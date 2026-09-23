@@ -27,6 +27,15 @@ fn main() -> Result<(), serde_json::Error> {
 }
 
 #[tool(description = "向用户打招呼")]
-fn hello(name: String) -> String {
+fn hello(#[param(description = "用户的名字")] name: String) -> String {
     format!("Hello {name}")
+}
+
+#[tool(description = "查询城市天气")]
+fn get_weather(
+    #[param(description = "城市名称，例如北京")] location: String,
+
+    #[param(description = "温度单位，可以省略")] unit: Option<String>,
+) -> Result<String, String> {
+    Ok(format!("城市：{location}，单位：{unit:?}"))
 }
