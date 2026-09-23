@@ -23,6 +23,11 @@ fn main() -> Result<(), serde_json::Error> {
 
     println!("{}", hello("Shirley".into()));
 
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&get_weather::definition())?
+    );
+
     Ok(())
 }
 
@@ -31,11 +36,19 @@ fn hello(#[param(description = "用户的名字")] name: String) -> String {
     format!("Hello {name}")
 }
 
+#[derive(serde::Deserialize, schemars::JsonSchema, Debug)]
+#[serde(rename_all = "snake_case")]
+#[schemars(inline)]
+enum TemperatureUnit {
+    Celsius,
+    Fahrenheit,
+}
+
 #[tool(description = "查询城市天气")]
 fn get_weather(
     #[param(description = "城市名称，例如北京")] location: String,
 
-    #[param(description = "温度单位，可以省略")] unit: Option<String>,
+    #[param(description = "温度单位，可以省略")] unit: Option<TemperatureUnit>,
 ) -> Result<String, String> {
-    Ok(format!("城市：{location}，单位：{unit:?}"))
+    Ok(format!("城市：{location}，单位：{:?}", unit))
 }

@@ -47,18 +47,9 @@ fn try_expand(attr: TokenStream, item: TokenStream) -> syn::Result<proc_macro2::
     // 提取参数信息，同时清除已经消费的辅助注解
     let parameters = extract_parameters(&mut function)?;
 
-    // 获取 LisStr 的字符串
-    let _description = config.description.value();
-
-    for parameter in &parameters {
-        let name = &parameter.name;
-        let ty = &parameter.ty;
-        let description = &parameter.description;
-    }
-
-    Ok(quote! {
-        #function
-    })
+    // 根据收集的信息生成代码。
+    // generate_tool 返回代码 token，用 Ok 包装成成功结果。
+    Ok(generate_tool(function, config, parameters))
 }
 
 // 解析 #tool[(...)] 括号里面的内容
@@ -185,4 +176,64 @@ fn read_description(
 
     // 不返回错误说明成功了
     Ok(())
+}
+
+fn generate_tool(
+    function: ItemFn,
+    config: ToolConfig,
+    parameters: Vec<ToolParameter>,
+) -> proc_macro2::TokenStream {
+    // 原始函数名
+    let func_name = &function.sig.ident;
+
+    // 函数可见性 pub / private
+    let visibility = &function.vis;
+
+    // 函数描述
+    let description = &config.description;
+
+    let fields = parameters.iter().map(|parameter| {
+        let field_name = &parameter.name;
+        let field_type = &parameter.ty;
+        let field_description = &parameter.description;
+
+        quote! {
+            #[schemars(description = #field_description)]
+            #field_name: #field_type
+        }
+    });
+
+    quote! {
+        #function
+
+        #visibility mod #func_name {
+            use super::*;
+
+            // 自动实现参数解析和 Schema 生成能力
+            #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
+
+            // 解析参数时拒绝未知字段
+            // Schema 中也会相应禁止额外属性
+            struct Arguments {
+                // 重复插入所有字段，没个字段后面添加逗号
+                #(#fields,)*
+            }
+
+            pub fn definition() -> ::serde_json::Value {
+                // 根据 Arguments 构造 JSON Schema
+                let parameters = ::schemars::schema_for!(Arguments);
+
+                // 组装与供应商无关的的工具定义
+                ::serde_json::json!({
+                    "name": stringify!(#func_name),
+                    "description": #description,
+                    "parameters": parameters
+
+                })
+
+            }
+
+
+        }
+    }
 }
