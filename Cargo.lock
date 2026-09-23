@@ -16,6 +16,8 @@ name = "agent-sdk"
 version = "0.1.0"
 dependencies = [
  "agent-sdk-macros",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

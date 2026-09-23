@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Debug)]
 #[serde(tag = "role", rename_all = "snake_case")]
-enum Message {
+pub enum Message {
     System {
         content: String,
     },
