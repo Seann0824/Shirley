@@ -26,7 +26,7 @@ fn main() -> Result<(), serde_json::Error> {
     Ok(())
 }
 
-#[tool]
+#[tool(description = "向用户打招呼")]
 fn hello(name: String) -> String {
     format!("Hello {name}")
 }
