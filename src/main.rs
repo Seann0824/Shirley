@@ -1,4 +1,6 @@
-use agent_sdk::Message;
+use std::format;
+
+use agent_sdk::{Message, tool};
 use serde::{Deserialize, Serialize};
 use serde_json;
 
@@ -19,5 +21,12 @@ fn main() -> Result<(), serde_json::Error> {
 
     println!("{:?}", message_duplicate);
 
+    println!("{}", hello("Shirley".into()));
+
     Ok(())
+}
+
+#[tool]
+fn hello(name: String) -> String {
+    format!("Hello {name}")
 }
