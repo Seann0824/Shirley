@@ -1,17 +1,8 @@
 use proc_macro::TokenStream;
 // 把rust模版代码转换成token
-use quote::quote;
+use quote::{quote, quote_spanned};
 // ItemFn 用来表示抽象语法树, LitStr 字符串字面量，既保留字符串内容，也保留源码位置。 Parser trait
-use syn::{
-    Attribute, // 属性注解，例如 #[param(...)]
-    FnArg,     // 函数参数，可能是self或普通参数
-    Ident,     // 标识符，例如 location
-    ItemFn,    // 完整函数语法树
-    LitStr,    // 字符串字面量
-    Pat,       // 参数绑定模式，例如 name、 mut name、(x, y)
-    Type,      // Rust 的类型语法树，例如 String、Option<String>
-    parse::Parser,
-};
+use syn::{Attribute, FnArg, Ident, ItemFn, LitStr, Pat, Type, parse::Parser, spanned::Spanned};
 
 // 保存从 #[tool(...)] 中读取的配置
 struct ToolConfig {
@@ -184,7 +175,7 @@ fn generate_tool(
     parameters: Vec<ToolParameter>,
 ) -> proc_macro2::TokenStream {
     // 原始函数名
-    let func_name = &function.sig.ident;
+    let name = &function.sig.ident;
 
     // 函数可见性 pub / private
     let visibility = &function.vis;
@@ -203,15 +194,33 @@ fn generate_tool(
         }
     });
 
+    let call_arguments = parameters.iter().map(|parameter| {
+        let field_name = &parameter.name;
+
+        quote! {
+            args.#field_name
+        }
+    });
+
+    // 获取返回值类型的代码位置
+    let return_span = function.sig.output.span();
+    // _ 让编译器推导成功值类型，错误类型固定为 SDK 的 ToolError
+    let invoke_function = quote_spanned! {return_span=>
+        let outcome: ::std::result::Result<_, ::agent_sdk::ToolError> = super::#name(
+            #(#call_arguments),*
+        ).await;
+        let result = outcome?;
+    };
+
     quote! {
         #function
 
-        #visibility mod #func_name {
+        #visibility mod #name {
             use super::*;
 
             // 自动实现参数解析和 Schema 生成能力
             #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
-
+            #[serde(deny_unknown_fields)]
             // 解析参数时拒绝未知字段
             // Schema 中也会相应禁止额外属性
             struct Arguments {
@@ -219,21 +228,62 @@ fn generate_tool(
                 #(#fields,)*
             }
 
-            pub fn definition() -> ::serde_json::Value {
-                // 根据 Arguments 构造 JSON Schema
-                let parameters = ::schemars::schema_for!(Arguments);
 
-                // 组装与供应商无关的的工具定义
-                ::serde_json::json!({
-                    "name": stringify!(#func_name),
-                    "description": #description,
-                    "parameters": parameters
-
-                })
-
+            // 这里应该大写结构体？
+            struct GenerateTool {
+                definition: ::agent_sdk::ToolDefinition,
             }
 
+            impl ::agent_sdk::Tool for GenerateTool {
+                fn definition(&self) -> &::agent_sdk::ToolDefinition {
+                    &self.definition
+                }
 
+                // 接受 SDK 统一传入的 JSON 参数
+                fn invoke(&self, input: ::serde_json::Value) -> ::agent_sdk::ToolFuture<'_> {
+                    // 1. 将 input 反序列化
+
+                    // 2. 调用原始函数
+                    Box::pin(async move {
+                        let args = ::serde_json::from_value::<Arguments>(input)
+                            .map_err(|error| {
+                                ::std::format!("工具参数错误: {error}")
+                        })?;
+
+                        // 调用函数，并传入参数
+                        #invoke_function
+
+                        // 返回序列话的json结果
+                        ::serde_json::to_value(result)
+                            .map_err(|error| {
+                                ::std::format!("工具结果序列化失败: {error}")
+                            })
+
+                    })
+                }
+            }
+
+            pub fn definition() -> ::agent_sdk::ToolDefinition {
+                ::agent_sdk::ToolDefinition {
+                    name: ::std::string::String::from(
+                        stringify!(#name)
+                    ),
+
+                    description: ::std::string::String::from(
+                        #description
+                    ),
+
+                    parameters: ::serde_json::json!(
+                        ::schemars::schema_for!(Arguments)
+                    ),
+                }
+            }
+
+            pub fn tool() -> impl ::agent_sdk::Tool + 'static {
+                GenerateTool {
+                    definition: definition()
+                }
+            }
         }
     }
 }
