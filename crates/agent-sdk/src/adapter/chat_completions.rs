@@ -23,12 +23,29 @@ fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
                 content,
                 tool_calls,
             } => {
-                // 这里应该还有工具调用相关的逻辑转换，另外一个问题，content 我看 openai 文档是可选的，慢慢兼容吧
-                serde_json::json!({
+                let mut value = serde_json::json!({
                     "role": "assistant",
                     "content": content,
-                    "tool_calls": tool_calls
-                })
+                });
+                if !tool_calls.is_empty() {
+                    value["tool_calls"] = serde_json::json!(
+                        tool_calls
+                            .iter()
+                            .map(|call| {
+                                serde_json::json!({
+                                    "id": &call.id,
+                                    "type": "function",
+                                    "function": {
+                                        "name": &call.name,
+                                        "arguments": &call.arguments,
+                                    },
+                                })
+                            })
+                            .collect::<Vec<_>>()
+                    );
+                }
+
+                value
             }
             message::Message::System { content } => {
                 serde_json::json!({
@@ -196,7 +213,7 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, ModelEr
 
     let message = message::Message::Assistant {
         content,
-        tool_calls,
+        tool_calls: tool_calls.into(),
     };
 
     Ok(ModelResponse {

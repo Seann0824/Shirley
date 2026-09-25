@@ -1,9 +1,7 @@
-use crate::ToolManager;
 use crate::adapter;
 use crate::adapter::ModelRequest;
 use crate::message;
 use crate::tool;
-
 pub struct RunResult {
     // 本次调用新增的消息，按照发送顺序排序
     pub messages: Vec<message::Message>,
@@ -72,24 +70,49 @@ impl Agent {
         }
     }
     pub async fn run(&mut self, task: &str) -> Result<RunResult, AgentError> {
-        // 1. client、mode_request、
+        let start_index = self.messages.len();
+
         self.messages.push(message::Message::User {
             content: task.into(),
         });
-        let client = reqwest::Client::new();
-        let model_request = ModelRequest {
-            messages: &self.messages,
-            tools: &self.tools.definitions(),
-        };
-        // todo: 后面在做循环调用，根据 finish_reason 判断是否需要循环调用
-        let response = adapter::invoke(&client, &self.model_config, model_request).await?;
 
-        let result = RunResult {
-            messages: vec![response.message],
-            // 这里调用结束的原因，我理解一下，是否应该和实际的请求对其呢？
-            stop_reason: StopReason::Completed,
-        };
-        Ok(result)
+        let client = reqwest::Client::new();
+
+        loop {
+            let model_request = ModelRequest {
+                messages: &self.messages,
+                tools: &self.tools.definitions(),
+            };
+            let response = adapter::invoke(&client, &self.model_config, model_request).await?;
+            let tool_messages = match &response.message {
+                message::Message::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
+                    let tasks = tool_calls.iter().map(|call| async {
+                        let content = match self.tools.invoke(call).await {
+                            Ok(output) => output.to_string(),
+                            Err(error) => format!("工具执行失败: {error}"),
+                        };
+
+                        message::Message::Tool {
+                            tool_call_id: call.id.clone(),
+                            content: Some(content),
+                        }
+                    });
+                    futures::future::join_all(tasks).await
+                }
+                _ => vec![],
+            };
+
+            let is_finished = tool_messages.is_empty();
+            self.messages.push(response.message);
+            self.messages.extend(tool_messages);
+
+            if is_finished {
+                return Ok(RunResult {
+                    messages: self.messages[start_index..].to_vec(),
+                    stop_reason: StopReason::Completed,
+                });
+            }
+        }
     }
 
     pub async fn run_stream<F>(&mut self, task: &str, on_event: F) -> Result<RunResult, AgentError>

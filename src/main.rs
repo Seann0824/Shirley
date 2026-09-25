@@ -43,9 +43,9 @@ async fn main() -> Result<(), String> {
         .tools(tool_manager)
         .build();
 
-    let answer = agent.run("你叫什么名字").await?;
+    let answer = agent.run("我叫Sean, 你叫什么名字").await?;
     println!("{:?}", answer.messages);
-    let answer = agent.run("你喜欢谁呀").await?;
+    let answer = agent.run("北京天气").await?;
     println!("{:?}", answer.messages);
     Ok(())
 }

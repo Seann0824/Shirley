@@ -40,6 +40,7 @@ pub struct ModelRequest<'a> {
     pub tools: &'a [&'a tool::ToolDefinition],
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum ModelfinishReaon {
     Stop,
     ToolCalls,
