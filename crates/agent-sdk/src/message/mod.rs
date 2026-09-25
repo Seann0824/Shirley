@@ -10,10 +10,18 @@ pub enum Message {
         content: String,
     },
     Assistant {
-        content: String,
+        content: Option<String>,
+        tool_calls: Vec<ToolCall>,
     },
     Tool {
         tool_call_id: String,
         content: Option<String>,
     },
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ToolCall {
+    pub id: String,
+    pub name: String,
+    pub arguments: String,
 }

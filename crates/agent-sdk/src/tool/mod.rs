@@ -1,5 +1,7 @@
 use std::{collections::HashMap, pin::Pin};
 
+use crate::message;
+
 pub type ToolError = String;
 
 pub type ToolName = String;
@@ -33,6 +35,17 @@ impl ToolManager {
         }
     }
 
+    pub fn definitions(&self) -> Vec<&ToolDefinition> {
+        let mut definitions = self
+            .tools
+            .values()
+            .map(|tool| tool.definition())
+            .collect::<Vec<&ToolDefinition>>();
+
+        definitions.sort_by(|a, b| a.name.cmp(&b.name));
+        definitions
+    }
+
     pub fn register(&mut self, tool: impl Tool + 'static) -> Result<(), ToolError> {
         // 1. 判断工具是否重复， 重复抛出错误
         let tool_name = &tool.definition().name;
@@ -46,25 +59,13 @@ impl ToolManager {
         Ok(())
     }
 
-    pub async fn invoke(&self, input: ::serde_json::Value) -> Result<serde_json::Value, ToolError> {
-        // 1. 根据输入找到工具
-        // 2. 将参数传递进对应的工具invoke中，并将值返回
-        let name = input
-            .get("name")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "缺少字符串类型的 name".to_owned())?;
-
+    pub async fn invoke(&self, input: &message::ToolCall) -> Result<serde_json::Value, ToolError> {
         let tool = self
             .tools
-            .get(name)
-            .ok_or_else(|| format!("工具不存在: {name}"))?;
+            .get(&input.name)
+            .ok_or_else(|| format!("工具不存在: {}", &input.name))?;
 
-        let arguments = input
-            .get("arguments")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| "缺少字符串类型的 arguments".to_owned())?;
-
-        let arguments = serde_json::from_str(arguments)
+        let arguments = serde_json::from_str(&input.arguments)
             .map_err(|error| format!("arguments 不是合法 JSON: {error}"))?;
 
         // 交给工具处理自己的参数

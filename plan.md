@@ -34,3 +34,29 @@ agent_sdk
 ```
 
 先将适配层做了，做完后我们就能基于适配层去构建 Agent 流程
+
+我们现在做了 Message enum、以及 Tool Manager 用来管理工具和调用。那么对于一个完整的 ReAct Agent SDK 来说，需要为用户抹平 ReAct 这一整个 AI 调用流程，让用户使用时只需要注册工具，以及实际发送任务就行？那么对于消息管理、AI 返回值的是什么格式，用户需要怎么处理都不需要关系。用户只需要知道，我这样写SDK就能给我数据。所以，我们 SDK 应该向外暴露一个 Agent 能力，用户申明 Agent 的模型配置，以及自己支持的一些工具等等。
+
+SDK 内部做消息管理和工具管理等等的一个架构，并统一在 Runtime 层拼接，对外暴露的不应该是 SDK 一些内部方法和细节，对外暴露应该只有必要的工具定义的一些类型和宏，以及说消息自定义消息转换的一些格式？SDK 因为太过基础，所以我们应该能通过Agent 统一去获取到messages 消息什么的，或者去修改当前message等等。
+
+我在想 message 本质上我们需要去维护什么东西？原始的json Value 结构，还是说 Message 类型。如果是原始的 Value 结构我们发送给AI应该不需要做一层转换，但是用户获取 Message 的时候，我们又需要提供一个可编程的数据类型结构。这块逻辑如何在SDK 内部权衡？
+
+```rs
+let mut agent = Agent::builder()
+    .model(model_config)
+    .system_prompt("你是Shirley, 最喜欢的人是鲁鲁修，你可以为了保护鲁鲁修做任何事。鲁鲁修带领的黑骑士团，制造了山体滑坡让你的父亲被掩埋在城市之下。因此，你非常憎恨Zero, 后来，你发现原来 Zero 就是 鲁鲁修。你在憎恨和爱意中两难，最后你决定保护鲁鲁修，但是不在爱他。")
+    .tool(send_meesage::tool())
+    .tool(read_book::tool())
+    .build()?;
+agent.run("你叫什么名字").await;
+agent.run_stream("帮我读一下这本书", |agent_event| {
+    println!("{agent_event}");
+}).await;
+agent.messages();
+agent.clear_messages();
+agent.replace_messages(saved_messages);
+```
+
+我在想，这里的 run、run_stream 方法，应该返回什么数据。可能是 本次调用过程中新产生的 Messages ？还是什么，本质上一次run就是一个 turn，一次 turn 会有一次或多次用户消息，以及多次的 AI 消息和工具调用消息，这种返回出去有什么作用呢？让我想想，最多用来展示？是的业务侧应该拿到这个消息去展示消费，或者说拿到这个消息去评估这次任务的路径，然后看看什么可以优化。所以我们要完整返回的这次任务消息和工具调用路径。
+
+agent_event 本质上就是对外暴露的一个 Agent Event SDK 内部对外提供的消费事件，外部要实现UI或其他的感觉都可以根据这个事件去获取，内部每次有对应的事件产生，就会去调用这个函数，将事件暴露的业务侧的代码消费。

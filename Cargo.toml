@@ -12,6 +12,7 @@ proc-macro2 = "1.0.107"
 quote = "1.0.47"
 schemars = { version = "1.2.2", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["macros", "rt"] }
+dotenvy = "0.15.7"
 
 [workspace]
 members = [
