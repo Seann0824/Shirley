@@ -2,6 +2,9 @@ use crate::adapter;
 use crate::adapter::ModelRequest;
 use crate::message;
 use crate::tool;
+use futures::StreamExt;
+
+#[derive(Debug)]
 pub struct RunResult {
     // 本次调用新增的消息，按照发送顺序排序
     pub messages: Vec<message::Message>,
@@ -10,6 +13,7 @@ pub struct RunResult {
     pub stop_reason: StopReason,
 }
 
+#[derive(Debug)]
 pub enum StopReason {
     Completed,
     MaxStepsReached,
@@ -24,18 +28,12 @@ pub type AgentError = String;
 //     }
 // }
 
-enum AgentEvent {
+#[derive(Debug)]
+pub enum AgentEvent {
     TextDetal(String),
     MessageAdded(message::Message),
-    ToolStarted {
-        call_id: String,
-        name: String,
-        arguments: serde_json::Value,
-    },
-    ToolFinished {
-        call_id: String,
-        result: serde_json::Value,
-    },
+    ToolStarted { call_id: String, name: String },
+    ToolFinished { call_id: String, name: String },
     Finished(RunResult),
 }
 
@@ -69,7 +67,10 @@ impl Agent {
             tools,
         }
     }
-    pub async fn run(&mut self, task: &str) -> Result<RunResult, AgentError> {
+    pub async fn run<F>(&mut self, task: &str, mut on_event: F) -> Result<RunResult, AgentError>
+    where
+        F: FnMut(AgentEvent),
+    {
         let start_index = self.messages.len();
 
         self.messages.push(message::Message::User {
@@ -84,20 +85,48 @@ impl Agent {
                 tools: &self.tools.definitions(),
             };
             let response = adapter::invoke(&client, &self.model_config, model_request).await?;
+            if let message::Message::Assistant {
+                content: Some(content),
+                ..
+            } = &response.message
+            {
+                on_event(AgentEvent::TextDetal(content.clone()));
+            }
             let tool_messages = match &response.message {
                 message::Message::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
-                    let tasks = tool_calls.iter().map(|call| async {
-                        let content = match self.tools.invoke(call).await {
-                            Ok(output) => output.to_string(),
-                            Err(error) => format!("工具执行失败: {error}"),
-                        };
+                    let mut tasks = futures::stream::FuturesUnordered::new();
 
-                        message::Message::Tool {
+                    for call in tool_calls {
+                        on_event(AgentEvent::ToolStarted {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                        });
+
+                        let tools = &self.tools;
+
+                        tasks.push(async move {
+                            let content = match tools.invoke(call).await {
+                                Ok(output) => output.to_string(),
+                                Err(error) => format!("工具执行失败: {error}"),
+                            };
+                            (call, content)
+                        });
+                    }
+
+                    let mut tool_messages = Vec::with_capacity(tool_calls.len());
+                    while let Some((call, content)) = tasks.next().await {
+                        on_event(AgentEvent::ToolFinished {
+                            call_id: call.id.clone(),
+                            name: call.name.clone(),
+                        });
+
+                        tool_messages.push(message::Message::Tool {
                             tool_call_id: call.id.clone(),
                             content: Some(content),
-                        }
-                    });
-                    futures::future::join_all(tasks).await
+                        })
+                    }
+
+                    tool_messages
                 }
                 _ => vec![],
             };

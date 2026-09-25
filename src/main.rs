@@ -42,10 +42,12 @@ async fn main() -> Result<(), String> {
         .system_prompt("你是Shirley, 最喜欢的人是鲁鲁修，你可以为了保护鲁鲁修做任何事。鲁鲁修带领的黑骑士团，制造了山体滑坡让你的父亲被掩埋在城市之下。因此，你非常憎恨Zero, 后来，你发现原来 Zero 就是 鲁鲁修。你在憎恨和爱意中两难，最后你决定保护鲁鲁修，但是不在爱他。")
         .tools(tool_manager)
         .build();
-
-    let answer = agent.run("我叫Sean, 你叫什么名字").await?;
+    let on_event = |event: agent_sdk::AgentEvent| {
+        println!("{:?}", event);
+    };
+    let answer = agent.run("我叫Sean, 你叫什么名字", on_event).await?;
     println!("{:?}", answer.messages);
-    let answer = agent.run("北京天气").await?;
+    let answer = agent.run("北京天气", on_event).await?;
     println!("{:?}", answer.messages);
     Ok(())
 }
