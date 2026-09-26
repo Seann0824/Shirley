@@ -1,20 +1,41 @@
 use agent_sdk::{Agent, Message};
 
-/// 一条展示用消息：[角色, 内容]，以及它是不是"思考"。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    User,
+    Assistant,
+    Error,
+}
+
 #[derive(Debug, Clone)]
 pub struct ChatMessage {
-    pub role: String,
+    pub role: Role,
     pub content: String,
     pub thinking: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolCallView {
+    pub name: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct ToolGroup {
+    pub calls: Vec<ToolCallView>,
+}
+
+#[derive(Debug, Clone)]
+pub enum Item {
+    Message(ChatMessage),
+    Tools(ToolGroup),
 }
 
 pub struct App {
     agent: Option<Agent>,
     exit: bool,
     input: String,
-    messages: Vec<ChatMessage>,
+    items: Vec<Item>,
     waiting: bool,
-    /// 是否在界面上显示模型的思考过程。
     show_thinking: bool,
     scroll: u16,
     auto_scroll: bool,
@@ -28,7 +49,7 @@ impl App {
             agent: Some(agent),
             exit: false,
             input: String::new(),
-            messages: Vec::new(),
+            items: Vec::new(),
             waiting: false,
             show_thinking: true,
             scroll: 0,
@@ -82,8 +103,8 @@ impl App {
         &self.input
     }
 
-    pub fn messages(&self) -> &[ChatMessage] {
-        &self.messages
+    pub fn items(&self) -> &[Item] {
+        &self.items
     }
 
     pub fn is_waiting(&self) -> bool {
@@ -123,43 +144,49 @@ impl App {
         self.waiting = false;
     }
 
+    fn push_message(&mut self, role: Role, content: String, thinking: bool) {
+        self.items.push(Item::Message(ChatMessage {
+            role,
+            content,
+            thinking,
+        }));
+    }
+
+    pub fn start_tool_calls(&mut self, calls: Vec<ToolCallView>) {
+        if calls.is_empty() {
+            return;
+        }
+        self.items.push(Item::Tools(ToolGroup { calls }));
+    }
+
     pub fn add_message(&mut self, message: Message) {
         match message {
-            Message::User { content } => self.messages.push(ChatMessage {
-                role: "你".into(),
-                content,
-                thinking: false,
-            }),
+            Message::User { content } => self.push_message(Role::User, content, false),
             Message::Assistant {
                 content,
                 reasoning_content,
-                ..
+                tool_calls,
             } => {
                 // 思考先记下来，让消息顺序保持"先想后答"。
                 if let Some(reasoning) = reasoning_content.filter(|r| !r.trim().is_empty()) {
-                    self.messages.push(ChatMessage {
-                        role: "夏莉".into(),
-                        content: reasoning,
-                        thinking: true,
-                    });
+                    self.push_message(Role::Assistant, reasoning, true);
                 }
                 if let Some(content) = content.filter(|c| !c.is_empty()) {
-                    self.messages.push(ChatMessage {
-                        role: "夏莉".into(),
-                        content,
-                        thinking: false,
-                    });
+                    self.push_message(Role::Assistant, content, false);
+                }
+                if !tool_calls.is_empty() {
+                    let calls = tool_calls
+                        .into_iter()
+                        .map(|call| ToolCallView { name: call.name })
+                        .collect();
+                    self.start_tool_calls(calls);
                 }
             }
-            _ => {}
+            Message::Tool { .. } | Message::System { .. } => {}
         }
     }
 
     pub fn add_error(&mut self, error: String) {
-        self.messages.push(ChatMessage {
-            role: "错误".into(),
-            content: error,
-            thinking: false,
-        });
+        self.push_message(Role::Error, error, false);
     }
 }

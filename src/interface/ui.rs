@@ -7,47 +7,24 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::app::App;
+use super::app::{App, ChatMessage, Item, Role};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [messages_area, input_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(frame.area());
 
+    let show_thinking = app.show_thinking();
+
     let mut lines: Vec<Line> = Vec::new();
-    for message in app.messages() {
-        let is_thinking = message.thinking;
-        if is_thinking && !app.show_thinking() {
-            continue;
+    for item in app.items() {
+        match item {
+            Item::Message(message) => {
+                append_message(&mut lines, message, show_thinking);
+            }
+            Item::Tools(group) => {
+                append_tools(&mut lines, group);
+            }
         }
-
-        let (label, label_style) = if is_thinking {
-            (
-                "🧠 夏莉（思考）：".to_owned(),
-                Style::default()
-                    .fg(Color::DarkGray)
-                    .add_modifier(Modifier::ITALIC),
-            )
-        } else if message.role == "你" {
-            ("你：".to_owned(), Style::default().fg(Color::Cyan))
-        } else if message.role == "错误" {
-            ("错误：".to_owned(), Style::default().fg(Color::Red))
-        } else {
-            ("夏莉：".to_owned(), Style::default().fg(Color::Magenta))
-        };
-
-        lines.push(Line::from(Span::styled(label, label_style)));
-        for raw in message.content.lines() {
-            let line = if is_thinking {
-                Line::from(Span::styled(
-                    raw.to_owned(),
-                    Style::default().fg(Color::DarkGray),
-                ))
-            } else {
-                Line::from(raw.to_owned())
-            };
-            lines.push(line);
-        }
-        lines.push(Line::default());
     }
 
     let message_width = messages_area.width.saturating_sub(2).max(1) as usize;
@@ -99,7 +76,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(visible_input).block(Block::bordered().title(if app.is_waiting() {
             " AI 回复中 · Esc 退出 "
         } else {
-            " 输入框 · Enter 发送 · Ctrl+T 切换思考 · Esc 退出 "
+            " 输入框 · Enter 发送 · Ctrl+T 思考 · Esc 退出 "
         })),
         input_area,
     );
@@ -108,4 +85,51 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         let cursor_x = input_area.x + 1 + visible_input.width() as u16;
         frame.set_cursor_position((cursor_x, input_area.y + 1));
     }
+}
+
+fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, show_thinking: bool) {
+    let is_thinking = message.thinking;
+    if is_thinking && !show_thinking {
+        return;
+    }
+
+    let (label, label_style) = if is_thinking {
+        (
+            "🧠 夏莉（思考）：".to_owned(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
+        )
+    } else {
+        match message.role {
+            Role::User => ("你：".to_owned(), Style::default().fg(Color::Cyan)),
+            Role::Assistant => ("夏莉：".to_owned(), Style::default().fg(Color::Magenta)),
+            Role::Error => ("错误：".to_owned(), Style::default().fg(Color::Red)),
+        }
+    };
+
+    lines.push(Line::from(Span::styled(label, label_style)));
+    for raw in message.content.lines() {
+        let line = if is_thinking {
+            Line::from(Span::styled(
+                raw.to_owned(),
+                Style::default().fg(Color::DarkGray),
+            ))
+        } else {
+            Line::from(raw.to_owned())
+        };
+        lines.push(line);
+    }
+    lines.push(Line::default());
+}
+
+fn append_tools(lines: &mut Vec<Line>, group: &super::app::ToolGroup) {
+    let style = Style::default().fg(Color::Yellow);
+    for call in &group.calls {
+        lines.push(Line::from(Span::styled(
+            format!("🔧 {}", call.name),
+            style,
+        )));
+    }
+    lines.push(Line::default());
 }

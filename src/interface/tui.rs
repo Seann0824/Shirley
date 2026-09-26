@@ -24,6 +24,8 @@ async fn run_agent(
                     break;
                 }
             }
+            // 工具的展示与结果都由带 tool_calls 的 Assistant 消息
+            // 和后续的 Tool 消息驱动，这里忽略开始/结束事件即可。
             Ok(_) => {}
             Err(error) => {
                 let _ = updates.send(AgentUpdate::Error(error.to_string()));
@@ -65,6 +67,13 @@ impl<'a> Tui<'a> {
         self.app.exit();
     }
 
+    fn apply(&mut self, update: AgentUpdate) {
+        match update {
+            AgentUpdate::Message(message) => self.app.add_message(message),
+            AgentUpdate::Error(error) => self.app.add_error(error),
+        }
+    }
+
     pub async fn run(&mut self) -> std::io::Result<()> {
         let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
         let mut response: Option<Pin<Box<dyn Future<Output = Agent>>>> = None;
@@ -78,16 +87,10 @@ impl<'a> Tui<'a> {
                         }
                     }
                 }
-                Some(update) = updates_rx.recv(), if response.is_some() => match update {
-                    AgentUpdate::Message(message) => self.app.add_message(message),
-                    AgentUpdate::Error(error) => self.app.add_error(error),
-                },
+                Some(update) = updates_rx.recv(), if response.is_some() => self.apply(update),
                 agent = async { response.as_mut().expect("response exists").await }, if response.is_some() => {
                     while let Ok(update) = updates_rx.try_recv() {
-                        match update {
-                            AgentUpdate::Message(message) => self.app.add_message(message),
-                            AgentUpdate::Error(error) => self.app.add_error(error),
-                        }
+                        self.apply(update);
                     }
                     response = None;
                     self.app.restore_agent(agent);
