@@ -4,6 +4,7 @@ use crate::message;
 use crate::tool;
 use futures::StreamExt;
 use std::fmt;
+use std::pin::Pin;
 
 #[derive(Debug)]
 pub struct RunResult {
@@ -91,15 +92,28 @@ impl Agent {
             tools,
         }
     }
-    pub async fn run<F>(&mut self, task: &str, mut on_event: F) -> Result<RunResult, AgentError>
-    where
-        F: FnMut(AgentEvent),
-    {
+    pub async fn run(&mut self, task: &str) -> Result<RunResult, AgentError> {
+        let mut events = self.run_stream(task);
+        while let Some(event) = events.next().await {
+            if let AgentEvent::Finished(result) = event? {
+                return Ok(result);
+            }
+        }
+        Err("agent stream ended without a final result".into())
+    }
+
+    pub fn run_stream<'a>(
+        &'a mut self,
+        task: &'a str,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + 'a>> {
+        Box::pin(async_stream::try_stream! {
         let start_index = self.messages.len();
 
-        self.messages.push(message::Message::User {
+        let user_message = message::Message::User {
             content: task.into(),
-        });
+        };
+        self.messages.push(user_message.clone());
+        yield AgentEvent::MessageAdded(user_message);
 
         let client = reqwest::Client::new();
 
@@ -109,22 +123,18 @@ impl Agent {
                 tools: &self.tools.definitions(),
             };
             let response = adapter::invoke(&client, &self.model_config, model_request).await?;
-            if let message::Message::Assistant {
-                content: Some(content),
-                ..
-            } = &response.message
-            {
-                on_event(AgentEvent::TextDetal(content.clone()));
-            }
-            let tool_messages = match &response.message {
+            let response_message = response.message;
+            self.messages.push(response_message.clone());
+            yield AgentEvent::MessageAdded(response_message.clone());
+            let tool_messages = match &response_message {
                 message::Message::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
                     let mut tasks = futures::stream::FuturesUnordered::new();
 
                     for call in tool_calls {
-                        on_event(AgentEvent::ToolStarted {
+                        yield AgentEvent::ToolStarted {
                             call_id: call.id.clone(),
                             name: call.name.clone(),
-                        });
+                        };
 
                         let tools = &self.tools;
 
@@ -139,15 +149,18 @@ impl Agent {
 
                     let mut tool_messages = Vec::with_capacity(tool_calls.len());
                     while let Some((call, content)) = tasks.next().await {
-                        on_event(AgentEvent::ToolFinished {
+                        yield AgentEvent::ToolFinished {
                             call_id: call.id.clone(),
                             name: call.name.clone(),
-                        });
+                        };
 
-                        tool_messages.push(message::Message::Tool {
+                        let tool_message = message::Message::Tool {
                             tool_call_id: call.id.clone(),
                             content: Some(content),
-                        })
+                        };
+                        self.messages.push(tool_message.clone());
+                        yield AgentEvent::MessageAdded(tool_message.clone());
+                        tool_messages.push(tool_message);
                     }
 
                     tool_messages
@@ -156,27 +169,15 @@ impl Agent {
             };
 
             let is_finished = tool_messages.is_empty();
-            self.messages.push(response.message);
-            self.messages.extend(tool_messages);
 
             if is_finished {
-                return Ok(RunResult {
+                yield AgentEvent::Finished(RunResult {
                     messages: self.messages[start_index..].to_vec(),
                     stop_reason: StopReason::Completed,
                 });
+                break;
             }
         }
-    }
-
-    pub async fn run_stream<F>(&mut self, task: &str, on_event: F) -> Result<RunResult, AgentError>
-    where
-        F: FnMut(AgentEvent),
-    {
-        let result = RunResult {
-            messages: vec![],
-            stop_reason: StopReason::Completed,
-        };
-
-        Ok(result)
+        })
     }
 }

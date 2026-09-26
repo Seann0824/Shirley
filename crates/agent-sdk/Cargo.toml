@@ -11,3 +11,4 @@ schemars = { version = "1.2.2", features = ["derive"] }
 bon = "3.10.1"
 reqwest = { version = "0.13.5", features = ["json"] }
 futures = "0.3.34"
+async-stream = "0.3"

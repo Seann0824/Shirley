@@ -68,3 +68,5 @@ agent_event 本质上就是对外暴露的一个 Agent Event SDK 内部对外提
 目前我遇到一个设计问题，关于 #tool 工具如何去处理 parameters，目前我把所有 parameters 默认都转换成了 Value，按照 OpenAi ChatCompletions 的格式。这就意味着，一旦我要兼容 Responses 或 Anthoripc 的消息格式，我无法感知到参数列表的格式，并将其转换成对应协议的格式。我理解，应该让 #tool 宏，转换函数的时候，将 parameters 作为一个标准化的模版，或者中间在封装一层类型，常用的JSOn类型罢了，然后我们在基于这中间层写转换规则。
 
 我先要解决的问题，就是目前反序列化json，每次都是通过我们手写 get的问题，我将要定义一层Rust json adpater，这样就能直接 value -> Rust Type,
+
+我现在以及把 usage 的层搭建好了，目前我只需要关注的指标是，输入，输出，缓存等，其他后续如果需要的话在添加吧。
