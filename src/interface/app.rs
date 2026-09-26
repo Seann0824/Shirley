@@ -16,6 +16,10 @@ pub struct App {
     waiting: bool,
     /// 是否在界面上显示模型的思考过程。
     show_thinking: bool,
+    scroll: u16,
+    auto_scroll: bool,
+    // 渲染层每帧回写，输入层拿不到布局所以存这儿
+    max_scroll: u16,
 }
 
 impl App {
@@ -27,7 +31,43 @@ impl App {
             messages: Vec::new(),
             waiting: false,
             show_thinking: true,
+            scroll: 0,
+            auto_scroll: true,
+            max_scroll: 0,
         }
+    }
+
+    pub fn max_scroll(&self) -> u16 {
+        self.max_scroll
+    }
+
+    pub fn set_max_scroll(&mut self, max_scroll: u16) {
+        // 上限缩小时旧位置可能越界，夹回来免得停在空白
+        self.max_scroll = max_scroll;
+        if !self.auto_scroll && self.scroll > max_scroll {
+            self.scroll = max_scroll;
+        }
+    }
+
+    pub fn scroll(&self) -> u16 {
+        self.scroll
+    }
+
+    pub fn auto_scroll(&self) -> bool {
+        self.auto_scroll
+    }
+
+    // 负为向上。上滚即退出跟随底部
+    pub fn scroll_by(&mut self, delta: i32) {
+        let max = self.max_scroll;
+        let next = self.scroll as i32 + delta;
+        let clamped = next.clamp(0, max as i32) as u16;
+        self.scroll = clamped;
+        self.auto_scroll = clamped >= max;
+    }
+
+    pub fn scroll_to_bottom(&mut self) {
+        self.auto_scroll = true;
     }
 
     pub fn should_exit(&self) -> bool {

@@ -114,7 +114,7 @@ pub fn encode_request(
         "messages": encode_messages(&input.messages),
         "tools": encode_tools(&input.tools),
         "thinking": {
-            "type": "enabled",
+            "type": "disabled",
         },
         "reasoning_effort": "medium",
         "stream": false,

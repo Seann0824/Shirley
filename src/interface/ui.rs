@@ -9,7 +9,7 @@ use unicode_width::UnicodeWidthStr;
 
 use super::app::App;
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &mut App) {
     let [messages_area, input_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(frame.area());
 
@@ -59,9 +59,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
         })
         .sum();
     let visible_height = messages_area.height.saturating_sub(2) as usize;
-    let scroll = total_height
+    let max_scroll = total_height
         .saturating_sub(visible_height)
         .min(u16::MAX as usize) as u16;
+    app.set_max_scroll(max_scroll);
+    let scroll = if app.auto_scroll() {
+        max_scroll
+    } else {
+        app.scroll().min(max_scroll)
+    };
 
     let title = if app.show_thinking() {
         " 消息 · 思考已显示（Ctrl+T 隐藏） "

@@ -1,4 +1,4 @@
-use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers, MouseEventKind};
 
 use super::{app::App, event::Event};
 
@@ -20,7 +20,11 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             _ => {}
         },
         Event::Key(_) => {}
-        Event::Mouse(_mouse_event) => {}
+        Event::Mouse(mouse_event) => match mouse_event.kind {
+            MouseEventKind::ScrollUp => app.scroll_by(-3),
+            MouseEventKind::ScrollDown => app.scroll_by(3),
+            _ => {}
+        },
         Event::Resize(_width, _height) => {}
     }
     None

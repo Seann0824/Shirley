@@ -55,12 +55,10 @@ impl<'a> Tui<'a> {
     }
 
     pub fn draw(&mut self) -> std::io::Result<()> {
-        self.terminal.draw(|frame| ui::draw(frame, &self.app))?;
+        // 拆开借用，terminal 和 app 都要 &mut
+        let app = &mut self.app;
+        self.terminal.draw(|frame| ui::draw(frame, app))?;
         Ok(())
-    }
-
-    pub fn reset(&mut self) -> std::io::Result<()> {
-        self.terminal.clear()
     }
 
     pub fn exit(&mut self) {
@@ -68,7 +66,6 @@ impl<'a> Tui<'a> {
     }
 
     pub async fn run(&mut self) -> std::io::Result<()> {
-        self.reset()?;
         let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
         let mut response: Option<Pin<Box<dyn Future<Output = Agent>>>> = None;
         while !self.app.should_exit() {
