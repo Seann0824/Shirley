@@ -22,13 +22,22 @@ pub enum StopReason {
     Cancelled,
 }
 
-pub type AgentError = String;
+#[derive(Debug)]
+pub enum AgentError {
+    // AdapterError(adapter::AdapterError),
+    ToolError(tool::ToolError),
+    AdapterError(adapter::ModelError),
+    Other(String),
+}
 
-// impl RunResult {
-//     pub fn final_text(&self) -> Option<&str> {
-//         todo!()
-//     }
-// }
+impl fmt::Display for AgentError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ToolError(error) => write!(f, "{error}"),
+            Self::AdapterError(error) | Self::Other(error) => write!(f, "{error}"),
+        }
+    }
+}
 
 #[derive(Debug)]
 pub enum AgentEvent {
@@ -99,7 +108,9 @@ impl Agent {
                 return Ok(result);
             }
         }
-        Err("agent stream ended without a final result".into())
+        Err(AgentError::Other(
+            "agent stream ended without a final result".into(),
+        ))
     }
 
     pub fn run_stream<'a>(
@@ -122,7 +133,7 @@ impl Agent {
                 messages: &self.messages,
                 tools: &self.tools.definitions(),
             };
-            let response = adapter::invoke(&client, &self.model_config, model_request).await?;
+            let response = adapter::invoke(&client, &self.model_config, model_request).await.map_err(|error| AgentError::AdapterError(error))?;
             let response_message = response.message;
             self.messages.push(response_message.clone());
             yield AgentEvent::MessageAdded(response_message.clone());
@@ -141,7 +152,8 @@ impl Agent {
                         tasks.push(async move {
                             let content = match tools.invoke(call).await {
                                 Ok(output) => output.to_string(),
-                                Err(error) => format!("工具执行失败: {error}"),
+                                // TODO: 感觉这里不太合理，不过如果消费者是AI合理，外部消费者应该通过 AgentEvent 把错误信息传递出去
+                                Err(error) => error.to_string(),
                             };
                             (call, content)
                         });

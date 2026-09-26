@@ -1,13 +1,35 @@
+use core::fmt;
 use std::{collections::HashMap, pin::Pin};
 
-use crate::message;
+use serde::Serialize;
 
-pub type ToolError = String;
+use crate::{Agent, AgentError, message};
+
+// 直接把错误格式化成消息，message，比如
+// [什么错误]: 失败原因， 感觉应该有个工具函数来做
+#[derive(Debug, Serialize)]
+pub enum ToolError {
+    ExecutionError(String),
+    RepetitionError(String),
+    NotFoundError(String),
+    ArgumentsError(String),
+}
+
+impl fmt::Display for ToolError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::ExecutionError(msg) => write!(f, "[执行错误]: {msg}"),
+            Self::RepetitionError(msg) => write!(f, "[重复注册错误]: {msg}"),
+            Self::NotFoundError(msg) => write!(f, "[工具不存在]: {msg}"),
+            Self::ArgumentsError(msg) => write!(f, "[参数错误]: {msg}"),
+        }
+    }
+}
 
 pub type ToolName = String;
 
 pub type ToolFuture<'a> =
-    Pin<Box<dyn Future<Output = Result<serde_json::Value, ToolError>> + Send + 'a>>;
+    Pin<Box<dyn Future<Output = Result<serde_json::Value, AgentError>> + Send + 'a>>;
 
 pub struct ToolDefinition {
     pub name: String,
@@ -46,11 +68,13 @@ impl ToolManager {
         definitions
     }
 
-    pub fn register(&mut self, tool: impl Tool + 'static) -> Result<(), ToolError> {
+    pub fn register(&mut self, tool: impl Tool + 'static) -> Result<(), AgentError> {
         // 1. 判断工具是否重复， 重复抛出错误
         let tool_name = &tool.definition().name;
         if self.tools.contains_key(tool_name) {
-            return Err(format!("{tool_name} 工具重复注册"));
+            return Err(AgentError::ToolError(ToolError::RepetitionError(format!(
+                "{tool_name} 工具重复注册"
+            ))));
         }
 
         // 2. 不重复，将工具添加到 self.tools
@@ -59,14 +83,19 @@ impl ToolManager {
         Ok(())
     }
 
-    pub async fn invoke(&self, input: &message::ToolCall) -> Result<serde_json::Value, ToolError> {
-        let tool = self
-            .tools
-            .get(&input.name)
-            .ok_or_else(|| format!("工具不存在: {}", &input.name))?;
+    pub async fn invoke(&self, input: &message::ToolCall) -> Result<serde_json::Value, AgentError> {
+        let tool = self.tools.get(&input.name).ok_or_else(|| {
+            AgentError::ToolError(ToolError::NotFoundError(format!(
+                "工具不存在: {}",
+                &input.name
+            )))
+        })?;
 
-        let arguments = serde_json::from_str(&input.arguments)
-            .map_err(|error| format!("arguments 不是合法 JSON: {error}"))?;
+        let arguments = serde_json::from_str(&input.arguments).map_err(|error| {
+            AgentError::ToolError(ToolError::ArgumentsError(format!(
+                "arguments 不是合法 JSON: {error}"
+            )))
+        })?;
 
         // 交给工具处理自己的参数
         tool.invoke(arguments).await
