@@ -1,7 +1,7 @@
-use std::{fmt::format, str::FromStr, todo};
+mod dto;
 
-use reqwest::header::{self, HeaderValue};
-use serde_json::Value;
+use reqwest::header::HeaderValue;
+use serde_json::{Value, map};
 
 use crate::{
     ModelConfig,
@@ -126,98 +126,53 @@ pub fn encode_request(
 }
 
 pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, ModelError> {
-    let _id = body.get("id").and_then(|value| value.as_str());
+    let response = serde_json::from_value::<dto::ModelResponse>(body.clone())
+        .map_err(|err| format!("响应解析失败: {err}"))?;
 
-    let choice = body
-        .get("choices")
-        .and_then(|value| value.as_array())
-        .and_then(|choices| choices.first())
+    // 开始转换 Message::Assistant and Message::Tool and finish_reason
+    let choice = response
+        .choices
+        .get(0)
         .ok_or_else(|| "响应缺少 choices[0]".to_owned())?;
 
-    // stream 模式下会出现没有 finish_reason
-    let finish_reason = choice
-        .get("finish_reason")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| "响应缺少 finish_reason".to_owned())?;
-
-    // stop, length, content_filter, tool_calls, insufficient_system_resource, aborted
-    let finish_reason = match finish_reason {
-        "stop" => ModelfinishReaon::Stop,
-        "tool_calls" => ModelfinishReaon::ToolCalls,
-        "length" => ModelfinishReaon::Length,
-        // 去
-        other => ModelfinishReaon::Other(other.to_owned()),
-    };
-
-    let message = choice
-        .get("message")
-        .ok_or_else(|| "响应缺少 message".to_owned())?;
-
-    let role = message
-        .get("role")
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| "响应缺少 message.role".to_owned())?;
-
+    let msg = &choice.message;
+    let role = &msg.role;
     if role != "assistant" {
-        return Err(format!("模型响应角色不符合预期：{role}"));
+        return Err(format!("响应 role 不合法: {role}").into());
     }
+    let content = &msg.content;
+    // 我需要在这判断如果为空则返回 [], 否者就处理成 Message::Tool
+    let tool_calls = msg
+        .tool_calls
+        .as_ref()
+        .map(|calls| {
+            calls
+                .iter()
+                .map(|call| message::ToolCall {
+                    id: call.id.clone(),
+                    name: call.function.name.clone(),
+                    arguments: call.function.arguments.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
-    // content 可以缺失或为 null，但其他类型明确报错。
-    let content = match message.get("content") {
-        None | Some(serde_json::Value::Null) => None,
-        Some(serde_json::Value::String(text)) => Some(text.clone()),
-        Some(_) => {
-            return Err("message.content 必须是字符串或 null".into());
-        }
-    };
-
-    let tool_calls = match message.get("tool_calls") {
-        // 没有工具调用时，使用空列表。
-        None | Some(serde_json::Value::Null) => Vec::new(),
-
-        Some(serde_json::Value::Array(calls)) => {
-            let mut tool_calls = Vec::with_capacity(calls.len());
-
-            for call in calls {
-                let id = required_string(call, "id")?;
-                let call_type = required_string(call, "type")?;
-
-                if call_type != "function" {
-                    return Err(format!("不支持的工具调用类型：{call_type}"));
-                }
-
-                let function = call
-                    .get("function")
-                    .filter(|value| value.is_object())
-                    .ok_or_else(|| "工具调用缺少 function 对象".to_owned())?;
-
-                let name = required_string(function, "name")?;
-                let arguments = required_string(function, "arguments")?;
-
-                tool_calls.push(message::ToolCall {
-                    id: id.to_owned(),
-                    name: name.to_owned(),
-
-                    // 保留原始参数文本，不重新序列化。
-                    arguments: arguments.to_owned(),
-                });
-            }
-
-            tool_calls
-        }
-
-        Some(_) => {
-            return Err("message.tool_calls 必须是数组或 null".into());
-        }
-    };
-
-    let message = message::Message::Assistant {
-        content,
-        tool_calls: tool_calls.into(),
-    };
+    let finish_reason = choice
+        .finish_reason
+        .as_ref()
+        .map(|reason| match reason.as_str() {
+            "stop" => ModelfinishReaon::Stop,
+            "tool_calls" => ModelfinishReaon::ToolCalls,
+            "length" => ModelfinishReaon::Length,
+            other => ModelfinishReaon::Other(other.to_owned()),
+        })
+        .unwrap_or(ModelfinishReaon::Other("unknown".to_owned()));
 
     Ok(ModelResponse {
-        message,
+        message: message::Message::Assistant {
+            content: content.clone(),
+            tool_calls: tool_calls.into(),
+        },
         finish_reason,
     })
 }
