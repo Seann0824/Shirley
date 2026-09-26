@@ -7,6 +7,9 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
         Event::Key(key_event) if key_event.kind == KeyEventKind::Press => match key_event.code {
             KeyCode::Esc => app.exit(),
             KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => app.exit(),
+            KeyCode::Char('t') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.toggle_thinking()
+            }
             KeyCode::Enter => return app.submit(),
             KeyCode::Backspace if !app.is_waiting() => app.pop_input(),
             KeyCode::Char(ch)

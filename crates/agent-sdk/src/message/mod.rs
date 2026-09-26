@@ -11,6 +11,9 @@ pub enum Message {
     },
     Assistant {
         content: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reasoning_content: Option<String>,
+        #[serde(default)]
         tool_calls: Vec<ToolCall>,
     },
     Tool {
@@ -46,8 +49,12 @@ impl fmt::Display for Message {
             }
             Message::Assistant {
                 content,
+                reasoning_content,
                 tool_calls,
             } => {
+                if let Some(reasoning) = reasoning_content {
+                    writeln!(f, "\u{1f9e0} Thinking: {}", reasoning)?;
+                }
                 if let Some(content) = content {
                     writeln!(f, "🤖 Assistant: {}", content)?;
                 }

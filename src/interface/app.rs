@@ -1,11 +1,21 @@
 use agent_sdk::{Agent, Message};
 
+/// 一条展示用消息：[角色, 内容]，以及它是不是"思考"。
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: String,
+    pub content: String,
+    pub thinking: bool,
+}
+
 pub struct App {
     agent: Option<Agent>,
     exit: bool,
     input: String,
-    messages: Vec<(String, String)>,
+    messages: Vec<ChatMessage>,
     waiting: bool,
+    /// 是否在界面上显示模型的思考过程。
+    show_thinking: bool,
 }
 
 impl App {
@@ -16,6 +26,7 @@ impl App {
             input: String::new(),
             messages: Vec::new(),
             waiting: false,
+            show_thinking: true,
         }
     }
 
@@ -31,12 +42,20 @@ impl App {
         &self.input
     }
 
-    pub fn messages(&self) -> &[(String, String)] {
+    pub fn messages(&self) -> &[ChatMessage] {
         &self.messages
     }
 
     pub fn is_waiting(&self) -> bool {
         self.waiting
+    }
+
+    pub fn show_thinking(&self) -> bool {
+        self.show_thinking
+    }
+
+    pub fn toggle_thinking(&mut self) {
+        self.show_thinking = !self.show_thinking;
     }
 
     pub fn push_input(&mut self, ch: char) {
@@ -66,18 +85,41 @@ impl App {
 
     pub fn add_message(&mut self, message: Message) {
         match message {
-            Message::User { content } => self.messages.push(("你".into(), content)),
+            Message::User { content } => self.messages.push(ChatMessage {
+                role: "你".into(),
+                content,
+                thinking: false,
+            }),
             Message::Assistant {
-                content: Some(content),
+                content,
+                reasoning_content,
                 ..
-            } if !content.is_empty() => {
-                self.messages.push(("AI".into(), content));
+            } => {
+                // 思考先记下来，让消息顺序保持"先想后答"。
+                if let Some(reasoning) = reasoning_content.filter(|r| !r.trim().is_empty()) {
+                    self.messages.push(ChatMessage {
+                        role: "夏莉".into(),
+                        content: reasoning,
+                        thinking: true,
+                    });
+                }
+                if let Some(content) = content.filter(|c| !c.is_empty()) {
+                    self.messages.push(ChatMessage {
+                        role: "夏莉".into(),
+                        content,
+                        thinking: false,
+                    });
+                }
             }
             _ => {}
         }
     }
 
     pub fn add_error(&mut self, error: String) {
-        self.messages.push(("错误".into(), error));
+        self.messages.push(ChatMessage {
+            role: "错误".into(),
+            content: error,
+            thinking: false,
+        });
     }
 }

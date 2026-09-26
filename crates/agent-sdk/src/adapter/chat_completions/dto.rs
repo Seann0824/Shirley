@@ -17,6 +17,8 @@ pub struct Choice {
 pub struct ChoiceMessage {
     pub role: String,
     pub content: Option<String>,
+    #[serde(default)]
+    pub reasoning_content: Option<String>,
     pub tool_calls: Option<Vec<ToolCall>>,
 }
 

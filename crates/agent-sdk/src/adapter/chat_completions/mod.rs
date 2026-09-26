@@ -21,12 +21,16 @@ fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
             }
             message::Message::Assistant {
                 content,
+                reasoning_content,
                 tool_calls,
             } => {
                 let mut value = serde_json::json!({
                     "role": "assistant",
                     "content": content,
                 });
+                if let Some(reasoning) = reasoning_content {
+                    value["reasoning_content"] = serde_json::json!(reasoning);
+                }
                 if !tool_calls.is_empty() {
                     value["tool_calls"] = serde_json::json!(
                         tool_calls
@@ -109,11 +113,10 @@ pub fn encode_request(
         // 这里应该转换对吧，但是看情况，我们现在主要以ChatCompletion 为唯一协议，其他协议都是根据这个协议适配过去的
         "messages": encode_messages(&input.messages),
         "tools": encode_tools(&input.tools),
-        // 先不管思考模式了，后面补上，先跑通再说
         "thinking": {
             "type": "enabled",
         },
-        "reasoning_effort": "low",
+        "reasoning_effort": "medium",
         "stream": false,
     });
 
@@ -141,6 +144,7 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, ModelEr
         return Err(format!("响应 role 不合法: {role}").into());
     }
     let content = &msg.content;
+    let reasoning_content = msg.reasoning_content.clone();
     // 我需要在这判断如果为空则返回 [], 否者就处理成 Message::Tool
     let tool_calls = msg
         .tool_calls
@@ -187,6 +191,7 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, ModelEr
     Ok(ModelResponse {
         message: message::Message::Assistant {
             content: content.clone(),
+            reasoning_content,
             tool_calls: tool_calls.into(),
         },
         finish_reason,

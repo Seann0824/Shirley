@@ -1,7 +1,8 @@
 use ratatui::{
     Frame,
     layout::{Constraint, Layout},
-    text::Line,
+    style::{Color, Modifier, Style},
+    text::{Line, Span},
     widgets::{Block, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
@@ -12,12 +13,43 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let [messages_area, input_area] =
         Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(frame.area());
 
-    let mut lines = Vec::new();
-    for (role, content) in app.messages() {
-        lines.push(Line::from(format!("{role}：")));
-        lines.extend(content.lines().map(|line| Line::from(line.to_owned())));
+    let mut lines: Vec<Line> = Vec::new();
+    for message in app.messages() {
+        let is_thinking = message.thinking;
+        if is_thinking && !app.show_thinking() {
+            continue;
+        }
+
+        let (label, label_style) = if is_thinking {
+            (
+                "🧠 夏莉（思考）：".to_owned(),
+                Style::default()
+                    .fg(Color::DarkGray)
+                    .add_modifier(Modifier::ITALIC),
+            )
+        } else if message.role == "你" {
+            ("你：".to_owned(), Style::default().fg(Color::Cyan))
+        } else if message.role == "错误" {
+            ("错误：".to_owned(), Style::default().fg(Color::Red))
+        } else {
+            ("夏莉：".to_owned(), Style::default().fg(Color::Magenta))
+        };
+
+        lines.push(Line::from(Span::styled(label, label_style)));
+        for raw in message.content.lines() {
+            let line = if is_thinking {
+                Line::from(Span::styled(
+                    raw.to_owned(),
+                    Style::default().fg(Color::DarkGray),
+                ))
+            } else {
+                Line::from(raw.to_owned())
+            };
+            lines.push(line);
+        }
         lines.push(Line::default());
     }
+
     let message_width = messages_area.width.saturating_sub(2).max(1) as usize;
     let total_height: usize = lines
         .iter()
@@ -30,9 +62,15 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let scroll = total_height
         .saturating_sub(visible_height)
         .min(u16::MAX as usize) as u16;
+
+    let title = if app.show_thinking() {
+        " 消息 · 思考已显示（Ctrl+T 隐藏） "
+    } else {
+        " 消息 · 思考已隐藏（Ctrl+T 显示） "
+    };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(" 消息 "))
+            .block(Block::bordered().title(title))
             .wrap(Wrap { trim: false })
             .scroll((scroll, 0)),
         messages_area,
@@ -55,7 +93,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
         Paragraph::new(visible_input).block(Block::bordered().title(if app.is_waiting() {
             " AI 回复中 · Esc 退出 "
         } else {
-            " 输入框 · Enter 发送 · Esc 退出 "
+            " 输入框 · Enter 发送 · Ctrl+T 切换思考 · Esc 退出 "
         })),
         input_area,
     );
