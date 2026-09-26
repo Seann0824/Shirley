@@ -1,7 +1,6 @@
-use std::println;
-
 use agent_sdk::{Agent, AgentError, ModelConfig, ModelProtocol, ToolError, ToolManager, tool};
-use futures::StreamExt;
+// use futures::{StreamExt, future::InspectOk};
+mod interface;
 mod tools;
 
 #[tokio::main(flavor = "current_thread")]
@@ -10,7 +9,6 @@ async fn main() -> Result<(), AgentError> {
     let api_key = std::env::var("DEEPSEEK_API_KEY").expect("缺少 APIKEY");
     // 定义一个工具Tool
     let mut tool_manager = ToolManager::new();
-    let _ = tool_manager.register(get_current_time::tool());
     let _ = tool_manager.register(tools::bash_tool::tool());
 
     // 调用返回 Future；await 等待它执行完成。
@@ -27,47 +25,42 @@ async fn main() -> Result<(), AgentError> {
         .tools(tool_manager)
         .build();
 
-    for task in ["我叫Sean, 你有什么工具列表？"] {
-        let mut events = agent.run_stream(task);
-        while let Some(event) = events.next().await {
-            let event = event?;
-            if let agent_sdk::AgentEvent::Finished(_) = &event {
-                continue;
-            }
-            println!("{}", event);
-        }
-    }
+    interface::run(agent).await.map_err(|error| AgentError::Other(error.to_string()))?;
+
+    // for task in ["我叫Sean, 你有什么工具列表？"] {
+    //     let mut events = agent.run_stream(task);
+    //     while let Some(event) = events.next().await {
+    //         let event = event?;
+    //         if let agent_sdk::AgentEvent::Finished(_) = &event {
+    //             continue;
+    //         }
+    //         println!("{}", event);
+    //     }
+    // }
 
     Ok(())
 }
 
-#[tool(description = "向用户打招呼")]
-async fn hello(
-    #[param(description = "用户的名字")] name: String
-) -> Result<String, ToolError> {
-    Ok(format!("Hello {name}"))
-}
+// #[tool(description = "向用户打招呼")]
+// async fn hello(
+//     #[param(description = "用户的名字")] name: String
+// ) -> Result<String, ToolError> {
+//     Ok(format!("Hello {name}"))
+// }
 
-#[derive(serde::Deserialize, schemars::JsonSchema, Debug)]
-#[serde(rename_all = "snake_case")]
-#[schemars(inline)]
-enum TemperatureUnit {
-    Celsius,
-    Fahrenheit,
-}
+// #[derive(serde::Deserialize, schemars::JsonSchema, Debug)]
+// #[serde(rename_all = "snake_case")]
+// #[schemars(inline)]
+// enum TemperatureUnit {
+//     Celsius,
+//     Fahrenheit,
+// }
 
-#[tool(description = "查询城市天气")]
-async fn get_weather(
-    #[param(description = "城市名称，例如北京")] location: String,
+// #[tool(description = "查询城市天气")]
+// async fn get_weather(
+//     #[param(description = "城市名称，例如北京")] location: String,
 
-    #[param(description = "温度单位，可以省略")] unit: Option<TemperatureUnit>,
-) -> Result<String, ToolError> {
-    Ok(format!("{location} 今天温度是 400F"))
-}
-
-// 获取当前时间
-#[tool(description = "获取当前时间")]
-async fn get_current_time() -> Result<String, ToolError> {
-    let now = chrono::Local::now();
-    Ok(now.format("%Y-%m-%d %H:%M:%S").to_string())
-}
+//     #[param(description = "温度单位，可以省略")] unit: Option<TemperatureUnit>,
+// ) -> Result<String, ToolError> {
+//     Ok(format!("{location} 今天温度是 400F"))
+// }

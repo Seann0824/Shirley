@@ -11,10 +11,13 @@ syn = { version = "3.0.6", features = ["full"] }
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
 schemars = { version = "1.2.2", features = ["derive"] }
-tokio = { version = "1.53.1", features = ["macros", "rt", "process", "time"] }
+tokio = { version = "1.53.1", features = ["macros", "rt", "process", "time", "sync"] }
 dotenvy = "0.15.7"
 futures = "0.3.34"
 chrono = "0.4.45"
+ratatui = "0.30.2"
+crossterm = "0.29.0"
+unicode-width = "0.2"
 
 [workspace]
 members = [
