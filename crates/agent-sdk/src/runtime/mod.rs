@@ -3,6 +3,7 @@ use crate::adapter::ModelRequest;
 use crate::message;
 use crate::tool;
 use futures::StreamExt;
+use std::fmt;
 
 #[derive(Debug)]
 pub struct RunResult {
@@ -37,6 +38,32 @@ pub enum AgentEvent {
     Finished(RunResult),
 }
 
+impl fmt::Display for AgentEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::TextDetal(text) => write!(f, "{text}"),
+            Self::MessageAdded(message) => write!(f, "{message}"),
+            Self::ToolStarted { call_id, name } => {
+                let _ = write!(f, "🔧 Tool Started [{call_id}]: {name}");
+                Ok(())
+            }
+            Self::ToolFinished { call_id, name } => {
+                let _ = write!(f, "✅ Tool Finished [{call_id}]: {name}");
+                Ok(())
+            }
+            Self::Finished(result) => {
+                let _ = write!(
+                    f,
+                    "🏁 Finished: {:?} ({} messages)",
+                    result.stop_reason,
+                    result.messages.len()
+                );
+                Ok(())
+            }
+        }
+    }
+}
+
 pub struct Agent {
     model_config: adapter::ModelConfig,
     messages: Vec<message::Message>,
@@ -53,12 +80,9 @@ impl Agent {
         #[builder(default = tool::ToolManager::new())] tools: tool::ToolManager,
     ) -> Self {
         if !system_prompt.trim().is_empty() {
-            messages.insert(
-                0,
-                message::Message::System {
-                    content: system_prompt,
-                },
-            );
+            messages.push(message::Message::System {
+                content: system_prompt,
+            });
         }
 
         Self {

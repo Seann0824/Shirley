@@ -51,6 +51,7 @@ pub enum ModelfinishReaon {
 pub struct ModelResponse {
     pub message: message::Message,
     pub finish_reason: ModelfinishReaon,
+    pub usage: message::Usage,
 }
 
 pub struct PreparedRequest {

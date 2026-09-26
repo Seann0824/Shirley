@@ -26,16 +26,14 @@ async fn main() -> Result<(), String> {
         .tools(tool_manager)
         .build();
     let on_event = |event: agent_sdk::AgentEvent| {
-        println!("{:?}", event);
+        println!("{}", event);
     };
-    let answer = agent
+    let _ = agent
         .run("我叫Sean, 你叫什么名字?你喜欢的人是谁？", on_event)
         .await?;
-    println!("{:?}", answer.messages);
-    let answer = agent.run("北京天气", on_event).await?;
-    println!("{:?}", answer.messages);
-    let answer = agent.run("现在几点了？", on_event).await?;
-    println!("{:?}", answer.messages);
+    let _ = agent.run("北京天气", on_event).await?;
+    let _ = agent.run("现在几点了？", on_event).await?;
+
     Ok(())
 }
 

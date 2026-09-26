@@ -4,6 +4,7 @@
 pub struct ModelResponse {
     pub id: String,
     pub choices: Vec<Choice>,
+    pub usage: Usage,
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -32,4 +33,31 @@ pub struct ToolCall {
 pub struct FunctionCall {
     pub name: String,
     pub arguments: String,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Usage {
+    pub prompt_tokens: u64,
+    pub completion_tokens: u64,
+    pub total_tokens: u64,
+    pub completion_tokens_details: Option<CompletionTokensDetails>,
+    pub prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct CompletionTokensDetails {
+    pub reasoning_tokens: Option<u64>,
+    pub accepted_prediction_tokens: Option<u64>,
+    pub rejected_prediction_tokens: Option<u64>,
+    pub audio_tokens: Option<u64>,
+    pub text_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct PromptTokensDetails {
+    pub audio_tokens: Option<u64>,
+    pub cached_tokens: Option<u64>,
+    pub text_tokens: Option<u64>,
+    pub image_tokens: Option<u64>,
+    pub cache_write_tokens: Option<u64>,
 }

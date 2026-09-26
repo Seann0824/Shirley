@@ -168,18 +168,28 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, ModelEr
         })
         .unwrap_or(ModelfinishReaon::Other("unknown".to_owned()));
 
+    // usage 需要转换成 message::Usage
+    let usage = message::Usage {
+        input_tokens: response.usage.prompt_tokens,
+        output_tokens: response.usage.completion_tokens,
+        cahced_input_tokens: response
+            .usage
+            .prompt_tokens_details
+            .as_ref()
+            .and_then(|details| details.cached_tokens.map(|t| t)),
+        reasoning_tokens: response
+            .usage
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|details| details.reasoning_tokens.map(|t| t)),
+    };
+
     Ok(ModelResponse {
         message: message::Message::Assistant {
             content: content.clone(),
             tool_calls: tool_calls.into(),
         },
         finish_reason,
+        usage,
     })
-}
-
-fn required_string<'a>(value: &'a serde_json::Value, field: &str) -> Result<&'a str, ModelError> {
-    value
-        .get(field)
-        .and_then(|value| value.as_str())
-        .ok_or_else(|| format!("字段 {field} 缺失或不是字符串"))
 }
