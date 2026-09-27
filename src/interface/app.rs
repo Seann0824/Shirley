@@ -1,4 +1,7 @@
 use agent_sdk::{Agent, Message, Usage};
+use std::time::Instant;
+
+use super::ui::MessageCache;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -38,13 +41,15 @@ pub struct App {
     input: String,
     items: Vec<Item>,
     waiting: bool,
+    waiting_since: Option<Instant>,
     show_thinking: bool,
-    scroll: u16,
+    scroll: usize,
     auto_scroll: bool,
     // 渲染层每帧回写，输入层拿不到布局所以存这儿
-    max_scroll: u16,
+    max_scroll: usize,
     last_usage: Option<Usage>,
     total_usage: Usage,
+    pub(crate) message_cache: Option<MessageCache>,
 }
 
 impl App {
@@ -55,12 +60,14 @@ impl App {
             input: String::new(),
             items: Vec::new(),
             waiting: false,
+            waiting_since: None,
             show_thinking: true,
             scroll: 0,
             auto_scroll: true,
             max_scroll: 0,
             last_usage: None,
             total_usage: Usage::default(),
+            message_cache: None,
         }
     }
 
@@ -77,11 +84,11 @@ impl App {
         self.last_usage = Some(usage);
     }
 
-    pub fn max_scroll(&self) -> u16 {
+    pub fn max_scroll(&self) -> usize {
         self.max_scroll
     }
 
-    pub fn set_max_scroll(&mut self, max_scroll: u16) {
+    pub fn set_max_scroll(&mut self, max_scroll: usize) {
         // 上限缩小时旧位置可能越界，夹回来免得停在空白
         self.max_scroll = max_scroll;
         if !self.auto_scroll && self.scroll > max_scroll {
@@ -89,7 +96,7 @@ impl App {
         }
     }
 
-    pub fn scroll(&self) -> u16 {
+    pub fn scroll(&self) -> usize {
         self.scroll
     }
 
@@ -100,8 +107,11 @@ impl App {
     // 负为向上。上滚即退出跟随底部
     pub fn scroll_by(&mut self, delta: i32) {
         let max = self.max_scroll;
-        let next = self.scroll as i32 + delta;
-        let clamped = next.clamp(0, max as i32) as u16;
+        let clamped = if delta < 0 {
+            self.scroll.saturating_sub(delta.unsigned_abs() as usize)
+        } else {
+            self.scroll.saturating_add(delta as usize).min(max)
+        };
         self.scroll = clamped;
         self.auto_scroll = clamped >= max;
     }
@@ -130,12 +140,17 @@ impl App {
         self.waiting
     }
 
+    pub fn waiting_seconds(&self) -> Option<u64> {
+        self.waiting_since.map(|since| since.elapsed().as_secs())
+    }
+
     pub fn show_thinking(&self) -> bool {
         self.show_thinking
     }
 
     pub fn toggle_thinking(&mut self) {
         self.show_thinking = !self.show_thinking;
+        self.message_cache = None;
     }
 
     pub fn push_input(&mut self, ch: char) {
@@ -151,7 +166,10 @@ impl App {
             return None;
         }
         self.waiting = true;
-        Some(std::mem::take(&mut self.input))
+        self.waiting_since = Some(Instant::now());
+        let prompt = std::mem::take(&mut self.input);
+        self.push_message(Role::User, prompt.clone(), false);
+        Some(prompt)
     }
 
     pub fn take_agent(&mut self) -> Option<Agent> {
@@ -161,6 +179,7 @@ impl App {
     pub fn restore_agent(&mut self, agent: Agent) {
         self.agent = Some(agent);
         self.waiting = false;
+        self.waiting_since = None;
     }
 
     fn push_message(&mut self, role: Role, content: String, thinking: bool) {
@@ -169,6 +188,7 @@ impl App {
             content,
             thinking,
         }));
+        self.message_cache = None;
     }
 
     pub fn start_tool_calls(&mut self, calls: Vec<ToolCallView>) {
@@ -176,6 +196,7 @@ impl App {
             return;
         }
         self.items.push(Item::Tools(ToolGroup { calls }));
+        self.message_cache = None;
     }
 
     pub fn add_message(&mut self, message: Message) {

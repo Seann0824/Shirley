@@ -1,5 +1,5 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, KeyEvent, MouseEvent},
+    event::{self, DisableMouseCapture, EnableMouseCapture, KeyEvent, MouseEvent, MouseEventKind},
     execute,
 };
 use std::{
@@ -42,7 +42,12 @@ impl EventHandler {
                 }
                 let next = match event::read() {
                     Ok(event::Event::Key(key)) => Event::Key(key),
-                    Ok(event::Event::Mouse(mouse)) => Event::Mouse(mouse),
+                    Ok(event::Event::Mouse(mouse)) => match mouse.kind {
+                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
+                            Event::Mouse(mouse)
+                        }
+                        _ => continue,
+                    },
                     Ok(event::Event::Resize(width, height)) => Event::Resize(width, height),
                     Ok(_) => continue,
                     Err(error) => {

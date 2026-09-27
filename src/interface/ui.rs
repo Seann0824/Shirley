@@ -9,6 +9,51 @@ use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, ChatMessage, Item, Role};
 
+pub(crate) struct MessageCache {
+    width: usize,
+    lines: Vec<Line<'static>>,
+    row_offsets: Vec<usize>,
+}
+
+impl MessageCache {
+    fn new(app: &App, width: usize) -> Self {
+        let mut lines = Vec::new();
+        for item in app.items() {
+            match item {
+                Item::Message(message) => append_message(&mut lines, message, app.show_thinking()),
+                Item::Tools(group) => append_tools(&mut lines, group),
+            }
+        }
+        let mut row_offsets = Vec::with_capacity(lines.len() + 1);
+        row_offsets.push(0);
+        for line in &lines {
+            row_offsets
+                .push(row_offsets.last().copied().unwrap() + line.width().max(1).div_ceil(width));
+        }
+        Self {
+            width,
+            lines,
+            row_offsets,
+        }
+    }
+
+    fn visible_lines(&self, scroll: usize, height: usize) -> (Vec<Line<'static>>, u16) {
+        if self.lines.is_empty() || height == 0 {
+            return (Vec::new(), 0);
+        }
+        let first = self
+            .row_offsets
+            .partition_point(|&offset| offset <= scroll)
+            .saturating_sub(1);
+        let end = self
+            .row_offsets
+            .partition_point(|&offset| offset < scroll.saturating_add(height))
+            .min(self.lines.len());
+        let inner_scroll = (scroll - self.row_offsets[first]) as u16;
+        (self.lines[first..end.max(first + 1)].to_vec(), inner_scroll)
+    }
+}
+
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [messages_area, status_area, input_area] = Layout::vertical([
         Constraint::Min(1),
@@ -17,38 +62,34 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    let show_thinking = app.show_thinking();
-
-    let mut lines: Vec<Line> = Vec::new();
-    for item in app.items() {
-        match item {
-            Item::Message(message) => {
-                append_message(&mut lines, message, show_thinking);
-            }
-            Item::Tools(group) => {
-                append_tools(&mut lines, group);
-            }
-        }
-    }
-
     let message_width = messages_area.width.saturating_sub(2).max(1) as usize;
-    let total_height: usize = lines
-        .iter()
-        .map(|line| {
-            let width = line.width();
-            width.max(1).div_ceil(message_width)
-        })
-        .sum();
+    if app
+        .message_cache
+        .as_ref()
+        .is_none_or(|cache| cache.width != message_width)
+    {
+        app.message_cache = Some(MessageCache::new(app, message_width));
+    }
+    let total_height = *app
+        .message_cache
+        .as_ref()
+        .unwrap()
+        .row_offsets
+        .last()
+        .unwrap();
     let visible_height = messages_area.height.saturating_sub(2) as usize;
-    let max_scroll = total_height
-        .saturating_sub(visible_height)
-        .min(u16::MAX as usize) as u16;
+    let max_scroll = total_height.saturating_sub(visible_height);
     app.set_max_scroll(max_scroll);
     let scroll = if app.auto_scroll() {
         max_scroll
     } else {
         app.scroll().min(max_scroll)
     };
+    let (lines, inner_scroll) = app
+        .message_cache
+        .as_ref()
+        .unwrap()
+        .visible_lines(scroll, visible_height);
 
     let title = if app.show_thinking() {
         " 消息 · 思考已显示（Ctrl+T 隐藏） "
@@ -59,7 +100,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         Paragraph::new(lines)
             .block(Block::bordered().title(title))
             .wrap(Wrap { trim: false })
-            .scroll((scroll, 0)),
+            .scroll((inner_scroll, 0)),
         messages_area,
     );
 
@@ -78,12 +119,13 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         start = index;
     }
     let visible_input = &input[start..];
+    let input_title = if let Some(seconds) = app.waiting_seconds() {
+        format!(" AI 回复中 {seconds}s · Esc 退出 ")
+    } else {
+        " 输入框 · Enter 发送 · Ctrl+T 思考 · Esc 退出 ".to_owned()
+    };
     frame.render_widget(
-        Paragraph::new(visible_input).block(Block::bordered().title(if app.is_waiting() {
-            " AI 回复中 · Esc 退出 "
-        } else {
-            " 输入框 · Enter 发送 · Ctrl+T 思考 · Esc 退出 "
-        })),
+        Paragraph::new(visible_input).block(Block::bordered().title(input_title)),
         input_area,
     );
 

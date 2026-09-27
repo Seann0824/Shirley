@@ -141,7 +141,7 @@ impl Agent {
     pub fn run_stream<'a>(
         &'a mut self,
         task: &'a str,
-    ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + 'a>> {
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + Send + 'a>> {
         Box::pin(async_stream::try_stream! {
         let start_index = self.messages.len();
         let mut total_usage = message::Usage::default();

@@ -2,7 +2,7 @@ use agent_sdk::{Agent, AgentError, ModelConfig, ModelProtocol, ToolManager};
 mod interface;
 mod tools;
 
-#[tokio::main(flavor = "current_thread")]
+#[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), AgentError> {
     dotenvy::dotenv().ok();
     let api_key = std::env::var("LOCAL_API_KEY").expect("缺少 APIKEY");

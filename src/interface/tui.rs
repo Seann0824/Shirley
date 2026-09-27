@@ -1,8 +1,7 @@
-use std::{future::Future, pin::Pin};
-
 use agent_sdk::{Agent, AgentEvent, Message, Usage};
 use futures::StreamExt;
 use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
 
 use super::{app::App, event::EventHandler, ui, update};
 
@@ -20,6 +19,8 @@ async fn run_agent(
     let mut stream = agent.run_stream(&prompt);
     while let Some(event) = stream.next().await {
         match event {
+            // 提交时已本地回显，避免同一条用户消息重复显示。
+            Ok(AgentEvent::MessageAdded(Message::User { .. })) => {}
             Ok(AgentEvent::MessageAdded(message)) => {
                 if updates.send(AgentUpdate::Message(message)).is_err() {
                     break;
@@ -83,26 +84,37 @@ impl<'a> Tui<'a> {
 
     pub async fn run(&mut self) -> std::io::Result<()> {
         let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
-        let mut response: Option<Pin<Box<dyn Future<Output = Agent>>>> = None;
+        let mut response: Option<JoinHandle<Agent>> = None;
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
         while !self.app.should_exit() {
             self.draw()?;
             tokio::select! {
                 event = self.events.next() => {
                     if let Some(prompt) = update::update(&mut self.app, event?) {
                         if let Some(agent) = self.app.take_agent() {
-                            response = Some(Box::pin(run_agent(agent, prompt, updates_tx.clone())));
+                            response = Some(tokio::spawn(run_agent(agent, prompt, updates_tx.clone())));
                         }
                     }
                 }
-                Some(update) = updates_rx.recv(), if response.is_some() => self.apply(update),
-                agent = async { response.as_mut().expect("response exists").await }, if response.is_some() => {
+                Some(update) = updates_rx.recv(), if response.is_some() => {
+                    self.apply(update);
+                    while let Ok(next) = updates_rx.try_recv() {
+                        self.apply(next);
+                    }
+                },
+                _ = tick.tick(), if response.is_some() => {}
+                completed = async { response.as_mut().expect("response exists").await }, if response.is_some() => {
                     while let Ok(update) = updates_rx.try_recv() {
                         self.apply(update);
                     }
                     response = None;
+                    let agent = completed.map_err(std::io::Error::other)?;
                     self.app.restore_agent(agent);
                 }
             }
+        }
+        if let Some(task) = response {
+            task.abort();
         }
         self.exit();
         Ok(())
