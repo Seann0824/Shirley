@@ -11,6 +11,7 @@ dependencies = [
  "crossterm",
  "dotenvy",
  "futures",
+ "memchr",
  "proc-macro2",
  "quote",
  "ratatui",

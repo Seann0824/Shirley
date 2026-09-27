@@ -1,7 +1,7 @@
 use agent_sdk::{ToolError, tool};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use tokio::io::AsyncBufReadExt;
+use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader, SeekFrom};
 
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
@@ -11,133 +11,184 @@ pub struct Start {
     pub column: Option<i32>,
 }
 
+#[derive(Serialize, Deserialize, JsonSchema, Clone)]
+pub struct Position {
+    pub line: usize,
+    pub column: usize,
+}
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 pub struct ReturnFormat {
     pub content: String,
-    pub start: Start,
-    pub end: Start,
+    pub start: Position,
+    pub end: Position,
+    pub start_byte: u64,
+    pub end_byte: u64,
+    pub total_lines: usize,
     pub truncated: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
 
-#[tool(description = "从文件的指定行列开始读取内容，并返回读取范围、截断状态及错误信息")]
+fn empty(position: Position) -> ReturnFormat {
+    ReturnFormat {
+        content: String::new(),
+        start: position.clone(),
+        end: position,
+        start_byte: 0,
+        end_byte: 0,
+        total_lines: 0,
+        truncated: false,
+        error: None,
+    }
+}
+
+// offsets[n] 是第 n 行行首的字节偏移；末项是文件长度。
+async fn line_offsets(file: tokio::fs::File) -> std::io::Result<Vec<u64>> {
+    let mut reader = BufReader::new(file);
+    let mut offsets = vec![0u64];
+    let mut offset = 0u64;
+    let mut last_was_newline = false;
+    loop {
+        let buf = reader.fill_buf().await?;
+        if buf.is_empty() {
+            break;
+        }
+        for index in memchr::memchr_iter(b'\n', buf) {
+            offsets.push(offset + index as u64 + 1);
+        }
+        last_was_newline = buf.last() == Some(&b'\n');
+        let len = buf.len();
+        reader.consume(len);
+        offset += len as u64;
+    }
+    if offset > 0 && !last_was_newline {
+        offsets.push(offset);
+    }
+    Ok(offsets)
+}
+
+#[tool(description = "按行列读取文件内容，返回带行号的文本、字节范围和总行数")]
 pub async fn read(
-    #[param(description = "要读取的文件路径，可以是绝对路径或相对当前工作目录的路径")] path: String,
-    #[param(
-        description = "起始位置。line 和 column 均从 0 开始，省略时默认为 0；column 仅作用于起始行"
-    )]
+    #[param(description = "文件路径，可以是绝对路径或相对当前工作目录的路径")] path: String,
+    #[param(description = "起始行列，均从 1 开始；省略时为第 1 行第 1 列。列只作用于起始行")]
     start: Option<Start>,
-    #[param(description = "最多读取的行数，从起始行算起；省略时读取 200 行")] line_count: Option<
-        i32,
-    >,
-) -> Result<ReturnFormat, agent_sdk::ToolError> {
+    #[param(description = "最多读取多少行，省略时为 200 行")] line_count: Option<i32>,
+) -> Result<ReturnFormat, ToolError> {
     let start = start.unwrap_or(Start {
         line: None,
         column: None,
     });
-    let start_line = usize::try_from(start.line.unwrap_or(0))
-        .map_err(|_| ToolError::ExecutionError("起始行不能为负数".into()))?;
-    let start_column = usize::try_from(start.column.unwrap_or(0))
-        .map_err(|_| ToolError::ExecutionError("起始列不能为负数".into()))?;
+    let line = usize::try_from(start.line.unwrap_or(1))
+        .map_err(|_| ToolError::ArgumentsError("起始行必须大于 0".into()))?;
+    let column = usize::try_from(start.column.unwrap_or(1))
+        .map_err(|_| ToolError::ArgumentsError("起始列必须大于 0".into()))?;
+    if line == 0 || column == 0 {
+        return Err(ToolError::ArgumentsError("起始行和列必须大于 0".into()));
+    }
     let count = usize::try_from(line_count.unwrap_or(200))
-        .map_err(|_| ToolError::ExecutionError("读取行数不能为负数".into()))?;
+        .map_err(|_| ToolError::ArgumentsError("读取行数不能为负数".into()))?;
+    let mut out = empty(Position { line, column });
 
-    let position = || Start {
-        line: Some(start_line as i32),
-        column: Some(start_column as i32),
-    };
-
-    let file = match tokio::fs::File::open(&path).await {
+    let mut file = match tokio::fs::File::open(&path).await {
         Ok(file) => file,
         Err(e) => {
-            return Ok(ReturnFormat {
-                content: String::new(),
-                start: position(),
-                end: position(),
-                truncated: false,
-                error: Some(format!("打开文件 {path} 失败: {e}")),
-            });
+            out.error = Some(format!("打开文件 {path} 失败: {e}"));
+            return Ok(out);
+        }
+    };
+    let scan_file = match file.try_clone().await {
+        Ok(file) => file,
+        Err(e) => {
+            out.error = Some(format!("复制文件句柄失败: {e}"));
+            return Ok(out);
+        }
+    };
+    let offsets = match line_offsets(scan_file).await {
+        Ok(offsets) => offsets,
+        Err(e) => {
+            out.error = Some(format!("扫描文件 {path} 失败: {e}"));
+            return Ok(out);
         }
     };
 
-    let mut lines = tokio::io::BufReader::new(file).lines();
-
-    for _ in 0..start_line {
-        match lines.next_line().await {
-            Ok(Some(_)) => {}
-            Ok(None) => {
-                return Ok(ReturnFormat {
-                    content: String::new(),
-                    start: position(),
-                    end: position(),
-                    truncated: false,
-                    error: None,
-                });
-            }
-            Err(e) => {
-                return Ok(ReturnFormat {
-                    content: String::new(),
-                    start: position(),
-                    end: position(),
-                    truncated: true,
-                    error: Some(format!("跳过文件开头区域失败: {e}")),
-                });
-            }
-        }
+    out.total_lines = offsets.len() - 1;
+    if line > out.total_lines || count == 0 {
+        out.start_byte = *offsets.last().unwrap();
+        out.end_byte = out.start_byte;
+        out.truncated = line <= out.total_lines;
+        return Ok(out);
     }
 
-    let mut output = String::new();
-    let mut read_lines = 0usize;
-    let mut error = None;
-    for i in 0..count {
-        let line = match lines.next_line().await {
-            Ok(Some(line)) => line,
-            Ok(None) => break,
-            Err(e) => {
-                error = Some(format!("读取文件第{}行失败: {e}", start_line + i));
-                break;
-            }
-        };
-        if i == 0 {
-            output.extend(line.chars().skip(start_column));
+    let first = line - 1;
+    let last = first.saturating_add(count).min(out.total_lines);
+    out.start_byte = offsets[first];
+    out.end_byte = offsets[last];
+    out.truncated = last < out.total_lines;
+    if let Err(e) = file.seek(SeekFrom::Start(out.start_byte)).await {
+        out.error = Some(format!("定位文件 {path} 失败: {e}"));
+        out.truncated = true;
+        return Ok(out);
+    }
+
+    let length = out.end_byte - out.start_byte;
+    let mut bytes = Vec::new();
+    let read_error = file.take(length).read_to_end(&mut bytes).await.err();
+    let mut emitted = 0usize;
+    for raw in bytes.split_inclusive(|byte| *byte == b'\n') {
+        if raw.is_empty() {
+            continue;
+        }
+        let text = String::from_utf8_lossy(raw);
+        let text = text.trim_end_matches(['\n', '\r']);
+        let display = if emitted == 0 {
+            text.chars().skip(column - 1).collect::<String>()
         } else {
-            output.push_str(&line);
-        }
-        output.push('\n');
-        read_lines += 1;
+            text.to_owned()
+        };
+        out.content
+            .push_str(&format!("{:>5} | {display}\n", line + emitted));
+        out.end = Position {
+            line: line + emitted,
+            column: text.chars().count(),
+        };
+        emitted += 1;
     }
+    if read_error.is_some() || bytes.len() as u64 != length {
+        out.error = Some(match read_error {
+            Some(e) => format!("读取文件 {path} 失败: {e}"),
+            None => format!("读取文件 {path} 失败: 文件在扫描后被截短"),
+        });
+        out.end_byte = out.start_byte + bytes.len() as u64;
+        out.truncated = true;
+    }
+    Ok(out)
+}
 
-    let truncated = if error.is_some() {
-        true
-    } else if read_lines == count {
-        match lines.next_line().await {
-            Ok(next) => next.is_some(),
-            Err(e) => {
-                error = Some(format!("检查文件剩余内容失败: {e}"));
-                true
-            }
-        }
-    } else {
-        false
-    };
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    let end = if read_lines == 0 {
-        position()
-    } else {
-        Start {
-            line: Some(
-                i32::try_from(start_line + read_lines)
-                    .map_err(|_| ToolError::ExecutionError("结束行超出可表示范围".into()))?,
-            ),
-            column: Some(0),
-        }
-    };
+    #[tokio::test]
+    async fn reads_byte_range_with_column_and_line_numbers() {
+        let path = std::env::temp_dir().join(format!("shirley-read-{}", std::process::id()));
+        tokio::fs::write(&path, "甲乙\nabc\n末").await.unwrap();
+        let out = read(
+            path.to_string_lossy().into_owned(),
+            Some(Start {
+                line: Some(1),
+                column: Some(2),
+            }),
+            Some(2),
+        )
+        .await
+        .unwrap();
+        tokio::fs::remove_file(path).await.unwrap();
 
-    Ok(ReturnFormat {
-        content: output,
-        start: position(),
-        end,
-        truncated,
-        error,
-    })
+        assert_eq!(out.content, "    1 | 乙\n    2 | abc\n");
+        assert_eq!((out.start_byte, out.end_byte), (0, 11));
+        assert_eq!(out.total_lines, 3);
+        assert!(out.truncated);
+        assert!(out.error.is_none());
+    }
 }

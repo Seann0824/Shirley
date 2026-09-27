@@ -17,6 +17,8 @@ pub struct ChatMessage {
 #[derive(Debug, Clone)]
 pub struct ToolCallView {
     pub name: String,
+    // 原始 JSON 参数，留着是为了在 TUI 里展示读了哪个文件
+    pub arguments: String,
 }
 
 #[derive(Debug, Clone)]
@@ -194,7 +196,10 @@ impl App {
                 if !tool_calls.is_empty() {
                     let calls = tool_calls
                         .into_iter()
-                        .map(|call| ToolCallView { name: call.name })
+                        .map(|call| ToolCallView {
+                            name: call.name,
+                            arguments: call.arguments,
+                        })
                         .collect();
                     self.start_tool_calls(calls);
                 }

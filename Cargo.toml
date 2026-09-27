@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
+memchr = "2.7"
 agent-sdk = { version = "0.1.0", path = "./crates/agent-sdk" }
 syn = { version = "3.0.6", features = ["full"] }
 proc-macro2 = "1.0.107"

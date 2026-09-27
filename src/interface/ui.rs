@@ -130,11 +130,42 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, show_thinking: b
 }
 
 fn append_tools(lines: &mut Vec<Line>, group: &super::app::ToolGroup) {
-    let style = Style::default().fg(Color::Yellow);
+    let name_style = Style::default().fg(Color::Yellow);
+    let arg_style = Style::default().fg(Color::DarkGray);
     for call in &group.calls {
-        lines.push(Line::from(Span::styled(format!("🔧 {}", call.name), style)));
+        lines.push(Line::from(vec![
+            Span::styled(format!("🔧 {}", call.name), name_style),
+            Span::styled(summarize_arguments(&call.arguments), arg_style),
+        ]));
     }
     lines.push(Line::default());
+}
+
+// 把工具参数压成一行摘要，重点是把"读了哪个文件"这种关键信息露出来
+fn summarize_arguments(arguments: &str) -> String {
+    let arguments = arguments.trim();
+    if arguments.is_empty() {
+        return String::new();
+    }
+
+    let value: serde_json::Value = match serde_json::from_str(arguments) {
+        Ok(value) => value,
+        // 模型偶尔会吐出非法 JSON，原样展示好过藏起来
+        Err(_) => return format!(" {arguments}"),
+    };
+
+    // 优先挑各工具最关键的字段
+    for key in ["path", "command", "pattern", "query"] {
+        if let Some(text) = value.get(key).and_then(|field| field.as_str()) {
+            return format!(" {text}");
+        }
+    }
+
+    // 退而求其次，把参数对象压成紧凑 JSON
+    match serde_json::to_string(&value) {
+        Ok(text) => format!(" {text}"),
+        Err(_) => String::new(),
+    }
 }
 
 fn status_line(app: &App) -> Line<'static> {
