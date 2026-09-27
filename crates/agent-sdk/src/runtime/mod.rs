@@ -13,6 +13,14 @@ pub struct RunResult {
 
     // 停止的原因
     pub stop_reason: StopReason,
+
+    pub usage: message::Usage,
+}
+
+impl RunResult {
+    pub fn cache_hit_rate(&self) -> Option<f64> {
+        self.usage.cache_hit_rate()
+    }
 }
 
 #[derive(Debug)]
@@ -45,6 +53,8 @@ pub enum AgentEvent {
     MessageAdded(message::Message),
     ToolStarted { call_id: String, name: String },
     ToolFinished { call_id: String, name: String },
+    // 每次模型调用后上报，便于实时观察缓存命中
+    Usage(message::Usage),
     Finished(RunResult),
 }
 
@@ -59,6 +69,21 @@ impl fmt::Display for AgentEvent {
             }
             Self::ToolFinished { call_id, name } => {
                 let _ = write!(f, "✅ Tool Finished [{call_id}]: {name}");
+                Ok(())
+            }
+            Self::Usage(usage) => {
+                let hit = match usage.cache_hit_rate() {
+                    Some(rate) => format!("{:.1}%", rate * 100.0),
+                    None => "n/a".to_owned(),
+                };
+                let _ = write!(
+                    f,
+                    "📊 Usage: in={} (cached={}, hit={}) out={}",
+                    usage.input_tokens,
+                    usage.cached_tokens(),
+                    hit,
+                    usage.output_tokens
+                );
                 Ok(())
             }
             Self::Finished(result) => {
@@ -119,6 +144,7 @@ impl Agent {
     ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + 'a>> {
         Box::pin(async_stream::try_stream! {
         let start_index = self.messages.len();
+        let mut total_usage = message::Usage::default();
 
         let user_message = message::Message::User {
             content: task.into(),
@@ -134,6 +160,10 @@ impl Agent {
                 tools: &self.tools.definitions(),
             };
             let response = adapter::invoke(&client, &self.model_config, model_request).await.map_err(|error| AgentError::AdapterError(error))?;
+
+            total_usage = total_usage + response.usage;
+            yield AgentEvent::Usage(response.usage);
+
             let response_message = response.message;
             self.messages.push(response_message.clone());
             yield AgentEvent::MessageAdded(response_message.clone());
@@ -186,6 +216,7 @@ impl Agent {
                 yield AgentEvent::Finished(RunResult {
                     messages: self.messages[start_index..].to_vec(),
                     stop_reason: StopReason::Completed,
+                    usage: total_usage,
                 });
                 break;
             }

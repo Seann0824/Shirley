@@ -173,19 +173,21 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, ModelEr
         .unwrap_or(ModelfinishReaon::Other("unknown".to_owned()));
 
     // usage 需要转换成 message::Usage
+    let cached_input_tokens = response
+        .usage
+        .prompt_tokens_details
+        .as_ref()
+        .and_then(|details| details.cached_tokens);
     let usage = message::Usage {
         input_tokens: response.usage.prompt_tokens,
         output_tokens: response.usage.completion_tokens,
-        cahced_input_tokens: response
-            .usage
-            .prompt_tokens_details
-            .as_ref()
-            .and_then(|details| details.cached_tokens.map(|t| t)),
+        cached_input_tokens,
+        cache_reported_input_tokens: cached_input_tokens.map(|_| response.usage.prompt_tokens),
         reasoning_tokens: response
             .usage
             .completion_tokens_details
             .as_ref()
-            .and_then(|details| details.reasoning_tokens.map(|t| t)),
+            .and_then(|details| details.reasoning_tokens),
     };
 
     Ok(ModelResponse {

@@ -1,6 +1,6 @@
 use std::{future::Future, pin::Pin};
 
-use agent_sdk::{Agent, AgentEvent, Message};
+use agent_sdk::{Agent, AgentEvent, Message, Usage};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 
@@ -8,6 +8,7 @@ use super::{app::App, event::EventHandler, ui, update};
 
 enum AgentUpdate {
     Message(Message),
+    Usage(Usage),
     Error(String),
 }
 
@@ -21,6 +22,11 @@ async fn run_agent(
         match event {
             Ok(AgentEvent::MessageAdded(message)) => {
                 if updates.send(AgentUpdate::Message(message)).is_err() {
+                    break;
+                }
+            }
+            Ok(AgentEvent::Usage(usage)) => {
+                if updates.send(AgentUpdate::Usage(usage)).is_err() {
                     break;
                 }
             }
@@ -70,6 +76,7 @@ impl<'a> Tui<'a> {
     fn apply(&mut self, update: AgentUpdate) {
         match update {
             AgentUpdate::Message(message) => self.app.add_message(message),
+            AgentUpdate::Usage(usage) => self.app.record_usage(usage),
             AgentUpdate::Error(error) => self.app.add_error(error),
         }
     }

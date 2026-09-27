@@ -10,8 +10,12 @@ use unicode_width::UnicodeWidthStr;
 use super::app::{App, ChatMessage, Item, Role};
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let [messages_area, input_area] =
-        Layout::vertical([Constraint::Min(1), Constraint::Length(3)]).areas(frame.area());
+    let [messages_area, status_area, input_area] = Layout::vertical([
+        Constraint::Min(1),
+        Constraint::Length(1),
+        Constraint::Length(3),
+    ])
+    .areas(frame.area());
 
     let show_thinking = app.show_thinking();
 
@@ -58,6 +62,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             .scroll((scroll, 0)),
         messages_area,
     );
+
+    frame.render_widget(Paragraph::new(status_line(app)), status_area);
 
     let visible_width = input_area.width.saturating_sub(2) as usize;
     let input = app.input();
@@ -126,10 +132,63 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, show_thinking: b
 fn append_tools(lines: &mut Vec<Line>, group: &super::app::ToolGroup) {
     let style = Style::default().fg(Color::Yellow);
     for call in &group.calls {
-        lines.push(Line::from(Span::styled(
-            format!("🔧 {}", call.name),
-            style,
-        )));
+        lines.push(Line::from(Span::styled(format!("🔧 {}", call.name), style)));
     }
     lines.push(Line::default());
+}
+
+fn status_line(app: &App) -> Line<'static> {
+    let Some(last) = app.last_usage() else {
+        return Line::from(Span::styled(
+            " 缓存：等待首次模型调用…".to_owned(),
+            Style::default().fg(Color::DarkGray),
+        ));
+    };
+
+    let total = app.total_usage();
+
+    let hit_style = |rate: Option<f64>| match rate {
+        // 未上报，不能标红误导成失效
+        None => Style::default().fg(Color::DarkGray),
+        Some(rate) if rate >= 0.8 => Style::default().fg(Color::Green),
+        Some(rate) if rate >= 0.5 => Style::default().fg(Color::Yellow),
+        Some(_) => Style::default().fg(Color::Red),
+    };
+
+    let format_rate = |rate: Option<f64>| match rate {
+        Some(rate) => format!("{:.1}%", rate * 100.0),
+        None => "n/a".to_owned(),
+    };
+
+    let last_rate = last.cache_hit_rate();
+    let total_rate = total.cache_hit_rate();
+    let coverage = total.cache_reported_input_tokens.unwrap_or(0);
+    let coverage_text = if coverage < total.input_tokens {
+        format!(" (覆盖 {coverage}/{})", total.input_tokens)
+    } else {
+        String::new()
+    };
+    let last_cached = last
+        .cached_input_tokens
+        .map(|tokens| tokens.to_string())
+        .unwrap_or_else(|| "n/a".to_owned());
+
+    Line::from(vec![
+        Span::styled(" 缓存 ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("最近调用 {} ", format_rate(last_rate)),
+            hit_style(last_rate),
+        ),
+        Span::styled(
+            format!("累计 {}{} ", format_rate(total_rate), coverage_text),
+            hit_style(total_rate),
+        ),
+        Span::styled(
+            format!(
+                "| 输入 {} (命中 {}) 输出 {}",
+                last.input_tokens, last_cached, last.output_tokens
+            ),
+            Style::default().fg(Color::DarkGray),
+        ),
+    ])
 }

@@ -1,4 +1,4 @@
-use agent_sdk::{Agent, Message};
+use agent_sdk::{Agent, Message, Usage};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -41,6 +41,8 @@ pub struct App {
     auto_scroll: bool,
     // 渲染层每帧回写，输入层拿不到布局所以存这儿
     max_scroll: u16,
+    last_usage: Option<Usage>,
+    total_usage: Usage,
 }
 
 impl App {
@@ -55,7 +57,22 @@ impl App {
             scroll: 0,
             auto_scroll: true,
             max_scroll: 0,
+            last_usage: None,
+            total_usage: Usage::default(),
         }
+    }
+
+    pub fn last_usage(&self) -> Option<&Usage> {
+        self.last_usage.as_ref()
+    }
+
+    pub fn total_usage(&self) -> &Usage {
+        &self.total_usage
+    }
+
+    pub fn record_usage(&mut self, usage: Usage) {
+        self.total_usage = self.total_usage + usage;
+        self.last_usage = Some(usage);
     }
 
     pub fn max_scroll(&self) -> u16 {
