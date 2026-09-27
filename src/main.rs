@@ -5,7 +5,8 @@ mod tools;
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), AgentError> {
     dotenvy::dotenv().ok();
-    let api_key = std::env::var("DEEPSEEK_API_KEY").expect("缺少 APIKEY");
+    let api_key = std::env::var("LOCAL_API_KEY").expect("缺少 APIKEY");
+    let base_url = std::env::var("LOCAL_BASE_URL").expect("缺少 BASE URL");
     // 定义一个工具Tool
     let mut tool_manager = ToolManager::new();
     let _ = tool_manager.register(tools::bash_tool::tool());
@@ -13,9 +14,9 @@ async fn main() -> Result<(), AgentError> {
     // 调用返回 Future；await 等待它执行完成。
     let model_config = ModelConfig::builder()
         .protocol(ModelProtocol::ChatCompletions)
-        .base_url("https://api.deepseek.com/chat/completions")
+        .base_url(base_url)
         .api_key(api_key)
-        .model("deepseek-flash")
+        .model("deepseek-v4.1-flash")
         .build();
 
     let agent = Agent::builder()
