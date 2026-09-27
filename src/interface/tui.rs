@@ -8,6 +8,9 @@ use super::{app::App, event::EventHandler, ui, update};
 enum AgentUpdate {
     Message(Message),
     Usage(Usage),
+    CompressionStarted,
+    CompressionFinished,
+    ContextUsage { used_tokens: u64, limit_tokens: u64 },
     Error(String),
 }
 
@@ -19,6 +22,30 @@ async fn run_agent(
     let mut stream = agent.run_stream(&prompt);
     while let Some(event) = stream.next().await {
         match event {
+            Ok(AgentEvent::CompressionStarted) => {
+                if updates.send(AgentUpdate::CompressionStarted).is_err() {
+                    break;
+                }
+            }
+            Ok(AgentEvent::CompressionFinished) => {
+                if updates.send(AgentUpdate::CompressionFinished).is_err() {
+                    break;
+                }
+            }
+            Ok(AgentEvent::ContextUsage {
+                used_tokens,
+                limit_tokens,
+            }) => {
+                if updates
+                    .send(AgentUpdate::ContextUsage {
+                        used_tokens,
+                        limit_tokens,
+                    })
+                    .is_err()
+                {
+                    break;
+                }
+            }
             // 提交时已本地回显，避免同一条用户消息重复显示。
             Ok(AgentEvent::MessageAdded(Message::User { .. })) => {}
             Ok(AgentEvent::MessageAdded(message)) => {
@@ -78,6 +105,12 @@ impl<'a> Tui<'a> {
         match update {
             AgentUpdate::Message(message) => self.app.add_message(message),
             AgentUpdate::Usage(usage) => self.app.record_usage(usage),
+            AgentUpdate::CompressionStarted => self.app.start_compression(),
+            AgentUpdate::CompressionFinished => self.app.finish_compression(),
+            AgentUpdate::ContextUsage {
+                used_tokens,
+                limit_tokens,
+            } => self.app.record_context_usage(used_tokens, limit_tokens),
             AgentUpdate::Error(error) => self.app.add_error(error),
         }
     }
@@ -89,6 +122,19 @@ impl<'a> Tui<'a> {
         while !self.app.should_exit() {
             self.draw()?;
             tokio::select! {
+                biased;
+                Some(update) = updates_rx.recv(), if response.is_some() => {
+                    let mut next = update;
+                    loop {
+                        let show_compression = matches!(next, AgentUpdate::CompressionStarted);
+                        self.apply(next);
+                        if show_compression { break; }
+                        match updates_rx.try_recv() {
+                            Ok(update) => next = update,
+                            Err(_) => break,
+                        }
+                    }
+                },
                 event = self.events.next() => {
                     if let Some(prompt) = update::update(&mut self.app, event?) {
                         if let Some(agent) = self.app.take_agent() {
@@ -96,12 +142,6 @@ impl<'a> Tui<'a> {
                         }
                     }
                 }
-                Some(update) = updates_rx.recv(), if response.is_some() => {
-                    self.apply(update);
-                    while let Ok(next) = updates_rx.try_recv() {
-                        self.apply(next);
-                    }
-                },
                 _ = tick.tick(), if response.is_some() => {}
                 completed = async { response.as_mut().expect("response exists").await }, if response.is_some() => {
                     while let Ok(update) = updates_rx.try_recv() {

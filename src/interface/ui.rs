@@ -91,7 +91,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .unwrap()
         .visible_lines(scroll, visible_height);
 
-    let title = if app.show_thinking() {
+    let title = if app.is_compressing() {
+        " 消息 · 正在压缩上下文… "
+    } else if app.show_thinking() {
         " 消息 · 思考已显示（Ctrl+T 隐藏） "
     } else {
         " 消息 · 思考已隐藏（Ctrl+T 显示） "
@@ -119,7 +121,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         start = index;
     }
     let visible_input = &input[start..];
-    let input_title = if let Some(seconds) = app.waiting_seconds() {
+    let input_title = if app.is_compressing() {
+        " 正在压缩上下文 · Esc 退出 ".to_owned()
+    } else if let Some(seconds) = app.waiting_seconds() {
         format!(" AI 回复中 {seconds}s · Esc 退出 ")
     } else {
         " 输入框 · Enter 发送 · Ctrl+T 思考 · Esc 退出 ".to_owned()
@@ -211,11 +215,37 @@ fn summarize_arguments(arguments: &str) -> String {
 }
 
 fn status_line(app: &App) -> Line<'static> {
-    let Some(last) = app.last_usage() else {
-        return Line::from(Span::styled(
-            " 缓存：等待首次模型调用…".to_owned(),
+    let mut spans = Vec::new();
+    if app.is_compressing() {
+        spans.push(Span::styled(
+            " 上下文：压缩中… | ",
+            Style::default().fg(Color::Yellow),
+        ));
+    } else if let Some((used, limit)) = app.context_usage() {
+        let percent = used as f64 / limit as f64 * 100.0;
+        let color = if percent >= 80.0 {
+            Color::Red
+        } else if percent >= 60.0 {
+            Color::Yellow
+        } else {
+            Color::Green
+        };
+        spans.push(Span::styled(
+            format!(" 上下文 {used}/{limit} ({percent:.1}%) | "),
+            Style::default().fg(color),
+        ));
+    } else {
+        spans.push(Span::styled(
+            " 上下文：待统计 | ",
             Style::default().fg(Color::DarkGray),
         ));
+    }
+    let Some(last) = app.last_usage() else {
+        spans.push(Span::styled(
+            "缓存：等待首次模型调用…",
+            Style::default().fg(Color::DarkGray),
+        ));
+        return Line::from(spans);
     };
 
     let total = app.total_usage();
@@ -246,7 +276,7 @@ fn status_line(app: &App) -> Line<'static> {
         .map(|tokens| tokens.to_string())
         .unwrap_or_else(|| "n/a".to_owned());
 
-    Line::from(vec![
+    spans.extend([
         Span::styled(" 缓存 ", Style::default().fg(Color::DarkGray)),
         Span::styled(
             format!("最近调用 {} ", format_rate(last_rate)),
@@ -263,5 +293,6 @@ fn status_line(app: &App) -> Line<'static> {
             ),
             Style::default().fg(Color::DarkGray),
         ),
-    ])
+    ]);
+    Line::from(spans)
 }

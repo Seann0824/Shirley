@@ -20,6 +20,10 @@ pub enum Message {
         tool_call_id: String,
         content: Option<String>,
     },
+    // 不展示，转换的时候转换成 system
+    ContextSummary {
+        content: String,
+    },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -141,6 +145,10 @@ impl fmt::Display for Message {
             }
             Message::System { content } => {
                 let _ = write!(f, "🖥️ System: {}", content);
+                Ok(())
+            }
+            Message::ContextSummary { content } => {
+                let _ = write!(f, "🖥️ Context Summary: {}", content);
                 Ok(())
             }
         }

@@ -49,6 +49,8 @@ pub struct App {
     max_scroll: usize,
     last_usage: Option<Usage>,
     total_usage: Usage,
+    compressing: bool,
+    context_usage: Option<(u64, u64)>,
     pub(crate) message_cache: Option<MessageCache>,
 }
 
@@ -67,6 +69,8 @@ impl App {
             max_scroll: 0,
             last_usage: None,
             total_usage: Usage::default(),
+            compressing: false,
+            context_usage: None,
             message_cache: None,
         }
     }
@@ -82,6 +86,27 @@ impl App {
     pub fn record_usage(&mut self, usage: Usage) {
         self.total_usage = self.total_usage + usage;
         self.last_usage = Some(usage);
+    }
+
+    pub fn start_compression(&mut self) {
+        self.compressing = true;
+    }
+
+    pub fn finish_compression(&mut self) {
+        self.compressing = false;
+        self.context_usage = None;
+    }
+
+    pub fn is_compressing(&self) -> bool {
+        self.compressing
+    }
+
+    pub fn record_context_usage(&mut self, used_tokens: u64, limit_tokens: u64) {
+        self.context_usage = Some((used_tokens, limit_tokens));
+    }
+
+    pub fn context_usage(&self) -> Option<(u64, u64)> {
+        self.context_usage
     }
 
     pub fn max_scroll(&self) -> usize {
@@ -225,11 +250,12 @@ impl App {
                     self.start_tool_calls(calls);
                 }
             }
-            Message::Tool { .. } | Message::System { .. } => {}
+            Message::Tool { .. } | Message::System { .. } | Message::ContextSummary { .. } => {}
         }
     }
 
     pub fn add_error(&mut self, error: String) {
+        self.compressing = false;
         self.push_message(Role::Error, error, false);
     }
 }

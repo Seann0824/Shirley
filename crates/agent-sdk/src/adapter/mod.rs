@@ -31,6 +31,7 @@ pub struct ModelConfig {
     pub request_timeout: Duration,
     #[builder(default)]
     pub generation: GenerationConfig,
+    pub context_window_tokens: Option<u64>,
 }
 
 pub type ModelError = String;

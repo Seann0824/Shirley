@@ -57,7 +57,12 @@ fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
                     "content": content,
                 })
             }
-
+            message::Message::ContextSummary { content } => {
+                serde_json::json!({
+                    "role": "system",
+                    "content": content,
+                })
+            }
             message::Message::Tool {
                 tool_call_id,
                 content,
