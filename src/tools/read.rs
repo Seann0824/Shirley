@@ -3,6 +3,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader, SeekFrom};
 
+const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+
 #[derive(Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "snake_case")]
 #[schemars(inline)]
@@ -43,11 +45,21 @@ fn empty(position: Position) -> ReturnFormat {
     }
 }
 
-// offsets[n] 是第 n 行行首的字节偏移；末项是文件长度。
-async fn line_offsets(file: tokio::fs::File) -> std::io::Result<Vec<u64>> {
+struct LineScan {
+    total_lines: usize,
+    file_len: u64,
+    start_byte: Option<u64>,
+    end_byte: Option<u64>,
+}
+
+// 扫完整个文件以计算总行数，但只保留请求范围的两个偏移。
+async fn scan_lines(file: tokio::fs::File, line: usize, count: usize) -> std::io::Result<LineScan> {
     let mut reader = BufReader::new(file);
-    let mut offsets = vec![0u64];
     let mut offset = 0u64;
+    let mut newline_count = 0usize;
+    let mut start_byte = (line == 1).then_some(0);
+    let mut end_byte = None;
+    let end_line = line.saturating_add(count);
     let mut last_was_newline = false;
     loop {
         let buf = reader.fill_buf().await?;
@@ -55,17 +67,27 @@ async fn line_offsets(file: tokio::fs::File) -> std::io::Result<Vec<u64>> {
             break;
         }
         for index in memchr::memchr_iter(b'\n', buf) {
-            offsets.push(offset + index as u64 + 1);
+            newline_count += 1;
+            let next_byte = offset + index as u64 + 1;
+            if newline_count + 1 == line {
+                start_byte = Some(next_byte);
+            }
+            if newline_count + 1 == end_line {
+                end_byte = Some(next_byte);
+            }
         }
         last_was_newline = buf.last() == Some(&b'\n');
         let len = buf.len();
         reader.consume(len);
         offset += len as u64;
     }
-    if offset > 0 && !last_was_newline {
-        offsets.push(offset);
-    }
-    Ok(offsets)
+    let total_lines = newline_count + usize::from(offset > 0 && !last_was_newline);
+    Ok(LineScan {
+        total_lines,
+        file_len: offset,
+        start_byte,
+        end_byte,
+    })
 }
 
 #[tool(description = "按行列读取文件内容，返回带行号的文本、字节范围和总行数")]
@@ -104,27 +126,27 @@ pub async fn read(
             return Ok(out);
         }
     };
-    let offsets = match line_offsets(scan_file).await {
-        Ok(offsets) => offsets,
+    let scan = match scan_lines(scan_file, line, count).await {
+        Ok(scan) => scan,
         Err(e) => {
             out.error = Some(format!("扫描文件 {path} 失败: {e}"));
             return Ok(out);
         }
     };
 
-    out.total_lines = offsets.len() - 1;
+    out.total_lines = scan.total_lines;
     if line > out.total_lines || count == 0 {
-        out.start_byte = *offsets.last().unwrap();
+        out.start_byte = scan.file_len;
         out.end_byte = out.start_byte;
         out.truncated = line <= out.total_lines;
         return Ok(out);
     }
 
-    let first = line - 1;
-    let last = first.saturating_add(count).min(out.total_lines);
-    out.start_byte = offsets[first];
-    out.end_byte = offsets[last];
-    out.truncated = last < out.total_lines;
+    let last = (line - 1).saturating_add(count).min(out.total_lines);
+    out.start_byte = scan.start_byte.unwrap_or(scan.file_len);
+    let requested_end = scan.end_byte.unwrap_or(scan.file_len);
+    out.end_byte = requested_end.min(out.start_byte.saturating_add(MAX_OUTPUT_BYTES as u64));
+    out.truncated = last < out.total_lines || out.end_byte < requested_end;
     if let Err(e) = file.seek(SeekFrom::Start(out.start_byte)).await {
         out.error = Some(format!("定位文件 {path} 失败: {e}"));
         out.truncated = true;
@@ -146,8 +168,26 @@ pub async fn read(
         } else {
             text.to_owned()
         };
-        out.content
-            .push_str(&format!("{:>5} | {display}\n", line + emitted));
+        let prefix = format!("{:>5} | ", line + emitted);
+        let remaining = MAX_OUTPUT_BYTES.saturating_sub(out.content.len());
+        if remaining <= prefix.len() {
+            out.truncated = true;
+            break;
+        }
+        out.content.push_str(&prefix);
+        let available = remaining - prefix.len();
+        let display_budget = available.saturating_sub(1);
+        let clipped = display
+            .char_indices()
+            .take_while(|(index, ch)| index + ch.len_utf8() <= display_budget)
+            .last()
+            .map_or(0, |(index, ch)| index + ch.len_utf8());
+        out.content.push_str(&display[..clipped]);
+        out.content.push('\n');
+        if clipped < display.len() {
+            out.truncated = true;
+            break;
+        }
         out.end = Position {
             line: line + emitted,
             column: text.chars().count(),
@@ -190,5 +230,42 @@ mod tests {
         assert_eq!(out.total_lines, 3);
         assert!(out.truncated);
         assert!(out.error.is_none());
+    }
+
+    #[tokio::test]
+    async fn caps_a_single_long_line() {
+        let path = std::env::temp_dir().join(format!("shirley-read-long-{}", std::process::id()));
+        tokio::fs::write(&path, vec![b'a'; MAX_OUTPUT_BYTES * 2])
+            .await
+            .unwrap();
+        let out = read(path.to_string_lossy().into_owned(), None, None)
+            .await
+            .unwrap();
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(out.total_lines, 1);
+        assert_eq!(out.end_byte, MAX_OUTPUT_BYTES as u64);
+        assert!(out.content.len() <= MAX_OUTPUT_BYTES);
+        assert!(out.truncated);
+    }
+
+    #[tokio::test]
+    async fn caps_formatted_output_from_many_short_lines() {
+        let path = std::env::temp_dir().join(format!("shirley-read-lines-{}", std::process::id()));
+        tokio::fs::write(&path, "x\n".repeat(MAX_OUTPUT_BYTES))
+            .await
+            .unwrap();
+        let out = read(
+            path.to_string_lossy().into_owned(),
+            None,
+            Some(MAX_OUTPUT_BYTES as i32),
+        )
+        .await
+        .unwrap();
+        tokio::fs::remove_file(path).await.unwrap();
+
+        assert_eq!(out.total_lines, MAX_OUTPUT_BYTES);
+        assert!(out.content.len() <= MAX_OUTPUT_BYTES);
+        assert!(out.truncated);
     }
 }
