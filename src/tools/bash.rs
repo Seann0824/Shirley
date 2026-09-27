@@ -5,7 +5,7 @@ const BLACKLIST: [&str; 3] = ["rm", "shutdown", "reboot"];
 
 // TODO: 工具错误消息格式应该有一个统一的格式，这样就能够按照设计好的格式，去反馈为什么执行失败了。
 #[tool(description = "bash 用于执行命令，比如，python、grep、find、git等系统命令")]
-pub async fn bash_tool(
+pub async fn bash(
     #[param(description = "要执行的命令")] command: String,
     #[param(description = "超时时间（秒）")] timeout: Option<u64>,
 ) -> Result<String, agent_sdk::ToolError> {
