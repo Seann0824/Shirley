@@ -1,11 +1,11 @@
 mod dto;
 
 use reqwest::header::HeaderValue;
-use serde_json::{Value, map};
+use serde_json::Value;
 
 use crate::{
     ModelConfig,
-    adapter::{ModelError, ModelRequest, ModelResponse, ModelfinishReaon, PreparedRequest},
+    adapter::{AdpaterError, ModelRequest, ModelResponse, ModelfinishReaon, PreparedRequest},
     message, tool,
 };
 
@@ -98,7 +98,7 @@ fn encode_tools(tools: &[&tool::ToolDefinition]) -> Vec<Value> {
 pub fn encode_request(
     config: &ModelConfig,
     input: &ModelRequest<'_>,
-) -> Result<PreparedRequest, ModelError> {
+) -> Result<PreparedRequest, AdpaterError> {
     // 处理消息列表，转换逻辑
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -108,21 +108,26 @@ pub fn encode_request(
 
     if let Some(api_key) = &config.api_key {
         let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|_| "API Key 无法构成有效请求头".to_owned())?;
+            .map_err(|_| AdpaterError::ResponseError("API Key 无法构成有效请求头".into()))?;
         authorization.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, authorization);
     }
     //  todo: 这里目前没有处理工具注入逻辑，以及思考逻辑。
+    let thinking = match config.thinking {
+        true => "enabled",
+        false => "disabled",
+    };
+
     let body = serde_json::json!({
         "model": &config.model,
         // 这里应该转换对吧，但是看情况，我们现在主要以ChatCompletion 为唯一协议，其他协议都是根据这个协议适配过去的
         "messages": encode_messages(&input.messages),
         "tools": encode_tools(&input.tools),
         "thinking": {
-            "type": "disabled",
+            "type": thinking,
         },
-        "reasoning_effort": "medium",
-        "stream": false,
+        "reasoning_effort": &config.reasoning_effort,
+        "stream": &config.stream,
     });
 
     // 2. 处理工具
@@ -133,20 +138,22 @@ pub fn encode_request(
     })
 }
 
-pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, ModelError> {
+pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, AdpaterError> {
     let response = serde_json::from_value::<dto::ModelResponse>(body.clone())
-        .map_err(|err| format!("响应解析失败: {err}"))?;
+        .map_err(|err| AdpaterError::ResponseError(format!("响应解析失败: {err}")))?;
 
     // 开始转换 Message::Assistant and Message::Tool and finish_reason
     let choice = response
         .choices
         .get(0)
-        .ok_or_else(|| "响应缺少 choices[0]".to_owned())?;
+        .ok_or_else(|| AdpaterError::ResponseError("响应缺少 choices[0]".to_owned()))?;
 
     let msg = &choice.message;
     let role = &msg.role;
     if role != "assistant" {
-        return Err(format!("响应 role 不合法: {role}").into());
+        return Err(AdpaterError::ResponseError(format!(
+            "响应 role 不合法: {role}"
+        )));
     }
     let content = &msg.content;
     let reasoning_content = msg.reasoning_content.clone();
