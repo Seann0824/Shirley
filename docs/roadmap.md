@@ -2,10 +2,10 @@
 
 **一、判断**
 
-当前仓库是一个"链路跑通了、但还不能托付真实仓库"的 v0.1。ReAct 循环、工具注册、上下文压缩、usage 统计、TUI 都已经能跑，`plan.md` 的方向也是对的。问题集中在两类：
+当前仓库是一个"链路跑通了、但还不能托付真实仓库"的 v0.1。ReAct 循环、工具注册、上下文压缩、usage 统计、TUI、流式输出都已经能跑，`plan.md` 的方向也是对的。问题集中在两类：
 
 - **边界类**：能跑，但一旦接入真实场景就会咬人（安全、无上限循环、无重试、协议 panic）。
-- **沉淀类**：`plan.md` 说清了要做什么，但一直没做（流式、参数中间层、记忆、规划）。
+- **沉淀类**：`plan.md` 说清了要做什么，但一直没做（参数中间层、记忆、规划）。
 
 前者是 P0，因为它决定了这个 Agent 能不能动我的代码。后者是 P1，因为它决定了后续每一步的边际成本。
 
@@ -29,7 +29,7 @@
 
 **P1 · 让它好用、且后续便宜**
 
-- 流式输出与 reasoning 流式（见 `streaming.md`）——`plan.md` 的第一优先级
+- ~~流式输出与 reasoning 流式（见 `streaming.md`）~~ ——已落地（`stream` 配置 + `ContentDelta` / `ReasoningDelta` + SSE 增量解析）
 - 适配中间层：工具参数标准化、`encode_messages` 归位（见 `adapter-layer.md`）
 - SDK 单测 + 缓存命中率基准（见 `testing.md`）
 
@@ -50,7 +50,7 @@ graph TD
     LONG --> PLAN["规划 / 记忆"]
     HARD --> ERR["结构化错误"]
     ERR --> RETRY["重试 / 取消 / 步数上限"]
-    HARD --> STREAM["流式（体验）"]
+    HARD --> STREAM["流式（体验）<br/>已落地"]
     ADAPT["adapter-layer.md<br/>codec 归位 / 参数中间层"] --> PROTO["多协议"]
     PROTO --> SCHEMA["参数 schema 复用"]
     TEST["testing.md"] -.->|全程并行，不阻塞| SEC
@@ -71,12 +71,12 @@ P0 完成的定义（可测）：
 
 P1 完成的定义：
 
-1. TUI 能看到逐字输出与 reasoning 流。
-2. `cargo test -p agent-sdk` 覆盖 Usage 语义、压缩切片、阈值判断。
-3. 缓存命中率有基准用例与阈值，UI 上的百分比有参照。
+1. TUI 能看到逐字输出与 reasoning 流。（已实现）
+2. `cargo test -p agent-sdk` 覆盖 Usage 语义、压缩切片、阈值判断。（仍未做，SDK 侧 0 测试）
+3. 缓存命中率有基准用例与阈值，UI 上的百分比有参照。（仍未做）
 
 **五、不做的事（明确划界）**
 
 - 不在这一轮引入向量库 / 外部记忆存储。
-- 不重写 TUI，只在事件层做减法（去掉 `AgentUpdate` 重复翻译）。
+- 不重写 TUI，只在事件层做减法（去掉 `AgentUpdate` 重复翻译）。（已完成）
 - 不为多协议提前抽象到"什么都能转"，只做参数 schema 这一层必要的标准化。

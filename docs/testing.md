@@ -168,7 +168,7 @@ pub struct MockModel {
 - cargo test --all
 ```
 
-当前 17 条 clippy 警告要么修掉，要么显式 `allow` 并写明原因。`-D warnings` 是让"顺手能修的"不再堆积的唯一办法。
+当前 36 条 clippy 警告（`agent-sdk` 32 条 + 应用层 4 条）要么修掉，要么显式 `allow` 并写明原因。`-D warnings` 是让"顺手能修的"不再堆积的唯一办法。
 
 **九、验收**
 

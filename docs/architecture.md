@@ -46,8 +46,12 @@ flowchart LR
     AM --> MR["ModelRequest"]
     MR --> ENC["encode_request<br/>encode_messages + encode_tools"]
     ENC --> HTTP["POST base_url"]
-    HTTP --> DEC["decode_response"]
+    HTTP --> BR{"config.stream?"}
+    BR -->|否| DEC["decode_response"]
+    BR -->|是| DSTREAM["decode_stream_response<br/>SSE 增量解析"]
     DEC --> MRESP["ModelResponse<br/>message + usage + finish_reason"]
+    DSTREAM -->|"逐片"| DELTA["ContentDelta / ReasoningDelta 事件"]
+    DSTREAM --> MRESP
     MRESP --> SCHED["should_schedule_compression"]
     SCHED --> PUSH["落库 Assistant"]
     PUSH --> TC{"有 tool_calls?"}
@@ -57,7 +61,7 @@ flowchart LR
     TC -->|否| FIN["Finished(RunResult)"]
 ```
 
-对应 `runtime/mod.rs` 的主循环。注意 `finish_reason` 虽然被解码出来，但**运行时没有消费它**——`is_finished` 只看 `tool_calls.is_empty()`，所以 `length` 截断会被当成正常完成（见 `runtime-hardening.md` 第三节）。
+对应 `runtime/mod.rs` 的主循环，`adapter/mod.rs` 的 `invoke` 是流式/非流式的分叉点（`config.stream`）。注意 `finish_reason` 虽然被解码出来，但**运行时仍然没有消费它**——`is_finished` 只看 `tool_calls.is_empty()`，所以 `length` 截断会被当成正常完成（见 `runtime-hardening.md` 第三节）。
 
 **三、ReAct 主循环（含压缩）**
 
@@ -67,7 +71,7 @@ flowchart TD
     P1 -->|是| COMP["compress_context()<br/>追加 ContextSummary"]
     P1 -->|否| BUILD
     COMP --> BUILD["active_messages + tools.definitions"]
-    BUILD --> CALL["adapter::invoke"]
+    BUILD --> CALL["adapter::invoke<br/>按 config.stream 分流"]
     CALL --> USAGE["累计 usage<br/>发 Usage / ContextUsage 事件"]
     USAGE --> SCHED2["used*100 >= limit*80<br/>置 compression_pending"]
     SCHED2 --> STORE["push Assistant + 发 MessageAdded"]
@@ -79,7 +83,7 @@ flowchart TD
 
 **这里的三个薄弱点**（`runtime-hardening.md` 详述）：
 
-1. 循环没有步数上限，`MaxStepsReached` / `Cancelled` 定义了但无人产生。
+1. 循环没有步数上限，`MaxStepsReached` / `Cancelled` 定义了但无人产生（`Completed` 是唯一会产生的值）。
 2. `compress_context` 失败会 `Err` 中断整个 stream，是单点故障。
 3. `compress_context` 内也走 `adapter::invoke`，它和主循环共用同一个错误通道。
 
@@ -143,12 +147,12 @@ graph TD
     CODEC -->|AnthropicMessages| P2["todo!() → panic"]
     CC --> EM["encode_messages"]
     CC --> ET["encode_tools"]
-    CC --> ER["encode_request<br/>stream:false / thinking:disabled<br/>reasoning_effort:medium 全写死"]
+    CC --> ER["encode_request<br/>stream / thinking / reasoning_effort<br/>均读 ModelConfig"]
     CC --> DR["decode_response"]
     DR --> DTO["dto.rs 反序列化结构"]
 ```
 
-两个未接线的配置也在这层：`ModelConfig.request_timeout` 从未被使用，`GenerationConfig` 的 `temperature` / `max_output_tokens` 没有进入请求体。`encode_messages` 写在适配层这件事，代码里自己的注释都承认"该在 message 侧"（见 `adapter-layer.md`）。
+两个未接线的配置也在这层：`ModelConfig.request_timeout` 从未被使用，`ModelConfig` 的 `temperature` / `max_output_tokens` 没有进入请求体。`stream` / `thinking` / `reasoning_effort` 已经改为读 `ModelConfig`（不再是硬编码）。`encode_messages` 写在适配层这件事，代码里自己的注释都承认"该在 message 侧"（见 `adapter-layer.md`）。
 
 **七、TUI 事件流**
 
@@ -166,14 +170,14 @@ sequenceDiagram
     T->>A: take_agent()
     T->>K: tokio::spawn(run_agent(agent, prompt))
     loop 每个 AgentEvent
-        K->>T: AgentUpdate 经 mpsc
+        K->>T: Result<AgentEvent, String> 经 mpsc
         T->>A: apply(update)
     end
     K-->>T: 返回 Agent 实例
     T->>A: restore_agent()
 ```
 
-这里有个设计债：`AgentUpdate` 是 `AgentEvent` 的**手写翻译层**，而且 `ToolStarted` / `ToolFinished` 被 `Ok(_) => {}` 吞掉，UI 只能靠 Assistant 消息反推工具状态。`streaming.md` 建议直接消费 `AgentEvent`。
+`AgentUpdate` 这层手写翻译已经去掉：`tui::apply` 直接消费 SDK 的 `AgentEvent`（`MessageAdded` / `ContentDelta` / `ReasoningDelta` / `Usage` / `Compression*` / `ContextUsage`）。`ToolStarted` / `ToolFinished` / `Finished` 仍在 `apply` 里被显式忽略（`Ok(_) => {}`），UI 只能靠 Assistant 消息反推工具状态——这一点尚未清理。
 
 **八、功能落点总表**
 
@@ -189,8 +193,8 @@ sequenceDiagram
 | usage / 缓存命中率 | `message` + `adapter` | `message/mod.rs`、`chat_completions` | 已实现 |
 | ChatCompletions 协议 | `adapter` | `adapter/chat_completions/` | 已实现 |
 | TUI 渲染与滚动 | 应用层 | `interface/ui.rs`、`app.rs` | 已实现 |
-| 流式输出 | `adapter` + `runtime` + 应用层 | 三处都要改 | 未做 |
-| reasoning 流式 | `adapter` + `message` + 应用层 | `ReasoningDelta` 未定义 | 未做 |
+| 流式输出 | `adapter` + `runtime` + 应用层 | `adapter/chat_completions`（SSE 解析）、`AgentEvent::ContentDelta` | 已实现 |
+| reasoning 流式 | `adapter` + `message` + 应用层 | `AgentEvent::ReasoningDelta`、`ReasoningDelta` 事件 | 已实现 |
 | 多协议（Responses / Anthropic） | `adapter` | `codec` 的 `todo!()` | 未做，会 panic |
 | 工具参数中间层 | `tool` + 宏层 | `ToolDefinition.parameters` | 未做 |
 | 权限 / 行为限制 | `tool` + 新增 `permission` | `tools/bash.rs` 黑名单 | 仅有硬编码 |

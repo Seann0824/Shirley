@@ -6,7 +6,7 @@
 
 **债一：`encode_messages` 的位置**
 
-`chat_completions/mod.rs` 第 12 行的注释：
+`chat_completions/mod.rs`（`encode_messages` 定义上一行）的注释：
 
 > 说实话我感觉这个应该是个 message 侧做的转换逻辑，而不是我们写在适配层对于这个消息处理。
 
@@ -115,10 +115,9 @@ Anthropic 的关键差异（提前记录，避免以后返工）：
 
 **六、顺手清理**
 
-- `ModelProtocol::AnyhtopicMessages` → `AnthropicMessages`（拼写）。
-- `ModelfinishReaon` → `ModelFinishReason`（少个 i）。
-- `chat_completions/mod.rs` 里 `use crate::ModelConfig` 与 `adapter::` 前缀风格统一。
-- `use serde_json::{Value, map}` 的 `map` 未使用。
+- `ModelProtocol::AnyhtopicMessages` → `AnthropicMessages`（拼写）。**仍在**（`adapter/mod.rs`）。
+- `ModelfinishReaon` → `ModelFinishReason`（少个 i）。**仍在**（`adapter/mod.rs` 定义，`chat_completions/mod.rs` 多处使用）。
+- `use serde_json::{Value, map}` 的 `map` 未使用。**已清**（现在只剩 `use serde_json::Value;`）。
 
 **七、验收**
 

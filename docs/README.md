@@ -24,11 +24,12 @@
 
 ---
 
-**当前状态基线（写方案时的实测）**
+**当前状态基线（核对代码后的实测）**
 
-- 代码量：`src` + `crates` 共 2534 行
+- 代码量：`src` + `crates` 共 2809 行
 - 测试：3 个（全部在 `read` 工具），SDK 侧 0 个
-- clippy：17 条警告（`agent-sdk` 14 条 + 应用层 3 条）
-- 已知 panic 点：`adapter::codec` 的 `_ => todo!()`
-- 未接线配置：`request_timeout`、`GenerationConfig.temperature`、`GenerationConfig.max_output_tokens`
-- 未使用的 `StopReason`：`MaxStepsReached`、`Cancelled`
+- clippy：36 条警告（`agent-sdk` 32 条 + 应用层 4 条）
+- 已知 panic 点：`adapter::codec` 的 `_ => todo!()`、`adapter::invoke` 流式分支的 `_ => todo!()`、`decode_stream_response` 里 SSE `id:` 行的 `todo!()`
+- 未接线配置：`request_timeout`（已定义未用）、`ModelConfig.temperature` / `max_output_tokens`（已定义未进入请求体）
+- 未使用的 `StopReason`：`MaxStepsReached`、`Cancelled`（`Completed` 是当前唯一会被产生的值）
+- 已落地（写方案时尚未做）：流式输出（`stream` 配置 + `ContentDelta` / `ReasoningDelta` 事件 + SSE 增量解析）、TUI 直接消费 `AgentEvent`
