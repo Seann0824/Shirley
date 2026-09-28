@@ -7,6 +7,7 @@ use super::ui::MessageCache;
 pub enum Role {
     User,
     Assistant,
+    Summary,
     Error,
 }
 
@@ -250,7 +251,8 @@ impl App {
                     self.start_tool_calls(calls);
                 }
             }
-            Message::Tool { .. } | Message::System { .. } | Message::ContextSummary { .. } => {}
+            Message::ContextSummary { content } => self.push_message(Role::Summary, content, false),
+            Message::Tool { .. } | Message::System { .. } => {}
         }
     }
 

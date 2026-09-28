@@ -19,8 +19,7 @@ async fn main() -> Result<(), AgentError> {
         .api_key(api_key)
         .model("deepseek-v4.1-flash")
         .build();
-    // 用 128K 作为主动压缩预算；实际服务端上限仍由接入方决定。
-    model_config.context_window_tokens = Some(104858);
+    model_config.context_window_tokens = Some(104858 >> 1);
     if let Ok(value) = std::env::var("LOCAL_CONTEXT_WINDOW_TOKENS") {
         let limit = value
             .parse::<u64>()
@@ -32,6 +31,9 @@ async fn main() -> Result<(), AgentError> {
         }
         model_config.context_window_tokens = Some(limit);
     }
+    // 1. 构建 System
+    // 2. 项目工作空间
+    // 3. 构建项目 Agent.md
 
     let agent = Agent::builder()
         .model_config(model_config)

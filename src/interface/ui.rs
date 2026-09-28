@@ -156,6 +156,7 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, show_thinking: b
         match message.role {
             Role::User => ("你：".to_owned(), Style::default().fg(Color::Cyan)),
             Role::Assistant => ("夏莉：".to_owned(), Style::default().fg(Color::Magenta)),
+            Role::Summary => ("上下文摘要：".to_owned(), Style::default().fg(Color::Yellow)),
             Role::Error => ("错误：".to_owned(), Style::default().fg(Color::Red)),
         }
     };

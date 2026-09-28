@@ -169,6 +169,7 @@ impl Agent {
         if self.compression_pending {
             yield AgentEvent::CompressionStarted;
             let usage = self.compress_context(&client).await?;
+            yield AgentEvent::MessageAdded(self.messages.last().expect("compression added a summary").clone());
             yield AgentEvent::CompressionFinished;
             total_usage = total_usage + usage;
             yield AgentEvent::Usage(usage);
@@ -185,6 +186,7 @@ impl Agent {
             if self.compression_pending {
                 yield AgentEvent::CompressionStarted;
                 let usage = self.compress_context(&client).await?;
+                yield AgentEvent::MessageAdded(self.messages.last().expect("compression added a summary").clone());
                 yield AgentEvent::CompressionFinished;
                 total_usage = total_usage + usage;
                 yield AgentEvent::Usage(usage);
