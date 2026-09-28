@@ -99,3 +99,18 @@ agent_event 本质上就是对外暴露的一个 Agent Event SDK 内部对外提
 
 - 后续我们要根据这个协议去解析真实的stream sse 返回值（https://api-docs.deepseek.com/api/create-chat-completion/）
 - 我们需要在adapter层将解析到的 reason 和 content 实时向外抛出去，当 stream 为 true时，同时我们要将本轮 ai 对话，在最后 finish_reason 出现时，将本轮ai返回的消息，完整的通过 Finished 抛出去。
+
+sse 标准规范：https://html.spec.whatwg.org/multipage/server-sent-events.html
+如何判断sse event是一个完整的呢？
+
+- \n 表示的是换行，继续发送这个event的数据
+- \n\n (CRLF/CR/LF) 表示下一行是个空行，也就表示说当前发送 event 结束了, 按照约定我们可以取出本次的完整收到的一个 JSON 数据格式。因为，sse的服务商提供的一个事件就是一个 JSON，拿到这个json直接去解析就行了。
+
+```text
+data: hello
+
+```
+
+这个就是发完了。
+
+那么，我们什么时候判断本轮发送结束了呢，按照约定，当我们的事件解析到 finish_reason 出现时 出现 data: [DONE]，或者网络问题，网络问题可能涉及到重连（这里我们暂时不需要考虑，网络问题）。

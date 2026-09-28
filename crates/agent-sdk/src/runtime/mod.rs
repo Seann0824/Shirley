@@ -34,7 +34,7 @@ pub enum StopReason {
 #[derive(Debug)]
 pub enum AgentError {
     ToolError(tool::ToolError),
-    AdapterError(adapter::AdpaterError),
+    AdapterError(adapter::AdapterError),
     CompressionError(String),
     Other(String),
 }
@@ -53,7 +53,8 @@ impl fmt::Display for AgentError {
 
 #[derive(Debug)]
 pub enum AgentEvent {
-    TextDetal(String),
+    ContentDelta(String),
+    ReasoningDelta(String),
     MessageAdded(message::Message),
     CompressionStarted,
     CompressionFinished,
@@ -68,7 +69,7 @@ pub enum AgentEvent {
 impl fmt::Display for AgentEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::TextDetal(text) => write!(f, "{text}"),
+            Self::ContentDelta(text) | Self::ReasoningDelta(text) => write!(f, "{text}"),
             Self::MessageAdded(message) => write!(f, "{message}"),
             Self::CompressionStarted => write!(f, "正在压缩上下文"),
             Self::CompressionFinished => write!(f, "上下文压缩完成"),

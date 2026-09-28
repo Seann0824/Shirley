@@ -63,3 +63,25 @@ pub struct PromptTokensDetails {
     pub image_tokens: Option<u64>,
     pub cache_write_tokens: Option<u64>,
 }
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ModelStreamResponse {
+    pub id: String,
+    pub choices: Vec<ChoiceStream>,
+    pub usage: Option<Usage>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ChoiceStream {
+    pub index: usize,
+    pub delta: Delta,
+    pub finish_reason: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct Delta {
+    pub role: Option<String>,
+    pub content: Option<String>,
+    pub reasoning_content: Option<String>,
+    pub tool_calls: Option<Vec<ToolCall>>,
+}

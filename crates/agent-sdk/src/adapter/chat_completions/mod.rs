@@ -1,11 +1,18 @@
 mod dto;
+mod sse;
 
+use std::pin::Pin;
+
+use futures::StreamExt;
 use reqwest::header::HeaderValue;
 use serde_json::Value;
 
 use crate::{
     ModelConfig,
-    adapter::{AdpaterError, ModelRequest, ModelResponse, ModelfinishReaon, PreparedRequest},
+    adapter::{
+        self, AdapterError, AdapterEvent, ModelRequest, ModelResponse, ModelfinishReaon,
+        PreparedRequest,
+    },
     message, tool,
 };
 
@@ -98,7 +105,7 @@ fn encode_tools(tools: &[&tool::ToolDefinition]) -> Vec<Value> {
 pub fn encode_request(
     config: &ModelConfig,
     input: &ModelRequest<'_>,
-) -> Result<PreparedRequest, AdpaterError> {
+) -> Result<PreparedRequest, AdapterError> {
     // 处理消息列表，转换逻辑
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
@@ -108,7 +115,7 @@ pub fn encode_request(
 
     if let Some(api_key) = &config.api_key {
         let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|_| AdpaterError::ResponseError("API Key 无法构成有效请求头".into()))?;
+            .map_err(|_| AdapterError::ResponseError("API Key 无法构成有效请求头".into()))?;
         authorization.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, authorization);
     }
@@ -138,20 +145,20 @@ pub fn encode_request(
     })
 }
 
-pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, AdpaterError> {
+pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, AdapterError> {
     let response = serde_json::from_value::<dto::ModelResponse>(body.clone())
-        .map_err(|err| AdpaterError::ResponseError(format!("响应解析失败: {err}")))?;
+        .map_err(|err| AdapterError::ResponseError(format!("响应解析失败: {err}")))?;
 
     // 开始转换 Message::Assistant and Message::Tool and finish_reason
     let choice = response
         .choices
         .get(0)
-        .ok_or_else(|| AdpaterError::ResponseError("响应缺少 choices[0]".to_owned()))?;
+        .ok_or_else(|| AdapterError::ResponseError("响应缺少 choices[0]".to_owned()))?;
 
     let msg = &choice.message;
     let role = &msg.role;
     if role != "assistant" {
-        return Err(AdpaterError::ResponseError(format!(
+        return Err(AdapterError::ResponseError(format!(
             "响应 role 不合法: {role}"
         )));
     }
@@ -210,5 +217,115 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adpater
         },
         finish_reason,
         usage,
+    })
+}
+
+//
+pub async fn decode_stream_response(
+    response: reqwest::Response,
+) -> Pin<Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send>> {
+    Box::pin(async_stream::try_stream! {
+        let mut byte_stream = response.bytes_stream();
+        let mut buffer = String::new();
+        let mut content = String::new();
+        let mut reasoning_content = String::new();
+        let mut tool_calls: Vec<dto::ToolCall> = vec![];
+        let mut usage = message::Usage::default();
+        let mut finish_reason = None;
+        while let Some(chunk) = byte_stream.next().await {
+            let chunk = chunk.unwrap();
+            let text = String::from_utf8_lossy(&chunk);
+            buffer.push_str(&text);
+
+            while let Some(pos) = buffer.find("\n\n") {
+                // 我觉得这个json结构应该一样的吧？
+                let section = buffer[..pos].to_string();
+                // 去掉当前读取后的事件 和 两个换行符号
+                buffer.drain(..pos + 2);
+
+                let mut event = String::new();
+                let mut data = String::new();
+                // 解析每行的数据
+                for line in section.lines() {
+                    if let Some(rest) = line.strip_prefix("event:") {
+                        // 一个个sse应该有对应event，但是看起来model好像没有遵循这个规范。
+                        event = rest.trim().into();
+                    } else if let Some(rest) = line.strip_prefix("data:") {
+                        data.push_str(rest.trim());
+                    } else if let Some(rest) = line.strip_prefix("id:") {
+                        // todo: 当前event 的id，多用于后续网络抖动重试。不知道模型服务器是否支持，后续我们可以验证一下。
+                        todo!()
+                    }
+                }
+                // 为啥会出现
+                let payload = data.trim();
+                if payload.is_empty() || payload == "[DONE]" {
+                    continue;
+                }
+                let value = serde_json::from_str::<dto::ModelStreamResponse>(&data.trim()).map_err(|e| AdapterError::ResponseError(format!("SSE 反序列化失败: {}", e.to_string())))?;
+                if let Some(stream_usage) = value.usage {
+                    let cached_input_tokens = stream_usage
+                        .prompt_tokens_details
+                        .as_ref()
+                        .and_then(|details| details.cached_tokens);
+                    usage = message::Usage {
+                        input_tokens: stream_usage.prompt_tokens,
+                        output_tokens: stream_usage.completion_tokens,
+                        cached_input_tokens,
+                        cache_reported_input_tokens: cached_input_tokens
+                            .map(|_| stream_usage.prompt_tokens),
+                        reasoning_tokens: stream_usage
+                            .completion_tokens_details
+                            .as_ref()
+                            .and_then(|details| details.reasoning_tokens),
+                    };
+                }
+                let Some(choice) = value.choices.first() else {
+                    continue;
+                };
+                let delta = &choice.delta;
+                let reasoning_delta = delta.reasoning_content.clone().unwrap_or(String::new());
+                let content_delta = delta.content.clone().unwrap_or(String::new());
+
+                if reasoning_delta.len() > 0 {
+                    reasoning_content.push_str(&reasoning_delta);
+                    yield AdapterEvent::ReasoningDelta(reasoning_delta);
+                }
+                if content_delta.len() > 0 {
+                    content.push_str(&content_delta);
+                    yield AdapterEvent::ContentDelta(content_delta);
+                }
+                // tool_calls 保存
+                tool_calls.extend(delta.tool_calls.clone().unwrap_or_default());
+
+                if let Some(reason) = &choice.finish_reason {
+                    finish_reason = Some(match reason.as_str() {
+                        "stop" => ModelfinishReaon::Stop,
+                        "tool_calls" => ModelfinishReaon::ToolCalls,
+                        "length" => ModelfinishReaon::Length,
+                        other => ModelfinishReaon::Other(other.to_owned()),
+                    });
+                }
+                // 这里必然返回 assistant， 所以接下来我们就是要把数据向外yield
+            }
+        }
+        if let Some(finish_reason) = finish_reason {
+            yield AdapterEvent::Finished(ModelResponse {
+                message: message::Message::Assistant {
+                    content: (!content.is_empty()).then_some(content),
+                    reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
+                    tool_calls: tool_calls
+                        .into_iter()
+                        .map(|tool_call| message::ToolCall {
+                            id: tool_call.id,
+                            name: tool_call.function.name,
+                            arguments: tool_call.function.arguments,
+                        })
+                        .collect(),
+                },
+                finish_reason,
+                usage,
+            });
+        }
     })
 }
