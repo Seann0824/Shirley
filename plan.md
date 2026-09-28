@@ -94,3 +94,8 @@ agent_event 本质上就是对外暴露的一个 Agent Event SDK 内部对外提
   - 这个讲的是一次任务结束后，不只是做总结，而是要做蒸馏验证去判断出最佳的路径，然后作为记忆沉淀
   - 对一次任务的执行的 tracejacy 本质上是对一次环境的探索，但是这并不是一个最佳逻辑，所以任务结束的时候不能直接总结入库，而是要做一个探索行为并验证，才能保证实际的记忆质量。
     - 在记忆库前加了一层验证逻辑而已
+
+目前，invkoe 已经统一流和非流的返回接口，非流调用也返回一个 Stream 句柄，不过只返回 AdapterEvent::Finished ，不会返回 ContentDelta 和 ReasoningDelta
+
+- 后续我们要根据这个协议去解析真实的stream sse 返回值（https://api-docs.deepseek.com/api/create-chat-completion/）
+- 我们需要在adapter层将解析到的 reason 和 content 实时向外抛出去，当 stream 为 true时，同时我们要将本轮 ai 对话，在最后 finish_reason 出现时，将本轮ai返回的消息，完整的通过 Finished 抛出去。
