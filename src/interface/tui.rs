@@ -1,68 +1,25 @@
-use agent_sdk::{Agent, AgentEvent, Message, Usage};
+use agent_sdk::{Agent, AgentEvent, Message};
 use futures::StreamExt;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use super::{app::App, event::EventHandler, ui, update};
 
-enum AgentUpdate {
-    Message(Message),
-    Usage(Usage),
-    CompressionStarted,
-    CompressionFinished,
-    ContextUsage { used_tokens: u64, limit_tokens: u64 },
-    Error(String),
-}
-
 async fn run_agent(
     mut agent: Agent,
     prompt: String,
-    updates: mpsc::UnboundedSender<AgentUpdate>,
+    updates: mpsc::UnboundedSender<Result<AgentEvent, String>>,
 ) -> Agent {
     let mut stream = agent.run_stream(&prompt);
     while let Some(event) = stream.next().await {
         match event {
-            Ok(AgentEvent::CompressionStarted) => {
-                if updates.send(AgentUpdate::CompressionStarted).is_err() {
+            Ok(event) => {
+                if updates.send(Ok(event)).is_err() {
                     break;
                 }
             }
-            Ok(AgentEvent::CompressionFinished) => {
-                if updates.send(AgentUpdate::CompressionFinished).is_err() {
-                    break;
-                }
-            }
-            Ok(AgentEvent::ContextUsage {
-                used_tokens,
-                limit_tokens,
-            }) => {
-                if updates
-                    .send(AgentUpdate::ContextUsage {
-                        used_tokens,
-                        limit_tokens,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
-            // 提交时已本地回显，避免同一条用户消息重复显示。
-            Ok(AgentEvent::MessageAdded(Message::User { .. })) => {}
-            Ok(AgentEvent::MessageAdded(message)) => {
-                if updates.send(AgentUpdate::Message(message)).is_err() {
-                    break;
-                }
-            }
-            Ok(AgentEvent::Usage(usage)) => {
-                if updates.send(AgentUpdate::Usage(usage)).is_err() {
-                    break;
-                }
-            }
-            // 工具的展示与结果都由带 tool_calls 的 Assistant 消息
-            // 和后续的 Tool 消息驱动，这里忽略开始/结束事件即可。
-            Ok(_) => {}
             Err(error) => {
-                let _ = updates.send(AgentUpdate::Error(error.to_string()));
+                let _ = updates.send(Err(error.to_string()));
                 break;
             }
         }
@@ -101,17 +58,29 @@ impl<'a> Tui<'a> {
         self.app.exit();
     }
 
-    fn apply(&mut self, update: AgentUpdate) {
+    fn apply(&mut self, update: Result<AgentEvent, String>) {
         match update {
-            AgentUpdate::Message(message) => self.app.add_message(message),
-            AgentUpdate::Usage(usage) => self.app.record_usage(usage),
-            AgentUpdate::CompressionStarted => self.app.start_compression(),
-            AgentUpdate::CompressionFinished => self.app.finish_compression(),
-            AgentUpdate::ContextUsage {
+            Ok(AgentEvent::MessageAdded(Message::User { .. })) => {}
+            Ok(AgentEvent::MessageAdded(message)) => {
+                if matches!(&message, Message::Assistant { .. }) {
+                    self.app.finish_streaming_deltas();
+                }
+                self.app.add_message(message);
+            }
+            Ok(AgentEvent::ContentDelta(delta)) => self.app.append_streaming_delta(delta, false),
+            Ok(AgentEvent::ReasoningDelta(delta)) => self.app.append_streaming_delta(delta, true),
+            Ok(AgentEvent::Usage(usage)) => self.app.record_usage(usage),
+            Ok(AgentEvent::CompressionStarted) => self.app.start_compression(),
+            Ok(AgentEvent::CompressionFinished) => self.app.finish_compression(),
+            Ok(AgentEvent::ContextUsage {
                 used_tokens,
                 limit_tokens,
-            } => self.app.record_context_usage(used_tokens, limit_tokens),
-            AgentUpdate::Error(error) => self.app.add_error(error),
+            }) => self.app.record_context_usage(used_tokens, limit_tokens),
+            Err(error) => self.app.add_error(error),
+            // Tool and run-finished events do not need a separate TUI update.
+            Ok(AgentEvent::ToolStarted { .. })
+            | Ok(AgentEvent::ToolFinished { .. })
+            | Ok(AgentEvent::Finished(_)) => {}
         }
     }
 
@@ -126,7 +95,7 @@ impl<'a> Tui<'a> {
                 Some(update) = updates_rx.recv(), if response.is_some() => {
                     let mut next = update;
                     loop {
-                        let show_compression = matches!(next, AgentUpdate::CompressionStarted);
+                        let show_compression = matches!(next, Ok(AgentEvent::CompressionStarted));
                         self.apply(next);
                         if show_compression { break; }
                         match updates_rx.try_recv() {

@@ -52,6 +52,7 @@ pub struct App {
     total_usage: Usage,
     compressing: bool,
     context_usage: Option<(u64, u64)>,
+    streaming_delta_start: Option<usize>,
     pub(crate) message_cache: Option<MessageCache>,
 }
 
@@ -72,6 +73,7 @@ impl App {
             total_usage: Usage::default(),
             compressing: false,
             context_usage: None,
+            streaming_delta_start: None,
             message_cache: None,
         }
     }
@@ -215,6 +217,33 @@ impl App {
             thinking,
         }));
         self.message_cache = None;
+    }
+
+    pub fn append_streaming_delta(&mut self, delta: String, thinking: bool) {
+        if delta.is_empty() {
+            return;
+        }
+
+        if self.streaming_delta_start.is_some() {
+            if let Some(Item::Message(message)) = self.items.last_mut() {
+                if message.role == Role::Assistant && message.thinking == thinking {
+                    message.content.push_str(&delta);
+                    self.message_cache = None;
+                    return;
+                }
+            }
+        } else {
+            self.streaming_delta_start = Some(self.items.len());
+        }
+
+        self.push_message(Role::Assistant, delta, thinking);
+    }
+
+    pub fn finish_streaming_deltas(&mut self) {
+        if let Some(start) = self.streaming_delta_start.take() {
+            self.items.truncate(start);
+            self.message_cache = None;
+        }
     }
 
     pub fn start_tool_calls(&mut self, calls: Vec<ToolCallView>) {
