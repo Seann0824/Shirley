@@ -5,7 +5,6 @@ use crate::tool;
 use futures::StreamExt;
 use std::fmt;
 use std::pin::Pin;
-use std::todo;
 
 #[derive(Debug)]
 pub struct RunResult {
@@ -275,7 +274,12 @@ impl Agent {
                                 break;
                             }
                         }
-                        _ => todo!()
+                        adapter::AdapterEvent::ReasoningDelta(delta) => {
+                            yield AgentEvent::ReasoningDelta(delta);
+                        }
+                        adapter::AdapterEvent::ContentDelta(delta) => {
+                            yield AgentEvent::ContentDelta(delta);
+                        }
                     }
                 }
                 if is_finished {
@@ -367,7 +371,8 @@ impl Agent {
 
                     return Ok(response.usage);
                 }
-                _ => todo!(),
+                adapter::AdapterEvent::ReasoningDelta(_)
+                | adapter::AdapterEvent::ContentDelta(_) => {}
             }
         }
 

@@ -18,7 +18,7 @@ async fn main() -> Result<(), AgentError> {
         .base_url(base_url)
         .api_key(api_key)
         .model("deepseek-v4.1-flash")
-        .stream(false)
+        .stream(true)
         .thinking(true)
         .build();
     model_config.context_window_tokens = Some(104858 >> 1);
