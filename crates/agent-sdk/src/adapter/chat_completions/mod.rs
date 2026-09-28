@@ -1,5 +1,4 @@
 mod dto;
-mod sse;
 
 use std::{collections::BTreeMap, pin::Pin};
 
