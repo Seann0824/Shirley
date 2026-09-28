@@ -1,7 +1,7 @@
 mod dto;
 mod sse;
 
-use std::pin::Pin;
+use std::{collections::BTreeMap, pin::Pin};
 
 use futures::StreamExt;
 use reqwest::header::HeaderValue;
@@ -220,6 +220,50 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adapter
     })
 }
 
+fn merge_tool_call_deltas(
+    tool_calls: &mut BTreeMap<usize, message::ToolCall>,
+    deltas: impl IntoIterator<Item = dto::ToolCallDelta>,
+) {
+    for delta in deltas {
+        let tool_call = tool_calls
+            .entry(delta.index)
+            .or_insert_with(|| message::ToolCall {
+                id: String::new(),
+                name: String::new(),
+                arguments: String::new(),
+            });
+        if let Some(id) = delta.id {
+            tool_call.id.push_str(&id);
+        }
+        if let Some(function) = delta.function {
+            if let Some(name) = function.name {
+                tool_call.name.push_str(&name);
+            }
+            if let Some(arguments) = function.arguments {
+                tool_call.arguments.push_str(&arguments);
+            }
+        }
+    }
+}
+
+fn finish_tool_calls(
+    tool_calls: BTreeMap<usize, message::ToolCall>,
+) -> Result<Vec<message::ToolCall>, AdapterError> {
+    for (index, tool_call) in &tool_calls {
+        if tool_call.id.is_empty() {
+            return Err(AdapterError::ResponseError(format!(
+                "流式工具调用 index={index} 缺少 id"
+            )));
+        }
+        if tool_call.name.is_empty() {
+            return Err(AdapterError::ResponseError(format!(
+                "流式工具调用 index={index} 缺少函数名"
+            )));
+        }
+    }
+    Ok(tool_calls.into_values().collect())
+}
+
 //
 pub async fn decode_stream_response(
     response: reqwest::Response,
@@ -229,7 +273,7 @@ pub async fn decode_stream_response(
         let mut buffer = String::new();
         let mut content = String::new();
         let mut reasoning_content = String::new();
-        let mut tool_calls: Vec<dto::ToolCall> = vec![];
+        let mut tool_calls = BTreeMap::new();
         let mut usage = message::Usage::default();
         let mut finish_reason = None;
         while let Some(chunk) = byte_stream.next().await {
@@ -296,7 +340,10 @@ pub async fn decode_stream_response(
                     yield AdapterEvent::ContentDelta(content_delta);
                 }
                 // tool_calls 保存
-                tool_calls.extend(delta.tool_calls.clone().unwrap_or_default());
+                merge_tool_call_deltas(
+                    &mut tool_calls,
+                    delta.tool_calls.clone().unwrap_or_default(),
+                );
 
                 if let Some(reason) = &choice.finish_reason {
                     finish_reason = Some(match reason.as_str() {
@@ -310,18 +357,12 @@ pub async fn decode_stream_response(
             }
         }
         if let Some(finish_reason) = finish_reason {
+            let tool_calls = finish_tool_calls(tool_calls)?;
             yield AdapterEvent::Finished(ModelResponse {
                 message: message::Message::Assistant {
                     content: (!content.is_empty()).then_some(content),
                     reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
-                    tool_calls: tool_calls
-                        .into_iter()
-                        .map(|tool_call| message::ToolCall {
-                            id: tool_call.id,
-                            name: tool_call.function.name,
-                            arguments: tool_call.function.arguments,
-                        })
-                        .collect(),
+                    tool_calls,
                 },
                 finish_reason,
                 usage,

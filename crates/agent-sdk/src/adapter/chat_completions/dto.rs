@@ -83,5 +83,18 @@ pub struct Delta {
     pub role: Option<String>,
     pub content: Option<String>,
     pub reasoning_content: Option<String>,
-    pub tool_calls: Option<Vec<ToolCall>>,
+    pub tool_calls: Option<Vec<ToolCallDelta>>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct ToolCallDelta {
+    pub index: usize,
+    pub id: Option<String>,
+    pub function: Option<FunctionCallDelta>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+pub struct FunctionCallDelta {
+    pub name: Option<String>,
+    pub arguments: Option<String>,
 }
