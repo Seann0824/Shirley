@@ -20,6 +20,7 @@ async fn main() -> Result<(), AgentError> {
         .model("deepseek-v4.1-flash")
         .stream(true)
         .thinking(true)
+        .reasoning_effort("low")
         .build();
     model_config.context_window_tokens = Some(104858 >> 1);
     if let Ok(value) = std::env::var("LOCAL_CONTEXT_WINDOW_TOKENS") {

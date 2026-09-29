@@ -28,6 +28,7 @@ pub struct ModelConfig {
     pub stream: bool,
     #[builder(default)]
     pub thinking: bool,
+    #[builder(into)]
     pub reasoning_effort: Option<String>,
     pub temperature: Option<f64>,
     pub max_output_tokens: Option<u32>,
