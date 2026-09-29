@@ -10,7 +10,6 @@ async fn main() -> Result<(), AgentError> {
     // 定义一个工具Tool
     let mut tool_manager = ToolManager::new();
     let _ = tool_manager.register(tools::bash_tool::tool());
-    let _ = tool_manager.register(tools::read_tool::tool());
 
     // 调用返回 Future；await 等待它执行完成。
     let mut model_config = ModelConfig::builder()
