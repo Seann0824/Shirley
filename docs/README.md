@@ -9,6 +9,7 @@
 | `architecture.md` | 架构图 + 每个功能落在哪些节点 | 先读这个 |
 | `roadmap.md` | 总路线图：分期、依赖关系、验收口径 | 其次 |
 | `security.md` | 权限层、bash 边界、密钥、工作区隔离 | P0 |
+| `sandbox.md` | 进程沙盒：spec / 后端 / degraded / 超时 / 执行策略归属 | P0 |
 | `runtime-hardening.md` | max_steps、重试、超时、取消、压缩健壮性 | P0 |
 | `streaming.md` | 流式输出与 reasoning 流式 | P1 |
 | `adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 | P1 |
@@ -21,6 +22,8 @@
 1. **边界不渗漏**。应用层与 SDK 的边界要清：`encode_messages` 这种"内部 Message → 协议格式"的映射属于 message 侧，不属于适配层；`AgentUpdate` 这种手写重复翻译要么去掉、要么明确它只做展示裁剪。
 2. **失败要可分类**。`ModelError = String` 把 HTTP 状态码、是否可重试、是不是限流全丢了。任何"要不要重试 / 要不要中断"的决策都需要结构化错误，这是运行时健壮性的前置条件。
 3. **默认安全**。当前 `bash` 用 `bash -c` 执行、黑名单靠 `split_whitespace` 字符串匹配，等于没有边界。工具是 Agent 的手，手没有边界，其他所有设计都是空的。
+
+沙盒层的落地设计见 `sandbox.md`：它把"默认安全"从"静态拒绝危险命令"推进到"物理上跑不出假世界"，是 `bash` 边界的下半场。
 
 ---
 

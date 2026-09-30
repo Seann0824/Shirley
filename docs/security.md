@@ -125,6 +125,8 @@ pub struct BashOutput {
 - **静态拒绝**：在 `-c` 之前，用解析后的 token 判断危险模式；对无法静态判断的（如 `base64 | bash`），进入 `Ask` 或直接 Deny。
 - **运行时约束**：cwd 锁定工作区；可选 `ulimit`；后续可接入 OS 级沙箱（macOS `sandbox-exec` / Linux `bubblewrap`）。
 
+  其中"OS 级沙箱"已单独成层并落地骨架，详见 `sandbox.md`。
+
 **6.3 审计**
 
 每次工具调用记录 `(timestamp, tool, arguments, decision, exit_code)` 到 `~/.shirley/audit.log`。长任务出问题时这是唯一的复盘依据。
