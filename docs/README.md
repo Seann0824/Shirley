@@ -14,6 +14,7 @@
 | `streaming.md` | 流式输出与 reasoning 流式 | P1 |
 | `adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 | P1 |
 | `testing.md` | SDK 单测策略、缓存命中率基准 | P1 |
+| `plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 | P0 |
 
 ---
 

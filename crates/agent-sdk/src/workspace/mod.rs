@@ -1,21 +1,46 @@
 use std::{
     fs,
+    io,
     path::{Component, Path, PathBuf},
-    todo,
 };
 
-use bon::builder;
-use futures::{future::err, io};
+use crate::error::{ErrorKind, SdkError};
 
 pub struct WorkSpace {
     root: PathBuf,
 }
 
+/// 工作区路径校验失败。
+///
+/// 刻意区分 `OutsideRoot` 与 `InvalidPath`：前者是"越界被拒绝"，
+/// 后者是"这个路径本身没法用"，模型需要靠这个差别决定是换路径还是换写法。
+///
+/// 展示格式统一为 `[前缀]: 详情`，与 `AdapterError` / `ToolError` /
+/// `SandboxError` 一致；前缀留在变体旁，不从 [`ErrorKind`] 推导
+/// （两者同属 `BadRequest`，但语义不同）。
+#[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
-    // 路径不再工具区域
+    /// 请求的路径落在工作区根目录之外。
+    #[error("[路径越界]: {0}")]
     OutsideRoot(String),
+
+    /// 路径本身不合法（无法解析、指向符号链接等）。
+    #[error("[路径不合法]: {0}")]
     InvalidPath(String),
-    Io(io::Error),
+
+    /// 底层文件系统错误。
+    #[error("[工作区 IO 错误]: {0}")]
+    Io(#[source] io::Error),
+}
+
+impl SdkError for WorkspaceError {
+    fn kind(&self) -> ErrorKind {
+        match self {
+            // 越界与非法路径都是请求侧问题：重试同一份输入不会变好。
+            Self::OutsideRoot(_) | Self::InvalidPath(_) => ErrorKind::BadRequest,
+            Self::Io(_) => ErrorKind::Internal,
+        }
+    }
 }
 
 impl From<io::Error> for WorkspaceError {

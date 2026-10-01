@@ -66,43 +66,41 @@ pub trait SandboxBackend: Send + Sync {
 }
 
 /// 沙盒本身出错时的错误类型。`enum` = 多选一。
-#[derive(Debug)]
+///
+/// 展示格式统一为 `[前缀]: 详情`，实现走 thiserror 派生——
+/// 与 `AdapterError` / `ToolError` / `WorkspaceError` 一致。
+/// 前缀留在变体旁：`BackendUnavailable` 与 `Unsupported` 同属
+/// `ErrorKind::Unsupported`，但前者是"这个平台没有"，后者是"这项约束不答应"，
+/// 排障时要分得清。
+#[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
     /// 后端在当前平台不可用（例如 Linux 上想用 sandbox-exec）。
-    BackendUnavailable(String), // 括号里带一条说明文字
+    #[error("[沙盒不可用]: {0}")]
+    BackendUnavailable(String),
+
     /// 后端启动失败。
+    #[error("[沙盒启动失败]: {0}")]
     Spawn(String),
+
     /// 后端不支持 spec 中要求的某项约束，且不允许降级。
+    #[error("[沙盒不支持该约束]: {0}")]
     Unsupported(String),
-    Io(std::io::Error), // 包一个底层 IO 错误
+
+    /// 底层 IO 错误。`#[from]` 提供 `io::Error -> SandboxError` 的自动转换，
+    /// 让调用点可以继续用 `?`；`#[source]` 保留错误链，便于向上追溯。
+    #[error("[沙盒 IO 错误]: {0}")]
+    Io(#[from] #[source] std::io::Error),
 }
 
-// `impl Display for X` 定义"X 怎么显示成给用户看的文字"。
-// 这样就能用 {} 或 {} 格式化打印它。
-impl std::fmt::Display for SandboxError {
-    // fmt 是格式化器；-> fmt::Result 是"格式化是否成功"。
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // match self 是"根据 self 是哪个变体，分别处理"。
+// 接入 SDK 统一错误契约：让上层能用同一个接口判断可重试性。
+impl crate::error::SdkError for SandboxError {
+    fn kind(&self) -> crate::error::ErrorKind {
+        use crate::error::ErrorKind;
         match self {
-            Self::BackendUnavailable(m) => write!(f, "[沙盒不可用]: {m}"),
-            Self::Spawn(m) => write!(f, "[沙盒启动失败]: {m}"),
-            Self::Unsupported(m) => write!(f, "[沙盒不支持该约束]: {m}"),
-            Self::Io(e) => write!(f, "[沙盒 IO 错误]: {e}"),
-            // write! 是"把格式化后的文字写进 f"。
-            // {m} 表示把变量 m 填进花括号。
+            // 后端在当前平台不可用 / 不支持该约束：换实现或换配置，重试无用。
+            Self::BackendUnavailable(_) | Self::Unsupported(_) => ErrorKind::Unsupported,
+            // 启动失败与 IO 错误可能是瞬时的（fork 失败、资源紧张）。
+            Self::Spawn(_) | Self::Io(_) => ErrorKind::Internal,
         }
-    }
-}
-
-// 声明"SandboxError 是一个标准错误类型"。
-// 空的花括号 {} 表示"用默认实现就行，不用额外写代码"。
-impl std::error::Error for SandboxError {}
-
-// `From` 定义"怎么从 A 转成 B"。
-// 这里：怎么从 io::Error 转成 SandboxError。
-// 有了它，代码里用 `?` 遇到 io::Error 时能自动转成 SandboxError。
-impl From<std::io::Error> for SandboxError {
-    fn from(e: std::io::Error) -> Self {
-        Self::Io(e) // 把 io::Error 包进 Io 变体
     }
 }

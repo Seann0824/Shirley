@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::{
     ModelConfig,
     adapter::{
-        self, AdapterError, AdapterEvent, ModelRequest, ModelResponse, ModelfinishReaon,
+        AdapterError, AdapterEvent, ModelRequest, ModelResponse, ModelfinishReaon,
         PreparedRequest,
     },
     message, tool,
@@ -114,7 +114,7 @@ pub fn encode_request(
 
     if let Some(api_key) = &config.api_key {
         let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|_| AdapterError::ResponseError("API Key 无法构成有效请求头".into()))?;
+            .map_err(|_| AdapterError::Encode("API Key 无法构成有效请求头".into()))?;
         authorization.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, authorization);
     }
@@ -146,18 +146,18 @@ pub fn encode_request(
 
 pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, AdapterError> {
     let response = serde_json::from_value::<dto::ModelResponse>(body.clone())
-        .map_err(|err| AdapterError::ResponseError(format!("响应解析失败: {err}")))?;
+        .map_err(|err| AdapterError::Decode(format!("响应解析失败: {err}")))?;
 
     // 开始转换 Message::Assistant and Message::Tool and finish_reason
     let choice = response
         .choices
         .get(0)
-        .ok_or_else(|| AdapterError::ResponseError("响应缺少 choices[0]".to_owned()))?;
+        .ok_or_else(|| AdapterError::Decode("响应缺少 choices[0]".to_owned()))?;
 
     let msg = &choice.message;
     let role = &msg.role;
     if role != "assistant" {
-        return Err(AdapterError::ResponseError(format!(
+        return Err(AdapterError::Decode(format!(
             "响应 role 不合法: {role}"
         )));
     }
@@ -250,12 +250,12 @@ fn finish_tool_calls(
 ) -> Result<Vec<message::ToolCall>, AdapterError> {
     for (index, tool_call) in &tool_calls {
         if tool_call.id.is_empty() {
-            return Err(AdapterError::ResponseError(format!(
+            return Err(AdapterError::Decode(format!(
                 "流式工具调用 index={index} 缺少 id"
             )));
         }
         if tool_call.name.is_empty() {
-            return Err(AdapterError::ResponseError(format!(
+            return Err(AdapterError::Decode(format!(
                 "流式工具调用 index={index} 缺少函数名"
             )));
         }
@@ -276,7 +276,8 @@ pub async fn decode_stream_response(
         let mut usage = message::Usage::default();
         let mut finish_reason = None;
         while let Some(chunk) = byte_stream.next().await {
-            let chunk = chunk.unwrap();
+            // 读取中断不能 unwrap：它是网络错误，应该走 Transport 分类让上层决定重试。
+            let chunk = chunk.map_err(AdapterError::Transport)?;
             let text = String::from_utf8_lossy(&chunk);
             buffer.push_str(&text);
 
@@ -295,9 +296,9 @@ pub async fn decode_stream_response(
                         event = rest.trim().into();
                     } else if let Some(rest) = line.strip_prefix("data:") {
                         data.push_str(rest.trim());
-                    } else if let Some(rest) = line.strip_prefix("id:") {
-                        // todo: 当前event 的id，多用于后续网络抖动重试。不知道模型服务器是否支持，后续我们可以验证一下。
-                        todo!()
+                    } else if line.strip_prefix("id:").is_some() {
+                        // 事件 id 目前没有消费方（多用于断线续传），先忽略而不是 panic。
+                        // 等真正实现断线重连时再在这里保留 last_event_id。
                     }
                 }
                 // 为啥会出现
@@ -305,7 +306,7 @@ pub async fn decode_stream_response(
                 if payload.is_empty() || payload == "[DONE]" {
                     continue;
                 }
-                let value = serde_json::from_str::<dto::ModelStreamResponse>(&data.trim()).map_err(|e| AdapterError::ResponseError(format!("SSE 反序列化失败: {}", e.to_string())))?;
+                let value = serde_json::from_str::<dto::ModelStreamResponse>(&data.trim()).map_err(|e| AdapterError::Decode(format!("SSE 反序列化失败: {e}")))?;
                 if let Some(stream_usage) = value.usage {
                     let cached_input_tokens = stream_usage
                         .prompt_tokens_details

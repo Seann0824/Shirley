@@ -30,22 +30,44 @@ pub enum StopReason {
     Cancelled,
 }
 
-#[derive(Debug)]
+/// SDK 对外暴露的顶层错误。
+///
+/// 它只做"收敛"：每一层的错误保留自己的类型与分类，
+/// 这里通过 `#[from]` 把它们收进来，不再自己发明 `String` 变体。
+/// 上层只需要问 [`AgentError::is_retryable`]，不必关心错误来自哪一层。
+#[derive(Debug, thiserror::Error)]
 pub enum AgentError {
-    ToolError(tool::ToolError),
-    AdapterError(adapter::AdapterError),
-    CompressionError(String),
+    #[error(transparent)]
+    Tool(#[from] tool::ToolError),
+
+    #[error(transparent)]
+    Adapter(#[from] adapter::AdapterError),
+
+    #[error(transparent)]
+    Sandbox(#[from] crate::sandbox::SandboxError),
+
+    #[error(transparent)]
+    Workspace(#[from] crate::workspace::WorkspaceError),
+
+    #[error("上下文压缩失败: {0}")]
+    Compression(String),
+
+    #[error("{0}")]
     Other(String),
 }
 
-impl fmt::Display for AgentError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl crate::error::SdkError for AgentError {
+    fn kind(&self) -> crate::error::ErrorKind {
+        use crate::error::ErrorKind;
         match self {
-            Self::ToolError(error) => write!(f, "{error}"),
-            // todo: 这里应该格式化一下错误
-            Self::AdapterError(error) => write!(f, "{error:?}"),
-            Self::CompressionError(error) => write!(f, "{error}"),
-            Self::Other(error) => write!(f, "{error}"),
+            Self::Tool(e) => e.kind(),
+            Self::Adapter(e) => e.kind(),
+            // 沙盒不可用 / 不支持该约束 —— 换配置才有意义，重试无用。
+            Self::Sandbox(_) => ErrorKind::Unsupported,
+            Self::Workspace(_) => ErrorKind::BadRequest,
+            // 压缩失败会中断整轮任务，但重试同一份上下文通常不会变好。
+            Self::Compression(_) => ErrorKind::Internal,
+            Self::Other(_) => ErrorKind::Internal,
         }
     }
 }
@@ -203,7 +225,7 @@ impl Agent {
                 let mut is_finished = false;
                 let mut stream = adapter::invoke(&client, &self.model_config, model_request).await;
                 while let Some(adapter_event) = stream.next().await {
-                    let adapter_event = adapter_event.map_err(|e| AgentError::AdapterError(e))?;
+                    let adapter_event = adapter_event.map_err(AgentError::Adapter)?;
 
                     match adapter_event {
                         adapter::AdapterEvent::Finished(response) => {
@@ -341,7 +363,7 @@ impl Agent {
             content: self
                 .compression_instruction
                 .clone()
-                .ok_or_else(|| AgentError::CompressionError("未配置压缩指令".into()))?,
+                .ok_or_else(|| AgentError::Compression("未配置压缩指令".into()))?,
         });
         let model_request = ModelRequest {
             messages: &messages,
@@ -350,7 +372,7 @@ impl Agent {
 
         let mut stream = adapter::invoke(&client, &self.model_config, model_request).await;
         while let Some(adapter_event) = stream.next().await {
-            let adapter_event = adapter_event.map_err(|e| AgentError::AdapterError(e))?;
+            let adapter_event = adapter_event.map_err(AgentError::Adapter)?;
             match adapter_event {
                 adapter::AdapterEvent::Finished(response) => {
                     let summary = match response.message {
@@ -360,7 +382,7 @@ impl Agent {
                             ..
                         } if !content.trim().is_empty() && tool_calls.is_empty() => content,
                         _ => {
-                            return Err(AgentError::CompressionError(
+                            return Err(AgentError::Compression(
                                 "压缩响应没有有效摘要".into(),
                             ));
                         }
@@ -376,6 +398,6 @@ impl Agent {
             }
         }
 
-        Err(AgentError::CompressionError("无法获取压缩后的Usage".into()))
+        Err(AgentError::Compression("无法获取压缩后的Usage".into()))
     }
 }

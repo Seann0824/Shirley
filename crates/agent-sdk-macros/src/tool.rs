@@ -209,7 +209,7 @@ fn generate_tool(
         let outcome: ::std::result::Result<_, ::agent_sdk::ToolError> = super::#name(
             #(#call_arguments),*
         ).await;
-        let result = outcome.map_err(::agent_sdk::AgentError::ToolError)?;
+        let result = outcome?;
     };
 
     quote! {
@@ -247,10 +247,8 @@ fn generate_tool(
                     Box::pin(async move {
                         let args = ::serde_json::from_value::<Arguments>(input)
                             .map_err(|error| {
-                                ::agent_sdk::AgentError::ToolError(
-                                    ::agent_sdk::ToolError::ArgumentsError(
-                                        ::std::format!("工具参数错误: {error}")
-                                    )
+                                ::agent_sdk::ToolError::ArgumentsError(
+                                    ::std::format!("工具参数错误: {error}")
                                 )
                         })?;
 
@@ -260,10 +258,8 @@ fn generate_tool(
                         // 返回序列话的json结果
                         ::serde_json::to_value(result)
                             .map_err(|error| {
-                                ::agent_sdk::AgentError::ToolError(
-                                    ::agent_sdk::ToolError::ExecutionError(
-                                        ::std::format!("工具结果序列化失败: {error}")
-                                    )
+                                ::agent_sdk::ToolError::ExecutionError(
+                                    ::std::format!("工具结果序列化失败: {error}")
                                 )
                             })
 
