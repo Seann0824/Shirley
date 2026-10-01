@@ -10,7 +10,7 @@
 use pulldown_cmark::{Alignment, CodeBlockKind, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 /// 一个带样式的文本片段，等价于 ratatui 的 `Span`，但在解析阶段不依赖渲染类型。
 #[derive(Clone, Debug, PartialEq)]
@@ -484,25 +484,29 @@ fn render_list_item(
 ) {
     let marker_width = marker.width();
     let pad = " ".repeat(indent);
+    // 悬挂缩进：标记占 marker_width 列，正文内容区相应收窄；
+    // 换行后的续行用等宽空白对齐到正文起点，而不是回到行首。
+    let content_width = width.saturating_sub(indent + marker_width);
     let mut first_line = true;
-    // 逐块渲染：首块与标记同行，后续块（含嵌套列表）按标记宽度缩进对齐。
+    // 逐块渲染：首块与标记同行，后续块（含嵌套列表）同样挂在悬挂缩进之下。
     for block in &item.blocks {
-        let block_indent = if first_line { 0 } else { marker_width };
         let mut produced = Vec::new();
-        render_blocks(std::slice::from_ref(block), base, block_indent, width, &mut produced);
+        render_blocks(std::slice::from_ref(block), base, 0, content_width, &mut produced);
         while produced.last().is_some_and(|line| line.spans.is_empty()) {
             produced.pop();
         }
         for line in produced {
-            let mut spans = vec![Span::raw(pad.clone())];
-            if first_line {
-                spans.push(Span::styled(marker.to_owned(), marker_style(base)));
-                first_line = false;
-            } else {
-                spans.push(Span::raw(" ".repeat(marker_width)));
+            for piece in wrap_line(&line.spans, content_width) {
+                let mut spans = vec![Span::raw(pad.clone())];
+                if first_line {
+                    spans.push(Span::styled(marker.to_owned(), marker_style(base)));
+                    first_line = false;
+                } else {
+                    spans.push(Span::raw(" ".repeat(marker_width)));
+                }
+                spans.extend(piece);
+                out.push(Line::from(spans));
             }
-            spans.extend(line.spans);
-            out.push(Line::from(spans));
         }
     }
     // 空列表项也要有标记，避免整项消失。
@@ -512,6 +516,73 @@ fn render_list_item(
             Span::styled(marker.to_owned(), marker_style(base)),
         ]));
     }
+}
+
+/// 按显示宽度把一行的 span 拆成多个换行片段。
+/// 尽量在空格处断行，只有单个词本身超宽时才从中间硬断；
+/// 调用方负责给每个片段补上前缀（缩进 / 列表标记），从而保证续行与首行正文对齐。
+fn wrap_line(spans: &[Span<'static>], max_width: usize) -> Vec<Vec<Span<'static>>> {
+    if max_width == 0 {
+        return vec![spans.to_vec()];
+    }
+    // 展平成 (字符, 样式)，方便按显示宽度与断词点重新切行。
+    let mut chars: Vec<(char, Style)> = Vec::new();
+    for span in spans {
+        for ch in span.content.chars() {
+            chars.push((ch, span.style));
+        }
+    }
+
+    let mut lines: Vec<Vec<Span<'static>>> = Vec::new();
+    let mut current: Vec<(char, Style)> = Vec::new();
+    let mut width = 0usize;
+    let mut last_space: Option<usize> = None;
+
+    for (ch, style) in chars {
+        let ch_width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if !current.is_empty() && width + ch_width > max_width {
+            // 需要换行：优先在最近的空格处断，避免把词切开。
+            let (mut head, tail) = match last_space {
+                Some(index) => {
+                    let tail = current.split_off(index + 1);
+                    (std::mem::take(&mut current), tail)
+                }
+                None => (std::mem::take(&mut current), Vec::new()),
+            };
+            while head.last().is_some_and(|(c, _)| *c == ' ') {
+                head.pop();
+            }
+            lines.push(coalesce(head));
+            width = 0;
+            last_space = None;
+            for (index, (c, _)) in tail.iter().enumerate() {
+                if *c == ' ' {
+                    last_space = Some(index);
+                }
+                width += UnicodeWidthChar::width(*c).unwrap_or(0);
+            }
+            current = tail;
+        }
+        if ch == ' ' {
+            last_space = Some(current.len());
+        }
+        width += ch_width;
+        current.push((ch, style));
+    }
+    lines.push(coalesce(current));
+    lines
+}
+
+/// 把相邻同样式的字符合并回 `Span`，避免换行后碎片化。
+fn coalesce(chars: Vec<(char, Style)>) -> Vec<Span<'static>> {
+    let mut spans: Vec<Span<'static>> = Vec::new();
+    for (ch, style) in chars {
+        match spans.last_mut() {
+            Some(span) if span.style == style => span.content.to_mut().push(ch),
+            _ => spans.push(Span::styled(ch.to_string(), style)),
+        }
+    }
+    spans
 }
 
 fn render_table(
@@ -717,6 +788,32 @@ mod tests {
         let joined: String = lines[0].iter().map(|span| span.text.as_str()).collect();
         assert!(joined.contains("文档"), "{joined}");
         assert!(joined.contains("https://example.com"), "{joined}");
+    }
+
+    #[test]
+    fn long_list_item_wraps_with_hanging_indent() {
+        // 换行后的续行必须对齐到标记之后的正文起点，而不是回到行首。
+        let text = render_text(
+            "- 这是一条非常非常长的列表项内容，用来测试换行之后的缩进对齐是否正常\n",
+        );
+        assert!(text[0].starts_with("• "), "{text:?}");
+        assert!(text.len() > 2, "should wrap into multiple lines: {text:?}");
+        for line in text[1..].iter().filter(|line| !line.is_empty()) {
+            assert!(
+                line.starts_with("  ") && !line.starts_with("• "),
+                "continuation should hang-indent: {text:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn ordered_list_wrap_aligns_after_number() {
+        let text = render_text("1. 有序列表的换行对齐测试，内容足够长以触发换行，续行应该对齐\n");
+        assert!(text[0].starts_with("1. "), "{text:?}");
+        assert!(text.len() > 2, "should wrap: {text:?}");
+        for line in text[1..].iter().filter(|line| !line.is_empty()) {
+            assert!(line.starts_with("   "), "continuation should align after number: {text:?}");
+        }
     }
 
     #[test]
