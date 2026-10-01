@@ -359,6 +359,13 @@ impl Agent {
         client: &reqwest::Client,
     ) -> Result<message::Usage, AgentError> {
         let mut messages = self.active_messages();
+        // 1. 确认需要保留的消息， 并划分出需要压缩的消息
+        // 1.1 我们保留上下文 20% 的 token，其余压缩掉，我们不得补计算输入输出消息的总token
+        // 2. 本轮 turn，用户的任务
+        // 3. 发送压缩， 确认需要保留的东西？按照是否可恢复分类
+        // 3.1 关键保留，用户意图、用户修正、以及Decistion、约束等
+        // 4. 重新构建 context，包括 system、summary、recent message、current_task
+        // 5. 将构建完成的 Context 添加到 messages 中，作为下一轮的 context
         messages.push(message::Message::System {
             content: self
                 .compression_instruction
@@ -382,9 +389,7 @@ impl Agent {
                             ..
                         } if !content.trim().is_empty() && tool_calls.is_empty() => content,
                         _ => {
-                            return Err(AgentError::Compression(
-                                "压缩响应没有有效摘要".into(),
-                            ));
+                            return Err(AgentError::Compression("压缩响应没有有效摘要".into()));
                         }
                     };
                     self.messages

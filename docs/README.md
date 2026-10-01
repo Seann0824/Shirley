@@ -11,6 +11,7 @@
 | `security.md` | 权限层、bash 边界、密钥、工作区隔离 | P0 |
 | `sandbox.md` | 进程沙盒：spec / 后端 / degraded / 超时 / 执行策略归属 | P0 |
 | `runtime-hardening.md` | max_steps、重试、超时、取消、压缩健壮性 | P0 |
+| `compaction.md` | 上下文压缩优化：切点压缩 + 分层保留 + recall 依据 | P0 |
 | `streaming.md` | 流式输出与 reasoning 流式 | P1 |
 | `adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 | P1 |
 | `testing.md` | SDK 单测策略、缓存命中率基准 | P1 |
