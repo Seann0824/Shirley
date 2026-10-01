@@ -193,6 +193,7 @@ sequenceDiagram
 | usage / 缓存命中率 | `message` + `adapter` | `message/mod.rs`、`chat_completions` | 已实现 |
 | ChatCompletions 协议 | `adapter` | `adapter/chat_completions/` | 已实现 |
 | TUI 渲染与滚动 | 应用层 | `interface/ui.rs`、`app.rs` | 已实现 |
+| Markdown → TUI 渲染层 | 应用层 | `interface/markdown.rs`（`parse` → `Block` → `render` → `Line`/`Span`） | 已实现 |
 | 流式输出 | `adapter` + `runtime` + 应用层 | `adapter/chat_completions`（SSE 解析）、`AgentEvent::ContentDelta` | 已实现 |
 | reasoning 流式 | `adapter` + `message` + 应用层 | `AgentEvent::ReasoningDelta`、`ReasoningDelta` 事件 | 已实现 |
 | 多协议（Responses / Anthropic） | `adapter` | `codec` 的 `todo!()` | 未做，会 panic |
@@ -266,3 +267,4 @@ graph LR
 - 改循环行为 → `runtime/mod.rs`，同时检查 `StopReason` 是否有对应产生点。
 - 加工具 → 只写 `src/tools/*.rs` 一个 `#[tool]` 函数，在 `main.rs` 注册。
 - 改渲染 → `interface/ui.rs`，注意 `MessageCache` 的失效逻辑与 `row_offsets` 的换行估算。
+- 改 Markdown 样式/新语法 → `interface/markdown.rs`，解析（`parse` → `Block`）与渲染（`render` → `Line`）分开，加语法只动 `parse` 侧，调样式只动 `render` 侧。

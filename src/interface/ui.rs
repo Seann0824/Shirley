@@ -8,6 +8,7 @@ use ratatui::{
 use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, ChatMessage, Item, Role};
+use super::markdown;
 
 pub(crate) struct MessageCache {
     width: usize,
@@ -20,7 +21,9 @@ impl MessageCache {
         let mut lines = Vec::new();
         for item in app.items() {
             match item {
-                Item::Message(message) => append_message(&mut lines, message, app.show_thinking()),
+                Item::Message(message) => {
+                    append_message(&mut lines, message, app.show_thinking(), width)
+                }
                 Item::Tools(group) => append_tools(&mut lines, group),
             }
         }
@@ -139,39 +142,67 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, show_thinking: bool) {
+fn append_message(
+    lines: &mut Vec<Line>,
+    message: &ChatMessage,
+    show_thinking: bool,
+    width: usize,
+) {
     let is_thinking = message.thinking;
     if is_thinking && !show_thinking {
         return;
     }
 
-    let (label, label_style) = if is_thinking {
+    let (label, label_style, base_style) = if is_thinking {
         (
             "🧠 夏莉（思考）：".to_owned(),
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::ITALIC),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
         )
     } else {
         match message.role {
-            Role::User => ("你：".to_owned(), Style::default().fg(Color::Cyan)),
-            Role::Assistant => ("夏莉：".to_owned(), Style::default().fg(Color::Magenta)),
-            Role::Summary => ("上下文摘要：".to_owned(), Style::default().fg(Color::Yellow)),
-            Role::Error => ("错误：".to_owned(), Style::default().fg(Color::Red)),
+            Role::User => (
+                "你：".to_owned(),
+                Style::default().fg(Color::Cyan),
+                Style::default(),
+            ),
+            Role::Assistant => (
+                "夏莉：".to_owned(),
+                Style::default().fg(Color::Magenta),
+                Style::default(),
+            ),
+            Role::Summary => (
+                "上下文摘要：".to_owned(),
+                Style::default().fg(Color::Yellow),
+                Style::default(),
+            ),
+            Role::Error => (
+                "错误：".to_owned(),
+                Style::default().fg(Color::Red),
+                Style::default().fg(Color::Red),
+            ),
         }
     };
 
     lines.push(Line::from(Span::styled(label, label_style)));
-    for raw in message.content.lines() {
-        let line = if is_thinking {
-            Line::from(Span::styled(
-                raw.to_owned(),
-                Style::default().fg(Color::DarkGray),
-            ))
-        } else {
-            Line::from(raw.to_owned())
-        };
-        lines.push(line);
+
+    // 消息正文走 Markdown → Block → Line/Span 渲染；错误消息保持原样，避免把报错里的
+    // 反引号/星号当成语法吃掉。
+    if message.role == Role::Error && !is_thinking {
+        for raw in message.content.lines() {
+            lines.push(Line::from(Span::styled(raw.to_owned(), base_style)));
+        }
+    } else {
+        let mut rendered = markdown::render(&message.content, base_style, width);
+        // render 会在块之间补空行，这里去掉尾部空行，由下面统一收尾。
+        while rendered.last().is_some_and(|line| line.spans.is_empty()) {
+            rendered.pop();
+        }
+        lines.extend(rendered);
     }
     lines.push(Line::default());
 }

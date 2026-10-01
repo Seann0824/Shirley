@@ -1,5 +1,6 @@
 mod app;
 mod event;
+mod markdown;
 mod tui;
 mod ui;
 mod update;

@@ -19,6 +19,7 @@ chrono = "0.4.45"
 ratatui = "0.30.2"
 crossterm = "0.29.0"
 unicode-width = "0.2"
+pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
 
 [workspace]
 members = [

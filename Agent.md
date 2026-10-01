@@ -129,7 +129,8 @@ pub async fn bash(
 - `src/main.rs`：读 `.env`（`dotenvy`），构造 `ModelConfig`（默认 `LOCAL_*`，模型名写死 `deepseek-v4.1-flash`），注册 `bash` 和 `read` 两个工具，交给 `interface::run`
 - `src/interface/tui.rs`：主循环用 `tokio::select!`，把 `Agent` 通过 `take_agent()` 移出去、`tokio::spawn` 到独立任务里跑，结果通过 `mpsc` 通道回传，完成后 `restore_agent()` 放回来。`AgentUpdate` 是 UI 内部的精简事件类型
 - `src/interface/app.rs`：纯状态机，`Item::Message` / `Item::Tools` 两种条目；`Role` 有 User / Assistant / Error；usage 和 context 用量都缓存在这里
-- `src/interface/ui.rs`：`MessageCache` 做渲染缓存（按宽度失效），`status_line` 展示上下文占用百分比和缓存命中率
+- `src/interface/ui.rs`：`MessageCache` 做渲染缓存（按宽度失效），`status_line` 展示上下文占用百分比和缓存命中率。消息正文交给 `markdown::render` 转成带样式的 `Line`/`Span`
+- `src/interface/markdown.rs`：Markdown 渲染层。`parse` 用 `pulldown-cmark` 把 raw markdown 收敛成块级 AST（`Block`：Heading / Paragraph / Code / List / Quote / Table / Rule / Html），`render` 再把 `Block` 变成 ratatui 的 `Line`/`Span`。支持标题、粗斜体、行内代码、代码块、有序/无序/任务列表、嵌套列表、引用、表格、分割线。错误消息不走 markdown（避免报错里的符号被当语法吃掉）。有 11 个单测覆盖各语法
 - `src/interface/event.rs`：终端事件在独立线程里 `poll` + `read`，通过无界通道送给异步侧，`Drop` 时关鼠标捕获
 - `src/interface/update.rs`：按键映射。`Esc` / `Ctrl+C` 退出，`Ctrl+T` 切换思考显示，`Enter` 提交，滚轮上下滚动
 
