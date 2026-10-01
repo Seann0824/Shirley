@@ -19,13 +19,31 @@ pub(crate) struct MessageCache {
 impl MessageCache {
     fn new(app: &App, width: usize) -> Self {
         let mut lines = Vec::new();
+        // 一整轮 AI 回复只在块首出一次名字，之后才是 思考 / 工具调用 / 正文。
+        // 连续的 Assistant 消息与工具调用同属一轮，遇到非 AI 条目才收束。
+        let mut turn_open = false;
         for item in app.items() {
             match item {
                 Item::Message(message) => {
-                    append_message(&mut lines, message, app.show_thinking(), width)
+                    if message.role == Role::Assistant {
+                        if message.thinking && !app.show_thinking() {
+                            continue;
+                        }
+                        if !turn_open {
+                            lines.push(assistant_name_line());
+                            turn_open = true;
+                        }
+                    } else {
+                        turn_open = false;
+                    }
+                    append_message(&mut lines, message, width);
                 }
                 Item::Tools(group) => {
-                    append_tools(&mut lines, group, app.show_tool_args(), width)
+                    if !turn_open {
+                        lines.push(assistant_name_line());
+                        turn_open = true;
+                    }
+                    append_tools(&mut lines, group, app.show_tool_args(), width);
                 }
             }
         }
@@ -135,8 +153,6 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let border_style = if app.is_compressing() {
         Style::default().fg(Color::Yellow)
-    } else if app.is_waiting() {
-        Style::default().fg(Color::Magenta)
     } else {
         Style::default().fg(Color::DarkGray)
     };
@@ -163,20 +179,23 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
 }
 
-fn append_message(
-    lines: &mut Vec<Line>,
-    message: &ChatMessage,
-    show_thinking: bool,
-    width: usize,
-) {
-    let is_thinking = message.thinking;
-    if is_thinking && !show_thinking {
-        return;
-    }
+/// 一轮 AI 回复的名字头，先于 思考 / 工具调用 / 正文 出现。
+fn assistant_name_line() -> Line<'static> {
+    Line::from(Span::styled(
+        "夏莉：".to_owned(),
+        Style::default()
+            .fg(Color::Magenta)
+            .add_modifier(Modifier::BOLD),
+    ))
+}
 
-    let (label, label_style, base_style) = if is_thinking {
+fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
+    let is_thinking = message.thinking;
+
+    // Assistant 正文不再单独打名字（名字由块首统一给出），只保留 思考 的子标签。
+    let (label, label_style, base_style): (Option<String>, Style, Style) = if is_thinking {
         (
-            "🧠 夏莉（思考）：".to_owned(),
+            Some("🧠 思考".to_owned()),
             Style::default()
                 .fg(Color::DarkGray)
                 .add_modifier(Modifier::ITALIC),
@@ -187,29 +206,27 @@ fn append_message(
     } else {
         match message.role {
             Role::User => (
-                "你：".to_owned(),
+                Some("你：".to_owned()),
                 Style::default().fg(Color::Cyan),
                 Style::default(),
             ),
-            Role::Assistant => (
-                "夏莉：".to_owned(),
-                Style::default().fg(Color::Magenta),
-                Style::default(),
-            ),
+            Role::Assistant => (None, Style::default(), Style::default()),
             Role::Summary => (
-                "上下文摘要：".to_owned(),
+                Some("上下文摘要：".to_owned()),
                 Style::default().fg(Color::Yellow),
                 Style::default(),
             ),
             Role::Error => (
-                "错误：".to_owned(),
+                Some("错误：".to_owned()),
                 Style::default().fg(Color::Red),
                 Style::default().fg(Color::Red),
             ),
         }
     };
 
-    lines.push(Line::from(Span::styled(label, label_style)));
+    if let Some(label) = label {
+        lines.push(Line::from(Span::styled(label, label_style)));
+    }
 
     // 消息正文走 Markdown → Block → Line/Span 渲染；错误消息保持原样，避免把报错里的
     // 反引号/星号当成语法吃掉。
@@ -391,7 +408,7 @@ fn input_label(app: &App) -> Line<'static> {
     let (text, color) = if app.is_compressing() {
         (" 正在压缩上下文 ".to_owned(), Color::Yellow)
     } else if let Some(seconds) = app.waiting_seconds() {
-        (format!(" 夏莉回复中 {seconds}s "), Color::Magenta)
+        (format!(" 夏莉回复中 {seconds}s "), Color::Cyan)
     } else {
         (" 输入 ".to_owned(), Color::Cyan)
     };
