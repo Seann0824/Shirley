@@ -40,6 +40,7 @@ pub struct App {
     agent: Option<Agent>,
     exit: bool,
     input: String,
+    input_cursor: usize,
     items: Vec<Item>,
     waiting: bool,
     waiting_since: Option<Instant>,
@@ -62,6 +63,7 @@ impl App {
             agent: Some(agent),
             exit: false,
             input: String::new(),
+            input_cursor: 0,
             items: Vec::new(),
             waiting: false,
             waiting_since: None,
@@ -135,10 +137,13 @@ impl App {
     // 负为向上。上滚即退出跟随底部
     pub fn scroll_by(&mut self, delta: i32) {
         let max = self.max_scroll;
+        // 跟随底部时 self.scroll 是陈旧的（draw 每帧只在本地算有效位置），
+        // 以底部为基准，否则第一次上滚会从旧位置跳走。
+        let base = if self.auto_scroll { max } else { self.scroll };
         let clamped = if delta < 0 {
-            self.scroll.saturating_sub(delta.unsigned_abs() as usize)
+            base.saturating_sub(delta.unsigned_abs() as usize)
         } else {
-            self.scroll.saturating_add(delta as usize).min(max)
+            base.saturating_add(delta as usize).min(max)
         };
         self.scroll = clamped;
         self.auto_scroll = clamped >= max;
@@ -158,6 +163,11 @@ impl App {
 
     pub fn input(&self) -> &str {
         &self.input
+    }
+
+    /// 输入光标的字节偏移，始终落在字符边界上。
+    pub fn input_cursor(&self) -> usize {
+        self.input_cursor
     }
 
     pub fn items(&self) -> &[Item] {
@@ -182,11 +192,43 @@ impl App {
     }
 
     pub fn push_input(&mut self, ch: char) {
-        self.input.push(ch);
+        self.input.insert(self.input_cursor, ch);
+        self.input_cursor += ch.len_utf8();
     }
 
+    /// 退格：删除光标前一个字符。
     pub fn pop_input(&mut self) {
-        self.input.pop();
+        if let Some((index, _)) = self.input[..self.input_cursor].char_indices().last() {
+            self.input.remove(index);
+            self.input_cursor = index;
+        }
+    }
+
+    /// Delete：删除光标处字符。
+    pub fn delete_input(&mut self) {
+        if self.input_cursor < self.input.len() {
+            self.input.remove(self.input_cursor);
+        }
+    }
+
+    pub fn move_cursor_left(&mut self) {
+        if let Some((index, _)) = self.input[..self.input_cursor].char_indices().last() {
+            self.input_cursor = index;
+        }
+    }
+
+    pub fn move_cursor_right(&mut self) {
+        if let Some(ch) = self.input[self.input_cursor..].chars().next() {
+            self.input_cursor += ch.len_utf8();
+        }
+    }
+
+    pub fn move_cursor_home(&mut self) {
+        self.input_cursor = 0;
+    }
+
+    pub fn move_cursor_end(&mut self) {
+        self.input_cursor = self.input.len();
     }
 
     pub fn submit(&mut self) -> Option<String> {
@@ -196,6 +238,7 @@ impl App {
         self.waiting = true;
         self.waiting_since = Some(Instant::now());
         let prompt = std::mem::take(&mut self.input);
+        self.input_cursor = 0;
         self.push_message(Role::User, prompt.clone(), false);
         Some(prompt)
     }
@@ -288,5 +331,78 @@ impl App {
     pub fn add_error(&mut self, error: String) {
         self.compressing = false;
         self.push_message(Role::Error, error, false);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use agent_sdk::{ModelConfig, ModelProtocol};
+
+    fn app() -> App {
+        let config = ModelConfig::builder()
+            .protocol(ModelProtocol::ChatCompletions)
+            .base_url("http://localhost")
+            .model("test")
+            .build();
+        App::new(Agent::builder().model_config(config).build())
+    }
+
+    #[test]
+    fn cursor_inserts_and_moves() {
+        let mut app = app();
+        for ch in "abd".chars() {
+            app.push_input(ch);
+        }
+        app.move_cursor_left();
+        app.push_input('c');
+        assert_eq!(app.input(), "abcd");
+        assert_eq!(app.input_cursor(), 3);
+
+        app.move_cursor_home();
+        assert_eq!(app.input_cursor(), 0);
+        app.move_cursor_right();
+        assert_eq!(app.input_cursor(), 1);
+        app.move_cursor_end();
+        assert_eq!(app.input_cursor(), 4);
+    }
+
+    #[test]
+    fn backspace_and_delete_at_cursor() {
+        let mut app = app();
+        for ch in "abcd".chars() {
+            app.push_input(ch);
+        }
+        app.move_cursor_left();
+        app.move_cursor_left();
+        app.pop_input(); // 删除 'b'
+        assert_eq!(app.input(), "acd");
+        assert_eq!(app.input_cursor(), 1);
+        app.delete_input(); // 删除光标处 'c'
+        assert_eq!(app.input(), "ad");
+        assert_eq!(app.input_cursor(), 1);
+    }
+
+    #[test]
+    fn cursor_handles_multibyte() {
+        let mut app = app();
+        for ch in "夏莉".chars() {
+            app.push_input(ch);
+        }
+        assert_eq!(app.input_cursor(), "夏莉".len());
+        app.move_cursor_left();
+        assert_eq!(app.input_cursor(), "夏".len());
+        app.pop_input();
+        assert_eq!(app.input(), "莉");
+    }
+
+    #[test]
+    fn scroll_up_from_bottom_starts_at_bottom() {
+        let mut app = app();
+        app.set_max_scroll(100);
+        // 自动跟随底部时 self.scroll 陈旧为 0，上滚应以底部为基准。
+        app.scroll_by(-3);
+        assert_eq!(app.scroll(), 97);
+        assert!(!app.auto_scroll());
     }
 }

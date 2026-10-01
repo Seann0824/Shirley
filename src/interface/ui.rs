@@ -65,7 +65,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     ])
     .areas(frame.area());
 
-    let message_width = messages_area.width.saturating_sub(2).max(1) as usize;
+    let message_width = messages_area.width.max(1) as usize;
     if app
         .message_cache
         .as_ref()
@@ -80,7 +80,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .row_offsets
         .last()
         .unwrap();
-    let visible_height = messages_area.height.saturating_sub(2) as usize;
+    let visible_height = messages_area.height as usize;
     let max_scroll = total_height.saturating_sub(visible_height);
     app.set_max_scroll(max_scroll);
     let scroll = if app.auto_scroll() {
@@ -94,16 +94,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .unwrap()
         .visible_lines(scroll, visible_height);
 
-    let title = if app.is_compressing() {
-        " 消息 · 正在压缩上下文… "
-    } else if app.show_thinking() {
-        " 消息 · 思考已显示（Ctrl+T 隐藏） "
-    } else {
-        " 消息 · 思考已隐藏（Ctrl+T 显示） "
-    };
     frame.render_widget(
         Paragraph::new(lines)
-            .block(Block::bordered().title(title))
             .wrap(Wrap { trim: false })
             .scroll((inner_scroll, 0)),
         messages_area,
@@ -113,17 +105,31 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let visible_width = input_area.width.saturating_sub(2) as usize;
     let input = app.input();
-    let mut start = input.len();
-    let mut width = 0;
-    for (index, ch) in input.char_indices().rev() {
+    let cursor = app.input_cursor();
+    // 水平滚动窗口：从光标往回留出可见宽度（预留 1 列给光标），
+    // 再向后铺满可见宽度，保证光标始终在框内可见。
+    let mut start = cursor;
+    let mut back_width = 0;
+    for (index, ch) in input[..cursor].char_indices().rev() {
         let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if width + char_width >= visible_width {
+        if back_width + char_width > visible_width.saturating_sub(1) {
             break;
         }
-        width += char_width;
+        back_width += char_width;
         start = index;
     }
-    let visible_input = &input[start..];
+    let mut end = input.len();
+    let mut forward_width = back_width;
+    for (offset, ch) in input[cursor..].char_indices() {
+        let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if forward_width + char_width > visible_width {
+            end = cursor + offset;
+            break;
+        }
+        forward_width += char_width;
+    }
+    let visible_input = &input[start..end];
+    let cursor_offset = input[start..cursor].width() as u16;
     let input_title = if app.is_compressing() {
         " 正在压缩上下文 · Esc 退出 ".to_owned()
     } else if let Some(seconds) = app.waiting_seconds() {
@@ -137,7 +143,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
 
     if visible_width > 0 && !app.is_waiting() {
-        let cursor_x = input_area.x + 1 + visible_input.width() as u16;
+        let cursor_x = input_area.x + 1 + cursor_offset;
         frame.set_cursor_position((cursor_x, input_area.y + 1));
     }
 }
@@ -248,6 +254,14 @@ fn summarize_arguments(arguments: &str) -> String {
 
 fn status_line(app: &App) -> Line<'static> {
     let mut spans = Vec::new();
+    if !app.is_compressing() {
+        let text = if app.show_thinking() {
+            "思考：显示 "
+        } else {
+            "思考：隐藏 "
+        };
+        spans.push(Span::styled(text, Style::default().fg(Color::DarkGray)));
+    }
     if app.is_compressing() {
         spans.push(Span::styled(
             " 上下文：压缩中… | ",

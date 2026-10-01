@@ -12,6 +12,17 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             }
             KeyCode::Enter => return app.submit(),
             KeyCode::Backspace if !app.is_waiting() => app.pop_input(),
+            KeyCode::Delete if !app.is_waiting() => app.delete_input(),
+            KeyCode::Left if !app.is_waiting() => app.move_cursor_left(),
+            KeyCode::Right if !app.is_waiting() => app.move_cursor_right(),
+            KeyCode::Home if !app.is_waiting() => app.move_cursor_home(),
+            KeyCode::End if !app.is_waiting() => app.move_cursor_end(),
+            KeyCode::Char('a') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.move_cursor_home()
+            }
+            KeyCode::Char('e') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.move_cursor_end()
+            }
             KeyCode::Char(ch)
                 if !app.is_waiting() && !key_event.modifiers.contains(KeyModifiers::CONTROL) =>
             {
