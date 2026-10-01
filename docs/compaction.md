@@ -257,7 +257,8 @@ self.messages = [system（Agent 重新生成）] + [新 ContextSummary] + messag
 **系统提示词不参与重建**：它由 `Agent` 单独持有（`system_prompt` 字段），
 `CompactParts::rebuild` 直接返回 `[新 ContextSummary] + current_task + remain`，
 既不接收也不复制原消息里的任何 `System`；`compress_context` 随后调用
-`Agent::system_message()` 重新生成一条置顶。这样系统提示词永远不会被压缩产物污染，
+`Agent::system_message()` 重新生成一条置顶（`SystemPrompt` 是函数时会被**重新解析**，
+工作目录 / 项目指南的最新状态会随之更新）。这样系统提示词永远不会被压缩产物污染，
 也不会因为"保留开头 system"而在重建里意外带上旧摘要。
 
 **5.3 摘要模板（XML 标签 + 区分可叙述与精确）**

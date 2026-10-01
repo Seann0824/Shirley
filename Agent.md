@@ -59,6 +59,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 **SDK 对外只暴露这些**（见 `crates/agent-sdk/src/lib.rs`）：
 
 - `Agent`、`AgentError`、`AgentEvent`
+- `SystemPrompt`、`SystemPromptContext`（系统提示词：静态字符串或函数）
 - `CutPlan`、`CompactParts`、`plan_cut`（压缩切点/重建，供测试与上层观测）
 - `Message`、`ToolCall`、`Usage`
 - `ModelConfig`、`ModelProtocol`、`AdapterError`
@@ -146,10 +147,12 @@ pub async fn bash(
 - `compaction.rs`：压缩切点与重建（`RETAIN_RATIO` / `CutPlan` / `CompactParts` / `plan_cut` / `background_len`）
 - `event.rs`：对外事件与运行结果（`AgentEvent` / `RunResult` / `StopReason`）
 - `error.rs`：顶层错误收敛（`AgentError` + `SdkError`）
+- `prompt.rs`：系统提示词（`SystemPrompt` / `SystemPromptContext`）
 
 `CompactParts` 的契约测试移到了 `crates/agent-sdk/tests/runtime_compaction.rs`（集成测试，只依赖公开 API）。
 
-- `Agent::new` 是 `bon` builder：`model_config` / `system_prompt` / `messages` / `tools` / `compression_instruction`
+- `Agent::new` 是 `bon` builder：`model_config` / `system_prompt` / `working_dir` / `messages` / `tools` / `compression_instruction`
+- `system_prompt` 类型是 `SystemPrompt`（不是 `String`）：既接受固定字符串（`From<String>` / `From<&str>`），也接受**函数** `Fn(&SystemPromptContext) -> String`。函数形式让提示词按运行时上下文动态生成——`SystemPromptContext` 目前携带 `working_dir`。`working_dir` 是独立 builder 参数，构造时会用它解析一次提示词
 - `run()` 是 `run_stream()` 的薄封装，只等最后一个 `Finished`
 - `run_stream()` 返回 `Pin<Box<dyn Stream<Item = Result<AgentEvent, AgentError>> + Send + 'a>>`，用 `async_stream::try_stream!` 实现
 - 主循环：压缩检查 → 组装请求 → 调模型（消费 `AdapterEvent`）→ 落库 → 有 tool_calls 就并发跑（`FuturesUnordered`）→ 没工具调用就 `Finished` 退出
@@ -162,14 +165,15 @@ pub async fn bash(
 - `active_messages()` 找到**最后一个** `ContextSummary`，只保留开头的 system 消息 + 从 summary 开始的消息
 - `compress_context()` 把压缩指令作为 system 追加，要求模型输出纯文本摘要，非空且无 tool_calls 才算成功，否则报 `CompressionError`
 - 摘要内容有**结构契约**：`compaction.rs` 的 `COMPACTION_TEMPLATE` 定义了 XML 块（`current_goal` / `hard_constraints` / `decisions` / `progress` / `open_questions` / `compacted_range`），`compress_context` 会把它追加到调用方的 `compression_instruction` 之后。模板**不含** `next_step`、并显式禁止推演——修的就是"压缩器编造用户没提过的下一步"（`docs/compaction.md` 5.3）
-- 压缩成功后用 `CompactParts::rebuild` 重建 `self.messages`：**系统提示词不保留、不复制**——它由 `Agent` 单独持有（`system_prompt` 字段），每次重建都 `system_message()` 重新生成一条再置顶。`rebuild` 只返回 `[新 ContextSummary] + current_task + remain`
+- 压缩成功后用 `CompactParts::rebuild` 重建 `self.messages`：**系统提示词不保留、不复制**——它由 `Agent` 单独持有（`system_prompt` 字段），每次重建都 `system_message()` 重新生成一条再置顶（函数形式的提示词会被**重新解析**，因此工作目录 / 项目指南的最新状态会反映进来）。`rebuild` 只返回 `[新 ContextSummary] + current_task + remain`
 - 压缩失败会中断整个 stream，UI 侧会显示成错误
 
 ---
 
 **四、应用层（TUI）**
 
-- `src/main.rs`：读 `.env`（`dotenvy`），构造 `ModelConfig`（默认 `LOCAL_*`，模型名写死 `deepseek-v4.1-flash`，`stream(true)` / `thinking(true)` / `reasoning_effort("low")`），注册 `bash` 工具，交给 `interface::run`。`context_window_tokens` 默认 `104858 >> 1`（=52429），可被 `LOCAL_CONTEXT_WINDOW_TOKENS` 覆盖
+- `src/main.rs`：读 `.env`（`dotenvy`），构造 `ModelConfig`（默认 `LOCAL_*`，模型名写死 `deepseek-v4.1-flash`，`stream(true)` / `thinking(true)` / `reasoning_effort("low")`），注册 `bash` 工具，交给 `interface::run`。`context_window_tokens` 默认 `104858 >> 1`（=52429），可被 `LOCAL_CONTEXT_WINDOW_TOKENS` 覆盖。工作目录由 `prompt::workspace_root()` 决定（`SHIRLEY_WORKSPACE` 优先，否则当前目录）
+- `src/prompt.rs`：应用侧系统提示词构造。`build(working_dir)` 返回一个 `SystemPrompt` 函数，每次解析时读取当前工作目录与工作区里的 `Agent.md`，拼成"角色 + 工作区根 + 项目指南"。工作目录明确告诉模型（`plan.md`：AI 不知道工作区就会从根目录乱找），`Agent.md` 提供项目怎么跑、代码怎么组织
 - `src/interface/tui.rs`：主循环用 `tokio::select!`，把 `Agent` 通过 `take_agent()` 移出去、`tokio::spawn` 到独立任务里跑，结果通过 `mpsc` 通道回传，完成后 `restore_agent()` 放回来。**直接消费 `AgentEvent`**（不再有 `AgentUpdate` 中间类型）
 - `src/interface/app.rs`：纯状态机，`Item::Message` / `Item::Tools` 两种条目；`Role` 有 User / Assistant / Summary / Error；usage、context 用量、输入历史（上/下键回放）都缓存在这里；`toggle_thinking` / `toggle_tool_args` 控制展示
 - `src/interface/ui.rs`：`MessageCache` 做渲染缓存（按宽度失效），`footer_line` 展示上下文占用百分比和缓存命中率（单次 + 累计）。消息正文交给 `markdown::render` 转成带样式的 `Line`/`Span`
@@ -218,7 +222,7 @@ cp .env.example .env   # 其实没有 example，照 .env 的键名自己写
 cargo run
 ```
 
-`.env` 需要的键：`LOCAL_API_KEY`、`LOCAL_BASE_URL`、`LOCAL_CONTEXT_WINDOW_TOKENS`（可选，默认 52429）。`DEEPSEEK_*` 那组目前没被代码引用。`bash` 工具还会读 `SHIRLEY_WORKSPACE`（工作区根目录，缺省为当前目录）。注意 `.env` 已在 `.gitignore` 里，**里面的 key 已经泄露过一次，别提交**。
+`.env` 需要的键：`LOCAL_API_KEY`、`LOCAL_BASE_URL`、`LOCAL_CONTEXT_WINDOW_TOKENS`（可选，默认 52429）。`DEEPSEEK_*` 那组目前没被代码引用。`bash` 工具与系统提示词都会读 `SHIRLEY_WORKSPACE`（工作区根目录，缺省为当前目录）；系统提示词还会把工作区根目录下的 `Agent.md`（项目指南）内联进去。注意 `.env` 已在 `.gitignore` 里，**里面的 key 已经泄露过一次，别提交**。
 
 常用命令：
 

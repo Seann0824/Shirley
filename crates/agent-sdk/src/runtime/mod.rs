@@ -6,13 +6,16 @@
 //! - [`compaction`]：压缩切点计算与重建（`CutPlan` / `CompactParts` / `plan_cut`）。
 //! - [`event`]：对外事件与运行结果（`AgentEvent` / `RunResult` / `StopReason`）。
 //! - [`error`]：顶层错误收敛（`AgentError`）。
+//! - [`prompt`]：系统提示词（静态字符串或按运行时上下文动态生成）。
 
 mod agent;
 mod compaction;
 mod error;
 mod event;
+mod prompt;
 
 pub use agent::Agent;
 pub use compaction::{CompactParts, CutPlan, plan_cut};
 pub use error::AgentError;
 pub use event::AgentEvent;
+pub use prompt::{SystemPrompt, SystemPromptContext};

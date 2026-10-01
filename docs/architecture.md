@@ -185,7 +185,8 @@ sequenceDiagram
 
 | 功能 | 主要落点 | 涉及文件 | 状态 |
 | --- | --- | --- | --- |
-| ReAct 循环 | `runtime` | `runtime/mod.rs` | 已实现 |
+| ReAct 循环 | `runtime` | `runtime/agent.rs` | 已实现 |
+| 系统提示词（静态/函数） | `runtime` + 应用层 | `runtime/prompt.rs`、`src/prompt.rs` | 已实现 |
 | 消息模型 / 序列化 | `message` | `message/mod.rs` | 已实现 |
 | 工具注册与并发调用 | `tool` + `runtime` | `tool/mod.rs`、`runtime/mod.rs` | 已实现 |
 | `#[tool]` 宏与参数 schema | 宏层 | `agent-sdk-macros/src/tool.rs` | 已实现 |

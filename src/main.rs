@@ -1,5 +1,6 @@
 use agent_sdk::{Agent, AgentError, ModelConfig, ModelProtocol, ToolManager};
 mod interface;
+mod prompt;
 mod tools;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -33,16 +34,16 @@ async fn main() -> Result<(), AgentError> {
         }
         model_config.context_window_tokens = Some(limit);
     }
-    // 1. 构建 System
-    // 2. 项目工作空间
-    // 3. 构建项目 Agent.md
+    // 1. 项目工作空间：作为 coding agent 的工作范围根。
+    // 2. 系统提示词：角色 + 工作目录 + 项目 Agent.md（由 `prompt` 模块动态拼装）。
+    let working_dir = prompt::workspace_root();
 
     let agent = Agent::builder()
         .model_config(model_config)
-        // todo: 这里去参考 Codex 的系统提示词设计
-        .system_prompt(r"
-            You are Shirley, base on Englife-1.0, You are runing as coding agent in the Shirley CLI on user's computer.
-        ")
+        // 提示词以函数形式传入：每次解析都读取当前工作目录与项目 Agent.md，
+        // 这样压缩重建后重新置顶的系统提示词始终反映最新的项目状态。
+        .system_prompt(prompt::build(working_dir.clone()))
+        .working_dir(working_dir)
         // 摘要的取舍口径：coding agent 关心文件 / 命令 / 报错 / 测试结果。
         // 结构与"不得推演、不得编下一步"等硬规则由 SDK 的 `COMPACTION_TEMPLATE` 追加，
         // 这里只写领域相关的偏好（见 `docs/compaction.md` 5.3）。

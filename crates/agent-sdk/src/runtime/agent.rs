@@ -1,18 +1,28 @@
 use super::compaction::{COMPACTION_TEMPLATE, CutPlan, RETAIN_RATIO, plan_cut};
 use super::error::AgentError;
 use super::event::{AgentEvent, RunResult, StopReason};
+use super::prompt::{SystemPrompt, SystemPromptContext};
 use crate::adapter;
 use crate::adapter::ModelRequest;
 use crate::message;
 use crate::token;
 use crate::tool;
 use futures::StreamExt;
+use std::path::PathBuf;
 use std::pin::Pin;
 
 pub struct Agent {
     model_config: adapter::ModelConfig,
     /// 系统提示词单独持有：压缩重建时不从旧消息里复制，而是每次重新生成一条置顶。
-    system_prompt: String,
+    ///
+    /// 它可以是一个固定字符串，也可以是一个函数——按 [`SystemPromptContext`]
+    /// 动态生成（例如把当前工作目录、项目指南拼进去）。见 [`super::prompt`]。
+    system_prompt: SystemPrompt,
+    /// 构建系统提示词时的运行时上下文（当前工作目录）。
+    ///
+    /// coding agent 靠它把"我的工作范围在哪"明确告诉模型，避免模型从文件系统
+    /// 根目录开始盲目探索（`plan.md`）。`None` 表示调用方没有指定。
+    working_dir: Option<PathBuf>,
     messages: Vec<message::Message>,
     tools: tool::ToolManager,
     compression_instruction: Option<String>,
@@ -26,23 +36,24 @@ impl Agent {
     #[builder]
     pub fn new(
         model_config: adapter::ModelConfig,
-        #[builder(default, into)] system_prompt: String,
+        #[builder(default, into)] system_prompt: SystemPrompt,
+        #[builder(into)] working_dir: Option<PathBuf>,
         #[builder(default)] mut messages: Vec<message::Message>,
         #[builder(default = tool::ToolManager::new())] tools: tool::ToolManager,
         #[builder(into)] compression_instruction: Option<String>,
     ) -> Self {
-        if !system_prompt.trim().is_empty() {
-            messages.insert(
-                0,
-                message::Message::System {
-                    content: system_prompt.clone(),
-                },
-            );
+        // 构造时就按工作目录解析一次，把 System 消息置顶（空提示词则不置顶）。
+        let resolved = system_prompt.resolve(&SystemPromptContext {
+            working_dir: working_dir.clone(),
+        });
+        if !resolved.trim().is_empty() {
+            messages.insert(0, message::Message::System { content: resolved });
         }
 
         Self {
             model_config,
             system_prompt,
+            working_dir,
             messages,
             tools,
             compression_instruction,
@@ -56,9 +67,15 @@ impl Agent {
     /// 系统提示词不随对话变化，也不参与压缩——每次都从 `self.system_prompt` 现取，
     /// 因此 [`CompactParts::rebuild`] 无需（也不该）复制原消息里的 `System`。
     fn system_message(&self) -> Option<message::Message> {
-        (!self.system_prompt.trim().is_empty()).then(|| message::Message::System {
-            content: self.system_prompt.clone(),
-        })
+        let content = self.system_prompt.resolve(&self.prompt_context());
+        (!content.trim().is_empty()).then(|| message::Message::System { content })
+    }
+
+    /// 当前用于解析系统提示词的运行时上下文。
+    fn prompt_context(&self) -> SystemPromptContext {
+        SystemPromptContext {
+            working_dir: self.working_dir.clone(),
+        }
     }
     pub async fn run(&mut self, task: &str) -> Result<RunResult, AgentError> {
         let mut events = self.run_stream(task);
