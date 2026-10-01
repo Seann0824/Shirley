@@ -221,7 +221,7 @@ fn compute_cut() -> Option<usize>:
 - 一条 `Assistant{tool_calls}` 可能对应多条连续 `Tool` 结果；
   `while` 回退会把这些一起吞进保留段，配对自然完整。
 - 压缩区域 = `messages[head..cut]`；重建为
-  `leading_system + [新 ContextSummary] + messages[cut..]`。
+  `[新 ContextSummary] + messages[cut..]`，系统提示词由 `Agent` 另行重新生成置顶。
 
 ---
 
@@ -247,12 +247,18 @@ fn compute_cut() -> Option<usize>:
 新设计：压缩时**重建** `self.messages`，让已压缩段**冻结**：
 
 ```
-self.messages = leading_system + [新 ContextSummary] + messages[cut..]
+self.messages = [system（Agent 重新生成）] + [新 ContextSummary] + messages[cut..]
 ```
 
 即 `ContextSummary` 不再是"追加在末尾"，而是**插到切点位置**，替换掉切点之前的段落。
 下一次压缩时，新 summary 覆盖的是"上一个 summary + 其后的对话"，语义清楚，
 且避免同一段被反复压缩（论文 caveat 4：多次压缩只会更差）。
+
+**系统提示词不参与重建**：它由 `Agent` 单独持有（`system_prompt` 字段），
+`CompactParts::rebuild` 直接返回 `[新 ContextSummary] + current_task + remain`，
+既不接收也不复制原消息里的任何 `System`；`compress_context` 随后调用
+`Agent::system_message()` 重新生成一条置顶。这样系统提示词永远不会被压缩产物污染，
+也不会因为"保留开头 system"而在重建里意外带上旧摘要。
 
 **5.3 摘要模板（XML 标签 + 区分可叙述与精确）**
 

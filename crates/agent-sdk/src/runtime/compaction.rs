@@ -1,0 +1,199 @@
+use crate::message;
+use crate::token;
+
+/// 保留尾部的预算口径：上下文窗口的 20%（`docs/compaction.md` 4.1）。
+pub(super) const RETAIN_RATIO: f64 = 0.20;
+
+/// 压缩切点算出的三段内容。
+///
+/// 三段**互不重叠**，且合起来恰好覆盖 `messages[head..]` 的全部消息（背景前缀除外）。
+/// 重建请用 [`CompactParts::rebuild`]，不要自己拼接——顺序有讲究。
+///
+/// **关于 `current_task` 的摘出规则**：只有当任务会落进待压缩区时（`task_extracted`），
+/// 才把它从 `to_compress` 摘出、在重建时重新注入。任务本来就在保留段里时**不动它**，
+/// 否则把它提到 `remain` 前面会打乱顺序（`U_task` 跑到 `U_prev` 之前，两个 user 连排）。
+#[derive(Debug, Clone)]
+pub struct CompactParts {
+    /// 固定背景前缀长度（`messages[..head]`）。系统提示词**不从这里复制**——
+    /// 它由 `Agent` 自己持有、重建时重新生成，见 [`CompactParts::rebuild`]。
+    pub head: usize,
+
+    /// 待压缩段：交给摘要器，压缩成一条 `ContextSummary`。
+    pub to_compress: Vec<message::Message>,
+
+    /// 保留段：原样留在请求里。任务若在其中，位置不变。
+    pub remain: Vec<message::Message>,
+
+    /// 用户最新提出的问题（始终提供，供摘要器作为 `<current_goal>`）。
+    pub current_task: Option<message::Message>,
+
+    /// 任务是否落在待压缩区、需要摘出后重新注入。
+    pub task_extracted: bool,
+}
+
+impl CompactParts {
+    /// 按正确顺序重建消息列表，**直接返回一条 `ContextSummary`** 作为开头。
+    ///
+    /// ```text
+    /// [ContextSummary] + (task_extracted ? current_task : []) + remain
+    /// ```
+    ///
+    /// **不保留开头的 `System`**：系统提示词不属于压缩产物，由 `Agent` 自己持有，
+    /// 每次重建时重新生成一条再置顶（见 `Agent::system_message`）。
+    /// 所以这里不接收、也不复制原消息里的任何 `System`。
+    ///
+    /// **丢弃上一轮的 `ContextSummary`**：它不会出现在输出里，避免"摘要叠摘要"
+    /// —— `docs/compaction.md` 5.2 明令禁止，论文 caveat 4 也指出多次压缩只会更差。
+    ///
+    /// - 任务未被摘出时，顺序即 `[summary] + remain`，与原顺序一致；
+    /// - 任务被摘出时插在 `remain` 之前。`plan_cut` 已保证 `remain`
+    ///   不以孤儿 `Tool` 开头，因此"任务 + 其后的 assistant/tool 链"配对完整。
+    pub fn rebuild(&self, summary: impl Into<String>) -> Vec<message::Message> {
+        // 摘要直接由本方法构造为 `ContextSummary`，不再从原消息里复制系统提示词。
+        let mut out = Vec::with_capacity(self.remain.len() + 2);
+        out.push(message::Message::ContextSummary {
+            content: summary.into(),
+        });
+        if let (true, Some(task)) = (self.task_extracted, &self.current_task) {
+            out.push(task.clone());
+        }
+        out.extend(self.remain.iter().cloned());
+        out
+    }
+}
+
+/// 压缩切点计划。
+///
+/// 由 [`plan_cut`] 计算，描述"保留哪一段、压哪一段、本轮任务是什么"。
+#[derive(Debug, Clone)]
+pub struct CutPlan {
+    /// 固定背景前缀长度：`messages[..head]` 永不压缩。
+    ///
+    /// 包含开头连续的 `System`（系统提示词）与紧邻其后的 `ContextSummary`
+    /// （上一轮的摘要）。后者在重建时会被**替换**而不是叠加，所以同样不计入预算。
+    pub head: usize,
+
+    /// 保留段起点：`messages[cut..]` 原样保留，`messages[head..cut]` 被压缩。
+    pub cut: usize,
+
+    /// 用户最新提出的问题（`messages` 中最后一条 `User`）。
+    ///
+    /// 正常布局下它就是保留段的第一条（切点紧邻其前），因此会原样留在请求里，
+    /// 同时显式喂给摘要器作为 `<current_goal>`——这正是"压缩后 AI 忘记用户任务"
+    /// 那个故障的修法：任务不能只存在于摘要里。
+    pub current_task: Option<message::Message>,
+}
+
+impl CutPlan {
+    /// 需要被压缩（换成摘要）的区间。
+    pub fn compacted_range(&self) -> std::ops::Range<usize> {
+        self.head..self.cut
+    }
+
+    /// 把消息切成三段：`to_compress` / `remain` / `current_task`。
+    ///
+    /// **摘出规则**：仅当任务会落进待压缩区（`cut > task_index`）时才摘出，
+    /// 此时它会从 `to_compress` 中移除，重建时重新注入，避免被摘要掉。
+    /// 任务本就在保留段时不动它——否则把它提到 `remain` 前面会打乱顺序。
+    pub fn split(&self, messages: &[message::Message]) -> CompactParts {
+        let task_index = messages
+            .iter()
+            .rposition(|msg| matches!(msg, message::Message::User { .. }));
+
+        // 只有落在待压缩区 [head, cut) 内的任务才需要摘出。
+        let task_extracted = task_index.is_some_and(|i| i >= self.head && i < self.cut);
+
+        let collect = |range: std::ops::Range<usize>| {
+            range
+                .filter(|&i| !(task_extracted && Some(i) == task_index))
+                .map(|i| messages[i].clone())
+                .collect::<Vec<_>>()
+        };
+
+        CompactParts {
+            head: self.head,
+            to_compress: collect(self.compacted_range()),
+            remain: collect(self.cut..messages.len()),
+            current_task: self.current_task.clone(),
+            task_extracted,
+        }
+    }
+}
+
+/// 固定背景前缀长度。
+///
+/// 开头连续的 `System` 之后，若紧跟一条 `ContextSummary`，它也算背景：
+/// 它是"上一轮的压缩结果"，重建时会被新摘要替换，不该再吃一遍 20% 预算。
+fn background_len(messages: &[message::Message]) -> usize {
+    let mut len = messages
+        .iter()
+        .take_while(|msg| matches!(msg, message::Message::System { .. }))
+        .count();
+    if matches!(
+        messages.get(len),
+        Some(message::Message::ContextSummary { .. })
+    ) {
+        len += 1;
+    }
+    len
+}
+
+/// 计算压缩切点（`docs/compaction.md` 4.5）。
+///
+/// 从尾部往前累加估算 token，直到再加就超出 `budget`，得到保留段起点。
+/// 两处修正，**正确性优先于预算**：
+///
+/// 1. **至少保留一条**：最后一条消息无条件进入保留段，即使它单独就超预算。
+/// 2. **tool 配对**：保留段的第一条不能是 `Tool` 结果，否则产生孤儿 `tool_call`，
+///    请求会被 API 以 400 拒绝。回退到产出它的 `Assistant{tool_calls}`，
+///    连续多条 `Tool` 结果会被一起吞进保留段，配对自然完整。
+///
+/// **不额外约束"切点不越过最后一条 `User`"。** 真实布局是
+/// `system, [历史], USER(本轮任务), assistant(tool_calls), tool, tool, ...`，
+/// 切点就落在本轮任务**之前**——任务本身属于保留段（见 [`CutPlan::current_task`]），
+/// 它后面的 tool 链才是可压对象。若强行把切点卡在最后一条 `User` 之前，
+/// 一条用户消息触发一长串大 tool 输出时切点会退到 `head`，压缩直接失效，
+/// 而这恰恰是最需要压缩的情形。
+pub fn plan_cut(
+    messages: &[message::Message],
+    budget: u64,
+    counter: &token::HeuristicCounter,
+) -> Option<CutPlan> {
+    let head = background_len(messages);
+    if head >= messages.len() {
+        return None;
+    }
+
+    let mut acc = 0u64;
+    let mut cut = messages.len();
+    for i in (head..messages.len()).rev() {
+        let cost = counter.estimate_message(&messages[i]);
+        // `acc > 0` 让第一条无条件保留，实现修正 1。
+        if acc > 0 && acc.saturating_add(cost) > budget {
+            break;
+        }
+        acc = acc.saturating_add(cost);
+        cut = i;
+    }
+
+    // 修正 2：保留段第一条不能是 Tool 结果。
+    while cut > head && matches!(messages.get(cut), Some(message::Message::Tool { .. })) {
+        cut -= 1;
+    }
+
+    if cut <= head {
+        return None;
+    }
+
+    let current_task = messages
+        .iter()
+        .rev()
+        .find(|msg| matches!(msg, message::Message::User { .. }))
+        .cloned();
+
+    Some(CutPlan {
+        head,
+        cut,
+        current_task,
+    })
+}

@@ -59,6 +59,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 **SDK 对外只暴露这些**（见 `crates/agent-sdk/src/lib.rs`）：
 
 - `Agent`、`AgentError`、`AgentEvent`
+- `CutPlan`、`CompactParts`、`plan_cut`（压缩切点/重建，供测试与上层观测）
 - `Message`、`ToolCall`、`Usage`
 - `ModelConfig`、`ModelProtocol`、`AdapterError`
 - `ErrorKind`、`SdkError`（统一错误契约）
@@ -137,9 +138,16 @@ pub async fn bash(
 - 参数描述必须写 `#[param(description = "...")]`，否则编译报错
 - 生成的 `invoke` 里调用的是 `super::#name`，所以**被修饰的函数和宏生成的 mod 必须在同一层级**
 
-**6. ReAct 运行时** — `crates/agent-sdk/src/runtime/mod.rs`
+**6. ReAct 运行时** — `crates/agent-sdk/src/runtime/`
 
-这是整个项目的心脏。
+这是整个项目的心脏。按职责拆成几个子模块，`mod.rs` 只负责接线与再导出：
+
+- `agent.rs`：`Agent` 本体（构造、`run` / `run_stream` 主循环、压缩调度）
+- `compaction.rs`：压缩切点与重建（`RETAIN_RATIO` / `CutPlan` / `CompactParts` / `plan_cut` / `background_len`）
+- `event.rs`：对外事件与运行结果（`AgentEvent` / `RunResult` / `StopReason`）
+- `error.rs`：顶层错误收敛（`AgentError` + `SdkError`）
+
+`CompactParts` 的契约测试移到了 `crates/agent-sdk/tests/runtime_compaction.rs`（集成测试，只依赖公开 API）。
 
 - `Agent::new` 是 `bon` builder：`model_config` / `system_prompt` / `messages` / `tools` / `compression_instruction`
 - `run()` 是 `run_stream()` 的薄封装，只等最后一个 `Finished`
@@ -153,6 +161,7 @@ pub async fn bash(
 - `should_schedule_compression` 在 `(input + output) * 100 >= limit * 80` 时置 `compression_pending`，用整数比较避免浮点精度问题
 - `active_messages()` 找到**最后一个** `ContextSummary`，只保留开头的 system 消息 + 从 summary 开始的消息
 - `compress_context()` 把压缩指令作为 system 追加，要求模型输出纯文本摘要，非空且无 tool_calls 才算成功，否则报 `CompressionError`
+- 压缩成功后用 `CompactParts::rebuild` 重建 `self.messages`：**系统提示词不保留、不复制**——它由 `Agent` 单独持有（`system_prompt` 字段），每次重建都 `system_message()` 重新生成一条再置顶。`rebuild` 只返回 `[新 ContextSummary] + current_task + remain`
 - 压缩失败会中断整个 stream，UI 侧会显示成错误
 
 ---
