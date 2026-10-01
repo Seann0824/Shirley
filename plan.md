@@ -133,6 +133,47 @@ SSE 流的解析，和tui的消费渲染已经处理完成了。
 
 - 如果新增工具能让 Agent 行为表现的更好，那么值得我们去新增一个工具
 
-
-
 发现一个关于上下文压缩的问题，压缩完成后，AI 忘记了用户压缩前下达的任务，然后我看了一下，压缩的摘要里面居然给出了下一步步骤。但是这个步骤并不是压缩前我提出的，看来是需要我们去保留压缩前的用户指令了，以及说部分的AI 对话？具体要保留多少轮对话呢？这点需要我们去思考一下，另外需要去优化压缩的指令，让压缩只做关键信息提炼等，不应该去有越界行为。
+
+- 上下文压缩的目的，应该是应对未来可能出现的询问？不是单纯将，上下文压缩成一个摘要就完成了，如果未来询问了摘要中不存在的信息，那么模型不会知道。因为 Compact Generation Game 本质上是交给模型做的决策，所以我们并不能定义说对不同任务能够去保留什么，可能对于不同任务需要保留的东西都是不一样的，这种不确定性促使我们不得不把这个事交给 LLM，而不是我们固定的程序化的压缩策略。 我们需要做的一点，就是在后续query中，如果出现压缩导致的上下文丢失，模型能够通过特定的工具或记忆召回，能够回忆起之前的内容。这个是应对上下文压缩，我们能够做的，而且非常有用的一个优化点。正常就是让 LLM 能够查到之前的会话的上下文信息，这里就涉及到 Memory、Rag 相关的知识内容了。
+- 这个论文 https://arxiv.org/html/2608.01326v1 是关于压缩算法指导和评估方案的。
+  - 压缩价值不是由“原始信息长什么样”单独决定，而是由“未来会问什么”决定
+
+```text
+[System Instructions]
+
+[Current Task State]
+这块内容如何更新和维护需要考虑
+
+[Important Constraints]
+一些关键约束
+
+[Relevant Memory / Summary]
+这里就是 LLM 对非保留区的内容，做的摘要。
+
+[Recent Conversation]
+这个内容，保留多少也是需要考虑的
+
+[Current User Message]
+```
+
+研究表明说，使用xml 标签 LLM 对这块内容的注意力会提升，我在 THink 文章中看到的，说就算不开启thinking 不是仅仅使用 <thinking> 这种标签，也会引导LLM去进行Thinking, 借助这个原理，我们可以把我们构建好的上下文转换成label formmater
+
+```text
+<current_goal>
+Implement context compaction.
+</current_goal>
+
+<hard_constraints>
+- Do not modify message.rs
+- Preserve API compatibility
+</hard_constraints>
+
+<decisions>
+...
+</decisions>
+```
+
+刚把错误归一化，这样内部使用具体工具的错误，然后通过实现 std::io::Error 很容的通过 ？ 转换成 AgentError 向外暴露使用。
+
+除了bash，我们还要提供一个 apply_patch， 这样我们就能直接观测到Agent本轮到底修改了什么，同时我们能够将其发送到视图层消费。以及说可以运行回滚本轮改动，而不是仅仅通过 git diff。
