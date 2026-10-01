@@ -10,6 +10,9 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             KeyCode::Char('t') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.toggle_thinking()
             }
+            KeyCode::Char('o') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.toggle_tool_args()
+            }
             // Enter 在等待回复时不提交（submit 内部也会拦截），
             // 但编辑能力不受等待影响，AI 回复期间照样能打字。
             KeyCode::Enter => return app.submit(),

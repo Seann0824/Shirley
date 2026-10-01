@@ -24,7 +24,9 @@ impl MessageCache {
                 Item::Message(message) => {
                     append_message(&mut lines, message, app.show_thinking(), width)
                 }
-                Item::Tools(group) => append_tools(&mut lines, group),
+                Item::Tools(group) => {
+                    append_tools(&mut lines, group, app.show_tool_args(), width)
+                }
             }
         }
         let mut row_offsets = Vec::with_capacity(lines.len() + 1);
@@ -226,43 +228,163 @@ fn append_message(
     lines.push(Line::default());
 }
 
-fn append_tools(lines: &mut Vec<Line>, group: &super::app::ToolGroup) {
-    let name_style = Style::default().fg(Color::Yellow);
-    let arg_style = Style::default().fg(Color::DarkGray);
+fn append_tools(
+    lines: &mut Vec<Line>,
+    group: &super::app::ToolGroup,
+    show_args: bool,
+    width: usize,
+) {
+    let name_style = Style::default()
+        .fg(Color::Yellow)
+        .add_modifier(Modifier::BOLD);
+    let dim = Style::default().fg(Color::DarkGray);
+
     for call in &group.calls {
-        lines.push(Line::from(vec![
-            Span::styled(format!("🔧 {}", call.name), name_style),
-            Span::styled(summarize_arguments(&call.arguments), arg_style),
-        ]));
+        // 默认一行：🔧 名称 + 关键参数摘要，超宽截断。
+        let summary = summarize_arguments(&call.arguments);
+        let mut line = vec![Span::styled(format!("🔧 {}", call.name), name_style)];
+        if !summary.is_empty() {
+            line.push(Span::styled(format!(" {summary}"), dim));
+        }
+        lines.push(truncate_line(Line::from(line), width));
+
+        // 展开时，逐行给出格式化后的可读参数（不改动原始 JSON）。
+        if show_args {
+            for param in format_arguments(&call.arguments) {
+                lines.push(param);
+            }
+        }
     }
     lines.push(Line::default());
 }
 
-// 把工具参数压成一行摘要，重点是把"读了哪个文件"这种关键信息露出来
+/// 把 Line 截断到 width 显示宽度，超出部分用省略号收尾。
+fn truncate_line(line: Line<'static>, width: usize) -> Line<'static> {
+    if width == 0 || line.width() <= width {
+        return line;
+    }
+    let mut spans = Vec::new();
+    let mut used = 0usize;
+    // 预留 1 列给省略号
+    let budget = width.saturating_sub(1);
+    'outer: for span in line.spans {
+        let mut text = String::new();
+        for ch in span.content.chars() {
+            let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+            if used + w > budget {
+                spans.push(Span::styled(text, span.style));
+                break 'outer;
+            }
+            used += w;
+            text.push(ch);
+        }
+        spans.push(Span::styled(text, span.style));
+    }
+    spans.push(Span::styled("…", Style::default().fg(Color::DarkGray)));
+    Line::from(spans)
+}
+
+/// 把原始 JSON 参数压成一行 KV 摘要，优先露出最关键字段。
 fn summarize_arguments(arguments: &str) -> String {
     let arguments = arguments.trim();
     if arguments.is_empty() {
         return String::new();
     }
-
-    let value: serde_json::Value = match serde_json::from_str(arguments) {
-        Ok(value) => value,
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
         // 模型偶尔会吐出非法 JSON，原样展示好过藏起来
-        Err(_) => return format!(" {arguments}"),
+        return arguments.to_owned();
+    };
+    let Some(map) = value.as_object() else {
+        return compact_value(&value);
+    };
+    if map.is_empty() {
+        return String::new();
+    }
+    map.iter()
+        .map(|(key, value)| format!("{key}={}", compact_value(value)))
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// 单个值的紧凑可读表示：字符串去引号，标量直接显示，复合类型压成 JSON。
+fn compact_value(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(text) => text.clone(),
+        serde_json::Value::Null => "null".to_owned(),
+        other => other.to_string(),
+    }
+}
+
+/// 展开时的可读参数视图：每个顶层字段一行 `key: value`，
+/// 字符串去引号，嵌套结构缩进展示，不改动原始 arguments。
+fn format_arguments(arguments: &str) -> Vec<Line<'static>> {
+    let indent = "  ";
+    let key_style = Style::default().fg(Color::Cyan);
+    let value_style = Style::default().fg(Color::Gray);
+
+    let arguments = arguments.trim();
+    if arguments.is_empty() {
+        return Vec::new();
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
+        return vec![Line::from(Span::styled(
+            format!("{indent}{arguments}"),
+            value_style,
+        ))];
     };
 
-    // 优先挑各工具最关键的字段
-    for key in ["path", "command", "pattern", "query"] {
-        if let Some(text) = value.get(key).and_then(|field| field.as_str()) {
-            return format!(" {text}");
+    let Some(map) = value.as_object() else {
+        return vec![Line::from(Span::styled(
+            format!("{indent}{}", compact_value(&value)),
+            value_style,
+        ))];
+    };
+
+    let mut lines = Vec::new();
+    for (key, value) in map {
+        match value {
+            serde_json::Value::String(text) if !text.contains('\n') => {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{indent}{key}: "), key_style),
+                    Span::styled(text.clone(), value_style),
+                ]));
+            }
+            serde_json::Value::String(text) => {
+                // 多行字符串：首行跟 key，其余行缩进对齐
+                let mut parts = text.lines();
+                let first = parts.next().unwrap_or("");
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{indent}{key}: "), key_style),
+                    Span::styled(first.to_owned(), value_style),
+                ]));
+                for rest in parts {
+                    lines.push(Line::from(Span::styled(
+                        format!("{indent}{indent}{rest}"),
+                        value_style,
+                    )));
+                }
+            }
+            serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+                // 复合类型：key 单独一行，下面缩进给出格式化 JSON
+                lines.push(Line::from(Span::styled(format!("{indent}{key}:"), key_style)));
+                let pretty = serde_json::to_string_pretty(value)
+                    .unwrap_or_else(|_| value.to_string());
+                for raw in pretty.lines() {
+                    lines.push(Line::from(Span::styled(
+                        format!("{indent}{indent}{raw}"),
+                        value_style,
+                    )));
+                }
+            }
+            scalar => {
+                lines.push(Line::from(vec![
+                    Span::styled(format!("{indent}{key}: "), key_style),
+                    Span::styled(compact_value(scalar), value_style),
+                ]));
+            }
         }
     }
-
-    // 退而求其次，把参数对象压成紧凑 JSON
-    match serde_json::to_string(&value) {
-        Ok(text) => format!(" {text}"),
-        Err(_) => String::new(),
-    }
+    lines
 }
 
 fn input_label(app: &App) -> Line<'static> {
@@ -285,7 +407,7 @@ fn input_hint(app: &App) -> String {
     } else if app.is_waiting() {
         " 可继续输入 · Esc 退出 ".to_owned()
     } else {
-        " Enter 发送 · ↑↓ 历史 · Ctrl+T 思考 · Esc 退出 ".to_owned()
+        " Enter 发送 · ↑↓ 历史 · Ctrl+T 思考 · Ctrl+O 参数 · Esc 退出 ".to_owned()
     }
 }
 
@@ -352,4 +474,54 @@ fn footer_line(app: &App) -> Line<'static> {
     }
 
     Line::from(spans).right_aligned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn plain(line: &Line) -> String {
+        line.spans.iter().map(|s| s.content.as_ref()).collect()
+    }
+
+    #[test]
+    fn summarize_picks_all_kv_on_one_line() {
+        let text = summarize_arguments(r#"{"path":"a/b.rs","line":12}"#);
+        assert_eq!(text, "line=12 path=a/b.rs");
+    }
+
+    #[test]
+    fn summarize_falls_back_to_raw_on_invalid_json() {
+        assert_eq!(summarize_arguments("not json"), "not json");
+        assert_eq!(summarize_arguments(""), "");
+    }
+
+    #[test]
+    fn format_arguments_is_readable_and_unquoted() {
+        let lines = format_arguments(r#"{"path":"a/b.rs","count":3}"#);
+        let text: Vec<String> = lines.iter().map(plain).collect();
+        assert_eq!(text, vec!["  count: 3", "  path: a/b.rs"]);
+    }
+
+    #[test]
+    fn format_arguments_pretty_prints_nested() {
+        let lines = format_arguments(r#"{"opts":{"deep":true}}"#);
+        let text: Vec<String> = lines.iter().map(plain).collect();
+        assert_eq!(text[0], "  opts:");
+        assert!(text.iter().any(|l| l.contains("\"deep\": true")));
+    }
+
+    #[test]
+    fn truncate_line_respects_width() {
+        let line = Line::from("abcdef");
+        let out = plain(&truncate_line(line, 4));
+        assert_eq!(out, "abc…");
+        assert_eq!(out.width(), 4);
+    }
+
+    #[test]
+    fn truncate_line_keeps_short_line() {
+        let line = Line::from("ab");
+        assert_eq!(plain(&truncate_line(line, 10)), "ab");
+    }
 }

@@ -51,6 +51,8 @@ pub struct App {
     waiting: bool,
     waiting_since: Option<Instant>,
     show_thinking: bool,
+    // 是否展开工具调用的完整参数（默认收起，只显示一行摘要）。
+    show_tool_args: bool,
     scroll: usize,
     auto_scroll: bool,
     // 渲染层每帧回写，输入层拿不到布局所以存这儿
@@ -77,6 +79,7 @@ impl App {
             waiting: false,
             waiting_since: None,
             show_thinking: true,
+            show_tool_args: false,
             scroll: 0,
             auto_scroll: true,
             max_scroll: 0,
@@ -197,6 +200,15 @@ impl App {
 
     pub fn toggle_thinking(&mut self) {
         self.show_thinking = !self.show_thinking;
+        self.message_cache = None;
+    }
+
+    pub fn show_tool_args(&self) -> bool {
+        self.show_tool_args
+    }
+
+    pub fn toggle_tool_args(&mut self) {
+        self.show_tool_args = !self.show_tool_args;
         self.message_cache = None;
     }
 
