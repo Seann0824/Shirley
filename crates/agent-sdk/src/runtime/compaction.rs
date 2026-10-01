@@ -4,6 +4,27 @@ use crate::token;
 /// 保留尾部的预算口径：上下文窗口的 20%（`docs/compaction.md` 4.1）。
 pub(super) const RETAIN_RATIO: f64 = 0.20;
 
+/// 压缩摘要的输出模板与硬性规则（`docs/compaction.md` 5.3）。
+///
+/// [`super::agent::Agent::compress_context`] 在构造压缩请求时，会把它**追加**到调用方
+/// 传入的 `compression_instruction` 之后，保证摘要始终是结构化的 XML 块，且不越界编造内容。
+///
+/// 之所以把"结构"放进 SDK 而不是调用方：有哪些标签、禁止什么，是压缩协议的契约，
+/// 不该由每个调用方各写一遍；调用方只负责领域相关的取舍（例如 coding agent 关心
+/// 哪些文件 / 命令值得保留）。模板里**刻意不要求"下一步"**——那会诱导模型编造
+/// 用户从未下达的计划（`docs/compaction.md` 2.2 根因 B）。
+pub(super) const COMPACTION_TEMPLATE: &str = r#"严格按下面的格式输出，不要输出 XML 之外的任何解释。
+
+只提炼对话中已经发生的内容：不得推演、不得补充用户未提出的计划、不得编造"下一步"。
+忠实复述用户明确下达的指令与约束，逐字保留关键措辞，不要改写用户意图。
+
+<current_goal>忠实复述用户当前真正下达的任务，不得添加、不得删改</current_goal>
+<hard_constraints>用户明确提出的约束（禁止的操作、必须遵守的约定、边界条件）</hard_constraints>
+<decisions>已经做出的关键决策，以及做出该决策的原因</decisions>
+<progress>已完成的工作与当前状态</progress>
+<open_questions>尚未解决的问题或悬而未决的疑问</open_questions>
+<compacted_range>此前对话已被压缩，精确细节（文件内容、命令输出、报错、符号列表）不在本摘要中；需要时请重新读取文件或重新执行命令确认</compacted_range>"#;
+
 /// 压缩切点算出的三段内容。
 ///
 /// 三段**互不重叠**，且合起来恰好覆盖 `messages[head..]` 的全部消息（背景前缀除外）。
@@ -196,4 +217,44 @@ pub fn plan_cut(
         cut,
         current_task,
     })
+}
+
+#[cfg(test)]
+mod template_tests {
+    use super::COMPACTION_TEMPLATE;
+
+    /// `docs/compaction.md` 5.3：摘要必须是这些 XML 块，缺一不可。
+    #[test]
+    fn template_has_all_required_blocks() {
+        for tag in [
+            "current_goal",
+            "hard_constraints",
+            "decisions",
+            "progress",
+            "open_questions",
+            "compacted_range",
+        ] {
+            assert!(
+                COMPACTION_TEMPLATE.contains(&format!("<{tag}>"))
+                    && COMPACTION_TEMPLATE.contains(&format!("</{tag}>")),
+                "缺少标签 {tag}",
+            );
+        }
+    }
+
+    /// 根因 B：模板绝不能**要求**"下一步"（没有 next_step 块），
+    /// 只能明确禁止编造它。
+    #[test]
+    fn template_never_asks_for_next_steps() {
+        assert!(!COMPACTION_TEMPLATE.contains("<next_step"));
+        assert!(COMPACTION_TEMPLATE.contains("不得推演"));
+        assert!(COMPACTION_TEMPLATE.contains("不得编造"));
+    }
+
+    /// `<compacted_range>` 是召回钩子，必须提示"精确细节不在摘要里"。
+    #[test]
+    fn template_marks_compacted_range_as_lossy() {
+        assert!(COMPACTION_TEMPLATE.contains("精确细节"));
+        assert!(COMPACTION_TEMPLATE.contains("重新读取"));
+    }
 }

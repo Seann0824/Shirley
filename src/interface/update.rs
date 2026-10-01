@@ -36,6 +36,9 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             _ => {}
         },
         Event::Key(_) => {}
+        // 括号粘贴整体插入：粘贴文本里的换行只当作普通字符写入输入框，
+        // 绝不触发发送，避免粘贴多行内容时消息被自动发出去。
+        Event::Paste(text) => app.insert_input(&text),
         Event::Mouse(mouse_event) => match mouse_event.kind {
             MouseEventKind::ScrollUp => app.scroll_by(-3),
             MouseEventKind::ScrollDown => app.scroll_by(3),

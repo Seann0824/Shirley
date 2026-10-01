@@ -5,10 +5,13 @@ use ratatui::{
     text::{Line, Span},
     widgets::{Block, BorderType, Paragraph, Wrap},
 };
-use unicode_width::UnicodeWidthStr;
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, ChatMessage, Item, Role};
 use super::markdown;
+
+/// 输入框最多显示的行数，超出后内部纵向滚动，避免挤占消息区。
+const INPUT_MAX_LINES: usize = 10;
 
 pub(crate) struct MessageCache {
     width: usize,
@@ -78,11 +81,18 @@ impl MessageCache {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let [messages_area, input_area] = Layout::vertical([
-        Constraint::Min(1),
-        Constraint::Length(3),
-    ])
-    .areas(frame.area());
+    let prompt = "❯ ";
+    let prompt_width = prompt.width();
+    let input_width = frame.area().width;
+    let inner_width = (input_width.saturating_sub(2) as usize).max(1);
+    let (input_lines, cursor_line, cursor_col) =
+        wrap_input(app.input(), app.input_cursor(), inner_width, prompt_width);
+    let content_lines = input_lines.len().clamp(1, INPUT_MAX_LINES);
+    let input_height = content_lines as u16 + 2;
+
+    let [messages_area, input_area] =
+        Layout::vertical([Constraint::Min(1), Constraint::Length(input_height)])
+            .areas(frame.area());
 
     let message_width = messages_area.width.max(1) as usize;
     if app
@@ -121,35 +131,29 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     );
 
     // 输入框用圆角描边 + 顶部标签/提示 + 底部右侧缓存信息，做出「卡片」的层次感。
-    let prompt = "❯ ";
-    let prompt_width = prompt.width() as u16;
-    let visible_width = input_area.width.saturating_sub(2 + prompt_width) as usize;
-    let input = app.input();
-    let cursor = app.input_cursor();
-    // 水平滚动窗口：从光标往回留出可见宽度（预留 1 列给光标），
-    // 再向后铺满可见宽度，保证光标始终在框内可见。
-    let mut start = cursor;
-    let mut back_width = 0;
-    for (index, ch) in input[..cursor].char_indices().rev() {
-        let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if back_width + char_width > visible_width.saturating_sub(1) {
-            break;
-        }
-        back_width += char_width;
-        start = index;
-    }
-    let mut end = input.len();
-    let mut forward_width = back_width;
-    for (offset, ch) in input[cursor..].char_indices() {
-        let char_width = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
-        if forward_width + char_width > visible_width {
-            end = cursor + offset;
-            break;
-        }
-        forward_width += char_width;
-    }
-    let visible_input = &input[start..end];
-    let cursor_offset = input[start..cursor].width() as u16;
+    // 粘贴多行内容时按行展开，框高随内容增长（到上限后内部纵向滚动）。
+    let first = cursor_line.saturating_add(1).saturating_sub(content_lines);
+    let visible: Vec<Line> = input_lines
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(content_lines)
+        .map(|(index, text)| {
+            if index == 0 {
+                Line::from(vec![
+                    Span::styled(
+                        prompt,
+                        Style::default()
+                            .fg(Color::Cyan)
+                            .add_modifier(Modifier::BOLD),
+                    ),
+                    Span::raw(text.clone()),
+                ])
+            } else {
+                Line::from(Span::raw(text.clone()))
+            }
+        })
+        .collect();
 
     let border_style = if app.is_compressing() {
         Style::default().fg(Color::Yellow)
@@ -162,21 +166,77 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         .title_top(input_label(app))
         .title_top(Line::from(input_hint(app)).right_aligned())
         .title_bottom(footer_line(app));
-    let content = Line::from(vec![
-        Span::styled(
-            prompt,
-            Style::default()
-                .fg(Color::Cyan)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw(visible_input.to_owned()),
-    ]);
-    frame.render_widget(Paragraph::new(content).block(block), input_area);
+    frame.render_widget(Paragraph::new(visible).block(block), input_area);
 
-    if visible_width > 0 {
-        let cursor_x = input_area.x + 1 + prompt_width + cursor_offset;
-        frame.set_cursor_position((cursor_x, input_area.y + 1));
+    let cursor_row = cursor_line.saturating_sub(first);
+    let cursor_x = input_area.x
+        + 1
+        + if cursor_line == 0 {
+            prompt_width as u16
+        } else {
+            0
+        }
+        + cursor_col as u16;
+    let cursor_y = input_area.y + 1 + cursor_row as u16;
+    if cursor_y < input_area.y + input_area.height.saturating_sub(1) {
+        frame.set_cursor_position((cursor_x, cursor_y));
     }
+}
+
+/// 把输入按显示宽度软换行，并保留硬换行（粘贴进来的 `\n`）。
+/// 返回每行的可见文本、光标所在行号与光标在该行内的显示列。
+/// 首行因为前面有提示符，可用宽度比后续行少 `prompt_width`。
+fn wrap_input(
+    input: &str,
+    cursor: usize,
+    inner_width: usize,
+    prompt_width: usize,
+) -> (Vec<String>, usize, usize) {
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_width = 0usize;
+    let mut cursor_line = 0usize;
+    let mut cursor_col = 0usize;
+    let mut cursor_set = false;
+    let capacity = |line_index: usize| {
+        if line_index == 0 {
+            inner_width.saturating_sub(prompt_width).max(1)
+        } else {
+            inner_width.max(1)
+        }
+    };
+    for (offset, ch) in input.char_indices() {
+        if ch == '\n' {
+            // 光标位于换行符之前时，停在当前行末尾。
+            if !cursor_set && offset == cursor {
+                cursor_line = lines.len();
+                cursor_col = current_width;
+                cursor_set = true;
+            }
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+            continue;
+        }
+        let width = UnicodeWidthChar::width(ch).unwrap_or(0);
+        if current_width > 0 && current_width + width > capacity(lines.len()) {
+            lines.push(std::mem::take(&mut current));
+            current_width = 0;
+        }
+        // 光标在该字符之前：若字符被软换行挤到下一行，光标也随之落到新行行首。
+        if !cursor_set && offset == cursor {
+            cursor_line = lines.len();
+            cursor_col = current_width;
+            cursor_set = true;
+        }
+        current.push(ch);
+        current_width += width;
+    }
+    if !cursor_set {
+        cursor_line = lines.len();
+        cursor_col = current_width;
+    }
+    lines.push(current);
+    (lines, cursor_line, cursor_col)
 }
 
 /// 一轮 AI 回复的名字头，先于 思考 / 工具调用 / 正文 出现。
@@ -383,9 +443,12 @@ fn format_arguments(arguments: &str) -> Vec<Line<'static>> {
             }
             serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
                 // 复合类型：key 单独一行，下面缩进给出格式化 JSON
-                lines.push(Line::from(Span::styled(format!("{indent}{key}:"), key_style)));
-                let pretty = serde_json::to_string_pretty(value)
-                    .unwrap_or_else(|_| value.to_string());
+                lines.push(Line::from(Span::styled(
+                    format!("{indent}{key}:"),
+                    key_style,
+                )));
+                let pretty =
+                    serde_json::to_string_pretty(value).unwrap_or_else(|_| value.to_string());
                 for raw in pretty.lines() {
                     lines.push(Line::from(Span::styled(
                         format!("{indent}{indent}{raw}"),
@@ -540,5 +603,34 @@ mod tests {
     fn truncate_line_keeps_short_line() {
         let line = Line::from("ab");
         assert_eq!(plain(&truncate_line(line, 10)), "ab");
+    }
+
+    #[test]
+    fn wrap_input_keeps_hard_newlines() {
+        let (lines, cursor_line, cursor_col) = wrap_input("ab\ncd", 2, 20, 2);
+        assert_eq!(lines, vec!["ab", "cd"]);
+        assert_eq!((cursor_line, cursor_col), (0, 2));
+    }
+
+    #[test]
+    fn wrap_input_wraps_long_line() {
+        // 首行可用宽度 = 10 - 2(提示符) = 8
+        let (lines, cursor_line, cursor_col) = wrap_input("abcdefghij", 10, 10, 2);
+        assert_eq!(lines, vec!["abcdefgh", "ij"]);
+        assert_eq!((cursor_line, cursor_col), (1, 2));
+    }
+
+    #[test]
+    fn wrap_input_cursor_at_line_boundary() {
+        let (_, cursor_line, cursor_col) = wrap_input("ab\n", 3, 20, 2);
+        assert_eq!((cursor_line, cursor_col), (1, 0));
+    }
+
+    #[test]
+    fn wrap_input_cursor_before_soft_wrapped_char() {
+        // 首行容量 8：第 9 个字符会换到第二行，光标在第 9 个字符之前应落在第二行行首。
+        let (lines, cursor_line, cursor_col) = wrap_input("abcdefghi", 8, 10, 2);
+        assert_eq!(lines, vec!["abcdefgh", "i"]);
+        assert_eq!((cursor_line, cursor_col), (1, 0));
     }
 }

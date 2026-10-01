@@ -219,6 +219,19 @@ impl App {
         self.input_cursor += ch.len_utf8();
     }
 
+    /// 粘贴：把整段文本按字面插入光标处。
+    /// 换行统一成 `\n` 作为普通字符写入，不会触发发送。
+    pub fn insert_input(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        self.history_index = None;
+        // 终端可能送 CRLF，统一成 LF，避免输入框里混入 `\r`。
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        self.input.insert_str(self.input_cursor, &normalized);
+        self.input_cursor += normalized.len();
+    }
+
     /// 退格：删除光标前一个字符。
     pub fn pop_input(&mut self) {
         if let Some((index, _)) = self.input[..self.input_cursor].char_indices().last() {
@@ -469,15 +482,17 @@ mod tests {
             }
             app.submit();
             // 模拟回复结束，允许下一次提交。
-            app.restore_agent(Agent::builder()
-                .model_config(
-                    ModelConfig::builder()
-                        .protocol(ModelProtocol::ChatCompletions)
-                        .base_url("http://localhost")
-                        .model("test")
-                        .build(),
-                )
-                .build());
+            app.restore_agent(
+                Agent::builder()
+                    .model_config(
+                        ModelConfig::builder()
+                            .protocol(ModelProtocol::ChatCompletions)
+                            .base_url("http://localhost")
+                            .model("test")
+                            .build(),
+                    )
+                    .build(),
+            );
         }
 
         // 输入一半的草稿，再上翻历史。
@@ -508,15 +523,17 @@ mod tests {
             app.push_input(ch);
         }
         app.submit();
-        app.restore_agent(Agent::builder()
-            .model_config(
-                ModelConfig::builder()
-                    .protocol(ModelProtocol::ChatCompletions)
-                    .base_url("http://localhost")
-                    .model("test")
-                    .build(),
-            )
-            .build());
+        app.restore_agent(
+            Agent::builder()
+                .model_config(
+                    ModelConfig::builder()
+                        .protocol(ModelProtocol::ChatCompletions)
+                        .base_url("http://localhost")
+                        .model("test")
+                        .build(),
+                )
+                .build(),
+        );
         app.history_prev();
         assert_eq!(app.input(), "hello");
         app.push_input('!');
@@ -534,5 +551,29 @@ mod tests {
         app.scroll_by(-3);
         assert_eq!(app.scroll(), 97);
         assert!(!app.auto_scroll());
+    }
+
+    #[test]
+    fn paste_inserts_multiline_without_submitting() {
+        let mut app = app();
+        app.push_input('a');
+        app.insert_input("b\nc\r\nd\r");
+        // CRLF 与 CR 都归一为 LF。
+        assert_eq!(app.input(), "ab\nc\nd\n");
+        assert_eq!(app.input_cursor(), "ab\nc\nd\n".len());
+        // 粘贴不应触发发送，仍处于编辑态。
+        assert!(!app.is_waiting());
+    }
+
+    #[test]
+    fn paste_at_cursor_keeps_surrounding_text() {
+        let mut app = app();
+        for ch in "ac".chars() {
+            app.push_input(ch);
+        }
+        app.move_cursor_left();
+        app.insert_input("b");
+        assert_eq!(app.input(), "abc");
+        assert_eq!(app.input_cursor(), 2);
     }
 }

@@ -43,9 +43,13 @@ async fn main() -> Result<(), AgentError> {
         .system_prompt(r"
             You are Shirley, base on Englife-1.0, You are runing as coding agent in the Shirley CLI on user's computer.
         ")
+        // 摘要的取舍口径：coding agent 关心文件 / 命令 / 报错 / 测试结果。
+        // 结构与"不得推演、不得编下一步"等硬规则由 SDK 的 `COMPACTION_TEMPLATE` 追加，
+        // 这里只写领域相关的偏好（见 `docs/compaction.md` 5.3）。
         .compression_instruction(r"
-            总结对话，以便于后续继续任务，然后保留当前目标。重要的决策和原因、关键信息和约束、当前进度和状态、未解决的问题、下一步，
-            以及重要的文件名、命令、错误和测试结果，删掉重复、闲聊或者过时的中间想法。摘要要简洁，但是足够让其他人能不看原始消息的情况下继续吧任务做下去。
+            你在为 coding agent 压缩对话上下文。请忠实保留用户下达的原始指令与约束，
+            以及继续任务所必需的信息：关键决策及其原因、当前进度与状态、未解决的问题、
+            涉及的文件路径、执行过的命令、遇到的错误和测试结果。删除重复、闲聊与过时的中间想法。
         ")
         .tools(tool_manager)
         .build();

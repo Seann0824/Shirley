@@ -161,6 +161,7 @@ pub async fn bash(
 - `should_schedule_compression` 在 `(input + output) * 100 >= limit * 80` 时置 `compression_pending`，用整数比较避免浮点精度问题
 - `active_messages()` 找到**最后一个** `ContextSummary`，只保留开头的 system 消息 + 从 summary 开始的消息
 - `compress_context()` 把压缩指令作为 system 追加，要求模型输出纯文本摘要，非空且无 tool_calls 才算成功，否则报 `CompressionError`
+- 摘要内容有**结构契约**：`compaction.rs` 的 `COMPACTION_TEMPLATE` 定义了 XML 块（`current_goal` / `hard_constraints` / `decisions` / `progress` / `open_questions` / `compacted_range`），`compress_context` 会把它追加到调用方的 `compression_instruction` 之后。模板**不含** `next_step`、并显式禁止推演——修的就是"压缩器编造用户没提过的下一步"（`docs/compaction.md` 5.3）
 - 压缩成功后用 `CompactParts::rebuild` 重建 `self.messages`：**系统提示词不保留、不复制**——它由 `Agent` 单独持有（`system_prompt` 字段），每次重建都 `system_message()` 重新生成一条再置顶。`rebuild` 只返回 `[新 ContextSummary] + current_task + remain`
 - 压缩失败会中断整个 stream，UI 侧会显示成错误
 
@@ -173,8 +174,10 @@ pub async fn bash(
 - `src/interface/app.rs`：纯状态机，`Item::Message` / `Item::Tools` 两种条目；`Role` 有 User / Assistant / Summary / Error；usage、context 用量、输入历史（上/下键回放）都缓存在这里；`toggle_thinking` / `toggle_tool_args` 控制展示
 - `src/interface/ui.rs`：`MessageCache` 做渲染缓存（按宽度失效），`footer_line` 展示上下文占用百分比和缓存命中率（单次 + 累计）。消息正文交给 `markdown::render` 转成带样式的 `Line`/`Span`
 - `src/interface/markdown.rs`：Markdown 渲染层。`parse` 用 `pulldown-cmark` 把 raw markdown 收敛成块级 AST（`Block`：Heading / Paragraph / Code / List / Quote / Table / Rule / Html），`render` 再把 `Block` 变成 ratatui 的 `Line`/`Span`。支持标题、粗斜体、行内代码、代码块、有序/无序/任务列表、嵌套列表（悬挂缩进）、引用、表格、分割线。错误消息不走 markdown（避免报错里的符号被当语法吃掉）。有 13 个单测覆盖各语法
-- `src/interface/event.rs`：终端事件在独立线程里 `poll` + `read`，通过无界通道送给异步侧，`Drop` 时关鼠标捕获
-- `src/interface/update.rs`：按键映射。`Esc` / `Ctrl+C` 退出，`Ctrl+T` 切换思考显示，`Ctrl+O` 切换工具参数展开，`Enter` 提交，`Ctrl+A` / `Ctrl+E` 行首/行尾，`↑` / `↓` 历史回放，滚轮上下滚动
+- `src/interface/event.rs`：终端事件在独立线程里 `poll` + `read`，通过无界通道送给异步侧。开启括号粘贴（`EnableBracketedPaste`），粘贴内容整体作为 `Event::Paste` 送达；`Drop` 时关鼠标捕获与括号粘贴
+- `src/interface/update.rs`：按键映射。`Esc` / `Ctrl+C` 退出，`Ctrl+T` 切换思考显示，`Ctrl+O` 切换工具参数展开，`Enter` 提交，`Ctrl+A` / `Ctrl+E` 行首/行尾，`↑` / `↓` 历史回放，滚轮上下滚动。`Event::Paste` 走 `App::insert_input` 整段插入（换行归一为 `\n` 当普通字符），不触发发送
+- `src/interface/app.rs`：输入编辑状态机。`insert_input` 支持粘贴多行文本（CRLF/CR 归一为 LF），光标始终落在字符边界
+- `src/interface/ui.rs`：输入框按显示宽度软换行 + 保留硬换行（`wrap_input`），框高随内容增长（上限 `INPUT_MAX_LINES = 10`），超出后内部纵向滚动，保证粘贴长文本时光标可见
 
 **已有工具**：
 

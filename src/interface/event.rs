@@ -1,5 +1,8 @@
 use crossterm::{
-    event::{self, DisableMouseCapture, EnableMouseCapture, KeyEvent, MouseEvent, MouseEventKind},
+    event::{
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyEvent, MouseEvent, MouseEventKind,
+    },
     execute,
 };
 use std::{
@@ -14,6 +17,8 @@ use tokio::sync::mpsc::{self, UnboundedReceiver};
 
 pub enum Event {
     Key(KeyEvent),
+    // 终端以「括号粘贴」形式整体送来的文本，内部可能含换行。
+    Paste(String),
     Mouse(MouseEvent),
     Resize(u16, u16),
 }
@@ -26,7 +31,9 @@ pub struct EventHandler {
 
 impl EventHandler {
     pub fn new() -> std::io::Result<Self> {
-        execute!(std::io::stdout(), EnableMouseCapture)?;
+        // 打开括号粘贴：粘贴内容会被终端包成一个 Paste 事件整体送达，
+        // 其中的换行不再被拆成一个个 Enter 键，从而避免误触发送。
+        execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
         let (sender, receiver) = mpsc::unbounded_channel();
         let running = Arc::new(AtomicBool::new(true));
         let worker_running = Arc::clone(&running);
@@ -42,6 +49,7 @@ impl EventHandler {
                 }
                 let next = match event::read() {
                     Ok(event::Event::Key(key)) => Event::Key(key),
+                    Ok(event::Event::Paste(text)) => Event::Paste(text),
                     Ok(event::Event::Mouse(mouse)) => match mouse.kind {
                         MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
                             Event::Mouse(mouse)
@@ -81,6 +89,10 @@ impl Drop for EventHandler {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        let _ = execute!(std::io::stdout(), DisableMouseCapture);
+        let _ = execute!(
+            std::io::stdout(),
+            DisableBracketedPaste,
+            DisableMouseCapture
+        );
     }
 }

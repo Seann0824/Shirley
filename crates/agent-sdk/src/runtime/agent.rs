@@ -1,4 +1,4 @@
-use super::compaction::{CutPlan, RETAIN_RATIO, plan_cut};
+use super::compaction::{COMPACTION_TEMPLATE, CutPlan, RETAIN_RATIO, plan_cut};
 use super::error::AgentError;
 use super::event::{AgentEvent, RunResult, StopReason};
 use crate::adapter;
@@ -291,12 +291,14 @@ impl Agent {
         if let Some(task) = &parts.current_task {
             messages.push(task.clone());
         }
-        messages.push(message::Message::System {
-            content: self
-                .compression_instruction
-                .clone()
-                .ok_or_else(|| AgentError::Compression("未配置压缩指令".into()))?,
-        });
+        let instruction = self
+            .compression_instruction
+            .clone()
+            .ok_or_else(|| AgentError::Compression("未配置压缩指令".into()))?;
+        // 调用方给领域相关的取舍，SDK 追加结构模板（`docs/compaction.md` 5.3）：
+        // 摘要始终是 XML 块，且禁止推演"下一步"。
+        let content = format!("{instruction}\n\n{COMPACTION_TEMPLATE}");
+        messages.push(message::Message::System { content });
 
         let model_request = ModelRequest {
             messages: &messages,
@@ -323,10 +325,7 @@ impl Agent {
                     // 3. 重建：[新摘要] + current_task + remain，再把系统提示词重新生成置顶。
                     //    system 不参与压缩、也不从旧消息复制，每次重建现取一条。
                     let rebuilt = parts.rebuild(summary);
-                    let summary_message = rebuilt
-                        .first()
-                        .expect("rebuild 至少产出摘要")
-                        .clone();
+                    let summary_message = rebuilt.first().expect("rebuild 至少产出摘要").clone();
                     let mut next = rebuilt;
                     if let Some(system) = self.system_message() {
                         next.insert(0, system);
