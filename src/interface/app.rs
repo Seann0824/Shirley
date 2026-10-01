@@ -41,6 +41,12 @@ pub struct App {
     exit: bool,
     input: String,
     input_cursor: usize,
+    // 已发送的提示词历史，供上/下键回放。
+    history: Vec<String>,
+    // None 表示不在历史浏览中；Some(i) 表示当前显示的是 history[i]。
+    history_index: Option<usize>,
+    // 进入历史浏览前暂存的未发送输入，用于向下回到末尾时恢复。
+    history_draft: String,
     items: Vec<Item>,
     waiting: bool,
     waiting_since: Option<Instant>,
@@ -64,6 +70,9 @@ impl App {
             exit: false,
             input: String::new(),
             input_cursor: 0,
+            history: Vec::new(),
+            history_index: None,
+            history_draft: String::new(),
             items: Vec::new(),
             waiting: false,
             waiting_since: None,
@@ -192,6 +201,8 @@ impl App {
     }
 
     pub fn push_input(&mut self, ch: char) {
+        // 一旦开始编辑就退出历史浏览，避免回放与草稿互相打架。
+        self.history_index = None;
         self.input.insert(self.input_cursor, ch);
         self.input_cursor += ch.len_utf8();
     }
@@ -239,8 +250,49 @@ impl App {
         self.waiting_since = Some(Instant::now());
         let prompt = std::mem::take(&mut self.input);
         self.input_cursor = 0;
+        self.history.push(prompt.clone());
+        self.history_index = None;
+        self.history_draft.clear();
         self.push_message(Role::User, prompt.clone(), false);
         Some(prompt)
+    }
+
+    /// 上键：回放到更早的一条历史。首次进入时暂存当前输入。
+    pub fn history_prev(&mut self) {
+        if self.history.is_empty() {
+            return;
+        }
+        let index = match self.history_index {
+            Some(0) => 0,
+            Some(index) => index - 1,
+            None => {
+                self.history_draft = self.input.clone();
+                self.history.len() - 1
+            }
+        };
+        self.history_index = Some(index);
+        self.set_input(self.history[index].clone());
+    }
+
+    /// 下键：回放到更晚的一条历史，走到末尾则恢复进入浏览前的输入。
+    pub fn history_next(&mut self) {
+        let Some(index) = self.history_index else {
+            return;
+        };
+        if index + 1 < self.history.len() {
+            self.history_index = Some(index + 1);
+            self.set_input(self.history[index + 1].clone());
+        } else {
+            self.history_index = None;
+            let draft = std::mem::take(&mut self.history_draft);
+            self.set_input(draft);
+        }
+    }
+
+    /// 整体替换输入内容，并把光标放到末尾。
+    fn set_input(&mut self, text: String) {
+        self.input = text;
+        self.input_cursor = self.input.len();
     }
 
     pub fn take_agent(&mut self) -> Option<Agent> {
@@ -394,6 +446,72 @@ mod tests {
         assert_eq!(app.input_cursor(), "夏".len());
         app.pop_input();
         assert_eq!(app.input(), "莉");
+    }
+
+    #[test]
+    fn history_recall_cycles_and_restores_draft() {
+        let mut app = app();
+        for prompt in ["first", "second"] {
+            for ch in prompt.chars() {
+                app.push_input(ch);
+            }
+            app.submit();
+            // 模拟回复结束，允许下一次提交。
+            app.restore_agent(Agent::builder()
+                .model_config(
+                    ModelConfig::builder()
+                        .protocol(ModelProtocol::ChatCompletions)
+                        .base_url("http://localhost")
+                        .model("test")
+                        .build(),
+                )
+                .build());
+        }
+
+        // 输入一半的草稿，再上翻历史。
+        app.push_input('d');
+        app.push_input('r');
+        app.push_input('a');
+        app.push_input('f');
+        app.push_input('t');
+
+        app.history_prev();
+        assert_eq!(app.input(), "second");
+        app.history_prev();
+        assert_eq!(app.input(), "first");
+        // 到头再上翻仍是第一条。
+        app.history_prev();
+        assert_eq!(app.input(), "first");
+        app.history_next();
+        assert_eq!(app.input(), "second");
+        // 下翻越过末尾恢复草稿。
+        app.history_next();
+        assert_eq!(app.input(), "draft");
+    }
+
+    #[test]
+    fn typing_after_history_exits_recall() {
+        let mut app = app();
+        for ch in "hello".chars() {
+            app.push_input(ch);
+        }
+        app.submit();
+        app.restore_agent(Agent::builder()
+            .model_config(
+                ModelConfig::builder()
+                    .protocol(ModelProtocol::ChatCompletions)
+                    .base_url("http://localhost")
+                    .model("test")
+                    .build(),
+            )
+            .build());
+        app.history_prev();
+        assert_eq!(app.input(), "hello");
+        app.push_input('!');
+        assert_eq!(app.input(), "hello!");
+        // 编辑后下键不再回放历史。
+        app.history_next();
+        assert_eq!(app.input(), "hello!");
     }
 
     #[test]

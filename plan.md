@@ -190,3 +190,5 @@ Implement context compaction.
 2. Objective
 
 - 明确最高目标，以及优先级
+
+上下文压缩要有重试机制，有点时候压缩失败了重试就能成功。

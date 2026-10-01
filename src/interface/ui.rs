@@ -3,7 +3,7 @@ use ratatui::{
     layout::{Constraint, Layout},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Paragraph, Wrap},
+    widgets::{Block, BorderType, Paragraph, Wrap},
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -58,9 +58,8 @@ impl MessageCache {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
-    let [messages_area, status_area, input_area] = Layout::vertical([
+    let [messages_area, input_area] = Layout::vertical([
         Constraint::Min(1),
-        Constraint::Length(1),
         Constraint::Length(3),
     ])
     .areas(frame.area());
@@ -101,9 +100,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         messages_area,
     );
 
-    frame.render_widget(Paragraph::new(status_line(app)), status_area);
-
-    let visible_width = input_area.width.saturating_sub(2) as usize;
+    // 输入框用圆角描边 + 顶部标签/提示 + 底部右侧缓存信息，做出「卡片」的层次感。
+    let prompt = "❯ ";
+    let prompt_width = prompt.width() as u16;
+    let visible_width = input_area.width.saturating_sub(2 + prompt_width) as usize;
     let input = app.input();
     let cursor = app.input_cursor();
     // 水平滚动窗口：从光标往回留出可见宽度（预留 1 列给光标），
@@ -130,20 +130,33 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     }
     let visible_input = &input[start..end];
     let cursor_offset = input[start..cursor].width() as u16;
-    let input_title = if app.is_compressing() {
-        " 正在压缩上下文 · Esc 退出 ".to_owned()
-    } else if let Some(seconds) = app.waiting_seconds() {
-        format!(" AI 回复中 {seconds}s · Esc 退出 ")
-    } else {
-        " 输入框 · Enter 发送 · Ctrl+T 思考 · Esc 退出 ".to_owned()
-    };
-    frame.render_widget(
-        Paragraph::new(visible_input).block(Block::bordered().title(input_title)),
-        input_area,
-    );
 
-    if visible_width > 0 && !app.is_waiting() {
-        let cursor_x = input_area.x + 1 + cursor_offset;
+    let border_style = if app.is_compressing() {
+        Style::default().fg(Color::Yellow)
+    } else if app.is_waiting() {
+        Style::default().fg(Color::Magenta)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(border_style)
+        .title_top(input_label(app))
+        .title_top(Line::from(input_hint(app)).right_aligned())
+        .title_bottom(footer_line(app));
+    let content = Line::from(vec![
+        Span::styled(
+            prompt,
+            Style::default()
+                .fg(Color::Cyan)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(visible_input.to_owned()),
+    ]);
+    frame.render_widget(Paragraph::new(content).block(block), input_area);
+
+    if visible_width > 0 {
+        let cursor_x = input_area.x + 1 + prompt_width + cursor_offset;
         frame.set_cursor_position((cursor_x, input_area.y + 1));
     }
 }
@@ -252,21 +265,50 @@ fn summarize_arguments(arguments: &str) -> String {
     }
 }
 
-fn status_line(app: &App) -> Line<'static> {
-    let mut spans = Vec::new();
-    if !app.is_compressing() {
-        let text = if app.show_thinking() {
-            "思考：显示 "
-        } else {
-            "思考：隐藏 "
-        };
-        spans.push(Span::styled(text, Style::default().fg(Color::DarkGray)));
-    }
+fn input_label(app: &App) -> Line<'static> {
+    let (text, color) = if app.is_compressing() {
+        (" 正在压缩上下文 ".to_owned(), Color::Yellow)
+    } else if let Some(seconds) = app.waiting_seconds() {
+        (format!(" 夏莉回复中 {seconds}s "), Color::Magenta)
+    } else {
+        (" 输入 ".to_owned(), Color::Cyan)
+    };
+    Line::from(Span::styled(
+        text,
+        Style::default().fg(color).add_modifier(Modifier::BOLD),
+    ))
+}
+
+fn input_hint(app: &App) -> String {
     if app.is_compressing() {
+        " Esc 退出 ".to_owned()
+    } else if app.is_waiting() {
+        " 可继续输入 · Esc 退出 ".to_owned()
+    } else {
+        " Enter 发送 · ↑↓ 历史 · Ctrl+T 思考 · Esc 退出 ".to_owned()
+    }
+}
+
+/// 底部信息统一右对齐，只保留 KV 形式的数字，够扫一眼即可。
+fn footer_line(app: &App) -> Line<'static> {
+    let dim = Style::default().fg(Color::DarkGray);
+    let sep = || Span::styled(" · ", dim);
+    let mut spans: Vec<Span> = Vec::new();
+
+    // 思考：显 / 隐
+    if !app.is_compressing() {
+        spans.push(Span::styled("思考 ", dim));
         spans.push(Span::styled(
-            " 上下文：压缩中… | ",
-            Style::default().fg(Color::Yellow),
+            if app.show_thinking() { "显" } else { "隐" },
+            dim,
         ));
+        spans.push(sep());
+    }
+
+    // 上下文占用率
+    spans.push(Span::styled("上下文 ", dim));
+    if app.is_compressing() {
+        spans.push(Span::styled("…", Style::default().fg(Color::Yellow)));
     } else if let Some((used, limit)) = app.context_usage() {
         let percent = used as f64 / limit as f64 * 100.0;
         let color = if percent >= 80.0 {
@@ -277,68 +319,37 @@ fn status_line(app: &App) -> Line<'static> {
             Color::Green
         };
         spans.push(Span::styled(
-            format!(" 上下文 {used}/{limit} ({percent:.1}%) | "),
+            format!("{percent:.0}%"),
             Style::default().fg(color),
         ));
     } else {
-        spans.push(Span::styled(
-            " 上下文：待统计 | ",
-            Style::default().fg(Color::DarkGray),
-        ));
+        spans.push(Span::styled("-", dim));
     }
-    let Some(last) = app.last_usage() else {
-        spans.push(Span::styled(
-            "缓存：等待首次模型调用…",
-            Style::default().fg(Color::DarkGray),
-        ));
-        return Line::from(spans);
-    };
+    spans.push(sep());
 
-    let total = app.total_usage();
-
+    // 缓存命中率：最近 / 累计
     let hit_style = |rate: Option<f64>| match rate {
-        // 未上报，不能标红误导成失效
-        None => Style::default().fg(Color::DarkGray),
+        None => dim,
         Some(rate) if rate >= 0.8 => Style::default().fg(Color::Green),
         Some(rate) if rate >= 0.5 => Style::default().fg(Color::Yellow),
         Some(_) => Style::default().fg(Color::Red),
     };
-
     let format_rate = |rate: Option<f64>| match rate {
-        Some(rate) => format!("{:.1}%", rate * 100.0),
-        None => "n/a".to_owned(),
+        Some(rate) => format!("{:.0}%", rate * 100.0),
+        None => "-".to_owned(),
     };
 
-    let last_rate = last.cache_hit_rate();
-    let total_rate = total.cache_hit_rate();
-    let coverage = total.cache_reported_input_tokens.unwrap_or(0);
-    let coverage_text = if coverage < total.input_tokens {
-        format!(" (覆盖 {coverage}/{})", total.input_tokens)
-    } else {
-        String::new()
-    };
-    let last_cached = last
-        .cached_input_tokens
-        .map(|tokens| tokens.to_string())
-        .unwrap_or_else(|| "n/a".to_owned());
+    spans.push(Span::styled("缓存 ", dim));
+    match app.last_usage() {
+        Some(last) => {
+            let last_rate = last.cache_hit_rate();
+            let total_rate = app.total_usage().cache_hit_rate();
+            spans.push(Span::styled(format_rate(last_rate), hit_style(last_rate)));
+            spans.push(Span::styled("/", dim));
+            spans.push(Span::styled(format_rate(total_rate), hit_style(total_rate)));
+        }
+        None => spans.push(Span::styled("-", dim)),
+    }
 
-    spans.extend([
-        Span::styled(" 缓存 ", Style::default().fg(Color::DarkGray)),
-        Span::styled(
-            format!("最近调用 {} ", format_rate(last_rate)),
-            hit_style(last_rate),
-        ),
-        Span::styled(
-            format!("累计 {}{} ", format_rate(total_rate), coverage_text),
-            hit_style(total_rate),
-        ),
-        Span::styled(
-            format!(
-                "| 输入 {} (命中 {}) 输出 {}",
-                last.input_tokens, last_cached, last.output_tokens
-            ),
-            Style::default().fg(Color::DarkGray),
-        ),
-    ]);
-    Line::from(spans)
+    Line::from(spans).right_aligned()
 }

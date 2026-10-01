@@ -10,22 +10,24 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             KeyCode::Char('t') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.toggle_thinking()
             }
+            // Enter 在等待回复时不提交（submit 内部也会拦截），
+            // 但编辑能力不受等待影响，AI 回复期间照样能打字。
             KeyCode::Enter => return app.submit(),
-            KeyCode::Backspace if !app.is_waiting() => app.pop_input(),
-            KeyCode::Delete if !app.is_waiting() => app.delete_input(),
-            KeyCode::Left if !app.is_waiting() => app.move_cursor_left(),
-            KeyCode::Right if !app.is_waiting() => app.move_cursor_right(),
-            KeyCode::Home if !app.is_waiting() => app.move_cursor_home(),
-            KeyCode::End if !app.is_waiting() => app.move_cursor_end(),
+            KeyCode::Backspace => app.pop_input(),
+            KeyCode::Delete => app.delete_input(),
+            KeyCode::Left => app.move_cursor_left(),
+            KeyCode::Right => app.move_cursor_right(),
+            KeyCode::Home => app.move_cursor_home(),
+            KeyCode::End => app.move_cursor_end(),
+            KeyCode::Up => app.history_prev(),
+            KeyCode::Down => app.history_next(),
             KeyCode::Char('a') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.move_cursor_home()
             }
             KeyCode::Char('e') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.move_cursor_end()
             }
-            KeyCode::Char(ch)
-                if !app.is_waiting() && !key_event.modifiers.contains(KeyModifiers::CONTROL) =>
-            {
+            KeyCode::Char(ch) if !key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.push_input(ch)
             }
             _ => {}
