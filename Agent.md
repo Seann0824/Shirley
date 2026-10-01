@@ -191,6 +191,27 @@ pub async fn bash(
 
 ---
 
+**5. 召回** — `crates/agent-sdk/src/recall/`（`docs/recall.md`）
+
+压缩丢失信息的退路。定位：**compaction 的自然配套，SDK 内部能力，应用层无感**。
+
+| 文件 | 职责 |
+| --- | --- |
+| `mod.rs` | 门面：`Retriever` trait（可扩展点，BM25 现在实现、embedding 以后加）+ `RecallStore`（内存存储，持久化留空）+ `RecallTool`（手写 `Tool`，因为要持有 `Arc<RecallStore>`） |
+| `tokenize.rs` | 分词：CJK 按字 / ASCII 按词。Unicode 范围与 `token` 模块**共享** `token::is_cjk_word_char`（唯一一处定义），但口径不同——记账含 CJK 标点（占体积），切词不含（标点是分隔符，入词元会污染打分） |
+| `bm25.rs` | 倒排索引 + 经典 BM25 打分。`k1=1.2` / `b=0.5`（低于经典 0.75，缓解 chunk 长度差异极端的失真） |
+| `chunk.rs` | 分块：`UserChunk` 独立成块；`StepChunk` = Assistant{tool_calls} + 按 id 配对的全部 Tool（原子组，支持并发多工具）。`reasoning_content` 不入索引视图（过程性思维会污染 IDF） |
+
+核心设计（`docs/recall.md` 一、两个核心决策）：
+
+- **重建与召回二分，由 AI 判断**："能不能重建"不是工具属性是调用属性（`cat x` vs `git commit`），AI 看到具体调用后自己决定。工具类消息**不入召回库**；对话类（User / Assistant 文本）入库。
+- **索引自动，检索 AI 触发**：`compress_context` 把被压段分块入库（先索引后清空——索引视图需要原始 Tool 输出）；recall 作为工具自动注册进 `ToolManager`（`Agent::new` 里做的，`main.rs` 一行没改），AI 生成 query 自己决定何时调。不做每轮自动检索。
+- **召回无损**：chunk 原文保存，返回原文 + 相关度元信息，**绝不二次摘要**。
+- **工具输出统一清空**：压缩时 Tool.content 替换为占位标记（`[工具结果已省略以节省上下文；如仍需要，请重新执行调用获取当前状态]`），AI 走重建路径。这是 v0 有意的技术债（见下）。
+- `<compacted_range>` 模板措辞已更新：重建路径（重新读取/执行）与召回路径（recall 工具）显式分立——这是 AI"感知到自己忘了"的钩子。
+
+---
+
 **五、沙盒与工作区（SDK 新增能力）**
 
 **沙盒** — `crates/agent-sdk/src/sandbox/`
@@ -249,6 +270,7 @@ cargo clippy --all-targets       # 静态检查
 - 进程沙盒框架（spec / 后端抽象 / degraded 上报 / 超时）
 - 工作区路径越界校验
 - 统一错误契约（`ErrorKind` / `SdkError`）
+- 召回：压缩段入库 + BM25 检索 + recall 工具（AI 主动触发）
 
 **明确没做的**：
 
@@ -262,6 +284,7 @@ cargo clippy --all-targets       # 静态检查
 8. **未接线配置**：`request_timeout` / `temperature` / `max_output_tokens` 定义了但没进请求体
 9. **未使用的 `StopReason`**：`MaxStepsReached` / `Cancelled` 定义了但不会产生（没有 max_steps 和取消机制）
 10. **压缩重试**：压缩失败直接中断，`plan.md` 提到"压缩失败重试有时能成功"
+11. **recall 的技术债**（`docs/recall.md` 第八节）：无持久化（进程结束即失）；BM25 只做词面匹配（同义改写召回不了，embedding 混合召回未做，`fuse.rs`/RRF 留接口）；中文无分词器（单字切，有噪声）；工具结果统一清空丢弃了不可重建的调用（一次性快照重跑拿不到当时结果，等工具能力细分后回填 per-call 判定）
 
 **顺手能修的**：
 
@@ -277,7 +300,7 @@ cargo clippy --all-targets       # 静态检查
 
 1. **别破坏 prefix 稳定性**。工具定义排序、消息顺序、system prompt 位置，任何变动都会影响缓存命中率。UI 状态栏会显示这个数字，改完自己看一眼。
 2. **`Option<u64>` 的语义是有意的**。"未上报"和"0"必须区分，别为了图省事用 `unwrap_or(0)`。
-3. **压缩是不可逆的**。`ContextSummary` 一旦写入，之前的消息在 `active_messages()` 里就不参与请求了，但原始消息仍留在 `self.messages` 里。改这块要小心 `start_index` 的语义（`RunResult.messages` 是从这里切出来的）。
+3. **压缩是不可逆的**。`ContextSummary` 一旦写入，之前的消息在 `active_messages()` 里就不参与请求了，但原始消息仍留在 `self.messages` 里（注：压缩会把 `self.messages` **整体重建**变短，原始消息只存活在召回库里）。改这块要小心 `start_index` 的语义（`RunResult.messages` 是从这里切出来的）——**循环内压缩后必须 `start_index = start_index.min(self.messages.len())` 钳制**，否则切片越界 panic（真实炸过：`range start index 10 out of range for slice of length 6`，被 async_stream 包成 `Other("task panicked...")`）。同理，任何"记录下标 + 中途重建底层容器"的模式都脆弱：`run_stream` 开头那个压缩分支不炸纯属它发生在 `start_index` 记录**之前**的顺序依赖，将来在记录之后插入任何重建 `messages` 的路径都会再踩。
 4. **对外契约要保持小**。`lib.rs` 的 `pub use` 是 SDK 的门面，加东西之前先问自己：这是基础能力，还是业务逻辑？
 5. **错误分类是稳定的**。`ErrorKind` 给日志/指标/重试决策用，文案可以改，kind 不能随便改；要判断重试只看 `is_retryable`，别 match 字符串。
 6. **边界在沙盒，不在黑名单**。`bash` 的字符串黑名单只是临时兜底，别把它当成安全边界。

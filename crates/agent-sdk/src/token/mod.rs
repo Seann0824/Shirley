@@ -57,13 +57,23 @@ fn char_weight(ch: char) -> f64 {
 }
 
 /// 是否是 CJK 区段的字符（汉字、假名、谚文、CJK 标点）。
+///
+/// 记账口径：CJK 标点也按 1.0 计费——它确实占请求体积。
 fn is_cjk(code: u32) -> bool {
+    is_cjk_word_char(code) || matches!(code, 0x3000..=0x303F) // CJK 标点
+}
+
+/// 是否是 CJK **表意**字符（汉字、假名、谚文，不含标点）。
+///
+/// `pub(crate)`：`recall::tokenize` 复用同一份 Unicode 范围做切词信号，
+/// 但它把标点当分隔符——分类必须只有一处定义，两个用途各自组合，
+/// 避免"改了一处忘了另一处"的漂移。
+pub(crate) fn is_cjk_word_char(code: u32) -> bool {
     matches!(
         code,
         0x4E00..=0x9FFF     // CJK 统一表意文字
         | 0x3040..=0x30FF   // 平假名 / 片假名
         | 0xAC00..=0xD7AF   // 谚文音节
-        | 0x3000..=0x303F   // CJK 标点
     )
 }
 

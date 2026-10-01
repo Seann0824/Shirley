@@ -204,3 +204,5 @@ Implement context compaction.
 - 对于 一个新的项目我们第一步往往就是先生成 agent.md 文件。
 
 麻了，AI 没有给 AI workspace 居然从根目录找，这个信息还是需要我们在构建system prompt 的时候，把它手动给ai，收敛一下搜索范围。
+
+麻了，聊到一半 AI 模型挂了，导致我不敢关闭窗口，没有做会话持久化 和 模型切换

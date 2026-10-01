@@ -23,7 +23,7 @@ pub(super) const COMPACTION_TEMPLATE: &str = r#"严格按下面的格式输出�
 <decisions>已经做出的关键决策，以及做出该决策的原因</decisions>
 <progress>已完成的工作与当前状态</progress>
 <open_questions>尚未解决的问题或悬而未决的疑问</open_questions>
-<compacted_range>此前对话已被压缩，精确细节（文件内容、命令输出、报错、符号列表）不在本摘要中；需要时请重新读取文件或重新执行命令确认</compacted_range>"#;
+<compacted_range>此前对话已被压缩，精确细节不在本摘要中。需要时：文件内容、命令结果可重新读取或重新执行；用户曾说过的话、约定与决策请调用 recall 工具检索</compacted_range>"#;
 
 /// 压缩切点算出的三段内容。
 ///

@@ -2,6 +2,7 @@ mod adapter;
 pub mod error;
 mod message;
 mod runtime;
+pub mod recall;
 pub mod sandbox;
 pub mod token;
 mod tool;
@@ -15,5 +16,6 @@ pub use runtime::{
     Agent, AgentError, AgentEvent, CompactParts, CutPlan, SystemPrompt, SystemPromptContext,
     plan_cut,
 };
+pub use recall::{Chunk, RecallStore, RecallTool, Retriever, ScoredChunk, chunk_messages};
 pub use token::{HeuristicCounter, TokenCounter, count_message, count_messages, count_text};
 pub use tool::*;

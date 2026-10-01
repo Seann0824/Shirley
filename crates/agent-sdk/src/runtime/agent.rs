@@ -5,10 +5,12 @@ use super::prompt::{SystemPrompt, SystemPromptContext};
 use crate::adapter;
 use crate::adapter::ModelRequest;
 use crate::message;
+use crate::recall::{self, RecallStore};
 use crate::token;
 use crate::tool;
 use futures::StreamExt;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::pin::Pin;
 
 pub struct Agent {
@@ -29,6 +31,9 @@ pub struct Agent {
     compression_pending: bool,
     // L1 估算 + L2 校准状态（见 `token` 模块）
     token_counter: token::HeuristicCounter,
+    /// 召回存储（`docs/recall.md`）：被压缩掉对话段的内存存档 + BM25 检索。
+    /// SDK 内部能力，应用层无感；recall 工具持有同一 `Arc` 的另一份引用。
+    recall: Arc<RecallStore>,
 }
 
 #[bon::bon]
@@ -39,7 +44,7 @@ impl Agent {
         #[builder(default, into)] system_prompt: SystemPrompt,
         #[builder(into)] working_dir: Option<PathBuf>,
         #[builder(default)] mut messages: Vec<message::Message>,
-        #[builder(default = tool::ToolManager::new())] tools: tool::ToolManager,
+        #[builder(default = tool::ToolManager::new())] mut tools: tool::ToolManager,
         #[builder(into)] compression_instruction: Option<String>,
     ) -> Self {
         // 构造时就按工作目录解析一次，把 System 消息置顶（空提示词则不置顶）。
@@ -50,6 +55,11 @@ impl Agent {
             messages.insert(0, message::Message::System { content: resolved });
         }
 
+        // 召回是 compaction 的自然配套（`docs/recall.md` 决策 2）：存储与工具共享 Arc，
+        // recall 工具在此自动注册进 ToolManager，应用层完全无感。
+        let recall = Arc::new(RecallStore::new());
+        let _ = tools.register(recall::RecallTool::new(recall.clone()));
+
         Self {
             model_config,
             system_prompt,
@@ -59,6 +69,7 @@ impl Agent {
             compression_instruction,
             compression_pending: false,
             token_counter: token::HeuristicCounter::new(),
+            recall,
         }
     }
 
@@ -106,7 +117,7 @@ impl Agent {
                 total_usage = total_usage + usage;
                 yield AgentEvent::Usage(usage);
             }
-            let start_index = self.messages.len();
+            let mut start_index = self.messages.len();
 
             let user_message = message::Message::User {
                 content: task.into(),
@@ -124,6 +135,14 @@ impl Agent {
                     yield AgentEvent::CompressionFinished;
                     total_usage = total_usage + usage;
                     yield AgentEvent::Usage(usage);
+
+                    // 压缩把 self.messages 整体重建（远短于原列表），
+                    // start_index 这个绝对下标随之失效——不钳制会在
+                    // Finished 处切片越界 panic（"range start index N out
+                    // of range"）。钳到当前长度后，切出的 [summary, task,
+                    // remain..] 仍是"本轮可见的新增内容"：summary 是本轮
+                    // 压缩产物，remain 是本轮的对话与 tool 链。
+                    start_index = start_index.min(self.messages.len());
                 }
                 let active_messages = self.active_messages();
                 let tools = self.tools.definitions();
@@ -300,7 +319,16 @@ impl Agent {
             self.compression_pending = false;
             return Ok((message::Usage::default(), None));
         };
-        let parts = plan.split(&self.messages);
+        let mut parts = plan.split(&self.messages);
+
+        // 1.5 召回入库 + 工具输出清空（`docs/recall.md` 四 / 五）：
+        //     - 对话类消息（User / Assistant 文本）分块后送进召回库，原文无损保存；
+        //     - 工具输出统一替换为占位标记——AI 走"重建"路径（重新执行获取当前状态）。
+        //       这是 v0 有意的技术债：不可重建的调用（一次性快照）重跑拿不到当时结果。
+        //     注意先入库再清空：recall.index 需要 Tool 的原始 content 做索引视图。
+        self.recall
+            .index(recall::chunk_messages(&parts.to_compress));
+        strip_tool_outputs(&mut parts.to_compress);
 
         // 2. 构造压缩请求：待压缩段 + 本轮任务 + 压缩指令。
         let mut messages = parts.to_compress.clone();
@@ -364,5 +392,22 @@ impl Agent {
         }
 
         Err(AgentError::Compression("无法获取压缩后的Usage".into()))
+    }
+}
+
+/// 工具结果统一清空为占位标记（`docs/recall.md` 第五节）。
+///
+/// **不能留空字符串**——模型会把空 content 误读为"执行成功但无输出"，
+/// 占位标记才是"结果被省略、可重新执行获取"的显式信号。
+/// 占位文案进 SDK 契约，措辞要稳定。
+fn strip_tool_outputs(messages: &mut [message::Message]) {
+    for msg in messages.iter_mut() {
+        if let message::Message::Tool { content, .. } = msg {
+            if let Some(text) = content {
+                if !text.trim().is_empty() {
+                    *text = "[工具结果已省略以节省上下文；如仍需要，请重新执行调用获取当前状态]".to_string();
+                }
+            }
+        }
     }
 }
