@@ -17,7 +17,7 @@ async fn main() -> Result<(), AgentError> {
         .protocol(ModelProtocol::ChatCompletions)
         .base_url(base_url)
         .api_key(api_key)
-        .model("deepseek-v4.1-flash")
+        .model("hy3")
         .stream(true)
         .thinking(true)
         .reasoning_effort("low")
@@ -47,11 +47,13 @@ async fn main() -> Result<(), AgentError> {
         // 摘要的取舍口径：coding agent 关心文件 / 命令 / 报错 / 测试结果。
         // 结构与"不得推演、不得编下一步"等硬规则由 SDK 的 `COMPACTION_TEMPLATE` 追加，
         // 这里只写领域相关的偏好（见 `docs/compaction.md` 5.3）。
-        .compression_instruction(r"
+        .compression_instruction(
+            r"
             你在为 coding agent 压缩对话上下文。请忠实保留用户下达的原始指令与约束，
             以及继续任务所必需的信息：关键决策及其原因、当前进度与状态、未解决的问题、
             涉及的文件路径、执行过的命令、遇到的错误和测试结果。删除重复、闲聊与过时的中间想法。
-        ")
+        ",
+        )
         .tools(tool_manager)
         .build();
 

@@ -203,13 +203,14 @@ if !status.is_success() {
 
 **五、依赖关系**
 
-```
-T1 (client/timeout) ──> T3 (重试退避)
-T2 (Tool 签名)      ──> 独立，但会动宏与 src/tools
-T4 (双通道)         ──> T7 (审计)
-T5 (max_steps)      ──> 独立
-T6 (压缩降级)       ──> 独立
-T8 (测试)           -.-> 全程并行，不阻塞
+```mermaid
+graph LR
+    T1["T1 · client/timeout"] --> T3["T3 · 重试退避"]
+    T2["T2 · Tool 签名"] --> D2["独立<br/>但会动宏与 src/tools"]
+    T4["T4 · 双通道"] --> T7["T7 · 审计"]
+    T5["T5 · max_steps"] --> D5["独立"]
+    T6["T6 · 压缩降级"] --> D6["独立"]
+    T8["T8 · 测试"] -.-> P["全程并行，不阻塞"]
 ```
 
 关键判断与 `roadmap.md` 一致：**结构化错误是很多事的前置**。
