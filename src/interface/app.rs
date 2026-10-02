@@ -178,6 +178,11 @@ pub struct App {
     /// `/login` 落盘的目标配置文件覆盖；`None` 时用工作区默认路径。
     /// 存在的意义是让测试写到临时目录，而不是污染真实工作区。
     config_path: Option<std::path::PathBuf>,
+    /// 配置来源的默认上下文窗口（启动时从 Agent 快照）。
+    ///
+    /// 切换模型时若目标模型元数据未提供窗口，就回退到这个默认值——而不是
+    /// 落成 `None`（那会关掉压缩与占用展示）。保持"配置 > 元数据缺失兜底"。
+    default_context_window: Option<u64>,
 }
 
 impl App {
@@ -199,6 +204,8 @@ impl App {
         catalog: Arc<dyn ModelCatalog>,
         session_catalog: Arc<dyn SessionCatalog>,
     ) -> Self {
+        // 快照配置来源的默认窗口：切换模型时元数据缺失的兜底（见字段注释）。
+        let default_context_window = agent.model_config().context_window_tokens;
         Self {
             agent: Some(agent),
             exit: false,
@@ -238,6 +245,7 @@ impl App {
             command_hint: None,
             login: None,
             config_path: None,
+            default_context_window,
         }
     }
 
@@ -1053,6 +1061,9 @@ impl App {
         let entry = picker.entries.get(picker.selected).cloned()?;
         if let Some(agent) = self.agent.as_mut() {
             agent.set_model(entry.value.clone());
+            // 模型自带窗口属性：元数据有则用元数据，无则回退配置默认。
+            // 避免"换了模型但窗口仍是旧值"导致压缩触发点错位。
+            agent.set_context_window(entry.context_window.or(self.default_context_window));
         }
         self.add_system_message(format!("已切换模型：{}", entry.label));
         Some(entry.value)
@@ -1332,6 +1343,46 @@ mod tests {
         assert_eq!(chosen.as_deref(), Some("model-b"));
         assert!(!app.is_picker_open(), "确认后应关闭面板");
         assert_eq!(app.current_model().as_deref(), Some("model-b"));
+    }
+
+    #[test]
+    fn picker_confirm_applies_model_context_window() {
+        // 模型自带窗口属性：确认切换后，Agent 的 context_window 应同步成新模型的。
+        let mut app = app();
+        let mut entry = ModelEntry::new("b", "model-b", "local");
+        entry.context_window = Some(200_000);
+        app.open_picker(vec![ModelEntry::new("a", "model-a", "local"), entry]);
+        app.picker_move(1);
+        app.picker_confirm();
+        let window = app
+            .agent
+            .as_ref()
+            .unwrap()
+            .model_config()
+            .context_window_tokens;
+        assert_eq!(window, Some(200_000), "应同步新模型的窗口");
+    }
+
+    #[test]
+    fn picker_confirm_falls_back_to_default_window_when_metadata_missing() {
+        // 元数据没给窗口时，回退到配置来源的默认窗口，而不是落成 None。
+        let config = ModelConfig::builder()
+            .protocol(ModelProtocol::ChatCompletions)
+            .base_url("http://localhost")
+            .model("test")
+            .build();
+        let mut config = config;
+        config.context_window_tokens = Some(52_429);
+        let mut app = App::new(Agent::builder().model_config(config).build().unwrap());
+        app.open_picker(vec![ModelEntry::new("a", "model-a", "local")]);
+        app.picker_confirm();
+        let window = app
+            .agent
+            .as_ref()
+            .unwrap()
+            .model_config()
+            .context_window_tokens;
+        assert_eq!(window, Some(52_429), "元数据缺失应回退配置默认");
     }
 
     #[test]
