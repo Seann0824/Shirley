@@ -216,16 +216,6 @@ impl Agent {
         self.model_config.api_key = api_key;
     }
 
-    /// 切换上下文窗口上限（token 数）：其余配置原样保留。
-    ///
-    /// 与 [`Agent::set_model`] 对称的接缝：模型是带窗口属性的，切换模型后
-    /// 应用层把新模型的窗口同步过来，避免"换了模型但窗口仍是旧值"导致压缩
-    /// 触发点错位（见 `docs/compaction.md` 四）。传 `None` 表示未知窗口
-    /// （不压缩、不展示占用，行为与未配置一致）。
-    pub fn set_context_window(&mut self, context_window_tokens: Option<u64>) {
-        self.model_config.context_window_tokens = context_window_tokens;
-    }
-
     /// 对话历史的只读视图。
     ///
     /// 供上层展示"当前 Agent 实际记得什么"，以及"回溯"时定位目标消息——

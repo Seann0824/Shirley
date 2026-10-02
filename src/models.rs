@@ -16,9 +16,6 @@ use serde::Deserialize;
 /// 一个可选模型。
 ///
 /// `label` 给人看，`value` 给请求用，`provider` 标明来源。
-/// `context_window` 是该模型的上下文窗口（token），来自 provider 的模型元数据
-/// （OpenAI 兼容 `/v1/models` 的 `data[].context_window`）；`None` 表示接口
-/// 没返回——此时不该凭空猜一个值，由调用方回退到手工配置 / 内置默认。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
     /// 展示名（UI 里给人看）。
@@ -27,8 +24,6 @@ pub struct ModelEntry {
     pub value: String,
     /// 来源供应商标识。现在只有一个；将来用于按 provider 分组 / 拉取。
     pub provider: String,
-    /// 该模型的上下文窗口（token）。`None` 表示元数据未提供。
-    pub context_window: Option<u64>,
 }
 
 impl ModelEntry {
@@ -41,14 +36,7 @@ impl ModelEntry {
             label: label.into(),
             value: value.into(),
             provider: provider.into(),
-            context_window: None,
         }
-    }
-
-    /// 附带上下文窗口（builder 风格，链式设置；静态列表用得上）。
-    pub fn with_context_window(mut self, context_window: Option<u64>) -> Self {
-        self.context_window = context_window;
-        self
     }
 }
 
@@ -88,10 +76,8 @@ impl StaticCatalog {
 
     pub fn builtin() -> Self {
         Self::new(vec![
-            // 内置窗口值仅作兜底：远端元数据不可用时，至少别退回"未知窗口"。
-            ModelEntry::new("deepseek-v4.1-flash", "deepseek-v4.1-flash", "local")
-                .with_context_window(Some(1_048_576)),
-            ModelEntry::new("hy3", "hy3", "local").with_context_window(Some(192_000)),
+            ModelEntry::new("deepseek-v4.1-flash", "deepseek-v4.1-flash", "local"),
+            ModelEntry::new("hy3", "hy3", "local"),
         ])
     }
 }
@@ -144,25 +130,6 @@ struct ModelDto {
     name: Option<String>,
     #[serde(default)]
     owned_by: Option<String>,
-    /// 模型上下文窗口（token）。非 OpenAI 标准字段，但常见网关（含 DeepSeek
-    /// 官方与本地 8788）会返回；缺失即 `None`，不猜。
-    #[serde(default)]
-    context_window: Option<u64>,
-}
-
-/// 把 `/v1/models` 响应转成 [`ModelEntry`] 列表（纯函数，便于单测）。
-///
-/// `name` 缺省回退 `id` 作展示名，`owned_by` 缺省回退 `remote`；
-/// `context_window` 缺失即 `None`（不猜）。
-fn parse_models_response(body: ModelsResponse) -> Vec<ModelEntry> {
-    body.data
-        .into_iter()
-        .map(|m| {
-            let label = m.name.unwrap_or_else(|| m.id.clone());
-            let provider = m.owned_by.unwrap_or_else(|| "remote".to_owned());
-            ModelEntry::new(label, m.id, provider).with_context_window(m.context_window)
-        })
-        .collect()
 }
 
 impl ModelCatalog for RemoteCatalog {
@@ -179,7 +146,16 @@ impl ModelCatalog for RemoteCatalog {
                     return None;
                 }
                 let body: ModelsResponse = response.json().await.ok()?;
-                Some(parse_models_response(body))
+                Some(
+                    body.data
+                        .into_iter()
+                        .map(|m| {
+                            let label = m.name.unwrap_or_else(|| m.id.clone());
+                            let provider = m.owned_by.unwrap_or_else(|| "remote".to_owned());
+                            ModelEntry::new(label, m.id, provider)
+                        })
+                        .collect::<Vec<_>>(),
+                )
             }
             .await;
 
@@ -262,31 +238,6 @@ mod tests {
             "应拉到远端列表而非兜底: {entries:?}"
         );
         eprintln!("拉取到 {} 个模型，例如 {:?}", entries.len(), entries.first());
-    }
-
-    #[test]
-    fn parses_context_window_from_models_response() {
-        // 网关返回 context_window 时应被解析进 ModelEntry；缺失则 None（不猜）。
-        let json = r#"{
-            "data": [
-                {"id": "deepseek-flash", "name": "DeepSeek V4.1 Flash",
-                 "owned_by": "deepseek", "context_window": 1048576},
-                {"id": "no-window", "owned_by": "x"}
-            ]
-        }"#;
-        let body: ModelsResponse = serde_json::from_str(json).unwrap();
-        let entries = parse_models_response(body);
-        assert_eq!(entries[0].value, "deepseek-flash");
-        assert_eq!(entries[0].context_window, Some(1_048_576));
-        assert_eq!(entries[1].context_window, None, "缺字段应为 None，不猜");
-    }
-
-    #[test]
-    fn builtin_entries_carry_context_window() {
-        let entries = StaticCatalog::builtin().entries();
-        // 内置兜底也应带上已知窗口，避免回退成"未知窗口"。
-        let flash = entries.iter().find(|e| e.value == "deepseek-v4.1-flash").unwrap();
-        assert_eq!(flash.context_window, Some(1_048_576));
     }
 
     #[test]
