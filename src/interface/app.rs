@@ -71,6 +71,40 @@ impl SessionPicker {
     pub const NEW_NAME: &'static str = "";
 }
 
+/// `/login` 分步流程的当前阶段。
+///
+/// 顺序固定：先确认端点（base_url），再确认密钥（api_key），最后确认模型。
+/// 端点在前是因为没有它后两者无从谈起；模型放最后，因为改完端点后
+/// 通常想顺手换个默认模型。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LoginStep {
+    BaseUrl,
+    ApiKey,
+    Model,
+}
+
+impl LoginStep {
+    /// 该步在提示里的问法。
+    fn prompt(&self) -> &'static str {
+        match self {
+            LoginStep::BaseUrl => "请输入模型服务地址 base_url",
+            LoginStep::ApiKey => "请输入 API Key（本地服务可留空，直接回车跳过）",
+            LoginStep::Model => "请输入默认模型名",
+        }
+    }
+}
+
+/// `/login` 分步流程的进行态：已收集的字段 + 当前阶段。
+///
+/// 只活在内存里，`Esc` 或走完即清空——没走完不落盘，避免写进半截配置。
+pub struct LoginFlow {
+    pub step: LoginStep,
+    /// 已确认的 base_url（第一步之后必有）。
+    pub base_url: String,
+    /// 已确认的 api_key（`None` 表示无鉴权）。
+    pub api_key: Option<String>,
+}
+
 pub struct App {
     agent: Option<Agent>,
     exit: bool,
@@ -139,6 +173,11 @@ pub struct App {
     /// 输入框提示语覆盖：指令打开的编辑态（如回溯编辑）用它说明"Enter 重发 / Esc 取消"。
     /// 为空时用默认提示。任何普通输入都会清掉它。
     command_hint: Option<String>,
+    /// 进行中的 `/login` 分步流程；`None` 表示不在登录态。
+    login: Option<LoginFlow>,
+    /// `/login` 落盘的目标配置文件覆盖；`None` 时用工作区默认路径。
+    /// 存在的意义是让测试写到临时目录，而不是污染真实工作区。
+    config_path: Option<std::path::PathBuf>,
 }
 
 impl App {
@@ -197,6 +236,8 @@ impl App {
             interrupt_requested: false,
             rewind_target: None,
             command_hint: None,
+            login: None,
+            config_path: None,
         }
     }
 
@@ -380,6 +421,12 @@ impl App {
     }
 
     pub fn submit(&mut self) -> Option<String> {
+        // 登录流程进行中：Enter 提交的是"当前字段的值"，不是发给 AI 的 prompt。
+        // 优先于其它一切分支——登录态下输入框被临时征用为字段编辑器。
+        if self.login.is_some() {
+            self.advance_login();
+            return None;
+        }
         if self.waiting || self.agent.is_none() || self.input.trim().is_empty() {
             return None;
         }
@@ -427,6 +474,14 @@ impl App {
                 self.command_hint =
                     Some(" ↑↓ 选择 · Enter 切换 · Esc 取消 ".to_owned());
                 self.session_picker_requested = true;
+                return None;
+            }
+            CommandOutcome::Login => {
+                // 不发送、不落历史：进入分步登录，输入框转为字段编辑器。
+                self.input.clear();
+                self.input_cursor = 0;
+                self.suggestions.clear();
+                self.start_login();
                 return None;
             }
             CommandOutcome::Unknown => {}
@@ -631,6 +686,176 @@ impl App {
             self.input_cursor = 0;
             self.command_hint = None;
             self.suggestions.clear();
+        }
+    }
+
+    // ---- 分步登录（`/login`）----
+    //
+    // 分步问答而非表单浮层：复用现有输入框与 `submit` 链路，不需要新的渲染态。
+    // 代价是每步一次回车，收益是不碰 UI 层、可立即用（见对话记录）。
+
+    /// 是否处于 `/login` 分步流程中（渲染层据此换输入框提示）。
+    pub fn is_login(&self) -> bool {
+        self.login.is_some()
+    }
+
+    /// 覆盖 `/login` 的落盘目标（默认写工作区 `.shirley/config.toml`）。
+    /// 供测试注入临时路径，避免污染真实工作区。
+    #[cfg(test)]
+    pub fn set_config_path(&mut self, path: impl Into<std::path::PathBuf>) {
+        self.config_path = Some(path.into());
+    }
+
+    /// `/login` 的当前阶段（供 UI / 测试查看）。
+    #[cfg(test)]
+    pub fn login_step(&self) -> Option<LoginStep> {
+        self.login.as_ref().map(|flow| flow.step)
+    }
+
+    /// 进入分步登录：以当前配置为默认值，从 base_url 开始问。
+    ///
+    /// 输入框预填当前值，用户直接回车即"保持不变"；想改就编辑。
+    pub fn start_login(&mut self) {
+        let (base_url, api_key) = match self.agent.as_ref() {
+            Some(agent) => {
+                let config = agent.model_config();
+                (config.base_url.clone(), config.api_key.clone())
+            }
+            None => (String::new(), None),
+        };
+        self.login = Some(LoginFlow {
+            step: LoginStep::BaseUrl,
+            base_url,
+            api_key,
+        });
+        // 预填当前 base_url，回车即保留。
+        self.prompt_login_step();
+    }
+
+    /// 取消登录：清掉流程与输入，Agent / 配置均不动。用户按 Esc 的落点。
+    pub fn cancel_login(&mut self) {
+        if self.login.take().is_some() {
+            self.input.clear();
+            self.input_cursor = 0;
+            self.command_hint = None;
+            self.suggestions.clear();
+            self.add_system_message("已取消登录。".to_owned());
+        }
+    }
+
+    /// 把当前阶段的默认值填进输入框，并更新提示语。
+    fn prompt_login_step(&mut self) {
+        let Some(step) = self.login.as_ref().map(|flow| flow.step) else {
+            return;
+        };
+        let current = match step {
+            LoginStep::BaseUrl => self
+                .login
+                .as_ref()
+                .map(|flow| flow.base_url.clone())
+                .unwrap_or_default(),
+            LoginStep::ApiKey => self
+                .login
+                .as_ref()
+                .and_then(|flow| flow.api_key.clone())
+                .unwrap_or_default(),
+            LoginStep::Model => self
+                .agent
+                .as_ref()
+                .map(|agent| agent.model_config().model.clone())
+                .unwrap_or_default(),
+        };
+        self.set_input(current);
+        self.command_hint = Some(format!(" {} · Enter 确认 · Esc 取消 ", step.prompt()));
+        self.add_system_message(format!("{}（回车保留当前值）：", step.prompt()));
+    }
+
+    /// 提交当前字段，推进到下一步；走完则落盘并热更新。
+    fn advance_login(&mut self) {
+        let Some(mut flow) = self.login.take() else {
+            return;
+        };
+        let value = std::mem::take(&mut self.input);
+        self.input_cursor = 0;
+        self.suggestions.clear();
+
+        match flow.step {
+            LoginStep::BaseUrl => {
+                let trimmed = value.trim();
+                if trimmed.is_empty() {
+                    // 空端点无意义：留在本步重问，不推进。
+                    self.add_system_message("base_url 不能为空，请重新输入。".to_owned());
+                    self.login = Some(flow);
+                    self.prompt_login_step();
+                    return;
+                }
+                flow.base_url = trimmed.to_owned();
+                flow.step = LoginStep::ApiKey;
+                self.login = Some(flow);
+                self.prompt_login_step();
+            }
+            LoginStep::ApiKey => {
+                let trimmed = value.trim();
+                // 空输入 = 无鉴权（本地服务常见），与"保留旧值"不同——这里明确清空。
+                flow.api_key = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+                flow.step = LoginStep::Model;
+                self.login = Some(flow);
+                self.prompt_login_step();
+            }
+            LoginStep::Model => {
+                let trimmed = value.trim();
+                let model = (!trimmed.is_empty()).then(|| trimmed.to_owned());
+                self.finish_login(&flow, model);
+            }
+        }
+    }
+
+    /// 落盘 + 热更新：写工作区配置，并让 Agent 立即用上新端点。
+    fn finish_login(&mut self, flow: &LoginFlow, model: Option<String>) {
+        self.command_hint = None;
+        self.message_cache = None;
+
+        // 热更新 Agent：端点 / 密钥立即生效（模型可选，未填则沿用当前）。
+        if let Some(agent) = self.agent.as_mut() {
+            agent.set_provider(flow.base_url.clone(), flow.api_key.clone());
+            if let Some(model) = model.clone() {
+                agent.set_model(model);
+            }
+        }
+
+        // 落盘：写配置文件（先读后改再写，不动其它键）。默认工作区路径，
+        // 测试可覆盖成临时路径（见 `set_config_path`）。
+        let target = self
+            .config_path
+            .clone()
+            .unwrap_or_else(|| crate::prompt::workspace_root().join(".shirley/config.toml"));
+        let provider = crate::settings::ProviderSettings {
+            protocol: None,
+            base_url: Some(flow.base_url.clone()),
+            api_key: flow.api_key.clone(),
+            models_url: None,
+            model: model.clone(),
+            context_window_tokens: None,
+        };
+        match crate::settings::save_provider(&target, provider) {
+            Ok(path) => {
+                let model_note = model
+                    .map(|m| format!("，模型 {m}"))
+                    .unwrap_or_default();
+                self.add_system_message(format!(
+                    "已登录：{}（已写入 {}）{}",
+                    flow.base_url,
+                    path.display(),
+                    model_note
+                ));
+            }
+            Err(error) => {
+                // 热更新已生效，只是没落盘——如实告诉用户，不假装成功。
+                self.add_system_message(format!(
+                    "已切换服务（{}），但写入配置失败：{error}",
+                    flow.base_url
+                ));
+            }
         }
     }
 
@@ -992,9 +1217,9 @@ impl App {
 
     /// 输入变化时重算候选（在 push/insert/pop/delete/move 等之后统一调用）。
     pub fn on_input_changed(&mut self) {
-        // 回溯编辑态下保留"Enter 重发 / Esc 取消"提示——用户改动的是待重发内容，
-        // 该态仍然成立；其余情况一旦改动输入即恢复默认提示。
-        if !self.is_rewind_edit() {
+        // 回溯编辑态与登录态下都保留各自的提示——用户改动的是"待重发内容"或
+        // "正在填的字段"，这两种态仍然成立；其余情况一旦改动输入即恢复默认提示。
+        if !self.is_rewind_edit() && !self.is_login() {
             self.command_hint = None;
         }
         self.refresh_suggestions();
@@ -1013,6 +1238,20 @@ mod tests {
             .model("test")
             .build();
         App::new(Agent::builder().model_config(config).build().unwrap())
+    }
+
+    /// 测试用 App：把 `/login` 落盘目标指向唯一临时文件，避免污染真实工作区
+    /// （并发的测试若都写同一文件还会互相截断）。
+    fn app_with_temp_config(tag: &str) -> App {
+        let mut app = app();
+        let dir = std::env::temp_dir().join(format!(
+            "shirley_login_{tag}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::create_dir_all(&dir);
+        app.set_config_path(dir.join("config.toml"));
+        app
     }
 
     #[test]
@@ -1114,6 +1353,102 @@ mod tests {
             ModelEntry::new("test", "test", "p"),
         ]);
         assert_eq!(app.picker().unwrap().selected, 1);
+    }
+
+    // ---- 分步登录（`/login`）----
+
+    #[test]
+    fn login_command_enters_flow_without_sending() {
+        let mut app = app();
+        for ch in "/login".chars() {
+            app.push_input(ch);
+        }
+        assert!(app.submit().is_none(), "/login 不应作为 prompt 发送");
+        assert!(app.is_login(), "应进入登录流程");
+        assert_eq!(app.login_step(), Some(LoginStep::BaseUrl));
+        assert!(!app.is_waiting(), "不应进入等待回复状态");
+        // 输入框预填当前 base_url，回车即保留。
+        assert_eq!(app.input(), "http://localhost");
+    }
+
+    #[test]
+    fn login_collects_fields_step_by_step() {
+        let mut app = app_with_temp_config("collect");
+        app.start_login();
+
+        // 第一步：改 base_url。
+        app.set_input("http://new-endpoint".into());
+        app.submit();
+        assert_eq!(app.login_step(), Some(LoginStep::ApiKey));
+        assert_eq!(app.input(), "", "api_key 默认空");
+
+        // 第二步：填 key。
+        app.set_input("sk-secret".into());
+        app.submit();
+        assert_eq!(app.login_step(), Some(LoginStep::Model));
+        assert_eq!(app.input(), "test", "模型默认当前值");
+
+        // 第三步：改模型 → 结束。
+        app.set_input("new-model".into());
+        app.submit();
+        assert!(!app.is_login(), "走完应退出登录态");
+        let agent = app.take_agent().unwrap();
+        assert_eq!(agent.model_config().base_url, "http://new-endpoint");
+        assert_eq!(agent.model_config().api_key.as_deref(), Some("sk-secret"));
+        assert_eq!(agent.model_config().model, "new-model");
+    }
+
+    #[test]
+    fn login_empty_base_url_is_rejected_and_stays() {
+        let mut app = app();
+        app.start_login();
+        app.set_input("   ".into());
+        app.submit();
+        // 空端点无意义：留在本步。
+        assert_eq!(app.login_step(), Some(LoginStep::BaseUrl));
+        assert!(app.is_login());
+    }
+
+    #[test]
+    fn login_empty_api_key_means_no_auth() {
+        let mut app = app_with_temp_config("noauth");
+        app.start_login();
+        app.set_input("http://x".into());
+        app.submit();
+        // api_key 直接回车 → 无鉴权。
+        app.submit();
+        app.set_input("m".into());
+        app.submit();
+        let agent = app.take_agent().unwrap();
+        assert_eq!(agent.model_config().api_key, None);
+    }
+
+    #[test]
+    fn login_cancel_keeps_config_untouched() {
+        let mut app = app();
+        app.start_login();
+        app.set_input("http://changed".into());
+        app.cancel_login();
+        assert!(!app.is_login());
+        assert!(app.input().is_empty(), "取消应清空输入");
+        let agent = app.take_agent().unwrap();
+        assert_eq!(
+            agent.model_config().base_url, "http://localhost",
+            "取消不应改变配置"
+        );
+    }
+
+    #[test]
+    fn login_enter_keeps_existing_values() {
+        let mut app = app_with_temp_config("keep");
+        app.start_login();
+        // 三步全部回车 → 保留原值。
+        app.submit(); // base_url 保留
+        app.submit(); // api_key 保留（None → 空 → None）
+        app.submit(); // model 保留
+        let agent = app.take_agent().unwrap();
+        assert_eq!(agent.model_config().base_url, "http://localhost");
+        assert_eq!(agent.model_config().model, "test");
     }
 
     fn agent_with_users(messages: Vec<Message>) -> Agent {

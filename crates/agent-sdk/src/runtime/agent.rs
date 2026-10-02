@@ -205,6 +205,17 @@ impl Agent {
         self.model_config.model = model.into();
     }
 
+    /// 切换模型服务连接（`base_url` + `api_key`）：其余配置原样保留。
+    ///
+    /// 这是应用层 `/login` 指令落地的 SDK 接缝（与 [`Agent::set_model`] 对称）：
+    /// 换一个供应商 / 端点不必重建 `Agent`，下一次请求即生效。`api_key` 传
+    /// `None` 表示"无鉴权"（本地服务常见），会覆盖掉旧 key——与"未改动"不同，
+    /// 调用方需自行决定是"保留旧值"还是"确实清空"。
+    pub fn set_provider(&mut self, base_url: impl Into<String>, api_key: Option<String>) {
+        self.model_config.base_url = base_url.into();
+        self.model_config.api_key = api_key;
+    }
+
     /// 对话历史的只读视图。
     ///
     /// 供上层展示"当前 Agent 实际记得什么"，以及"回溯"时定位目标消息——

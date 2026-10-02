@@ -154,6 +154,7 @@ pub async fn bash(
 - `Agent::new` 是 `bon` builder：`model_config` / `system_prompt` / `working_dir` / `messages` / `tools` / `compression_instruction`
 - `system_prompt` 类型是 `SystemPrompt`（不是 `String`）：既接受固定字符串（`From<String>` / `From<&str>`），也接受**函数** `Fn(&SystemPromptContext) -> String`。函数形式让提示词按运行时上下文动态生成——`SystemPromptContext` 目前携带 `working_dir`。`working_dir` 是独立 builder 参数，构造时会用它解析一次提示词
 - `run()` 是 `run_stream()` 的薄封装，只等最后一个 `Finished`
+- 运行参数热切换接缝（应用层指令落地用，均不重建 `Agent`）：`set_model(model)` 只换模型名；`set_provider(base_url, api_key)` 换端点与密钥（与前者对称，`/login` 用）；`switch_session(store)` 换当前会话（`/session` 用）。后两者是 SDK 为应用层指令新增的接缝，模型配置的其余字段原样保留
 - `run_stream()` 返回 `Pin<Box<dyn Stream<Item = Result<AgentEvent, AgentError>> + Send + 'a>>`，用 `async_stream::try_stream!` 实现
 - 主循环：压缩检查 → 组装请求 → 调模型（消费 `AdapterEvent`）→ 落库 → 有 tool_calls 就并发跑（`FuturesUnordered`）→ 没工具调用就 `Finished` 退出
 - `AgentEvent` 有：`ContentDelta` / `ReasoningDelta`（流式增量）、`MessageAdded`、`CompressionStarted` / `CompressionFinished`、`ContextUsage`、`ToolStarted` / `ToolFinished`、`Usage`、`Finished(RunResult)`
@@ -172,7 +173,8 @@ pub async fn bash(
 
 **四、应用层（TUI）**
 
-- `src/main.rs`：读 `.env`（`dotenvy`），构造 `ModelConfig`（默认 `LOCAL_*`，模型名写死 `deepseek-v4.1-flash`，`stream(true)` / `thinking(true)` / `reasoning_effort("low")`），注册 `bash` 工具，并把会话目录（`src/session.rs` 的 `FileSessionCatalog`，多会话布局 `.shirley/sessions/<name>.jsonl`）交给 `interface::run`——启动时打开"最近修改"的会话（无则新建），旧的单文件 `.shirley/session.jsonl` 会被 `adopt_legacy` 收编（会话持久化，见 `docs/session.md`）。`context_window_tokens` 默认 `104858 >> 1`（=52429），可被 `LOCAL_CONTEXT_WINDOW_TOKENS` 覆盖。工作目录由 `prompt::workspace_root()` 决定（`SHIRLEY_WORKSPACE` 优先，否则当前目录）
+- `src/main.rs`：读 `.env`（`dotenvy`），经 `settings::Settings::load_default()` 装载配置（**不再散读 env**，见下条），构造 `ModelConfig`（`stream(true)` / `thinking(true)` / `reasoning_effort("low")`），注册 `bash` 工具，并把会话目录（`src/session.rs` 的 `FileSessionCatalog`，多会话布局 `.shirley/sessions/<name>.jsonl`）交给 `interface::run`——启动时打开"最近修改"的会话（无则新建），旧的单文件 `.shirley/session.jsonl` 会被 `adopt_legacy` 收编（会话持久化，见 `docs/session.md`）。工作目录由 `prompt::workspace_root()` 决定（`SHIRLEY_WORKSPACE` 优先，否则当前目录）——它**刻意不属于 `settings`**（是"在哪个项目跑"的会话级信息，不是"用户是谁"的配置）
+- `src/settings.rs`：**配置装载（方案 A）**。把"配置从哪来"与"怎么用"解耦，纯应用层、不碰 SDK。优先级 `内置默认 < 全局 config.toml < 工作区 .shirley/config.toml < 环境变量`。配置文件为 TOML，`[provider]` 表含 `protocol` / `base_url` / `api_key` / `models_url` / `model` / `context_window_tokens`（全 `Option`，`deny_unknown_fields`）。全局路径 `<config_dir>/shirley/config.toml`，工作区路径 `<root>/.shirley/config.toml`。环境变量层（`LOCAL_*`）放在**最后**以兼容既有 `.env` 习惯——老用户零改动。`Settings::load` 的环境读取用注入闭包（测试不打全局 env），`load_default` 才用真实 `config_dir` + 进程环境。缺 `base_url` 报可操作的 `Missing` 错误（提示去哪配）。**也可写**：`save_provider(path, provider)` 先读后改再写（只覆盖传入字段、不动其它键、自动建目录、写完 chmod 600 收紧权限），是 `/login` 的落盘入口
 - `src/prompt.rs`：应用侧系统提示词构造。`build(working_dir)` 返回一个 `SystemPrompt` 函数，每次解析时读取当前工作目录与工作区里的 `Agent.md`，拼成"角色 + 工作区根 + 项目指南"。工作目录明确告诉模型（`plan.md`：AI 不知道工作区就会从根目录乱找），`Agent.md` 提供项目怎么跑、代码怎么组织
 - `src/session.rs`：应用侧会话存储与**会话目录**（`docs/session.md`）。`JsonlSessionStore` 把**原始 Message 全量日志**逐行落成 JSONL，实现 SDK 的 `SessionStore`（`append` / `load` / `truncate`，同步签名）。**不含 system**（恢复时现生成）、不含 chunk / BM25 索引（召回库由日志派生）。`truncate` 先写临时文件再原子替换、并重开追加句柄（注意：内部 `rewrite_locked` 需在已持锁下调用，否则非重入锁会死锁）。多会话（`/session`）：`SessionCatalog` trait（`list` / `open` / `create` / `latest` / `entry`，与 `ModelCatalog` 对称）+ `FileSessionCatalog`（一份会话 = `.shirley/sessions/<name>.jsonl`，目录扫描即列出，`adopt_legacy` 收编旧单文件）+ `SessionEntry { name, label, preview }`（`preview` 取首条用户消息）+ `EmptySessionCatalog`（`App::new` 兜底）
 - `src/interface/tui.rs`：主循环用 `tokio::select!`，把 `Agent` 通过 `take_agent()` 移出去、`tokio::spawn` 到独立任务里跑，结果通过 `mpsc` 通道回传，完成后 `restore_agent()` 放回来。**直接消费 `AgentEvent`**（不再有 `AgentUpdate` 中间类型）
@@ -181,10 +183,11 @@ pub async fn bash(
 - `src/interface/markdown.rs`：Markdown 渲染层。`parse` 用 `pulldown-cmark` 把 raw markdown 收敛成块级 AST（`Block`：Heading / Paragraph / Code / List / Quote / Table / Rule / Html），`render` 再把 `Block` 变成 ratatui 的 `Line`/`Span`。支持标题、粗斜体、行内代码、代码块、有序/无序/任务列表、嵌套列表（悬挂缩进）、引用、表格、分割线。错误消息不走 markdown（避免报错里的符号被当语法吃掉）。有 13 个单测覆盖各语法
 - `src/interface/event.rs`：终端事件在独立线程里 `poll` + `read`，通过无界通道送给异步侧。开启括号粘贴（`EnableBracketedPaste`），粘贴内容整体作为 `Event::Paste` 送达；`Drop` 时关鼠标捕获与括号粘贴
 - `src/interface/update.rs`：按键映射。`Esc`（AI 回复中 → 打断本轮；回溯编辑态 → 取消本次改动；否则退出）/ `Ctrl+C` 退出，`Ctrl+T` 切换思考显示，`Ctrl+O` 切换工具参数展开，`Enter` 提交，`Ctrl+A` / `Ctrl+E` 行首/行尾，`↑` / `↓` 历史回放，滚轮上下滚动。模型选择器面板打开时按键优先导向面板；指令候选浮层打开时 `↑↓←→` / `Tab` / `Enter` / `Esc` 优先导向浮层（其余按键继续正常编辑）。`Event::Paste` 走 `App::insert_input` 整段插入（换行归一为 `\n` 当普通字符），不触发发送
-- `src/interface/command.rs`：快捷指令（slash commands）。仅作用于 TUI，**不接触 SDK**——指令要么展开成 prompt 发给 AI，要么作为本地系统消息，要么触发一个本地面板。当前有 `/init`（展开为生成 `Agent.md` 的 prompt）、`/model`（打开模型选择器）、`/rewind`（回退最后一条用户消息）、`/session`（打开会话选择器）。`CommandOutcome` 区分这几类；模糊匹配（fuzzy + Levenshtein）在输入 `/` 时给候选，浮层里 `↑↓` / `←→` 移动高亮、`Tab` / `Enter` 采纳当前高亮项、`Esc` 关闭浮层（不动输入）
+- `src/interface/command.rs`：快捷指令（slash commands）。仅作用于 TUI，**不接触 SDK**——指令要么展开成 prompt 发给 AI，要么作为本地系统消息，要么触发一个本地面板。当前有 `/init`（展开为生成 `Agent.md` 的 prompt）、`/model`（打开模型选择器）、`/rewind`（回退最后一条用户消息）、`/session`（打开会话选择器）、`/login`（分步登录：依次询问 base_url / api_key / model）。`CommandOutcome` 区分这几类；模糊匹配（fuzzy + Levenshtein）在输入 `/` 时给候选，浮层里 `↑↓` / `←→` 移动高亮、`Tab` / `Enter` 采纳当前高亮项、`Esc` 关闭浮层（不动输入）
 - `src/models.rs`：模型目录。`ModelEntry { label, value, provider }` + `trait ModelCatalog`（异步 `list()`，仿 SDK `ToolFuture` 手法）+ `StaticCatalog`（兜底静态列表）+ `RemoteCatalog`（请求 OpenAI 兼容 `GET /v1/models`，失败回退兜底）。`main.rs` 从 `LOCAL_BASE_URL` 推导接口、`LOCAL_MODELS_URL` 可覆盖。`/model` 打开面板时由主循环把目录移入后台任务异步加载（不阻塞 UI）
 - **历史回溯（`/rewind`，方案 A：只回退最新一条）**：直接取**最后一条**用户消息，把**原文填回输入框**（进入"编辑重发态"，输入框提示切换为「Enter 重新发送 · Esc 取消本次修改」）。只做最新一条（`docs/session.md` 一.决策 4），没有"选择"这个动作，故**没有选择面板**。进入编辑态时**输入框不再钉在底部，而是就地移动到该消息在会话中的渲染位置**——渲染层把该条消息替换成一个青色描边的输入框（上方是它之前的对话，下方是之后的对话，新消息只会把底部挤出视野、不挤压编辑框，见 `ui.rs` 的 `draw_rewind_edit`）。回车则先回退 Agent 与界面到该消息之前、再作为全新一轮发送，Esc 则直接取消本次改动（清空输入、退出编辑态，Agent/界面均不动）。被压缩掉的历史不在 `agent.messages` 里，天然不可回溯
-- **多会话切换（`/session`）**：模态选择器（与 `/model` 同款），列表首项固定是「＋ 新建会话」哨兵（`SessionPicker::NEW_NAME` 为空串），其余为真实会话、每项第二行显示首条用户消息预览。确认时按哨兵分流到 `SessionCatalog::create` 或 `open`，拿到 `Arc<dyn SessionStore>` 后调 `Agent::switch_session`（SDK 唯一新增接缝，与 `set_model` 对称）——模型配置 / 系统提示词 / 工作目录 / 工具 / 压缩指令原样保留，只换"当前会话"。切换语义与 `Agent::new` 的恢复路径**共用 `restore_from_session`**（清空工作集与召回库 → 从新日志重建 → 现生成 system 置顶），因此切换出的工作集必然与冷启动恢复一致；配套 `RecallStore::clear()` 防旧语料污染。切换后 `App::rebuild_items_from_agent` 整体重建界面条目并重置会话绑定统计（usage / 上下文占用）。会话目录是本地扫描（同步），由主循环直接取列表打开，无需后台任务。页脚会显示当前会话名
+- **多会话切换（`/session`）**：模态选择器（与 `/model` 同款），列表首项固定是「＋ 新建会话」哨兵（`SessionPicker::NEW_NAME` 为空串），其余为真实会话、每项第二行显示首条用户消息预览。确认时按哨兵分流到 `SessionCatalog::create` 或 `open`，拿到 `Arc<dyn SessionStore>` 后调 `Agent::switch_session`（SDK 接缝，与 `set_model` / `set_provider` 对称）——模型配置 / 系统提示词 / 工作目录 / 工具 / 压缩指令原样保留，只换"当前会话"。切换语义与 `Agent::new` 的恢复路径**共用 `restore_from_session`**（清空工作集与召回库 → 从新日志重建 → 现生成 system 置顶），因此切换出的工作集必然与冷启动恢复一致；配套 `RecallStore::clear()` 防旧语料污染。切换后 `App::rebuild_items_from_agent` 整体重建界面条目并重置会话绑定统计（usage / 上下文占用）。会话目录是本地扫描（同步），由主循环直接取列表打开，无需后台任务。页脚会显示当前会话名
+- **分步登录（`/login`，方案 A：分步问答版）**：不做表单浮层，而是**复用现有输入框与 `submit` 链路**——进入后输入框被临时征用为字段编辑器，每步一次回车。顺序固定 `base_url → api_key → model`，每步以当前配置（`agent.model_config()`）预填，直接回车即"保留不变"；`base_url` 空则留在本步重问（空端点无意义），`api_key` 空表示"无鉴权"（本地服务常见，会**明确清空**旧 key，与"保留旧值"不同）。走完先**热更新 Agent**（`set_provider` + 可选 `set_model`），再**落盘**到工作区 `<root>/.shirley/config.toml`（`settings::save_provider`，先读后改再写，不动其它键，写完 chmod 600）。热更新成功但落盘失败会如实告知（不假装成功）。`Esc` 取消登录（只退登录态，不退出程序，也不改配置）。渲染层无改动——提示语走既有的 `command_hint`（`ui.rs::input_hint` 已消费），登录态下 `on_input_changed` 与回溯编辑态一样保留提示。登录流程是内存态（`App::login: Option<LoginFlow>`），未走完不落盘。测试用 `set_config_path` 注入临时路径，避免污染真实工作区
 - `src/interface/app.rs`：输入编辑状态机。`insert_input` 支持粘贴多行文本（CRLF/CR 归一为 LF），光标始终落在字符边界
 - `src/interface/ui.rs`：输入框按显示宽度软换行 + 保留硬换行（`wrap_input`），框高随内容增长（上限 `INPUT_MAX_LINES = 10`），超出后内部纵向滚动，保证粘贴长文本时光标可见
 
@@ -248,7 +251,7 @@ cp .env.example .env   # 其实没有 example，照 .env 的键名自己写
 cargo run
 ```
 
-`.env` 需要的键：`LOCAL_API_KEY`、`LOCAL_BASE_URL`、`LOCAL_CONTEXT_WINDOW_TOKENS`（可选，默认 52429）。`DEEPSEEK_*` 那组目前没被代码引用。`bash` 工具与系统提示词都会读 `SHIRLEY_WORKSPACE`（工作区根目录，缺省为当前目录）；系统提示词还会把工作区根目录下的 `Agent.md`（项目指南）内联进去。注意 `.env` 已在 `.gitignore` 里，**里面的 key 已经泄露过一次，别提交**。
+配置来源（优先级从低到高）：内置默认 → 全局 `<config_dir>/shirley/config.toml` → 工作区 `<root>/.shirley/config.toml` → 环境变量。最省事的是在 `.env` 里写（兼容旧习惯）：`LOCAL_BASE_URL`（**必填**，缺失时报错并提示去哪配）、`LOCAL_API_KEY`（可选，本地服务常不需要）、`LOCAL_MODEL`、`LOCAL_PROTOCOL`、`LOCAL_MODELS_URL`、`LOCAL_CONTEXT_WINDOW_TOKENS`（可选，默认 52429）。也可以写 TOML 配置文件：`[provider]` 表 + `base_url` / `api_key` / `model` / `protocol` / `models_url` / `context_window_tokens`。`DEEPSEEK_*` 那组目前没被代码引用。`bash` 工具与系统提示词都会读 `SHIRLEY_WORKSPACE`（工作区根目录，缺省为当前目录）；系统提示词还会把工作区根目录下的 `Agent.md`（项目指南）内联进去。注意 `.env` 已在 `.gitignore` 里，**里面的 key 已经泄露过一次，别提交**。
 
 常用命令：
 
@@ -259,7 +262,7 @@ cargo test -p agent-sdk          # 只跑 SDK 测试
 cargo clippy --all-targets       # 静态检查
 ```
 
-测试分布（应用层约 85 个）：`markdown.rs` 13 个、`app.rs` 22 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`session.rs` 10 个、`models.rs` 4 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`session_contract.rs` 7 个。
+测试分布（应用层约 85 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`session.rs` 10 个、`models.rs` 4 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`session_contract.rs` 7 个。
 
 ---
 

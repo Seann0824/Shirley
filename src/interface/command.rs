@@ -5,7 +5,7 @@
 //! （本质就是 prompt，见工作区根 `Agent.md` 的"本质是 prompt"约定），
 //! 要么作为本地系统消息直接提示用户，完全不进入模型。
 //!
-//! 当前实现 `/init`、`/model`、`/rewind` 与 `/session`。
+//! 当前实现 `/init`、`/model`、`/rewind`、`/session` 与 `/login`。
 
 use crate::prompt;
 
@@ -28,6 +28,9 @@ pub enum CommandOutcome {
     /// TUI 本地动作：打开会话选择器。会话清单由应用层的会话目录提供
     /// （见 `crate::session`），指令本身不关心会话从哪来、存哪里。
     SessionPicker,
+    /// TUI 本地动作：进入分步登录流程（依次询问 base_url / api_key / model）。
+    /// 指令本身不关心配置怎么写、写哪里——那是 `App` 与 `settings` 的事。
+    Login,
     /// 不是已知指令：按普通文本照发（宽松策略，不打断用户）。
     Unknown,
 }
@@ -38,6 +41,7 @@ enum Builtin {
     Model,
     Rewind,
     Session,
+    Login,
 }
 
 impl Builtin {
@@ -47,6 +51,7 @@ impl Builtin {
             Builtin::Model => "model",
             Builtin::Rewind => "rewind",
             Builtin::Session => "session",
+            Builtin::Login => "login",
         }
     }
 
@@ -61,6 +66,8 @@ impl Builtin {
             // 打开会话选择器：会话清单由应用层的会话目录提供，
             // 指令层只负责"要开这个面板"，不掺和会话从哪来、存哪里。
             Builtin::Session => CommandOutcome::SessionPicker,
+            // 进入分步登录：具体问答与落盘由 `App` 驱动，指令层只管"发起登录"。
+            Builtin::Login => CommandOutcome::Login,
         }
     }
 }
@@ -108,6 +115,7 @@ impl CommandManager {
                 Builtin::Model,
                 Builtin::Rewind,
                 Builtin::Session,
+                Builtin::Login,
             ],
         }
     }

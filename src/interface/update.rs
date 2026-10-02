@@ -62,6 +62,9 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             KeyCode::Esc => {
                 if app.is_waiting() {
                     app.request_interrupt();
+                } else if app.is_login() {
+                    // 登录流程中：Esc 只取消登录，不退出程序（与回溯编辑态一致）。
+                    app.cancel_login();
                 } else if app.is_rewind_edit() {
                     app.cancel_rewind_edit();
                 } else {

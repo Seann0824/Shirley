@@ -1,60 +1,56 @@
 use std::sync::Arc;
 
-use agent_sdk::{Agent, AgentError, ModelConfig, ModelProtocol, ToolManager};
+use agent_sdk::{Agent, AgentError, ModelConfig, ToolManager};
 use session::SessionCatalog as _;
 mod interface;
 mod models;
 mod prompt;
 mod session;
+mod settings;
 mod tools;
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), AgentError> {
     dotenvy::dotenv().ok();
-    let api_key = std::env::var("LOCAL_API_KEY").expect("缺少 APIKEY");
-    let base_url = std::env::var("LOCAL_BASE_URL").expect("缺少 BASE URL");
+
+    // 工作区根目录：决定"这次在哪个项目跑"，也是工作区级配置的来源。
+    // 注意它与 provider 配置是两类东西——`SHIRLEY_WORKSPACE` 刻意不进
+    // `settings`（见该模块文档），这里先解析出来供两处共用。
+    let working_dir = prompt::workspace_root();
+
+    // 配置装载（方案 A）：优先级 `内置默认 < 全局 config.toml < 工作区
+    // .shirley/config.toml < 环境变量`。`main.rs` 只消费结果，不再散读 env。
+    let settings = settings::Settings::load_default(&working_dir)
+        .map_err(|error| AgentError::Other(error.to_string()))?;
 
     // 模型目录：默认从 chat completions 的 base_url 推导 `/v1/models` 接口，
-    // 也可用 `LOCAL_MODELS_URL` 显式覆盖。拉取失败时回退到内置静态列表，
-    // 保证 `/model` 在远端抖动时仍可用（见 `models::RemoteCatalog`）。
-    let models_url = std::env::var("LOCAL_MODELS_URL")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| models::models_endpoint(&base_url));
+    // 也可用配置里的 `models_url`（或旧环境变量 `LOCAL_MODELS_URL`）显式覆盖。
+    // 拉取失败时回退到内置静态列表，保证 `/model` 在远端抖动时仍可用。
+    let models_url = settings
+        .models_url
+        .clone()
+        .unwrap_or_else(|| models::models_endpoint(&settings.base_url));
     let catalog: Arc<dyn models::ModelCatalog> = Arc::new(models::RemoteCatalog::new(
         models_url,
-        Some(api_key.clone()),
+        settings.api_key.clone(),
         models::StaticCatalog::builtin().entries(),
     ));
+
     // 定义一个工具Tool
     let mut tool_manager = ToolManager::new();
     let _ = tool_manager.register(tools::bash_tool::tool());
 
     // 调用返回 Future；await 等待它执行完成。
     let mut model_config = ModelConfig::builder()
-        .protocol(ModelProtocol::ChatCompletions)
-        .base_url(base_url)
-        .api_key(api_key)
-        .model("deepseek-v4.1-flash")
+        .protocol(settings.protocol)
+        .base_url(settings.base_url.clone())
+        .maybe_api_key(settings.api_key.clone())
+        .model(settings.model.clone())
         .stream(true)
         .thinking(true)
         .reasoning_effort("low")
         .build();
-    model_config.context_window_tokens = Some(104858 >> 1);
-    if let Ok(value) = std::env::var("LOCAL_CONTEXT_WINDOW_TOKENS") {
-        let limit = value
-            .parse::<u64>()
-            .map_err(|_| AgentError::Other("LOCAL_CONTEXT_WINDOW_TOKENS 必须是正整数".into()))?;
-        if limit == 0 {
-            return Err(AgentError::Other(
-                "LOCAL_CONTEXT_WINDOW_TOKENS 必须大于 0".into(),
-            ));
-        }
-        model_config.context_window_tokens = Some(limit);
-    }
-    // 1. 项目工作空间：作为 coding agent 的工作范围根。
-    // 2. 系统提示词：角色 + 工作目录 + 项目 Agent.md（由 `prompt` 模块动态拼装）。
-    let working_dir = prompt::workspace_root();
+    model_config.context_window_tokens = Some(settings.context_window_tokens);
 
     // 会话持久化（`docs/session.md`）：把原始 Message 全量日志落到工作区。
     // 多会话布局：每份会话是 `.shirley/sessions/<name>.jsonl`（见 `session` 模块）。

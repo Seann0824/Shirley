@@ -14,6 +14,9 @@ quote = "1.0.47"
 schemars = { version = "1.2.2", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "process", "time", "sync", "fs", "io-util"] }
 dotenvy = "0.15.7"
+toml = "0.9"
+dirs = "6"
+thiserror = "2.0.21"
 futures = "0.3.34"
 reqwest = { version = "0.13.5", features = ["json"] }
 chrono = "0.4.45"
