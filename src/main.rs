@@ -20,8 +20,12 @@ async fn main() -> Result<(), AgentError> {
 
     // 配置装载（方案 A）：优先级 `内置默认 < 全局 config.toml < 工作区
     // .shirley/config.toml < 环境变量`。`main.rs` 只消费结果，不再散读 env。
+    //
+    // 缺 `base_url` 不再阻断启动：程序照常进入 TUI，并在未配置时自动进入
+    // `/login` 引导用户补齐（见 `needs_login` 与 `interface::run`）。
     let settings = settings::Settings::load_default(&working_dir)
         .map_err(|error| AgentError::Other(error.to_string()))?;
+    let needs_login = !settings.is_configured();
 
     // 模型目录：默认从 chat completions 的 base_url 推导 `/v1/models` 接口，
     // 也可用配置里的 `models_url`（或旧环境变量 `LOCAL_MODELS_URL`）显式覆盖。
@@ -88,7 +92,7 @@ async fn main() -> Result<(), AgentError> {
         .session(session)
         .build()?;
 
-    interface::run(agent, catalog, session_catalog, Some(current_session))
+    interface::run(agent, catalog, session_catalog, Some(current_session), needs_login)
         .await
         .map_err(|error| AgentError::Other(error.to_string()))?;
 

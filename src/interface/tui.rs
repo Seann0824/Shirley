@@ -58,9 +58,15 @@ impl<'a> Tui<'a> {
         catalog: Arc<dyn ModelCatalog>,
         session_catalog: Arc<dyn SessionCatalog>,
         current_session: Option<String>,
+        needs_login: bool,
     ) -> Self {
         let mut app = App::with_catalogs(agent, catalog, session_catalog);
         app.set_current_session(current_session);
+        // 未配置模型服务时自动进入 `/login`：把"缺配置"从启动错误变成 TUI 内
+        // 的一次引导。用户可随时 Esc 取消（取消后仍可手动 `/login`）。
+        if needs_login {
+            app.start_login();
+        }
         Self {
             terminal,
             events,
@@ -204,9 +210,18 @@ pub async fn run(
     catalog: Arc<dyn ModelCatalog>,
     session_catalog: Arc<dyn SessionCatalog>,
     current_session: Option<String>,
+    needs_login: bool,
 ) -> std::io::Result<()> {
     let events = EventHandler::new()?;
-    Tui::new(terminal, events, agent, catalog, session_catalog, current_session)
-        .run()
-        .await
+    Tui::new(
+        terminal,
+        events,
+        agent,
+        catalog,
+        session_catalog,
+        current_session,
+        needs_login,
+    )
+    .run()
+    .await
 }

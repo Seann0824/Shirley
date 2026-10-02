@@ -137,9 +137,6 @@ pub enum SettingsError {
     #[error("[配置解析失败] {path}: {message}")]
     Parse { path: PathBuf, message: String },
 
-    #[error("[配置缺失]: {0}")]
-    Missing(String),
-
     #[error("[配置非法]: {0}")]
     Invalid(String),
 }
@@ -176,12 +173,25 @@ impl Settings {
         Self::load(workspace_root, global.as_deref(), &|key| std::env::var(key).ok())
     }
 
-    /// 把合并结果落成最终配置，补齐默认值并校验必填项。
+    /// 是否已完成模型服务配置（即 `base_url` 非空）。
+    ///
+    /// 缺配置不是错误、不阻断启动：应用层据此决定是否在 TUI 里自动进入
+    /// `/login` 引导用户补齐。空 `base_url` 下模型请求会失败，所以未配置时
+    /// 不应把"能跑起来"误当成"能用"。
+    pub fn is_configured(&self) -> bool {
+        !self.base_url.trim().is_empty()
+    }
+
+    /// 把合并结果落成最终配置，补齐默认值。
+    ///
+    /// 缺 `base_url` **不再报错**：那会阻断启动。此时 `base_url` 为空串，
+    /// [`Settings::is_configured`] 返回 `false`，应用层据此在 TUI 里引导用户
+    /// 走 `/login` 完成配置（见 `main.rs`）。
     fn finalize(merged: ProviderSettings) -> Result<Self, SettingsError> {
         let base_url = merged
             .base_url
             .filter(|v| !v.trim().is_empty())
-            .ok_or_else(|| SettingsError::Missing(missing_base_url_hint()))?;
+            .unwrap_or_default();
 
         let protocol = match &merged.protocol {
             Some(name) => parse_protocol(name)?,
@@ -293,15 +303,6 @@ fn parse_protocol(name: &str) -> Result<ModelProtocol, SettingsError> {
     }
 }
 
-/// 缺少 base_url 时的提示，把"该去哪配"直接说清楚。
-fn missing_base_url_hint() -> String {
-    format!(
-        "未找到模型服务地址（base_url）。请在环境变量 `LOCAL_BASE_URL`、\
-         工作区 `{WORKSPACE_CONFIG_REL}` 或全局配置的 `[provider] base_url` 中至少配置一处。\n\
-         例如：\n  [provider]\n  base_url = \"http://127.0.0.1:8788/v1/chat/completions\""
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -340,11 +341,22 @@ mod tests {
     }
 
     #[test]
-    fn missing_base_url_is_actionable_error() {
+    fn missing_base_url_yields_unconfigured_not_error() {
+        // 缺 base_url 不再是错误（不阻断启动），而是"未配置"状态。
         let root = temp_root("missing");
-        let err = Settings::load(&root, None, &env_of(&[])).unwrap_err();
-        assert!(matches!(err, SettingsError::Missing(_)));
-        assert!(err.to_string().contains("LOCAL_BASE_URL"), "应提示去哪配: {err}");
+        let settings = Settings::load(&root, None, &env_of(&[])).unwrap();
+        assert_eq!(settings.base_url, "");
+        assert!(!settings.is_configured());
+        // 其余字段仍填默认值，ModelConfig 仍可构造。
+        assert_eq!(settings.model, DEFAULT_MODEL);
+    }
+
+    #[test]
+    fn present_base_url_is_configured() {
+        let root = temp_root("configured");
+        let settings =
+            Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+        assert!(settings.is_configured());
     }
 
     #[test]
