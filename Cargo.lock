@@ -16,6 +16,7 @@ dependencies = [
  "pulldown-cmark",
  "quote",
  "ratatui",
+ "reqwest",
  "schemars",
  "serde",
  "serde_json",

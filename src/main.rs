@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use agent_sdk::{Agent, AgentError, ModelConfig, ModelProtocol, ToolManager};
 mod interface;
+mod models;
 mod prompt;
 mod tools;
 
@@ -8,6 +11,19 @@ async fn main() -> Result<(), AgentError> {
     dotenvy::dotenv().ok();
     let api_key = std::env::var("LOCAL_API_KEY").expect("缺少 APIKEY");
     let base_url = std::env::var("LOCAL_BASE_URL").expect("缺少 BASE URL");
+
+    // 模型目录：默认从 chat completions 的 base_url 推导 `/v1/models` 接口，
+    // 也可用 `LOCAL_MODELS_URL` 显式覆盖。拉取失败时回退到内置静态列表，
+    // 保证 `/model` 在远端抖动时仍可用（见 `models::RemoteCatalog`）。
+    let models_url = std::env::var("LOCAL_MODELS_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| models::models_endpoint(&base_url));
+    let catalog: Arc<dyn models::ModelCatalog> = Arc::new(models::RemoteCatalog::new(
+        models_url,
+        Some(api_key.clone()),
+        models::StaticCatalog::builtin().entries(),
+    ));
     // 定义一个工具Tool
     let mut tool_manager = ToolManager::new();
     let _ = tool_manager.register(tools::bash_tool::tool());
@@ -57,7 +73,7 @@ async fn main() -> Result<(), AgentError> {
         .tools(tool_manager)
         .build();
 
-    interface::run(agent)
+    interface::run(agent, catalog)
         .await
         .map_err(|error| AgentError::Other(error.to_string()))?;
 

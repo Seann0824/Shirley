@@ -15,8 +15,9 @@ schemars = { version = "1.2.2", features = ["derive"] }
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "process", "time", "sync", "fs", "io-util"] }
 dotenvy = "0.15.7"
 futures = "0.3.34"
+reqwest = { version = "0.13.5", features = ["json"] }
 chrono = "0.4.45"
-ratatui = "0.30.2"
+ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29.0"
 unicode-width = "0.2"
 pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }

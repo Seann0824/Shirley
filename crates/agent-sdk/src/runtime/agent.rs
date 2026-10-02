@@ -88,6 +88,56 @@ impl Agent {
             working_dir: self.working_dir.clone(),
         }
     }
+    /// 当前模型配置（只读）。
+    ///
+    /// 应用层用它展示"现在用的是哪个模型"，以及切换时保留其余配置。
+    pub fn model_config(&self) -> &adapter::ModelConfig {
+        &self.model_config
+    }
+
+    /// 切换模型：只替换 `model` 字段，其余配置（协议 / base_url / 超时 / 窗口等）原样保留。
+    ///
+    /// 这是应用层 `/model` 指令落地的唯一 SDK 接缝——模型是可热切换的运行参数，
+    /// 不重建 `Agent` 也能生效（下一次请求即用新模型）。
+    pub fn set_model(&mut self, model: impl Into<String>) {
+        self.model_config.model = model.into();
+    }
+
+    /// 对话历史的只读视图。
+    ///
+    /// 供上层展示"当前 Agent 实际记得什么"，以及"回溯"时定位目标消息——
+    /// 被压缩掉的历史不在这里，因此天然不可回溯（压缩边界之后才谈得上回溯）。
+    pub fn messages(&self) -> &[message::Message] {
+        &self.messages
+    }
+
+    /// 回溯：丢弃 `messages[len..]`，只保留前 `len` 条。
+    ///
+    /// 上层用它把会话回退到某条用户消息之前，再重新发送（编辑后的）内容。
+    /// `len` 不小于当前长度时不做任何事（幂等，避免越界）。
+    pub fn rewind(&mut self, len: usize) {
+        if len < self.messages.len() {
+            self.messages.truncate(len);
+        }
+    }
+
+    /// 回溯到最后一轮用户消息之前，返回被丢弃的用户输入（供上层编辑 / 退回输入框）。
+    ///
+    /// 用于"打断"：本轮尚未产出完整回复，回退掉这一轮的用户消息，
+    /// 让会话回到该轮开始前的状态。没有用户消息时返回 `None`。
+    pub fn rewind_last_user_turn(&mut self) -> Option<String> {
+        let index = self
+            .messages
+            .iter()
+            .rposition(|m| matches!(m, message::Message::User { .. }))?;
+        let content = match &self.messages[index] {
+            message::Message::User { content } => content.clone(),
+            _ => unreachable!("rposition 已保证是 User"),
+        };
+        self.messages.truncate(index);
+        Some(content)
+    }
+
     pub async fn run(&mut self, task: &str) -> Result<RunResult, AgentError> {
         let mut events = self.run_stream(task);
         while let Some(event) = events.next().await {

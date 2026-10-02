@@ -5,7 +5,7 @@
 //! （本质就是 prompt，见工作区根 `Agent.md` 的"本质是 prompt"约定），
 //! 要么作为本地系统消息直接提示用户，完全不进入模型。
 //!
-//! 当前只实现 `/init`。
+//! 当前实现 `/init`、`/model` 与 `/rewind`。
 
 use crate::prompt;
 
@@ -19,6 +19,12 @@ pub enum CommandOutcome {
     Prompt(String),
     /// TUI 本地动作：直接给一条系统提示，不发给 AI。
     SystemMessage(String),
+    /// TUI 本地动作：打开模型选择器。列表由应用层的模型目录提供，
+    /// 指令本身不关心模型从哪来（见 `models` 模块）。
+    ModelPicker,
+    /// TUI 本地动作：打开历史回溯面板（选一条用户消息回退重发）。
+    /// 候选直接取自 Agent 当前仍记得的消息，无需异步加载。
+    RewindPicker,
     /// 不是已知指令：按普通文本照发（宽松策略，不打断用户）。
     Unknown,
 }
@@ -26,18 +32,27 @@ pub enum CommandOutcome {
 /// 已知的内置指令。用枚举而非字符串表，避免运行期拼错。
 enum Builtin {
     Init,
+    Model,
+    Rewind,
 }
 
 impl Builtin {
     fn name(&self) -> &'static str {
         match self {
             Builtin::Init => "init",
+            Builtin::Model => "model",
+            Builtin::Rewind => "rewind",
         }
     }
 
     fn handle(&self) -> CommandOutcome {
         match self {
             Builtin::Init => handle_init(),
+            // 打开模型选择器：模型清单由应用层的 `models` 目录提供，
+            // 指令层只负责"要开这个面板"，不掺和模型从哪来。
+            Builtin::Model => CommandOutcome::ModelPicker,
+            // 打开回溯面板：候选来自 Agent 当前的消息表，指令层同样只管"开面板"。
+            Builtin::Rewind => CommandOutcome::RewindPicker,
         }
     }
 }
@@ -80,7 +95,7 @@ impl CommandManager {
     pub fn new(prefix: char) -> Self {
         Self {
             prefix,
-            builtins: vec![Builtin::Init],
+            builtins: vec![Builtin::Init, Builtin::Model, Builtin::Rewind],
         }
     }
 
@@ -221,6 +236,22 @@ mod tests {
         }
         let _ = std::fs::remove_dir_all(&dir);
         unsafe { std::env::remove_var("SHIRLEY_WORKSPACE"); }
+    }
+
+    #[test]
+    fn rewind_opens_picker() {
+        let mgr = CommandManager::new('/');
+        assert!(matches!(mgr.resolve("/rewind"), CommandOutcome::RewindPicker));
+        // 带参数也应命中（参数由面板忽略）。
+        assert!(matches!(mgr.resolve("/rewind 2"), CommandOutcome::RewindPicker));
+    }
+
+    #[test]
+    fn model_opens_picker() {
+        let mgr = CommandManager::new('/');
+        assert!(matches!(mgr.resolve("/model"), CommandOutcome::ModelPicker));
+        // 带参数也应命中（参数由选择器 UI 忽略）。
+        assert!(matches!(mgr.resolve("/model gpt"), CommandOutcome::ModelPicker));
     }
 
     #[test]
