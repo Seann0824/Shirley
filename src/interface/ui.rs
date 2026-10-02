@@ -205,8 +205,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // 模型选择器：模态浮层，覆盖消息区中央。
     draw_model_picker(frame, app, messages_area);
 
-    // 历史回溯面板（`/rewind`）：模态浮层，覆盖消息区中央。
-    draw_rewind_picker(frame, app, messages_area);
+    // 会话选择器：同款模态浮层。
+    draw_session_picker(frame, app, messages_area);
 }
 
 /// 回溯编辑态渲染：头部 + 就地输入框 + 尾部。
@@ -351,84 +351,6 @@ fn input_block(app: &App) -> Block<'static> {
         .title_bottom(footer_line(app))
 }
 
-/// 渲染 `/rewind` 的历史回溯面板。
-///
-/// 居中覆盖在消息区之上：列出 Agent 仍记得的用户消息（最近的在最上），
-/// 高亮当前选中项，底部给一行操作提示。选中后内容会填回输入框供编辑重发。
-fn draw_rewind_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
-    let Some(picker) = app.rewind() else {
-        return;
-    };
-    if area.height < 4 || area.width < 8 {
-        return;
-    }
-    let width = area.width.saturating_sub(2).clamp(20, 80).min(area.width);
-    let height = (picker.entries.len() as u16 + 3).min(area.height);
-    let x = area.x + (area.width.saturating_sub(width)) / 2;
-    let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let popup_area = ratatui::layout::Rect { x, y, width, height };
-
-    frame.render_widget(ratatui::widgets::Clear, popup_area);
-
-    let block = Block::bordered()
-        .border_type(BorderType::Rounded)
-        .border_style(Style::default().fg(Color::Magenta))
-        .title_top(
-            Line::from("回溯消息 (↑↓ 选择 · Enter 编辑重发 · Esc 取消)".to_owned())
-                .style(Style::default().fg(Color::Magenta)),
-        );
-
-    // 每条消息压成一行预览：换行折成空格，超出宽度截断。
-    let inner = width.saturating_sub(4) as usize;
-    let lines: Vec<Line> = picker
-        .entries
-        .iter()
-        .enumerate()
-        .map(|(i, entry)| {
-            let highlighted = i == picker.selected;
-            let cursor = if highlighted { "▶ " } else { "  " };
-            let preview: String = entry
-                .content
-                .split_whitespace()
-                .collect::<Vec<_>>()
-                .join(" ");
-            let preview = truncate_display(&preview, inner);
-            let style = if highlighted {
-                Style::default()
-                    .fg(Color::Black)
-                    .bg(Color::Magenta)
-                    .add_modifier(Modifier::BOLD)
-            } else {
-                Style::default()
-            };
-            Line::from(Span::styled(format!("{cursor}{preview}"), style))
-        })
-        .collect();
-
-    frame.render_widget(Paragraph::new(lines).block(block), popup_area);
-}
-
-/// 按显示宽度截断字符串，超出部分用省略号收尾（用于回溯面板的单行预览）。
-fn truncate_display(text: &str, width: usize) -> String {
-    if text.width() <= width {
-        return text.to_owned();
-    }
-    if width <= 1 {
-        return "…".to_owned();
-    }
-    let mut out = String::new();
-    let mut used = 0;
-    for ch in text.chars() {
-        let w = ch.width().unwrap_or(0);
-        if used + w > width - 1 {
-            break;
-        }
-        out.push(ch);
-        used += w;
-    }
-    out.push('…');
-    out
-}
 
 /// 渲染 `/model` 的模型选择器。
 ///
@@ -502,6 +424,78 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) 
 
     frame.render_widget(Paragraph::new(lines).block(block), popup_area);
 }
+
+/// 渲染 `/session` 的会话选择器（与模型选择器同款模态浮层）。
+///
+/// 首项是「＋ 新建会话」哨兵，其余为真实会话；每项第二行显示首条用户消息预览，
+/// 让用户认得出会话（只显示时间戳名字无法分辨）。当前会话打绿标。
+fn draw_session_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let Some(picker) = app.session_picker() else {
+        return;
+    };
+    if area.height < 4 || area.width < 12 {
+        return;
+    }
+    // 每项占两行（名字 + 预览），哨兵项只占一行。
+    let content_rows: u16 = picker
+        .entries
+        .iter()
+        .map(|e| if e.is_empty() { 1 } else { 2 })
+        .sum();
+    let height = (content_rows + 3).min(area.height);
+    let width = (area.width.saturating_sub(2)).clamp(24, 72).min(area.width);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup_area = ratatui::layout::Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, popup_area);
+
+    let current = picker.current.as_deref();
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title_top(
+            Line::from("选择会话 (↑↓ 切换 · Enter 确认 · Esc 取消)".to_owned())
+                .style(Style::default().fg(Color::Cyan)),
+        );
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, entry) in picker.entries.iter().enumerate() {
+        let highlighted = i == picker.selected;
+        let is_current = current == Some(entry.name.as_str());
+        let cursor = if highlighted { "▶ " } else { "  " };
+        let mark = if is_current { "● " } else { "  " };
+        let style = if highlighted {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else if is_current {
+            Style::default().fg(Color::Green)
+        } else {
+            Style::default()
+        };
+        lines.push(Line::from(Span::styled(
+            format!("{cursor}{mark}{}", entry.label),
+            style,
+        )));
+        // 预览行：缩进对齐，弱化样式（跟随高亮底色，保证可读）。
+        if !entry.is_empty() {
+            let preview_style = if highlighted {
+                Style::default().fg(Color::Black).bg(Color::Cyan)
+            } else {
+                Style::default().fg(Color::DarkGray)
+            };
+            lines.push(Line::from(Span::styled(
+                format!("      {}", entry.preview),
+                preview_style,
+            )));
+        }
+    }
+
+    frame.render_widget(Paragraph::new(lines).block(block), popup_area);
+}
+
 /// 渲染 `/` 触发的模糊指令候选浮层。
 ///
 /// 直接覆盖在消息区底部若干行之上，做成一个带描边的小面板。
@@ -890,6 +884,13 @@ fn footer_line(app: &App) -> Line<'static> {
         spans.push(sep());
     }
 
+    // 当前会话名（多会话切换后让用户知道自己在哪份会话里）。
+    if let Some(name) = app.current_session() {
+        spans.push(Span::styled("会话 ", dim));
+        spans.push(Span::styled(name.to_owned(), dim));
+        spans.push(sep());
+    }
+
     // 上下文占用率
     spans.push(Span::styled("上下文 ", dim));
     if app.is_compressing() {
@@ -996,7 +997,7 @@ mod tests {
             .base_url("http://localhost")
             .model("test")
             .build();
-        let mut app = App::new(Agent::builder().model_config(config).build());
+        let mut app = App::new(Agent::builder().model_config(config).build().unwrap());
         app.add_message(agent_sdk::Message::User { content: "hi".into() });
         app.add_message(agent_sdk::Message::User { content: "bye".into() });
 
@@ -1025,7 +1026,7 @@ mod tests {
             .base_url("http://localhost")
             .model("test")
             .build();
-        let mut app = App::new(Agent::builder().model_config(config).build());
+        let mut app = App::new(Agent::builder().model_config(config).build().unwrap());
         for i in 0..4 {
             app.add_message(Message::User {
                 content: format!("user turn {i}"),

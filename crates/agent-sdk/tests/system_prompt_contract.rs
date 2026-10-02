@@ -58,11 +58,11 @@ fn builder_accepts_function_prompt_and_working_dir() {
         .working_dir(PathBuf::from("/work"))
         .build();
     // 构造成功即证明类型契约成立（解析在 `Agent::new` 内完成）。
-    let _ = agent;
+    let _ = agent.unwrap();
 }
 
 /// 默认不传提示词时也能构造（空提示词 = 不置顶 System 消息）。
 #[test]
 fn builder_defaults_to_empty_prompt() {
-    let _ = Agent::builder().model_config(model_config()).build();
+    let _ = Agent::builder().model_config(model_config()).build().unwrap();
 }

@@ -20,15 +20,17 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             }
             return None;
         }
-        // 回溯面板打开时，按键先交给面板（上/下选择、Enter 确认、Esc 取消）。
+        // 会话选择器打开时同理：按键先交给面板（上/下选择、Enter 切换、Esc 取消）。
         Event::Key(key_event)
-            if key_event.kind == KeyEventKind::Press && app.is_rewind_open() =>
+            if key_event.kind == KeyEventKind::Press && app.is_session_picker_open() =>
         {
             match key_event.code {
-                KeyCode::Up => app.rewind_move(-1),
-                KeyCode::Down => app.rewind_move(1),
-                KeyCode::Enter => app.rewind_confirm(),
-                KeyCode::Esc => app.rewind_cancel(),
+                KeyCode::Up => app.session_picker_move(-1),
+                KeyCode::Down => app.session_picker_move(1),
+                KeyCode::Enter => {
+                    app.session_picker_confirm();
+                }
+                KeyCode::Esc => app.session_picker_cancel(),
                 _ => {}
             }
             return None;

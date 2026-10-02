@@ -78,6 +78,17 @@ impl RecallStore {
         }
     }
 
+    /// 清空召回库：索引与 chunk 一起重置。
+    ///
+    /// 切换会话时用（`Agent::load_session`）——新会话的语料必须从零派生，
+    /// 否则旧会话的 chunk 会污染检索。与 `index` 一样走内部可变性（`&self`），
+    /// 因为 recall 工具与 runtime 共享同一 `Arc<RecallStore>`。
+    pub fn clear(&self) {
+        let mut inner = self.inner.lock().expect("recall 锁中毒");
+        inner.index = Bm25Index::new(Bm25Params::default());
+        inner.chunks.clear();
+    }
+
     /// 检索：返回命中 chunk 的原文（含元信息），按分数降序。
     ///
     /// 分数只是词面重合度的代理；**最终筛选交给调用 recall 的 AI**——

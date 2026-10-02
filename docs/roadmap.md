@@ -38,7 +38,7 @@
 - 记忆系统（"蒸馏验证"入库）
 - 任务规划与进度跟踪
 - 多协议（Responses / Anthropic）真正落地
-- 会话持久化与恢复
+- ~~会话持久化与恢复~~ ——已落地（`session` 模块 + `docs/session.md`；SDK 定 `SessionStore` 契约，应用层 `JsonlSessionStore`）
 
 **三、依赖关系**
 

@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::models::{ModelCatalog, ModelEntry, StaticCatalog};
+use crate::session::{EmptySessionCatalog, SessionCatalog, SessionEntry};
 
 use super::command::{CommandManager, CommandOutcome, DEFAULT_PREFIX};
 
@@ -52,24 +53,22 @@ pub struct ModelPicker {
     pub current: Option<String>,
 }
 
-/// `/rewind` 历史回溯面板：列出 Agent 仍记得的用户消息，选中后回退重发。
-pub struct RewindPicker {
-    /// 候选项：最近的在最上。
-    pub entries: Vec<RewindEntry>,
-    /// 当前高亮下标。
+/// `/session` 选择器的状态。列表已在打开时由会话目录加载完毕，
+/// 这里只保存展示所需的数据与高亮位置。
+///
+/// 列表首项固定是「＋ 新建会话」哨兵（`name` 为空串），其余是真实会话；
+/// 确认时按 `name` 是否为空分流到"新建"或"切换"。
+pub struct SessionPicker {
+    pub entries: Vec<SessionEntry>,
+    /// 当前高亮的条目下标。
     pub selected: usize,
+    /// 当前会话名（用于在列表里打标），打开时快照一次。
+    pub current: Option<String>,
 }
 
-/// 一条可回溯的用户消息。同时记录它在 Agent 消息表与 UI 条目表里的位置，
-/// 回退时两边一起截断，保证视图与真实上下文对齐。
-#[derive(Debug, Clone)]
-pub struct RewindEntry {
-    /// 该用户消息在 `agent.messages` 里的下标（回退到此下标之前）。
-    pub agent_index: usize,
-    /// 对应的 UI `items` 下标（回退到此下标之前）。
-    pub ui_index: usize,
-    /// 消息原文，选中后填入输入框供编辑。
-    pub content: String,
+impl SessionPicker {
+    /// 「新建会话」哨兵条目的名字（空串即代表新建入口）。
+    pub const NEW_NAME: &'static str = "";
 }
 
 pub struct App {
@@ -114,16 +113,27 @@ pub struct App {
     /// `/model` 被触发、但模型列表尚未加载完成时置位。
     /// 由 TUI 主循环取走并异步加载目录（列表可能来自远端）。
     picker_requested: bool,
+    /// 会话目录：`/session` 的会话来源。接口稳定，实现可换（本地目录 / 远端）。
+    session_catalog: Arc<dyn SessionCatalog>,
+    /// 打开中的会话选择器；`None` 表示未打开。
+    session_picker: Option<SessionPicker>,
+    /// `/session` 被触发、但会话列表尚未加载完成时置位。
+    /// 由 TUI 主循环取走并加载目录后打开选择器。
+    session_picker_requested: bool,
+    /// 当前会话名（供选择器打标 / 状态展示）；`None` 表示未命名（内存会话）。
+    current_session: Option<String>,
     /// 本轮回复开始时 UI `items` 的长度，打断时据此回退界面。
     ui_turn_start: Option<usize>,
     /// 本轮提交的输入，打断后退回输入框供修改重发。
     turn_prompt: Option<String>,
     /// 用户按 Esc 请求打断当前回复；由主循环读取后触发取消（不清除，待完成时消费）。
     interrupt_requested: bool,
-    /// `/rewind` 打开的历史回溯面板；`None` 表示未打开。
-    rewind: Option<RewindPicker>,
-    /// 已确认的回溯点 `(agent 消息下标, UI 条目下标)`：下次提交前先回退到这里。
-    rewind_target: Option<(usize, usize)>,
+    /// `/rewind` 已确认的回溯点：被编辑消息的 UI `items` 下标。
+    ///
+    /// 回溯只作用于**最后一条用户消息**（`docs/session.md` 一.决策 4），
+    /// 因此只需记 UI 下标；Agent 侧回退由 `rewind_last_user_turn` 确定性完成。
+    /// 下次提交前先回退到这里，再作为全新一轮发送。
+    rewind_target: Option<usize>,
     /// 待滚动到的 UI 条目下标：回溯确认后置位，渲染层据此把该消息滚入视野。
     /// 渲染层取走即清空（一次性）。
     /// 输入框提示语覆盖：指令打开的编辑态（如回溯编辑）用它说明"Enter 重发 / Esc 取消"。
@@ -138,7 +148,18 @@ impl App {
     }
 
     /// 注入模型目录构造。远端目录将来从这里传入，UI 无需改动。
+    ///
+    /// 会话目录用空实现兜底（不落盘、列表为空），供不关心会话切换的场景使用。
     pub fn with_catalog(agent: Agent, catalog: Arc<dyn ModelCatalog>) -> Self {
+        Self::with_catalogs(agent, catalog, Arc::new(EmptySessionCatalog))
+    }
+
+    /// 注入模型目录与会话目录构造。`/model` 与 `/session` 各自的数据来源。
+    pub fn with_catalogs(
+        agent: Agent,
+        catalog: Arc<dyn ModelCatalog>,
+        session_catalog: Arc<dyn SessionCatalog>,
+    ) -> Self {
         Self {
             agent: Some(agent),
             exit: false,
@@ -167,10 +188,13 @@ impl App {
             catalog,
             picker: None,
             picker_requested: false,
+            session_catalog,
+            session_picker: None,
+            session_picker_requested: false,
+            current_session: None,
             ui_turn_start: None,
             turn_prompt: None,
             interrupt_requested: false,
-            rewind: None,
             rewind_target: None,
             command_hint: None,
         }
@@ -385,31 +409,41 @@ impl App {
                 self.picker_requested = true;
                 return None;
             }
-            CommandOutcome::RewindPicker => {
-                // 不发送、不落历史：清空输入并打开回溯面板。候选来自 Agent 当前消息表，
-                // 无需异步加载（与 `/model` 的差别正在于此）。
+            CommandOutcome::Rewind => {
+                // 不发送、不落历史：直接回退最后一条用户消息，把原文填回输入框。
+                // 方案 A（`docs/session.md` 一.决策 4）：只做最新一条，故无需选择面板——
+                // 没有"选择"这个动作，选择器无存在意义。
                 self.input.clear();
                 self.input_cursor = 0;
                 self.suggestions.clear();
-                self.open_rewind();
-                // 无可回溯消息时 open_rewind 会给系统提示，此时别留下指令提示。
-                self.command_hint = self
-                    .is_rewind_open()
-                    .then(|| " ↑↓ 选择 · Enter 编辑重发 · Esc 取消 ".to_owned());
+                self.start_rewind_last_turn();
+                return None;
+            }
+            CommandOutcome::SessionPicker => {
+                // 不发送、不落历史：清空输入并请求主循环加载会话列表后打开选择器。
+                self.input.clear();
+                self.input_cursor = 0;
+                self.suggestions.clear();
+                self.command_hint =
+                    Some(" ↑↓ 选择 · Enter 切换 · Esc 取消 ".to_owned());
+                self.session_picker_requested = true;
                 return None;
             }
             CommandOutcome::Unknown => {}
         }
 
-        // 若存在已确认的回溯点（`/rewind` 选择后未提交），先同步回退 Agent 与界面，
+        // 若处于回溯编辑态（`/rewind` 后未提交），先同步回退 Agent 与界面，
         // 再作为全新一轮发送——保证 UI 视图与真实上下文始终一致。
-        if let Some((agent_index, ui_index)) = self.rewind_target.take() {
+        // Agent 侧回退最后一条用户消息（及其后的 assistant/tool 链），界面侧截到
+        // 该条之前；随后本轮的 `push_message` 会把编辑后的内容作为新一条补上。
+        if let Some(ui_index) = self.rewind_target.take() {
             if let Some(agent) = self.agent.as_mut() {
-                agent.rewind(agent_index);
+                let _ = agent.rewind_last_user_turn();
             }
             self.items.truncate(ui_index);
             self.streaming_delta_start = None;
             self.message_cache = None;
+            self.command_hint = None;
         }
 
         self.command_hint = None;
@@ -488,10 +522,9 @@ impl App {
         if self.interrupt_requested {
             self.interrupt_requested = false;
             // Agent 侧：丢掉本轮用户消息及其后可能已完成的 assistant/tool 链。
-            if let Some(prompt) = self
-                .agent
-                .as_mut()
-                .and_then(|agent| agent.rewind_last_user_turn())
+            // 会话日志同步截尾（`docs/session.md` 一.决策 4），失败则记录但不阻断收尾。
+            if let Some(agent) = self.agent.as_mut()
+                && let Ok(Some(prompt)) = agent.rewind_last_user_turn()
             {
                 self.turn_prompt = Some(prompt);
             }
@@ -525,97 +558,48 @@ impl App {
         self.interrupt_requested
     }
 
-    // ---- 历史回溯（`/rewind`）----
+    // ---- 历史回溯（`/rewind`，方案 A：只回退最新一条用户消息）----
 
-    /// 打开回溯面板：列出 Agent 仍记得的用户消息（最近的在最上）。
+    /// `/rewind` 的落点：直接回退**最后一条**用户消息，把原文填回输入框供编辑重发。
     ///
-    /// 被压缩掉的历史不在 `agent.messages` 里，因此天然不可回溯——压缩边界
-    /// 之后才谈得上回溯，语义上也自洽。
-    pub fn open_rewind(&mut self) {
+    /// 只做最新一条（`docs/session.md` 一.决策 4）——没有"选择"这个动作，
+    /// 因此不需要选择面板：找最后一条用户消息、进编辑态即可。
+    /// 被压缩掉的历史不在 `agent.messages` 里，天然不可回溯，语义自洽。
+    ///
+    /// 这里**只进入编辑态**（记录回退点 + 填输入框），真正的回退推迟到 `submit`：
+    /// 这样编辑期间界面仍保留原对话，渲染层能把被编辑那条就地画成输入框
+    /// （见 `ui.rs::draw_rewind_edit`），用户看得到上下文。
+    pub fn start_rewind_last_turn(&mut self) {
         let Some(agent) = self.agent.as_ref() else {
             return;
         };
-        // Agent 侧的用户消息（下标 + 原文）。
-        let agent_users: Vec<(usize, String)> = agent
+        // Agent 侧最后一条用户消息的原文。
+        let Some(content) = agent
             .messages()
             .iter()
-            .enumerate()
-            .filter_map(|(i, m)| match m {
-                Message::User { content } => Some((i, content.clone())),
+            .rev()
+            .find_map(|m| match m {
+                Message::User { content } => Some(content.clone()),
                 _ => None,
             })
-            .collect();
-        if agent_users.is_empty() {
+        else {
             self.add_system_message("没有可回溯的消息。".to_owned());
             return;
-        }
-        // UI 侧的用户条目下标：与 Agent 用户消息一一对应（每次提交各产生一条）。
-        let ui_users: Vec<usize> = self
-            .items
-            .iter()
-            .enumerate()
-            .filter_map(|(i, item)| match item {
-                Item::Message(m) if m.role == Role::User => Some(i),
-                _ => None,
-            })
-            .collect();
+        };
+        // UI 侧最后一条用户条目下标：与 Agent 用户消息一一对应（每次提交各产生一条）。
+        let Some(ui_index) = self.items.iter().rposition(|item| {
+            matches!(item, Item::Message(m) if m.role == Role::User)
+        }) else {
+            self.add_system_message("没有可回溯的消息。".to_owned());
+            return;
+        };
 
-        // 从两端对齐：最近的一条在面板最上方。
-        let entries: Vec<RewindEntry> = agent_users
-            .iter()
-            .rev()
-            .zip(ui_users.iter().rev())
-            .map(|((agent_index, content), ui_index)| RewindEntry {
-                agent_index: *agent_index,
-                ui_index: *ui_index,
-                content: content.clone(),
-            })
-            .collect();
-
-        self.rewind = Some(RewindPicker { entries, selected: 0 });
+        self.rewind_target = Some(ui_index);
+        self.set_input(content);
         self.message_cache = None;
-    }
-
-    pub fn rewind(&self) -> Option<&RewindPicker> {
-        self.rewind.as_ref()
-    }
-
-    pub fn is_rewind_open(&self) -> bool {
-        self.rewind.is_some()
-    }
-
-    pub fn rewind_move(&mut self, delta: i32) {
-        let Some(picker) = self.rewind.as_mut() else {
-            return;
-        };
-        let len = picker.entries.len() as i32;
-        if len == 0 {
-            return;
-        }
-        picker.selected = (picker.selected as i32 + delta).rem_euclid(len) as usize;
-    }
-
-    /// 确认回溯：把选中消息填回输入框并记录回溯点，等待用户编辑后提交。
-    pub fn rewind_confirm(&mut self) {
-        let Some(picker) = self.rewind.take() else {
-            return;
-        };
-        self.message_cache = None;
-        let Some(entry) = picker.entries.get(picker.selected).cloned() else {
-            return;
-        };
-        self.rewind_target = Some((entry.agent_index, entry.ui_index));
-        self.set_input(entry.content);
         // 进入"编辑重发"态：Enter 重新发送，Esc 取消本次改动。
-        // 输入框由渲染层就地画到该消息的位置（见 `rewind_edit_item`），无需额外滚动。
+        // 输入框由渲染层就地画到该消息的位置（见 `ui.rs::draw_rewind_edit`）。
         self.command_hint = Some(" Enter 重新发送 · Esc 取消本次修改 ".to_owned());
-    }
-
-    pub fn rewind_cancel(&mut self) {
-        if self.rewind.take().is_some() {
-            self.message_cache = None;
-        }
-        self.command_hint = None;
     }
 
     /// 指令编辑态的输入框提示覆盖（无则为 `None`）。
@@ -623,23 +607,23 @@ impl App {
         self.command_hint.as_deref()
     }
 
-    /// 是否处于"回溯编辑重发"态（已确认回溯点、等待编辑后提交）。
+    /// 是否处于"回溯编辑重发"态（已进入编辑态、等待编辑后提交）。
     pub fn is_rewind_edit(&self) -> bool {
         self.rewind_target.is_some()
     }
 
     /// 回溯编辑态下正在被编辑的 UI 条目下标（渲染层据此把该消息就地画成输入框）。
     pub fn rewind_edit_item(&self) -> Option<usize> {
-        self.rewind_target.map(|(_, ui_index)| ui_index)
+        self.rewind_target
     }
 
     /// 仅测试用：直接进入回溯编辑态并指向某条 UI 条目。
     #[cfg(test)]
     pub fn set_rewind_edit_for_test(&mut self, ui_index: usize) {
-        self.rewind_target = Some((0, ui_index));
+        self.rewind_target = Some(ui_index);
     }
 
-    /// 取消本次回溯编辑：清掉回溯点与输入，Agent / 界面均不改动。
+    /// 取消本次回溯编辑：清掉编辑态与输入，Agent / 界面均不改动。
     /// 用户"不回车直接取消"的落点。
     pub fn cancel_rewind_edit(&mut self) {
         if self.rewind_target.take().is_some() {
@@ -862,6 +846,150 @@ impl App {
         self.picker.is_some()
     }
 
+    // ---- 会话选择器（`/session`）----
+
+    /// 主循环取走"需要加载会话列表"的请求。
+    pub fn take_session_picker_request(&mut self) -> bool {
+        std::mem::take(&mut self.session_picker_requested)
+    }
+
+    /// 会话目录句柄（供主循环加载列表）。
+    pub fn session_catalog(&self) -> Arc<dyn SessionCatalog> {
+        Arc::clone(&self.session_catalog)
+    }
+
+    /// 当前会话名（供状态展示）。
+    pub fn current_session(&self) -> Option<&str> {
+        self.current_session.as_deref()
+    }
+
+    /// 记录当前会话名（启动时由主循环从上次会话恢复后设置）。
+    pub fn set_current_session(&mut self, name: Option<String>) {
+        self.current_session = name;
+    }
+
+    /// 用加载好的会话列表打开选择器，高亮当前会话。
+    ///
+    /// 列表首项固定插入「＋ 新建会话」哨兵，让"切换"与"新建"在同一个面板里完成。
+    pub fn open_session_picker(&mut self, mut entries: Vec<SessionEntry>) {
+        let current = self.current_session.clone();
+        // 哨兵项置顶：name 为空串代表"新建"。
+        let mut all = vec![SessionEntry {
+            name: SessionPicker::NEW_NAME.to_owned(),
+            label: "＋ 新建会话".to_owned(),
+            preview: String::new(),
+        }];
+        all.append(&mut entries);
+        let selected = current
+            .as_ref()
+            .and_then(|name| all.iter().position(|e| &e.name == name))
+            .unwrap_or(0);
+        self.session_picker = Some(SessionPicker {
+            entries: all,
+            selected,
+            current,
+        });
+        self.message_cache = None;
+    }
+
+    pub fn session_picker(&self) -> Option<&SessionPicker> {
+        self.session_picker.as_ref()
+    }
+
+    /// 选择器上下移动高亮（不绕回，到边界停住——列表含新建入口，绕回易误触）。
+    pub fn session_picker_move(&mut self, delta: i32) {
+        let Some(picker) = self.session_picker.as_mut() else {
+            return;
+        };
+        let last = picker.entries.len().saturating_sub(1) as i32;
+        let next = (picker.selected as i32 + delta).clamp(0, last);
+        picker.selected = next as usize;
+    }
+
+    /// 确认选择：新建或切换到目标会话，重建界面与 Agent 上下文。返回结果说明。
+    ///
+    /// 返回 `Some(说明文案)` 表示已切换；`None` 表示面板未打开或切换失败
+    /// （失败时已通过系统消息提示）。
+    pub fn session_picker_confirm(&mut self) -> Option<String> {
+        let picker = self.session_picker.take()?;
+        self.message_cache = None;
+        self.command_hint = None;
+        let entry = picker.entries.get(picker.selected).cloned()?;
+        let catalog = Arc::clone(&self.session_catalog);
+
+        let (name, store) = if entry.name == SessionPicker::NEW_NAME {
+            match catalog.create() {
+                Ok((created, store)) => (created.name, store),
+                Err(error) => {
+                    self.add_system_message(format!("新建会话失败：{error}"));
+                    return None;
+                }
+            }
+        } else {
+            match catalog.open(&entry.name) {
+                Ok(store) => (entry.name.clone(), store),
+                Err(error) => {
+                    self.add_system_message(format!("打开会话失败：{error}"));
+                    return None;
+                }
+            }
+        };
+
+        let agent = self.agent.as_mut()?;
+        if let Err(error) = agent.switch_session(store) {
+            self.add_system_message(format!("切换会话失败：{error}"));
+            return None;
+        }
+        self.current_session = Some(name.clone());
+        // 会话已换：界面重放新会话历史，并重置与会话绑定的统计量。
+        self.rebuild_items_from_agent();
+        self.reset_session_stats();
+        let message = format!("已切换到会话：{name}");
+        self.add_system_message(message.clone());
+        Some(message)
+    }
+
+    /// 取消选择。
+    pub fn session_picker_cancel(&mut self) {
+        if self.session_picker.take().is_some() {
+            self.message_cache = None;
+        }
+        self.command_hint = None;
+    }
+
+    /// 会话选择器是否打开（主循环据此把按键导向面板而非输入框）。
+    pub fn is_session_picker_open(&self) -> bool {
+        self.session_picker.is_some()
+    }
+
+    /// 从 Agent 当前消息表重放界面条目（切换会话后调用）。
+    ///
+    /// 界面条目是 Agent 消息的视图；换会话等于换了整份历史，视图必须整体重建，
+    /// 不能增量。`add_message` 天然跳过 system / tool（与展示口径一致）。
+    pub fn rebuild_items_from_agent(&mut self) {
+        self.items.clear();
+        self.streaming_delta_start = None;
+        self.scroll = 0;
+        self.auto_scroll = true;
+        let messages: Vec<Message> = self
+            .agent
+            .as_ref()
+            .map(|agent| agent.messages().to_vec())
+            .unwrap_or_default();
+        for message in messages {
+            self.add_message(message);
+        }
+        self.message_cache = None;
+    }
+
+    /// 切换会话后重置与会话绑定的统计（usage / 上下文占用）。
+    fn reset_session_stats(&mut self) {
+        self.last_usage = None;
+        self.total_usage = Usage::default();
+        self.context_usage = None;
+        self.compressing = false;
+    }
+
     /// 输入变化时重算候选（在 push/insert/pop/delete/move 等之后统一调用）。
     pub fn on_input_changed(&mut self) {
         // 回溯编辑态下保留"Enter 重发 / Esc 取消"提示——用户改动的是待重发内容，
@@ -884,7 +1012,50 @@ mod tests {
             .base_url("http://localhost")
             .model("test")
             .build();
-        App::new(Agent::builder().model_config(config).build())
+        App::new(Agent::builder().model_config(config).build().unwrap())
+    }
+
+    #[test]
+    fn session_command_requests_picker_without_sending() {
+        let mut app = app();
+        for ch in "/session".chars() {
+            app.push_input(ch);
+        }
+        assert!(app.submit().is_none(), "/session 不应作为 prompt 发送");
+        assert!(app.take_session_picker_request(), "应请求加载会话列表");
+        assert!(!app.is_waiting(), "不应进入等待回复状态");
+        assert!(app.input().is_empty(), "输入应被清空");
+    }
+
+    #[test]
+    fn session_picker_new_entry_is_first_and_confirms_to_new_session() {
+        let mut app = app();
+        app.open_session_picker(vec![SessionEntry {
+            name: "20240101-000000".into(),
+            label: "20240101-000000".into(),
+            preview: "旧对话".into(),
+        }]);
+        assert!(app.is_session_picker_open());
+        // 首项固定是「新建」哨兵。
+        assert_eq!(app.session_picker().unwrap().entries[0].name, "");
+        // 无当前会话 → 高亮新建项。
+        assert_eq!(app.session_picker().unwrap().selected, 0);
+        app.session_picker_cancel();
+        assert!(!app.is_session_picker_open());
+    }
+
+    #[test]
+    fn session_picker_move_does_not_wrap() {
+        let mut app = app();
+        app.open_session_picker(vec![
+            SessionEntry { name: "a".into(), label: "a".into(), preview: String::new() },
+            SessionEntry { name: "b".into(), label: "b".into(), preview: String::new() },
+        ]);
+        // 共 3 项（新建 + a + b）。
+        app.session_picker_move(-1);
+        assert_eq!(app.session_picker().unwrap().selected, 0, "到顶应停住，不绕回");
+        app.session_picker_move(5);
+        assert_eq!(app.session_picker().unwrap().selected, 2, "到底应停住，不绕回");
     }
 
     #[test]
@@ -951,7 +1122,7 @@ mod tests {
             .base_url("http://localhost")
             .model("test")
             .build();
-        Agent::builder().model_config(config).messages(messages).build()
+        Agent::builder().model_config(config).messages(messages).build().unwrap()
     }
 
     #[test]
@@ -983,7 +1154,7 @@ mod tests {
     }
 
     #[test]
-    fn rewind_confirm_fills_input_and_records_target() {
+    fn rewind_command_fills_last_user_message() {
         let mut app = App::new(agent_with_users(vec![
             Message::User { content: "first".into() },
             Message::User { content: "second".into() },
@@ -992,20 +1163,12 @@ mod tests {
         app.add_message(Message::User { content: "first".into() });
         app.add_message(Message::User { content: "second".into() });
 
-        app.open_rewind();
-        assert!(app.is_rewind_open());
-        // 最近的在最上。
-        assert_eq!(app.rewind().unwrap().entries[0].content, "second");
-        assert_eq!(app.rewind().unwrap().entries[1].content, "first");
-
-        app.rewind_move(1);
-        assert_eq!(app.rewind().unwrap().selected, 1);
-        app.rewind_confirm();
-        assert!(!app.is_rewind_open(), "确认后应关闭面板");
-        assert_eq!(app.input(), "first", "选中消息应填入输入框");
-        // 确认后应进入编辑重发态，并把输入框就地定位到该消息位置。
+        app.start_rewind_last_turn();
+        // 只回退最新一条：输入框应填 "second"，编辑点指向第 1 条 UI 条目。
+        assert_eq!(app.input(), "second", "应填回最后一条用户消息");
         assert!(app.is_rewind_edit(), "应进入回溯编辑态");
-        assert_eq!(app.rewind_edit_item(), Some(0), "应定位到被编辑的消息条目");
+        assert_eq!(app.rewind_edit_item(), Some(1), "应定位到被编辑的消息条目");
+        assert!(app.command_hint().is_some(), "应给出重发提示");
     }
 
     #[test]
@@ -1017,12 +1180,10 @@ mod tests {
         app.add_message(Message::User { content: "first".into() });
         app.add_message(Message::User { content: "second".into() });
 
-        app.open_rewind();
-        app.rewind_move(1); // 选 "first"
-        app.rewind_confirm();
+        app.start_rewind_last_turn(); // 回退 "second"
         // 编辑后提交。
         app.push_input('!');
-        assert_eq!(app.submit().as_deref(), Some("first!"));
+        assert_eq!(app.submit().as_deref(), Some("second!"));
 
         // 界面只剩回退点之前的条目 + 新提交的这条。
         let user_items = app
@@ -1033,24 +1194,19 @@ mod tests {
                 _ => None,
             })
             .collect::<Vec<_>>();
-        assert_eq!(user_items, vec!["first!".to_owned()]);
+        assert_eq!(user_items, vec!["first".to_owned(), "second!".to_owned()]);
     }
 
     #[test]
-    fn rewind_cancel_keeps_state() {
-        let mut app = App::new(agent_with_users(vec![Message::User {
-            content: "only".into(),
-        }]));
-        app.add_message(Message::User { content: "only".into() });
-        app.open_rewind();
-        app.rewind_cancel();
-        assert!(!app.is_rewind_open());
-        assert!(app.input().is_empty(), "取消不应改动输入");
-        assert!(!app.is_rewind_edit(), "取消后面板关闭且未进入编辑态");
+    fn rewind_without_user_message_is_noop() {
+        let mut app = App::new(agent_with_users(vec![]));
+        app.start_rewind_last_turn();
+        assert!(!app.is_rewind_edit(), "无可回溯消息不应进入编辑态");
+        assert!(app.input().is_empty());
     }
 
     #[test]
-    fn rewind_command_opens_picker_without_sending() {
+    fn rewind_command_starts_edit_without_sending() {
         let mut app = App::new(agent_with_users(vec![Message::User {
             content: "only".into(),
         }]));
@@ -1059,10 +1215,10 @@ mod tests {
             app.push_input(ch);
         }
         assert!(app.submit().is_none(), "/rewind 不应作为 prompt 发送");
-        assert!(app.is_rewind_open(), "应打开回溯面板");
+        assert!(app.is_rewind_edit(), "应进入回溯编辑态");
         assert!(!app.is_waiting(), "不应进入等待回复状态");
-        assert!(app.input().is_empty(), "输入应被清空");
-        assert!(app.command_hint().is_some(), "应给出面板操作提示");
+        assert_eq!(app.input(), "only", "应填回最后一条用户消息");
+        assert!(app.command_hint().is_some(), "应给出重发提示");
     }
 
     #[test]
@@ -1075,7 +1231,6 @@ mod tests {
             app.push_input(ch);
         }
         app.submit();
-        app.rewind_confirm();
         assert_eq!(app.input(), "first");
 
         // Esc：取消本次改动——清输入、退出编辑态，且不发送。
@@ -1085,8 +1240,7 @@ mod tests {
         assert!(app.command_hint().is_none(), "取消应清掉提示");
 
         // 再来一次，这次编辑后回车重发。
-        app.open_rewind();
-        app.rewind_confirm();
+        app.start_rewind_last_turn();
         app.push_input('!');
         assert!(app.command_hint().is_some(), "编辑态应保留重发提示");
         assert_eq!(app.submit().as_deref(), Some("first!"), "回车应重发编辑后的内容");
@@ -1159,7 +1313,8 @@ mod tests {
                             .model("test")
                             .build(),
                     )
-                    .build(),
+                    .build()
+                    .unwrap(),
             );
         }
 
@@ -1200,7 +1355,8 @@ mod tests {
                         .model("test")
                         .build(),
                 )
-                .build(),
+                .build()
+                .unwrap(),
         );
         app.history_prev();
         assert_eq!(app.input(), "hello");

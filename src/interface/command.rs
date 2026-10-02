@@ -5,7 +5,7 @@
 //! （本质就是 prompt，见工作区根 `Agent.md` 的"本质是 prompt"约定），
 //! 要么作为本地系统消息直接提示用户，完全不进入模型。
 //!
-//! 当前实现 `/init`、`/model` 与 `/rewind`。
+//! 当前实现 `/init`、`/model`、`/rewind` 与 `/session`。
 
 use crate::prompt;
 
@@ -22,9 +22,12 @@ pub enum CommandOutcome {
     /// TUI 本地动作：打开模型选择器。列表由应用层的模型目录提供，
     /// 指令本身不关心模型从哪来（见 `models` 模块）。
     ModelPicker,
-    /// TUI 本地动作：打开历史回溯面板（选一条用户消息回退重发）。
-    /// 候选直接取自 Agent 当前仍记得的消息，无需异步加载。
-    RewindPicker,
+    /// TUI 本地动作：回退最后一条用户消息，把原文填回输入框供编辑重发。
+    /// 方案 A：只做最新一条，无需选择面板，候选也不涉及异步加载。
+    Rewind,
+    /// TUI 本地动作：打开会话选择器。会话清单由应用层的会话目录提供
+    /// （见 `crate::session`），指令本身不关心会话从哪来、存哪里。
+    SessionPicker,
     /// 不是已知指令：按普通文本照发（宽松策略，不打断用户）。
     Unknown,
 }
@@ -34,6 +37,7 @@ enum Builtin {
     Init,
     Model,
     Rewind,
+    Session,
 }
 
 impl Builtin {
@@ -42,6 +46,7 @@ impl Builtin {
             Builtin::Init => "init",
             Builtin::Model => "model",
             Builtin::Rewind => "rewind",
+            Builtin::Session => "session",
         }
     }
 
@@ -51,8 +56,11 @@ impl Builtin {
             // 打开模型选择器：模型清单由应用层的 `models` 目录提供，
             // 指令层只负责"要开这个面板"，不掺和模型从哪来。
             Builtin::Model => CommandOutcome::ModelPicker,
-            // 打开回溯面板：候选来自 Agent 当前的消息表，指令层同样只管"开面板"。
-            Builtin::Rewind => CommandOutcome::RewindPicker,
+            // 回退最新一条用户消息：候选来自 Agent 当前的消息表，指令层只管"发起回退"。
+            Builtin::Rewind => CommandOutcome::Rewind,
+            // 打开会话选择器：会话清单由应用层的会话目录提供，
+            // 指令层只负责"要开这个面板"，不掺和会话从哪来、存哪里。
+            Builtin::Session => CommandOutcome::SessionPicker,
         }
     }
 }
@@ -95,7 +103,12 @@ impl CommandManager {
     pub fn new(prefix: char) -> Self {
         Self {
             prefix,
-            builtins: vec![Builtin::Init, Builtin::Model, Builtin::Rewind],
+            builtins: vec![
+                Builtin::Init,
+                Builtin::Model,
+                Builtin::Rewind,
+                Builtin::Session,
+            ],
         }
     }
 
@@ -239,11 +252,11 @@ mod tests {
     }
 
     #[test]
-    fn rewind_opens_picker() {
+    fn rewind_starts_last_turn() {
         let mgr = CommandManager::new('/');
-        assert!(matches!(mgr.resolve("/rewind"), CommandOutcome::RewindPicker));
-        // 带参数也应命中（参数由面板忽略）。
-        assert!(matches!(mgr.resolve("/rewind 2"), CommandOutcome::RewindPicker));
+        assert!(matches!(mgr.resolve("/rewind"), CommandOutcome::Rewind));
+        // 带参数也应命中（参数被忽略——只回退最新一条）。
+        assert!(matches!(mgr.resolve("/rewind 2"), CommandOutcome::Rewind));
     }
 
     #[test]
@@ -252,6 +265,14 @@ mod tests {
         assert!(matches!(mgr.resolve("/model"), CommandOutcome::ModelPicker));
         // 带参数也应命中（参数由选择器 UI 忽略）。
         assert!(matches!(mgr.resolve("/model gpt"), CommandOutcome::ModelPicker));
+    }
+
+    #[test]
+    fn session_opens_picker() {
+        let mgr = CommandManager::new('/');
+        assert!(matches!(mgr.resolve("/session"), CommandOutcome::SessionPicker));
+        // 带参数也应命中（参数由选择器 UI 忽略）。
+        assert!(matches!(mgr.resolve("/session 2"), CommandOutcome::SessionPicker));
     }
 
     #[test]

@@ -1,9 +1,11 @@
 use std::sync::Arc;
 
 use agent_sdk::{Agent, AgentError, ModelConfig, ModelProtocol, ToolManager};
+use session::SessionCatalog as _;
 mod interface;
 mod models;
 mod prompt;
+mod session;
 mod tools;
 
 #[tokio::main(flavor = "multi_thread")]
@@ -54,6 +56,22 @@ async fn main() -> Result<(), AgentError> {
     // 2. 系统提示词：角色 + 工作目录 + 项目 Agent.md（由 `prompt` 模块动态拼装）。
     let working_dir = prompt::workspace_root();
 
+    // 会话持久化（`docs/session.md`）：把原始 Message 全量日志落到工作区。
+    // 多会话布局：每份会话是 `.shirley/sessions/<name>.jsonl`（见 `session` 模块）。
+    // 旧的单文件日志 `.shirley/session.jsonl` 会在首次启动时被收编为一份会话，
+    // 保证升级不丢历史。启动时打开"最近修改"的会话；一份都没有就新建一个。
+    let session_catalog = session::FileSessionCatalog::new(&working_dir);
+    session_catalog.adopt_legacy()?;
+    let (current_session, session): (String, Arc<dyn agent_sdk::SessionStore>) =
+        match session_catalog.latest()? {
+            Some(entry) => (entry.name.clone(), session_catalog.open(&entry.name)?),
+            None => {
+                let (entry, store) = session_catalog.create()?;
+                (entry.name, store)
+            }
+        };
+    let session_catalog: Arc<dyn session::SessionCatalog> = Arc::new(session_catalog);
+
     let agent = Agent::builder()
         .model_config(model_config)
         // 提示词以函数形式传入：每次解析都读取当前工作目录与项目 Agent.md，
@@ -71,9 +89,10 @@ async fn main() -> Result<(), AgentError> {
         ",
         )
         .tools(tool_manager)
-        .build();
+        .session(session)
+        .build()?;
 
-    interface::run(agent, catalog)
+    interface::run(agent, catalog, session_catalog, Some(current_session))
         .await
         .map_err(|error| AgentError::Other(error.to_string()))?;
 

@@ -6,6 +6,7 @@ use tokio::task::JoinHandle;
 
 use super::{app::App, event::EventHandler, ui, update};
 use crate::models::ModelCatalog;
+use crate::session::SessionCatalog;
 
 async fn run_agent(
     mut agent: Agent,
@@ -55,11 +56,15 @@ impl<'a> Tui<'a> {
         events: EventHandler,
         agent: Agent,
         catalog: Arc<dyn ModelCatalog>,
+        session_catalog: Arc<dyn SessionCatalog>,
+        current_session: Option<String>,
     ) -> Self {
+        let mut app = App::with_catalogs(agent, catalog, session_catalog);
+        app.set_current_session(current_session);
         Self {
             terminal,
             events,
-            app: App::with_catalog(agent, catalog),
+            app,
             cancel: None,
         }
     }
@@ -143,6 +148,17 @@ impl<'a> Tui<'a> {
                             let _ = tx.send(entries);
                         });
                     }
+                    // `/session` 触发了会话列表加载：会话目录是本地扫描（同步），
+                    // 直接在主循环取列表并打开选择器即可，无需后台任务。
+                    if self.app.take_session_picker_request() {
+                        let catalog = self.app.session_catalog();
+                        match catalog.list() {
+                            Ok(entries) => self.app.open_session_picker(entries),
+                            Err(error) => {
+                                self.app.add_system_message(format!("加载会话列表失败：{error}"))
+                            }
+                        }
+                    }
                 }
                 // 模型列表加载完成：打开选择器。
                 Some(entries) = picker_rx.recv() => {
@@ -186,7 +202,11 @@ pub async fn run(
     terminal: &mut ratatui::DefaultTerminal,
     agent: Agent,
     catalog: Arc<dyn ModelCatalog>,
+    session_catalog: Arc<dyn SessionCatalog>,
+    current_session: Option<String>,
 ) -> std::io::Result<()> {
     let events = EventHandler::new()?;
-    Tui::new(terminal, events, agent, catalog).run().await
+    Tui::new(terminal, events, agent, catalog, session_catalog, current_session)
+        .run()
+        .await
 }
