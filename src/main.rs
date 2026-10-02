@@ -17,7 +17,7 @@ async fn main() -> Result<(), AgentError> {
         .protocol(ModelProtocol::ChatCompletions)
         .base_url(base_url)
         .api_key(api_key)
-        .model("hy3")
+        .model("deepseek-v4.1-flash")
         .stream(true)
         .thinking(true)
         .reasoning_effort("low")

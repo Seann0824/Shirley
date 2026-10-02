@@ -97,7 +97,7 @@ pub struct ModelRequest<'a> {
 }
 
 #[derive(Debug, PartialEq, Eq)]
-pub enum ModelfinishReaon {
+pub enum ModelFinishReason {
     Stop,
     ToolCalls,
     Length,
@@ -107,7 +107,7 @@ pub enum ModelfinishReaon {
 #[derive(Debug)]
 pub struct ModelResponse {
     pub message: message::Message,
-    pub finish_reason: ModelfinishReaon,
+    pub finish_reason: ModelFinishReason,
     pub usage: message::Usage,
 }
 

@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::{
     ModelConfig,
     adapter::{
-        AdapterError, AdapterEvent, ModelRequest, ModelResponse, ModelfinishReaon,
+        AdapterError, AdapterEvent, ModelRequest, ModelResponse, ModelFinishReason,
         PreparedRequest,
     },
     message, tool,
@@ -183,12 +183,12 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adapter
         .finish_reason
         .as_ref()
         .map(|reason| match reason.as_str() {
-            "stop" => ModelfinishReaon::Stop,
-            "tool_calls" => ModelfinishReaon::ToolCalls,
-            "length" => ModelfinishReaon::Length,
-            other => ModelfinishReaon::Other(other.to_owned()),
+            "stop" => ModelFinishReason::Stop,
+            "tool_calls" => ModelFinishReason::ToolCalls,
+            "length" => ModelFinishReason::Length,
+            other => ModelFinishReason::Other(other.to_owned()),
         })
-        .unwrap_or(ModelfinishReaon::Other("unknown".to_owned()));
+        .unwrap_or(ModelFinishReason::Other("unknown".to_owned()));
 
     // usage 需要转换成 message::Usage
     let cached_input_tokens = response
@@ -347,10 +347,10 @@ pub async fn decode_stream_response(
 
                 if let Some(reason) = &choice.finish_reason {
                     finish_reason = Some(match reason.as_str() {
-                        "stop" => ModelfinishReaon::Stop,
-                        "tool_calls" => ModelfinishReaon::ToolCalls,
-                        "length" => ModelfinishReaon::Length,
-                        other => ModelfinishReaon::Other(other.to_owned()),
+                        "stop" => ModelFinishReason::Stop,
+                        "tool_calls" => ModelFinishReason::ToolCalls,
+                        "length" => ModelFinishReason::Length,
+                        other => ModelFinishReason::Other(other.to_owned()),
                     });
                 }
                 // 这里必然返回 assistant， 所以接下来我们就是要把数据向外yield
