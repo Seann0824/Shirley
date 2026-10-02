@@ -1,4 +1,5 @@
 mod app;
+mod command;
 mod event;
 mod markdown;
 mod tui;

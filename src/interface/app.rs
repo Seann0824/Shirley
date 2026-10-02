@@ -1,6 +1,8 @@
 use agent_sdk::{Agent, Message, Usage};
 use std::time::Instant;
 
+use super::command::{CommandManager, CommandOutcome, DEFAULT_PREFIX};
+
 use super::ui::MessageCache;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,6 +10,7 @@ pub enum Role {
     User,
     Assistant,
     Summary,
+    System,
     Error,
 }
 
@@ -63,6 +66,10 @@ pub struct App {
     context_usage: Option<(u64, u64)>,
     streaming_delta_start: Option<usize>,
     pub(crate) message_cache: Option<MessageCache>,
+    /// 快捷指令解析器。只作用于 TUI，不参与任何发送给 AI 的上下文。
+    commands: CommandManager,
+    /// `/` 触发的模糊指令候选（如 `/inti` → `init`）。空表示当前无候选。
+    suggestions: Vec<String>,
 }
 
 impl App {
@@ -89,6 +96,8 @@ impl App {
             context_usage: None,
             streaming_delta_start: None,
             message_cache: None,
+            commands: CommandManager::new(DEFAULT_PREFIX),
+            suggestions: Vec::new(),
         }
     }
 
@@ -217,6 +226,7 @@ impl App {
         self.history_index = None;
         self.input.insert(self.input_cursor, ch);
         self.input_cursor += ch.len_utf8();
+        self.on_input_changed();
     }
 
     /// 粘贴：把整段文本按字面插入光标处。
@@ -230,6 +240,7 @@ impl App {
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         self.input.insert_str(self.input_cursor, &normalized);
         self.input_cursor += normalized.len();
+        self.on_input_changed();
     }
 
     /// 退格：删除光标前一个字符。
@@ -237,6 +248,7 @@ impl App {
         if let Some((index, _)) = self.input[..self.input_cursor].char_indices().last() {
             self.input.remove(index);
             self.input_cursor = index;
+            self.on_input_changed();
         }
     }
 
@@ -244,6 +256,7 @@ impl App {
     pub fn delete_input(&mut self) {
         if self.input_cursor < self.input.len() {
             self.input.remove(self.input_cursor);
+            self.on_input_changed();
         }
     }
 
@@ -271,6 +284,24 @@ impl App {
         if self.waiting || self.agent.is_none() || self.input.trim().is_empty() {
             return None;
         }
+        // 快捷指令：以 prefix 开头且命中内置指令时，先解析。
+        // - 展开成 prompt：把展开后内容替换回 input，UI 显示的是展开后的自然语言，
+        //   AI 收到的也只是 prompt，与直接打字无任何差别。
+        // - 本地系统消息：不打扰 AI，直接提示用户。
+        match self.commands.resolve(&self.input) {
+            CommandOutcome::Prompt(expanded) => {
+                self.input = expanded;
+            }
+            CommandOutcome::SystemMessage(message) => {
+                self.input.clear();
+                self.input_cursor = 0;
+                self.add_system_message(message);
+                self.suggestions.clear();
+                return None;
+            }
+            CommandOutcome::Unknown => {}
+        }
+
         self.waiting = true;
         self.waiting_since = Some(Instant::now());
         let prompt = std::mem::take(&mut self.input);
@@ -279,6 +310,7 @@ impl App {
         self.history_index = None;
         self.history_draft.clear();
         self.push_message(Role::User, prompt.clone(), false);
+        self.suggestions.clear();
         Some(prompt)
     }
 
@@ -408,6 +440,36 @@ impl App {
     pub fn add_error(&mut self, error: String) {
         self.compressing = false;
         self.push_message(Role::Error, error, false);
+    }
+
+    /// TUI 本地系统提示（如指令反馈），不进入发送给 AI 的上下文。
+    pub fn add_system_message(&mut self, content: String) {
+        self.push_message(Role::System, content, false);
+    }
+
+    /// 根据当前输入刷新模糊指令候选。仅在输入以 prefix 开头且未精确命中时给出。
+    /// 无候选时清空。每次编辑输入后调用。
+    pub fn refresh_suggestions(&mut self) {
+        self.suggestions = self.commands.fuzzy_match(&self.input).into_iter().map(|(n, _)| n).collect();
+    }
+
+    /// 当前指令候选（按匹配度排序）。
+    pub fn suggestions(&self) -> &[String] {
+        &self.suggestions
+    }
+
+    /// Tab 补全：采纳第一个候选，把输入替换为 `/<name> ` 并清空候选，继续编辑参数。
+    pub fn accept_suggestion(&mut self) {
+        if let Some(name) = self.suggestions.first().cloned() {
+            self.input = format!("{}{} ", DEFAULT_PREFIX, name);
+            self.input_cursor = self.input.len();
+            self.suggestions.clear();
+        }
+    }
+
+    /// 输入变化时重算候选（在 push/insert/pop/delete/move 等之后统一调用）。
+    pub fn on_input_changed(&mut self) {
+        self.refresh_suggestions();
     }
 }
 

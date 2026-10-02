@@ -181,7 +181,61 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if cursor_y < input_area.y + input_area.height.saturating_sub(1) {
         frame.set_cursor_position((cursor_x, cursor_y));
     }
+
+    // 模糊指令候选浮层：在消息区底部贴一个列表，不挤压主布局。
+    draw_command_suggestions(frame, app, messages_area);
 }
+/// 渲染 `/` 触发的模糊指令候选浮层。
+///
+/// 直接覆盖在消息区底部若干行之上，做成一个带描边的小面板。
+/// 最多展示 5 个候选，超出截断（当前指令极少，足够）。
+fn draw_command_suggestions(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let suggestions = app.suggestions();
+    if suggestions.is_empty() {
+        return;
+    }
+    let shown = suggestions.iter().take(5);
+    let count = shown.clone().count();
+    let width = area.width.max(1).min(40);
+    let height = (count as u16) + 2; // 上下描边各 1 行
+    if height > area.height {
+        return;
+    }
+    // 贴底：从消息区底部向上对齐。
+    let y = area.y + area.height.saturating_sub(height);
+    let popup_area = ratatui::layout::Rect {
+        x: area.x,
+        y,
+        width,
+        height,
+    };
+    let title_style = Style::default().fg(Color::Cyan);
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::DarkGray))
+        .title_top(Line::from("指令建议 (Tab 补全)".to_owned()).style(title_style));
+    let lines: Vec<Line> = suggestions
+        .iter()
+        .take(5)
+        .enumerate()
+        .map(|(i, name)| {
+            let tag = if i == 0 {
+                "▶ "
+            } else {
+                "  "
+            };
+            Line::from(Span::styled(
+                format!("{tag}/{name}"),
+                Style::default().fg(Color::Green),
+            ))
+        })
+        .collect();
+    frame.render_widget(
+        Paragraph::new(lines).block(block),
+        popup_area,
+    );
+}
+
 
 /// 把输入按显示宽度软换行，并保留硬换行（粘贴进来的 `\n`）。
 /// 返回每行的可见文本、光标所在行号与光标在该行内的显示列。
@@ -275,6 +329,11 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
                 Some("上下文摘要：".to_owned()),
                 Style::default().fg(Color::Yellow),
                 Style::default(),
+            ),
+            Role::System => (
+                Some("指令：".to_owned()),
+                Style::default().fg(Color::Green),
+                Style::default().fg(Color::Green),
             ),
             Role::Error => (
                 Some("错误：".to_owned()),

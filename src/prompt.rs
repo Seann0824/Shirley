@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use agent_sdk::{SystemPrompt, SystemPromptContext};
 
 /// 项目指南文件名。放在工作区根目录，作为 Agent 的工作参考。
-const GUIDE_FILE: &str = "Agent.md";
+pub const GUIDE_FILE_NAME: &str = "Agent.md";
 
 /// 系统提示词里固定的角色 / 边界部分。
 const ROLE: &str = "You are Shirley, base on Englife-1.0, You are runing as coding agent in the Shirley CLI on user's computer.";
@@ -36,8 +36,12 @@ pub fn workspace_root() -> PathBuf {
 }
 
 /// 读取工作区里的项目指南（`Agent.md`）。不存在或读失败都返回 `None`。
+pub fn guide_path(root: &Path) -> PathBuf {
+    root.join(GUIDE_FILE_NAME)
+}
+
 fn read_guide(root: &Path) -> Option<String> {
-    let path = root.join(GUIDE_FILE);
+    let path = root.join(GUIDE_FILE_NAME);
     let content = std::fs::read_to_string(path).ok()?;
     (!content.trim().is_empty()).then_some(content)
 }
@@ -71,14 +75,14 @@ fn render(root: &Path) -> String {
     match read_guide(root) {
         Some(guide) => {
             prompt.push_str("\n# 项目指南（");
-            prompt.push_str(GUIDE_FILE);
+            prompt.push_str(GUIDE_FILE_NAME);
             prompt.push_str("）\n");
             prompt.push_str(&guide);
             prompt.push('\n');
         }
         None => {
             prompt.push_str(&format!(
-                "\n# 项目指南\n未找到 {GUIDE_FILE}，请先自行探索项目结构再动手。\n"
+                "\n# 项目指南\n未找到 {GUIDE_FILE_NAME}，请先自行探索项目结构再动手。\n"
             ));
         }
     }
@@ -104,7 +108,7 @@ mod tests {
     #[test]
     fn render_includes_guide_when_present() {
         let dir = tempfile_dir("render_guide");
-        std::fs::write(dir.join(GUIDE_FILE), "# 项目说明\n先跑 cargo test").unwrap();
+        std::fs::write(dir.join(GUIDE_FILE_NAME), "# 项目说明\n先跑 cargo test").unwrap();
         let text = render(&dir);
         assert!(text.contains("先跑 cargo test"), "应内联 Agent.md: {text}");
     }
