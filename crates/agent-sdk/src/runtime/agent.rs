@@ -151,7 +151,7 @@ impl Agent {
     /// 因此 [`CompactParts::rebuild`] 无需（也不该）复制原消息里的 `System`。
     fn system_message(&self) -> Option<message::Message> {
         let content = self.system_prompt.resolve(&self.prompt_context());
-        (!content.trim().is_empty()).then(|| message::Message::System { content })
+        (!content.trim().is_empty()).then_some(message::Message::System { content })
     }
 
     /// 当前用于解析系统提示词的运行时上下文。
@@ -173,10 +173,10 @@ impl Agent {
         session: &Option<Arc<dyn SessionStore>>,
         message: message::Message,
     ) -> Result<(), AgentError> {
-        if !matches!(message, message::Message::System { .. }) {
-            if let Some(store) = session {
-                store.append(&message)?;
-            }
+        if !matches!(message, message::Message::System { .. })
+            && let Some(store) = session
+        {
+            store.append(&message)?;
         }
         messages.push(message);
         Ok(())
@@ -513,7 +513,7 @@ impl Agent {
             tools: &[],
         };
 
-        let mut stream = adapter::invoke(&client, &self.model_config, model_request).await;
+        let mut stream = adapter::invoke(client, &self.model_config, model_request).await;
         while let Some(adapter_event) = stream.next().await {
             let adapter_event = adapter_event.map_err(AgentError::Adapter)?;
             match adapter_event {
@@ -571,12 +571,11 @@ impl Agent {
 /// 占位文案进 SDK 契约，措辞要稳定。
 fn strip_tool_outputs(messages: &mut [message::Message]) {
     for msg in messages.iter_mut() {
-        if let message::Message::Tool { content, .. } = msg {
-            if let Some(text) = content {
-                if !text.trim().is_empty() {
-                    *text = "[工具结果已省略以节省上下文；如仍需要，请重新执行调用获取当前状态]".to_string();
-                }
-            }
+        if let message::Message::Tool { content, .. } = msg
+            && let Some(text) = content
+            && !text.trim().is_empty()
+        {
+            *text = "[工具结果已省略以节省上下文；如仍需要，请重新执行调用获取当前状态]".to_string();
         }
     }
 }

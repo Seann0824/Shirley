@@ -2,7 +2,7 @@ mod chat_completions;
 
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
-use std::{format, pin::Pin, time::Duration};
+use std::{format, pin::Pin};
 
 use crate::error::{ErrorKind, SdkError};
 use crate::{message, tool};
@@ -23,8 +23,6 @@ pub struct ModelConfig {
     pub model: String,
     #[builder(into)]
     pub api_key: Option<String>,
-    #[builder(default = Duration::from_secs(60))]
-    pub request_timeout: Duration,
     #[builder(default)]
     pub stream: bool,
     #[builder(default)]
@@ -107,6 +105,8 @@ pub enum ModelFinishReason {
 #[derive(Debug)]
 pub struct ModelResponse {
     pub message: message::Message,
+    /// 解析自响应、随结果返回，供上层将来做截断/工具调用判定；当前未消费。
+    #[allow(dead_code)]
     pub finish_reason: ModelFinishReason,
     pub usage: message::Usage,
 }

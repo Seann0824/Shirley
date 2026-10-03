@@ -121,6 +121,7 @@ impl CommandManager {
     }
 
     /// 已注册指令数量（供测试与 UI 展示）。
+    #[allow(dead_code)]
     pub fn command_count(&self) -> usize {
         self.builtins.len()
     }

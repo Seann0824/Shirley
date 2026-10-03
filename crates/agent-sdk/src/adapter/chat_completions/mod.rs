@@ -18,7 +18,7 @@ use crate::{
 // 说实话我感觉这个应该是个 message 侧做的转换逻辑，而不是我们写在适配层对于这个消息处理。
 fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
     let encode_message = |msg: &message::Message| {
-        let value = match msg {
+        match msg {
             message::Message::User { content } => {
                 serde_json::json!({
                     "role": "user",
@@ -79,8 +79,7 @@ fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
                     "content": content,
                 })
             }
-        };
-        value
+        }
     };
     messages.iter().map(encode_message).collect()
 }
@@ -127,8 +126,8 @@ pub fn encode_request(
     let body = serde_json::json!({
         "model": &config.model,
         // 这里应该转换对吧，但是看情况，我们现在主要以ChatCompletion 为唯一协议，其他协议都是根据这个协议适配过去的
-        "messages": encode_messages(&input.messages),
-        "tools": encode_tools(&input.tools),
+        "messages": encode_messages(input.messages),
+        "tools": encode_tools(input.tools),
         "thinking": {
             "type": thinking,
         },
@@ -151,7 +150,7 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adapter
     // 开始转换 Message::Assistant and Message::Tool and finish_reason
     let choice = response
         .choices
-        .get(0)
+        .first()
         .ok_or_else(|| AdapterError::Decode("响应缺少 choices[0]".to_owned()))?;
 
     let msg = &choice.message;
@@ -212,7 +211,7 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adapter
         message: message::Message::Assistant {
             content: content.clone(),
             reasoning_content,
-            tool_calls: tool_calls.into(),
+            tool_calls,
         },
         finish_reason,
         usage,
@@ -287,26 +286,21 @@ pub async fn decode_stream_response(
                 // 去掉当前读取后的事件 和 两个换行符号
                 buffer.drain(..pos + 2);
 
-                let mut event = String::new();
                 let mut data = String::new();
                 // 解析每行的数据
                 for line in section.lines() {
-                    if let Some(rest) = line.strip_prefix("event:") {
-                        // 一个个sse应该有对应event，但是看起来model好像没有遵循这个规范。
-                        event = rest.trim().into();
-                    } else if let Some(rest) = line.strip_prefix("data:") {
+                    if let Some(rest) = line.strip_prefix("data:") {
                         data.push_str(rest.trim());
-                    } else if line.strip_prefix("id:").is_some() {
-                        // 事件 id 目前没有消费方（多用于断线续传），先忽略而不是 panic。
-                        // 等真正实现断线重连时再在这里保留 last_event_id。
                     }
+                    // `event:` / `id:` 目前没有消费方（后者多用于断线续传），
+                    // 先忽略而不是 panic；等真正实现断线重连时再保留 last_event_id。
                 }
                 // 为啥会出现
                 let payload = data.trim();
                 if payload.is_empty() || payload == "[DONE]" {
                     continue;
                 }
-                let value = serde_json::from_str::<dto::ModelStreamResponse>(&data.trim()).map_err(|e| AdapterError::Decode(format!("SSE 反序列化失败: {e}")))?;
+                let value = serde_json::from_str::<dto::ModelStreamResponse>(data.trim()).map_err(|e| AdapterError::Decode(format!("SSE 反序列化失败: {e}")))?;
                 if let Some(stream_usage) = value.usage {
                     let cached_input_tokens = stream_usage
                         .prompt_tokens_details
@@ -331,11 +325,11 @@ pub async fn decode_stream_response(
                 let reasoning_delta = delta.reasoning_content.clone().unwrap_or(String::new());
                 let content_delta = delta.content.clone().unwrap_or(String::new());
 
-                if reasoning_delta.len() > 0 {
+                if !reasoning_delta.is_empty() {
                     reasoning_content.push_str(&reasoning_delta);
                     yield AdapterEvent::ReasoningDelta(reasoning_delta);
                 }
-                if content_delta.len() > 0 {
+                if !content_delta.is_empty() {
                     content.push_str(&content_delta);
                     yield AdapterEvent::ContentDelta(content_delta);
                 }

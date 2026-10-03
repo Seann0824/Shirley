@@ -46,10 +46,10 @@ fn render(output: &SandboxOutput, command: &str) -> String {
         }
     }
 
-    if let Some(code) = output.exit_code {
-        if code != 0 {
-            text.push_str(&format!("[exit code] {code}\n"));
-        }
+    if let Some(code) = output.exit_code
+        && code != 0
+    {
+        text.push_str(&format!("[exit code] {code}\n"));
     }
 
     // // 降级提示：本次执行的隔离并未完全生效。诚实上报，不静默忽略。
@@ -99,7 +99,7 @@ pub async fn bash(
     // TODO: 后端应可配置（macOS sandbox-exec / Linux bwrap）。
     // 目前 SandboxBackend::execute 返回 impl Future，trait 非 object-safe，
     // 无法用 Box<dyn> 动态注入，故直接实例化。换后端时改这一行即可。
-    let sandbox = Sandbox::new(ProcessBackend::default());
+    let sandbox = Sandbox::new(ProcessBackend);
 
     // 2. 执行。超时由 Sandbox 统一施加，这里不再自己包 tokio::time::timeout。
     let output = sandbox.run(&spec).await.map_err(|e| {

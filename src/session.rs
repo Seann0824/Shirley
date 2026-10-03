@@ -44,11 +44,6 @@ impl JsonlSessionStore {
         })
     }
 
-    /// 工作区根目录下的默认会话文件：`<root>/.shirley/session.jsonl`。
-    pub fn default_for(root: impl AsRef<Path>) -> Result<Self, SessionError> {
-        Self::open(root.as_ref().join(".shirley").join("session.jsonl"))
-    }
-
     /// 读取全量日志（逐行反序列化）。空行跳过。
     fn read_all(&self) -> Result<Vec<Message>, SessionError> {
         let file = File::open(&self.path)?;
@@ -310,6 +305,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
 /// 空会话目录：`App::new` 的默认值，供不关心会话切换的测试与默认构造使用。
 ///
 /// 列出为空、打开 / 新建都报错——不落盘、也不产生副作用。
+#[allow(dead_code)]
 pub struct EmptySessionCatalog;
 
 impl SessionCatalog for EmptySessionCatalog {

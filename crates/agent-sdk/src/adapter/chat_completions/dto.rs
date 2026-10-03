@@ -1,4 +1,7 @@
-// 定义
+// 协议 DTO：字段按 ChatCompletions 契约完整定义，只做反序列化。
+// 部分字段当前未被消费（如 `id` / `total_tokens` / 各类 token 明细），
+// 保留它们是协议完整性的一部分，不是死代码。
+#![allow(dead_code)]
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ModelResponse {

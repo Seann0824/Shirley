@@ -6,7 +6,7 @@ use std::time::Duration;
 
 #[tokio::test]
 async fn runs_and_captures_stdout() {
-    let sandbox = Sandbox::new(ProcessBackend::default());
+    let sandbox = Sandbox::new(ProcessBackend);
     let spec = SandboxSpec::new("sh").arg("-c").arg("printf hello");
     let out = sandbox.run(&spec).await.unwrap();
     assert_eq!(out.stdout, "hello");
@@ -17,7 +17,7 @@ async fn runs_and_captures_stdout() {
 
 #[tokio::test]
 async fn captures_stderr_and_exit_code() {
-    let sandbox = Sandbox::new(ProcessBackend::default());
+    let sandbox = Sandbox::new(ProcessBackend);
     let spec = SandboxSpec::new("sh").arg("-c").arg("echo boom >&2; exit 3");
     let out = sandbox.run(&spec).await.unwrap();
     assert_eq!(out.exit_code, Some(3));
@@ -27,7 +27,7 @@ async fn captures_stderr_and_exit_code() {
 
 #[tokio::test]
 async fn enforces_timeout() {
-    let sandbox = Sandbox::new(ProcessBackend::default());
+    let sandbox = Sandbox::new(ProcessBackend);
     let spec = SandboxSpec::new("sh")
         .arg("-c")
         .arg("sleep 5")
@@ -41,7 +41,7 @@ async fn enforces_timeout() {
 async fn env_not_inherited_by_default() {
     // 宿主设一个变量，沙盒内不应看到（除非显式注入）。
     unsafe { std::env::set_var("SANDBOX_LEAK_TEST", "secret") };
-    let sandbox = Sandbox::new(ProcessBackend::default());
+    let sandbox = Sandbox::new(ProcessBackend);
     let spec = SandboxSpec::new("sh")
         .arg("-c")
         .arg("printf '%s' \"$SANDBOX_LEAK_TEST\"");
@@ -51,7 +51,7 @@ async fn env_not_inherited_by_default() {
 
 #[tokio::test]
 async fn env_explicitly_injected_is_visible() {
-    let sandbox = Sandbox::new(ProcessBackend::default());
+    let sandbox = Sandbox::new(ProcessBackend);
     let spec = SandboxSpec::new("sh")
         .arg("-c")
         .arg("printf '%s' \"$GREETING\"")
@@ -62,7 +62,7 @@ async fn env_explicitly_injected_is_visible() {
 
 #[tokio::test]
 async fn proxy_policy_reported_as_degraded() {
-    let sandbox = Sandbox::new(ProcessBackend::default());
+    let sandbox = Sandbox::new(ProcessBackend);
     let spec = SandboxSpec::new("sh")
         .arg("-c")
         .arg("true")

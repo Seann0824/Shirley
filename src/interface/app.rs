@@ -182,6 +182,9 @@ pub struct App {
 
 impl App {
     /// 用内置静态模型目录构造（默认）。
+    ///
+    /// 主要供测试与不关心目录注入的场景使用；主程序走 [`App::with_catalogs`]。
+    #[allow(dead_code)]
     pub fn new(agent: Agent) -> Self {
         Self::with_catalog(agent, Arc::new(StaticCatalog::builtin()))
     }
@@ -189,6 +192,7 @@ impl App {
     /// 注入模型目录构造。远端目录将来从这里传入，UI 无需改动。
     ///
     /// 会话目录用空实现兜底（不落盘、列表为空），供不关心会话切换的场景使用。
+    #[allow(dead_code)]
     pub fn with_catalog(agent: Agent, catalog: Arc<dyn ModelCatalog>) -> Self {
         Self::with_catalogs(agent, catalog, Arc::new(EmptySessionCatalog))
     }
@@ -275,10 +279,6 @@ impl App {
         self.context_usage
     }
 
-    pub fn max_scroll(&self) -> usize {
-        self.max_scroll
-    }
-
     pub fn set_max_scroll(&mut self, max_scroll: usize) {
         // 上限缩小时旧位置可能越界，夹回来免得停在空白
         self.max_scroll = max_scroll;
@@ -308,10 +308,6 @@ impl App {
         };
         self.scroll = clamped;
         self.auto_scroll = clamped >= max;
-    }
-
-    pub fn scroll_to_bottom(&mut self) {
-        self.auto_scroll = true;
     }
 
     pub fn should_exit(&self) -> bool {
@@ -874,12 +870,13 @@ impl App {
         }
 
         if self.streaming_delta_start.is_some() {
-            if let Some(Item::Message(message)) = self.items.last_mut() {
-                if message.role == Role::Assistant && message.thinking == thinking {
-                    message.content.push_str(&delta);
-                    self.message_cache = None;
-                    return;
-                }
+            if let Some(Item::Message(message)) = self.items.last_mut()
+                && message.role == Role::Assistant
+                && message.thinking == thinking
+            {
+                message.content.push_str(&delta);
+                self.message_cache = None;
+                return;
             }
         } else {
             self.streaming_delta_start = Some(self.items.len());

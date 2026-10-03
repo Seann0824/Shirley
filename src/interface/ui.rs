@@ -507,7 +507,7 @@ fn draw_command_suggestions(frame: &mut Frame, app: &App, area: ratatui::layout:
     }
     let shown = suggestions.iter().take(5);
     let count = shown.clone().count();
-    let width = area.width.max(1).min(40);
+    let width = area.width.clamp(1, 40);
     let height = (count as u16) + 2; // 上下描边各 1 行
     if height > area.height {
         return;
