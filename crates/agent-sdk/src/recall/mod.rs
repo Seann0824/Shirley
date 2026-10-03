@@ -117,6 +117,7 @@ impl Default for RecallStore {
 /// recall 工具的渲染：原文 + 元信息，无损（`docs/recall.md` 4.3）。
 ///
 /// 元信息让 AI 能判断"这是什么时候、什么类型的内容"。
+/// 只渲染对话性 chunk（用户 / assistant 文本）——工具类消息压根不入库。
 fn render_hits(hits: &[(f64, Chunk)]) -> String {
     if hits.is_empty() {
         return "没有检索到相关内容。可尝试换个措辞再检索一次。".to_string();
@@ -133,31 +134,27 @@ fn render_hits(hits: &[(f64, Chunk)]) -> String {
     out
 }
 
+/// 单条召回内容注入上下文时的字符上限。
+///
+/// 与索引视图的截断不同：这里**不重写内容**，只是把超长 chunk（例如用户一次性粘贴
+/// 的几万字符）截断并**显式标注**，避免单条内容垄断上下文。标注让 AI 知道"这里被截断了"，
+/// 而非静默丢失——符合"召回不二次摘要"的底线（`docs/recall.md` 2.3）。
+const INJECT_TRUNCATE: usize = 4000;
+
 fn render_chunk(chunk: &Chunk) -> String {
     match chunk {
-        Chunk::User { content } => format!("[用户曾说]\n{content}"),
-        Chunk::Step {
-            content,
-            calls,
-            observations,
-        } => {
-            let mut out = String::from("[对话记录]");
-            if let Some(content) = content {
-                out.push_str("\n回复：");
-                out.push_str(content);
-            }
-            if !calls.is_empty() {
-                out.push_str("\n工具调用：");
-                for (name, arguments) in calls {
-                    out.push_str(&format!("\n  {name} {arguments}"));
-                }
-            }
-            for observation in observations.iter().flatten() {
-                out.push_str(&format!("\n工具结果：\n{observation}"));
-            }
-            out
-        }
+        Chunk::User { content } => format!("[用户曾说]\n{}", clip(content)),
+        Chunk::Assistant { content } => format!("[助手曾说]\n{}", clip(content)),
     }
+}
+
+/// 超长内容截断并显式标注（不摘要、不静默丢弃）。
+fn clip(content: &str) -> String {
+    if content.chars().count() <= INJECT_TRUNCATE {
+        return content.to_string();
+    }
+    let head: String = content.chars().take(INJECT_TRUNCATE).collect();
+    format!("{head}\n…（内容过长，此处仅展示前 {INJECT_TRUNCATE} 字符）")
 }
 
 /// recall 工具（`docs/recall.md` 4.3）。

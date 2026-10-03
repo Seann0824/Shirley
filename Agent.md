@@ -208,13 +208,13 @@ pub async fn bash(
 | `mod.rs` | 门面：`Retriever` trait（可扩展点，BM25 现在实现、embedding 以后加）+ `RecallStore`（内存存储，持久化留空）+ `RecallTool`（手写 `Tool`，因为要持有 `Arc<RecallStore>`） |
 | `tokenize.rs` | 分词：CJK 按字 / ASCII 按词。Unicode 范围与 `token` 模块**共享** `token::is_cjk_word_char`（唯一一处定义），但口径不同——记账含 CJK 标点（占体积），切词不含（标点是分隔符，入词元会污染打分） |
 | `bm25.rs` | 倒排索引 + 经典 BM25 打分。`k1=1.2` / `b=0.5`（低于经典 0.75，缓解 chunk 长度差异极端的失真） |
-| `chunk.rs` | 分块：`UserChunk` 独立成块；`StepChunk` = Assistant{tool_calls} + 按 id 配对的全部 Tool（原子组，支持并发多工具）。`reasoning_content` 不入索引视图（过程性思维会污染 IDF） |
+| `chunk.rs` | 分块：**只有对话性内容入库**——`UserChunk`（一条 User）独立成块；无 `tool_calls` 的 `Assistant` 正文成块。带 `tool_calls` 的 `Assistant` 与全部 `Tool` 结果**不入库**（走重建路径，决策 1）。`reasoning_content` 也不入索引视图（过程性思维会污染 IDF） |
 
 核心设计（`docs/recall.md` 一、两个核心决策）：
 
 - **重建与召回二分，由 AI 判断**："能不能重建"不是工具属性是调用属性（`cat x` vs `git commit`），AI 看到具体调用后自己决定。工具类消息**不入召回库**；对话类（User / Assistant 文本）入库。
-- **索引自动，检索 AI 触发**：`compress_context` 把被压段分块入库（先索引后清空——索引视图需要原始 Tool 输出）；recall 作为工具自动注册进 `ToolManager`（`Agent::new` 里做的，`main.rs` 一行没改），AI 生成 query 自己决定何时调。不做每轮自动检索。
-- **召回无损**：chunk 原文保存，返回原文 + 相关度元信息，**绝不二次摘要**。
+- **索引自动，检索 AI 触发**：`compress_context` 把被压段里的对话性内容分块入库；recall 作为工具自动注册进 `ToolManager`（`Agent::new` 里做的，`main.rs` 一行没改），AI 生成 query 自己决定何时调。不做每轮自动检索。
+- **召回无损**：chunk 原文保存，返回原文 + 相关度元信息，**绝不二次摘要**（单条超 4000 字符时截断并显式标注，是防垄断的兜底，不是摘要）。
 - **工具输出统一清空**：压缩时 Tool.content 替换为占位标记（`[工具结果已省略以节省上下文；如仍需要，请重新执行调用获取当前状态]`），AI 走重建路径。这是 v0 有意的技术债（见下）。
 - `<compacted_range>` 模板措辞已更新：重建路径（重新读取/执行）与召回路径（recall 工具）显式分立——这是 AI"感知到自己忘了"的钩子。
 
@@ -292,7 +292,7 @@ cargo clippy --all-targets       # 静态检查
 8. **未接线配置**：`request_timeout` / `temperature` / `max_output_tokens` 定义了但没进请求体
 9. **未使用的 `StopReason`**：`MaxStepsReached` / `Cancelled` 定义了但不会产生（没有 max_steps 和取消机制）
 10. **压缩重试**：压缩失败直接中断，`plan.md` 提到"压缩失败重试有时能成功"
-11. **recall 的技术债**（`docs/recall.md` 第八节）：无持久化（进程结束即失）；BM25 只做词面匹配（同义改写召回不了，embedding 混合召回未做，`fuse.rs`/RRF 留接口）；中文无分词器（单字切，有噪声）；工具结果统一清空丢弃了不可重建的调用（一次性快照重跑拿不到当时结果，等工具能力细分后回填 per-call 判定）
+11. **recall 的技术债**（`docs/recall.md` 第八节）：无持久化（进程结束即失）；BM25 只做词面匹配（同义改写召回不了，embedding 混合召回未做，`fuse.rs`/RRF 留接口）；中文无分词器（单字切，有噪声）；工具结果统一清空丢弃了不可重建的调用（一次性快照重跑拿不到当时结果，等工具能力细分后回填 per-call 判定）。**（曾经的坑已修：初版误把工具类消息也入库 + 漏了防递归，导致召回内容雪球式膨胀——见 `docs/recall.md` 2.2 注）**
 
 **顺手能修的**：
 

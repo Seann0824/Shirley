@@ -214,3 +214,5 @@ Implement context compaction.
 也就是说,我们sdk接口要抽象,外部实现了某些trait后i,
 但是我们不能限制持久话的选型,我们sdk只需要暴露内部持久话需要的接口声明
 我们就能调用它实现的持久话函数?不管的sqlite还是postgresql还是mysql甚至说jsonl,我理解我们sdk不需要关注具体持久话技术细节
+
+有的文件太大了，AI 一读就触发压缩上下文。

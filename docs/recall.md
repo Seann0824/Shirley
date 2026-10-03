@@ -54,38 +54,44 @@ AI 读到这个标记就会想到调 recall。因此这个标记必须随 `Conte
 靠 `tool_call_id` 关联。以单条消息为块的问题：
 
 - 召回孤立 `Tool` 消息 → 孤儿 tool_call，注入回上下文时 API 会 400
-  （与 `plan_cut` 的 tool 配对修正同类问题）；
-- `Assistant` 内部横跨 reason/act 两个语义，拆开就丢上下文。
+  （与 `plan_cut` 的 tool 配对修正同类问题）。
+
+按决策 1，工具类消息整体不入库，这个问题从源头消失——`Tool` 消息根本不会被召回，
+自然没有孤儿 tool_call 的风险。
 
 **2.2 chunk 定义**
 
+按决策 1，**只有对话性内容入库**：
+
 ```
 Chunk = UserChunk        一条 User 消息，独立成块
-      | StepChunk        一个完整 ReAct 步：
-                          Assistant{reasoning_content, content, tool_calls}
-                          + 其配对全部 Tool 结果（按 tool_call_id 聚合，支持并发多工具）
+      | AssistantChunk   无 tool_calls 的 Assistant 正文（结论 / 决策 / 约定）
 ```
 
-配对规则：`StepChunk` 的 observations 必须包含父 `Assistant.tool_calls` 的全部 id。
-**注入时 chunk 是原子单位**，不拆开。
+带 `tool_calls` 的 `Assistant` 与全部 `Tool` 结果**不入库**（走重建路径）。
+因此实现里不再需要"按 `tool_call_id` 聚合并发工具结果"这套配对逻辑——
+`Tool` 消息在遍历时被逐个跳过，天然无孤儿风险。
 
 **`ContextSummary` 不入库**（它是压缩产物，且被 `background_len` 当背景前缀）。
 
-**2.3 字段级索引视图（chunk 的可检索投影）**
+> **曾经的坑（已修）**：初版实现把 `StepChunk`（工具名 + 参数 + 工具输出）也索引并
+> 原文返回，还漏了"recall 步不入库"的防递归，导致召回结果被几万字符的代码 / 日志
+> 淹没，且 recall 的返回文本被再次索引、雪球式放大（真实会话里 16KB → 78KB → 491KB
+> → 1MB）。召回"太多"的根因就在这里，与"BM25 打分"无关。
 
-注意本轮的存储分工（决策 1）：StepChunk **不入库**，因此字段级视图只对 UserChunk 与
-Assistant 文本有意义。但规则先定下来，未来若回填工具结果入库时直接复用：
+**2.3 字段级索引视图（chunk 的可检索投影）**
 
 | 字段 | 入索引 | 理由 |
 | --- | --- | --- |
 | `User.content` | 是 | 任务锚点，主要检索对象 |
 | `Assistant.content` | 是（中权重） | 正式回复与结论 |
-| `Assistant.tool_calls[].name + arguments` | 是 | "做了什么"的锚点（未来工具入库时） |
-| `Tool.content` | 截断后索引（未来） | 长输出（build 日志几万 token）会垄断 BM25 长度归一化 |
 | `Assistant.reasoning_content` | **否** | 过程性思维，"我需要/让我看看"类低信息措辞会污染 IDF |
+| `Assistant.tool_calls[]` / `Tool.content` | **否** | 工具类消息不入库（决策 1）；未来若回填工具结果入库时再启用 |
 
-**索引视图 ≠ 注入内容**：索引前可截断（长输出保留头尾 + 报错行），注入时按需取原文。
-召回结果**绝不二次摘要**——重新摘要等于二次损失，等于白召回。
+**索引视图 ≠ 注入内容**：索引前可截断（只为打分），注入时取原文。
+但注入侧也有一道**上限保护**（`INJECT_TRUNCATE = 4000` 字符 / 条）：超长 chunk 截断并
+**显式标注**"此处仅展示前 N 字符"，不静默丢弃。这是防"单条内容垄断上下文"的兜底，
+不是二次摘要——召回结果仍**绝不二次摘要**（重新摘要等于二次损失，等于白召回）。
 
 ---
 
@@ -134,7 +140,7 @@ BM25 天生是"一个 query 对 N 个文档排序"的跨文档算法：IDF 依�
 ```
 crates/agent-sdk/src/recall/
 ├── mod.rs        门面：RecallStore + Retriever trait（持久化层留空）
-├── chunk.rs      分块策略（UserChunk / StepChunk、配对聚合、索引视图）
+├── chunk.rs      分块策略（UserChunk / AssistantChunk、索引视图）
 ├── bm25.rs       BM25 实现（实现 Retriever）
 ├── tokenize.rs   分词（CJK 按字符、ASCII 按词）
 └── fuse.rs       多 retriever 融合（RRF）—— 未来 BM25 + embedding 用，本轮只留接口
@@ -176,6 +182,8 @@ pub async fn recall(
 - **防递归**：recall 自己产生的 `Tool` 消息，将来被压缩时**不入召回库**（自我索引会循环）；
 - 副作用：recall 会以 `ToolStarted/ToolFinished` 出现在 UI——用户能看到"AI 在回忆"，
   这是可观测性上的好事，接受。
+- **单条内容有注入上限**（4000 字符，超出截断并显式标注）：防单条超长内容垄断上下文。
+  注意这是"截断 + 标注"，不是二次摘要。
 
 **4.4 数据流（与现有 runtime 的接合点）**
 
@@ -183,8 +191,8 @@ pub async fn recall(
 compress_context():
     plan_cut → split 出 to_compress
     → 分块：
-        UserChunk / Assistant 文本 → recall.index() → 丢弃原文
-        StepChunk → 保留骨架，Tool.content 清空为占位标记（见第五节）
+        UserChunk / Assistant 文本 → recall.index()（对话性内容，可召回）
+        工具类消息 → 不入库；Tool.content 清空为占位标记（见第五节，走重建路径）
     → rebuild（现状逻辑不变）
 
 run 循环：不变。AI 想召回时自己调 recall 工具，走正常工具执行路径。
@@ -251,9 +259,9 @@ v0 极端化决策：**压缩时对所有 Tool.content 统一替换为占位标�
 2. recall 返回的 chunk 内容与压缩前原文**逐字一致**（无损，不二次摘要）。
 3. 压缩后的请求体中，每个 `Tool` 消息的 content 都是占位标记，且 tool_call 配对完整（无孤儿）。
 4. 压缩后 `self.messages` 里不存在任何未清空的旧 Tool 输出。
-5. StepChunk 的 chunk 化正确处理并发多工具：一条 Assistant + N 条 Tool 聚为一个块。
+5. 带工具调用的步与其 Tool 结果都不入召回库；只有 User 与无工具调用的 Assistant 文本入库。
 6. BM25 冒烟：索引 10 个 chunk，中英混合 query 均能命中预期 top-1。
-7. recall 产生的 Tool 消息不进入召回库（防递归）。
+7. recall 产生的步（`Assistant{tool_calls: recall}` + Tool 召回文本）不进入召回库（防递归）。
 8. 压缩后首轮缓存 miss，后续轮命中率恢复（footer 核对）。
 9. `Retriever` trait 可被第二个实现替换（测试里写个 stub retriever 注入）——验证可扩展性。
 

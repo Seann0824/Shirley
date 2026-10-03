@@ -56,28 +56,44 @@ fn retrieve_returns_verbatim_content() {
     assert!(text.contains("我叫夏莉，住在上海，最喜欢的历史人物是朱雀"));
 }
 
-/// 验收 5：一条 Assistant 并发 N 个工具 → N 条 Tool 聚为一个块，配对不串。
+/// 验收 5 / 决策 1：带工具调用的步与其 Tool 结果都不入召回库。
+///
+/// 工具输出是"世界可再生的"，走重建路径；入库会让召回被代码 / 日志淹没。
 #[test]
-fn parallel_tools_group_into_one_chunk() {
+fn tool_step_excluded_from_recall() {
     let messages = vec![
         assistant_with_calls(&["a", "b", "c"]),
         tool_msg("a", "output A"),
         tool_msg("b", "output B"),
         tool_msg("c", "output C"),
     ];
-    let chunks = chunk_messages(&messages);
-    assert_eq!(chunks.len(), 1);
-    let text = chunks[0].index_text();
-    assert!(text.contains("output A") && text.contains("output C"));
+    assert!(chunk_messages(&messages).is_empty(), "工具类消息不该入库");
 }
 
-/// 验收 3 的先决：压缩区里的 tool 消息 chunk 化后配对完整（无孤儿）。
+/// 验收 7（防递归）：recall 自己产生的步（Assistant{recall} + Tool 召回文本）不入库，
+/// 否则召回文本会被再次索引、雪球放大。
+#[test]
+fn recall_step_not_reindexed() {
+    let messages = vec![
+        Message::Assistant {
+            content: Some("让我回忆一下".into()),
+            reasoning_content: None,
+            tool_calls: vec![ToolCall {
+                id: "r".into(),
+                name: "recall".into(),
+                arguments: "{\"query\":\"名字\"}".into(),
+            }],
+        },
+        tool_msg("r", "召回到 5 条历史内容：……"),
+    ];
+    assert!(chunk_messages(&messages).is_empty(), "recall 步不该入库");
+}
+
+/// 验收 3 的先决：压缩区里的 tool 消息不入库，天然无孤儿。
 #[test]
 fn orphan_tool_dropped_not_mispaired() {
-    // 第二条 Tool 的 id 不属于前面的 assistant → 不产出 chunk（吞掉防孤儿）
     let messages = vec![tool_msg("ghost", "没人认领的结果")];
-    let chunks = chunk_messages(&messages);
-    assert!(chunks.is_empty(), "孤立 Tool 不该产出 chunk");
+    assert!(chunk_messages(&messages).is_empty(), "孤立 Tool 不该产出 chunk");
 }
 
 /// recall 工具：合法参数 → 返回渲染文本；k 边界钳制。
