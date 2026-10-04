@@ -194,8 +194,15 @@ pub async fn bash(
 **已有工具**：
 
 - `bash`（`src/tools/bash.rs`）：先做 `split_whitespace` 黑名单检查（`rm` / `shutdown` / `reboot`，这只是临时兜底），然后**走进程沙盒**执行（`SandboxSpec::new("bash").arg("-c").arg(&command)`），默认 60s 超时。沙盒结果渲染时带 stdout / stderr / 退出码 / 超时提示。**真正的边界在沙盒后端，不在黑名单**
+- `read_file`（`src/tools/read.rs`）：**受控的文件读取**，用来替代裸 `cat`，从源头卡住上下文占用。关键约束：
+  - **路径受工作区约束**：经 SDK 的 `WorkSpace::resolve` 校验，拒绝绝对路径与 `..` 越界（越界/非法路径归为 `ArgumentsError`，模型换个写法就能成功）——落地 `docs/roadmap.md` 验收第 4 条
+  - **行数有上限**：默认 200 行、硬上限 `MAX_LINE_COUNT = 2000`（显式要求更多也只读到上限）
+  - **字节有上限**：单次输出 `MAX_OUTPUT_BYTES = 64KB` 封顶，单行超长时按字符边界截断
+  - **疑似密钥默认拒绝**：`.env` / `*.pem` / `*.key` / `id_rsa*` 等（见 `docs/security.md` 第三节）
+  - **二进制探测**：开头 8KB 出现 NUL 即拒绝；目录引导用 `ls`
+  - 返回**纯文本带行号**（非 JSON），截断时在末尾提示 `start_line=<下一行>` 续读——模型可直接读、可续读
 
-> `read` 工具已被移除（commit `aaf0081`）。`src/tools/` 现在只有 `bash.rs`。后续计划加 `apply_patch`（见根目录 `plan.md`）。
+> `read` 工具曾在 commit `aaf0081` 被移除（当时判断"一个 bash 就够"），但裸 `cat` 没有输出上限，容易把上下文灌满。现已以 `read_file` 的形式**重新引入**，并补上工作区约束、行/字节上限与密钥脱敏。后续计划加 `apply_patch`（见根目录 `plan.md`）。
 
 ---
 
@@ -262,7 +269,7 @@ cargo test -p agent-sdk          # 只跑 SDK 测试
 cargo clippy --all-targets       # 静态检查
 ```
 
-测试分布（应用层约 85 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`session.rs` 10 个、`models.rs` 4 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`session_contract.rs` 7 个。
+测试分布（应用层约 95 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`read.rs` 10 个、`session.rs` 10 个、`models.rs` 4 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`session_contract.rs` 7 个。
 
 ---
 

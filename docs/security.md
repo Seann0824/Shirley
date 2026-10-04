@@ -19,7 +19,8 @@ cmd.arg("-c").arg(&command);
 - `echo cm0gLXJm | base64 -d | bash`
 - `r''m -rf /`（shell 会拼接，字符串匹配看不到 `rm`）
 
-同时 `read` 没有任何路径限制，可以读 `~/.ssh/id_rsa`，也可以读 `.env` 把 API key 读进上下文再发给模型。
+同时当时的 `read` 没有任何路径限制，可以读 `~/.ssh/id_rsa`，也可以读 `.env` 把 API key 读进上下文再发给模型。
+（注：`read` 曾被移除，现以 `read_file` 重新引入并**已落地本节约束**——工作区边界校验 + 疑似密钥文件拒绝，见下。）
 
 **二、设计目标**
 
@@ -39,7 +40,7 @@ LOCAL_BASE_URL=http://127.0.0.1:8788/v1/chat/completions
 LOCAL_CONTEXT_WINDOW_TOKENS=104858
 ```
 
-3. 在 `read` 工具侧增加默认脱敏：命中 `.env`、`*.pem`、`id_rsa*`、`*.key` 等模式时拒绝或遮蔽内容。
+3. 在 `read_file` 工具侧增加默认脱敏：命中 `.env`、`*.pem`、`id_rsa*`、`*.key` 等模式时拒绝（**已实现**，见 `src/tools/read.rs::is_secret_file`）。
 4. 长期：密钥不落盘，改为启动时从环境或系统钥匙串注入。
 
 **四、工作区隔离**

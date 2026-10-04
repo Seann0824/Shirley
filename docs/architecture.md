@@ -17,9 +17,9 @@
 ```mermaid
 graph TD
     subgraph App["应用层 src/"]
-        MAIN["main.rs<br/>读 .env / 建 ModelConfig<br/>注册 bash + read"]
+        MAIN["main.rs<br/>读 .env / 建 ModelConfig<br/>注册 bash + read_file"]
         IFACE["interface/<br/>TUI 状态机与渲染"]
-        TOOLS["tools/<br/>bash / read"]
+        TOOLS["tools/<br/>bash / read_file"]
     end
 
     subgraph SDK["SDK 层 crates/agent-sdk/"]
