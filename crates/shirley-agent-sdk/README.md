@@ -10,7 +10,7 @@ The [Shirley](https://github.com/Seann0824/Shirley) TUI coding agent is built on
 
 - **ReAct runtime** — `Agent` drives the full model → tool → model loop, with streaming support
 - **Tool system** — a `#[tool]` attribute macro turns a plain async function into a model-callable tool (JSON Schema generated automatically)
-- **Protocol adapters** — a unified `invoke` interface; OpenAI-compatible ChatCompletions is implemented today
+- **Protocol adapters** — a unified `invoke` interface with three wire protocols: ChatCompletions, Responses, and Anthropic Messages (all with streaming)
 - **Context compaction** — history is compacted automatically as the context window fills up; the summary is never shown to the user
 - **Recall** — compacted conversational content goes into a BM25 index the model can query on demand
 - **Sandbox & workspace** — a unified process-execution abstraction (with timeouts and degradation reporting) and workspace path confinement
@@ -43,7 +43,8 @@ async fn add(
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let model_config = ModelConfig::builder()
         .protocol(ModelProtocol::ChatCompletions)
-        .base_url("https://api.example.com/v1")
+        // base_url is the full request endpoint, not a base path.
+        .base_url("https://api.example.com/v1/chat/completions")
         .api_key("sk-...")
         .model("gpt-4o-mini")
         .stream(true)
@@ -63,6 +64,38 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 ```
+
+### Choosing a protocol
+
+`base_url` is the full request endpoint — the adapter POSTs to it as-is.
+
+```rust
+// OpenAI Chat Completions (default)
+let config = ModelConfig::builder()
+    .protocol(ModelProtocol::ChatCompletions)
+    .base_url("https://api.deepseek.com/v1/chat/completions")
+    .api_key("sk-...")
+    .model("deepseek-chat")
+    .build();
+
+// OpenAI Responses
+let config = ModelConfig::builder()
+    .protocol(ModelProtocol::Responses)
+    .base_url("https://api.deepseek.com/responses")
+    .api_key("sk-...")
+    .model("deepseek-chat")
+    .build();
+
+// Anthropic Messages — the adapter adds `x-api-key` and `anthropic-version` for you.
+let config = ModelConfig::builder()
+    .protocol(ModelProtocol::AnthropicMessages)
+    .base_url("https://api.deepseek.com/anthropic/v1/messages")
+    .api_key("sk-...")
+    .model("deepseek-chat")
+    .build();
+```
+
+Everything downstream of `ModelConfig` is protocol-agnostic: the same `Agent`, `Message`, and tool code runs against any of the three. Protocol quirks (system handling, tool-result placement, thinking blocks, usage semantics, streaming event shapes) live entirely in `src/adapter/`.
 
 ### Consuming the stream
 
@@ -90,7 +123,7 @@ while let Some(event) = stream.next().await {
 | --- | --- |
 | `Agent` | The ReAct runtime; built with a `bon` builder, driven by `run` / `run_stream` |
 | `ModelConfig` | Model endpoint config: protocol, base_url, model, api_key, stream, thinking, etc. |
-| `ModelProtocol` | Protocol enum; only `ChatCompletions` is implemented |
+| `ModelProtocol` | Protocol enum: `ChatCompletions` / `Responses` / `AnthropicMessages` (all implemented) |
 | `Message` | Message enum: System / User / Assistant / Tool / ContextSummary |
 | `ToolManager` | Tool registration and invocation; `definitions()` is sorted by name to keep the prompt prefix stable |
 | `Tool` / `ToolError` | The tool trait and its error type (tool authors only return `ToolError`) |
