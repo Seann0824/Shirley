@@ -346,3 +346,4 @@ cargo test -p shirley-agent-sdk --lib responses::tests::live -- --ignored --noca
   item 展开逻辑注定不能和 ChatCompletions 共用。
 - `docs/sdk-gaps.md`：gap-4 的 `extra_body` 逃生口在本文里继续沿用。
 - `plan.md` 第 36 行"先将适配层做了"：本文是这条路线上的具体一步。
+- `docs/anthropic-messages-api.md`：第三个协议的方案，与本文结构对称。

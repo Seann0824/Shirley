@@ -17,6 +17,7 @@
 | `streaming.md` | 流式输出与 reasoning 流式 | P1 |
 | `adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 | P1 |
 | `responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件 / 落地方式 | P1 |
+| `anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / thinking 回传 / usage 语义 / 落地方式 | P1 |
 | `sdk-gaps.md` | SDK 能力缺口修复：工具上下文注入（已落地）/ 请求体留口（已落地）/ 工具顺序保序（不做） | P0 |
 | `testing.md` | SDK 单测策略、缓存命中率基准 | P1 |
 | `plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 | P0 |

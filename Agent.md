@@ -33,6 +33,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | `docs/streaming.md` | 流式输出与 reasoning 流式 |
 | `docs/adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 |
 | `docs/responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件（**已实现**） |
+| `docs/anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / thinking 回传 / usage 语义（**方案已定，待实现**） |
 | `docs/testing.md` | SDK 单测策略、缓存命中率基准 |
 | `docs/plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 |
 
