@@ -52,11 +52,11 @@ pub trait SessionStore: Send + Sync {
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
     /// 底层存储 I/O 失败（写盘、读盘、序列化等）。
-    #[error("[会话存储失败]: {0}")]
+    #[error("[session storage failure]: {0}")]
     Io(#[from] std::io::Error),
 
     /// 存储后端本身报告的错误（例如 SQL 失败），带自由文本详情。
-    #[error("[会话存储错误]: {0}")]
+    #[error("[session storage error]: {0}")]
     Backend(String),
 }
 
@@ -93,17 +93,17 @@ impl SessionStore for InMemoryStore {
     fn append(&self, message: &Message) -> Result<(), SessionError> {
         self.log
             .lock()
-            .expect("session 锁中毒")
+            .expect("session lock poisoned")
             .push(message.clone());
         Ok(())
     }
 
     fn load(&self) -> Result<Vec<Message>, SessionError> {
-        Ok(self.log.lock().expect("session 锁中毒").clone())
+        Ok(self.log.lock().expect("session lock poisoned").clone())
     }
 
     fn truncate(&self, len: usize) -> Result<(), SessionError> {
-        let mut log = self.log.lock().expect("session 锁中毒");
+        let mut log = self.log.lock().expect("session lock poisoned");
         if len < log.len() {
             log.truncate(len);
         }
@@ -135,7 +135,7 @@ mod tests {
                 assert_eq!(first, "a");
                 assert_eq!(last, "c");
             }
-            _ => panic!("应为 User 消息"),
+            _ => panic!("expected a User message"),
         }
     }
 
@@ -169,7 +169,7 @@ mod tests {
             .unwrap();
         match &store.load().unwrap()[0] {
             Message::ContextSummary { content } => assert!(content.contains("current_goal")),
-            _ => panic!("应为 ContextSummary"),
+            _ => panic!("expected a ContextSummary"),
         }
     }
 

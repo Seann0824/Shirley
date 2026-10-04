@@ -116,6 +116,6 @@ async fn recall_tool_invocation() -> Result<(), ToolError> {
 
     // 无命中 → 友好提示（不报错）
     let output = tool.invoke(serde_json::json!({ "query": "zzz 不存在的词" })).await?;
-    assert!(output.as_str().unwrap().contains("没有检索到"));
+    assert!(output.as_str().unwrap().contains("no relevant history"));
     Ok(())
 }

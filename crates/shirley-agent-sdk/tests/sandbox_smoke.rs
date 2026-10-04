@@ -70,5 +70,5 @@ async fn proxy_policy_reported_as_degraded() {
             addr: "127.0.0.1:8888".into(),
         });
     let out = sandbox.run(&spec).await.unwrap();
-    assert!(out.degraded.iter().any(|d| d.contains("代理")));
+    assert!(out.degraded.iter().any(|d| d.contains("proxy")));
 }

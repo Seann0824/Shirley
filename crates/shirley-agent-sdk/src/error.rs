@@ -44,13 +44,13 @@ impl ErrorKind {
 impl fmt::Display for ErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let text = match self {
-            Self::Transport => "网络传输失败",
-            Self::RateLimited => "被限流",
-            Self::ServerError => "服务端错误",
-            Self::BadRequest => "请求不合法",
-            Self::Unsupported => "能力未实现",
-            Self::ToolFailure => "工具执行失败",
-            Self::Internal => "内部错误",
+            Self::Transport => "transport failure",
+            Self::RateLimited => "rate limited",
+            Self::ServerError => "server error",
+            Self::BadRequest => "bad request",
+            Self::Unsupported => "unsupported",
+            Self::ToolFailure => "tool failure",
+            Self::Internal => "internal error",
         };
         f.write_str(text)
     }

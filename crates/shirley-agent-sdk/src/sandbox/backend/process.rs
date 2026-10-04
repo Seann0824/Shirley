@@ -49,7 +49,7 @@ impl SandboxBackend for ProcessBackend {
         if spec.program.is_empty() {
             // return Err(...) 表示"提前失败退出"。
             // "program 为空".into() 把 &str 转成 String。
-            return Err(SandboxError::Spawn("program 为空".into()));
+            return Err(SandboxError::Spawn("program is empty".into()));
         }
 
         // 创建一个命令，要执行 spec.program。
@@ -101,7 +101,7 @@ impl SandboxBackend for ProcessBackend {
             .await    // .await 表示"等这个异步操作完成"
             // 如果启动失败，把 io::Error 转成我们的 SandboxError::Spawn。
             // `?` 表示"如果是 Err 就提前返回"。
-            .map_err(|e| SandboxError::Spawn(format!("启动 {} 失败: {e}", spec.program)))?;
+            .map_err(|e| SandboxError::Spawn(format!("failed to spawn {}: {e}", spec.program)))?;
 
         // 到这里进程跑完了。下面开始"如实上报降级项"。
 
@@ -109,27 +109,27 @@ impl SandboxBackend for ProcessBackend {
         // vec![...] 是创建列表的字面量写法。
         // .to_owned() 把 &str 变成 String。
         let mut degraded = vec![
-            "无文件系统隔离：进程可访问宿主整个文件系统".to_owned(),
-            "无资源限制：未施加内存/进程数上限".to_owned(),
+            "no filesystem isolation: the process can access the host filesystem".to_owned(),
+            "no resource limits: no memory/process-count caps applied".to_owned(),
         ];
 
         // 根据 spec 要求的网络策略，再补一条对应的降级说明。
         match spec.network {
             // 如果调用方要求断网，但我们做不到，就如实说。
             NetworkPolicy::Disabled => {
-                degraded.push("无网络隔离：NetworkPolicy::Disabled 未被强制".to_owned())
+                degraded.push("no network isolation: NetworkPolicy::Disabled is not enforced".to_owned())
             }
             // 如果要求走代理，同样做不到，如实说。
             // `{ .. }` 表示"不关心里面 addr 的值，忽略它"。
             NetworkPolicy::Proxy { .. } => {
-                degraded.push("无网络隔离：代理出网未被强制".to_owned())
+                degraded.push("no network isolation: proxy egress is not enforced".to_owned())
             }
         }
 
         // 如果调用方设了工作区根目录，说明它以为有文件系统约束——
         // 但我们只是把 cwd 设成那儿，并没有真的锁住文件系统，得说明。
         if spec.workspace_root.is_some() {
-            degraded.push("工作区仅为 cwd，未被文件系统强制".to_owned());
+            degraded.push("workspace is only a cwd; not enforced by the filesystem".to_owned());
         }
 
         // 组装并返回结果。Ok(...) 表示成功。

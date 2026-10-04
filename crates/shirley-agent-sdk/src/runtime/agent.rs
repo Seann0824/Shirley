@@ -242,7 +242,7 @@ impl Agent {
         };
         let content = match &self.messages[index] {
             message::Message::User { content } => content.clone(),
-            _ => unreachable!("rposition 已保证是 User"),
+            _ => unreachable!("rposition guarantees a User message"),
         };
         if let Some(store) = &self.session {
             store.truncate(self.session_len_for(index))?;
@@ -502,7 +502,7 @@ impl Agent {
         let instruction = self
             .compression_instruction
             .clone()
-            .ok_or_else(|| AgentError::Compression("未配置压缩指令".into()))?;
+            .ok_or_else(|| AgentError::Compression("compression instruction is not configured".into()))?;
         // 调用方给领域相关的取舍，SDK 追加结构模板（`docs/compaction.md` 5.3）：
         // 摘要始终是 XML 块，且禁止推演"下一步"。
         let content = format!("{instruction}\n\n{COMPACTION_TEMPLATE}");
@@ -526,14 +526,14 @@ impl Agent {
                             ..
                         } if !content.trim().is_empty() && tool_calls.is_empty() => content,
                         _ => {
-                            return Err(AgentError::Compression("压缩响应没有有效摘要".into()));
+                            return Err(AgentError::Compression("compression response contained no usable summary".into()));
                         }
                     };
 
                     // 3. 重建：[新摘要] + current_task + remain，再把系统提示词重新生成置顶。
                     //    system 不参与压缩、也不从旧消息复制，每次重建现取一条。
                     let rebuilt = parts.rebuild(summary);
-                    let summary_message = rebuilt.first().expect("rebuild 至少产出摘要").clone();
+                    let summary_message = rebuilt.first().expect("rebuild always yields a summary").clone();
                     let mut next = rebuilt;
                     if let Some(system) = self.system_message() {
                         next.insert(0, system);
@@ -560,7 +560,7 @@ impl Agent {
             }
         }
 
-        Err(AgentError::Compression("无法获取压缩后的Usage".into()))
+        Err(AgentError::Compression("compression produced no usage report".into()))
     }
 }
 
@@ -575,7 +575,7 @@ fn strip_tool_outputs(messages: &mut [message::Message]) {
             && let Some(text) = content
             && !text.trim().is_empty()
         {
-            *text = "[工具结果已省略以节省上下文；如仍需要，请重新执行调用获取当前状态]".to_string();
+            *text = "[tool result omitted to save context; re-run the call to get the current state if still needed]".to_string();
         }
     }
 }

@@ -24,7 +24,7 @@ async fn main() -> Result<(), AgentError> {
     // 缺 `base_url` 不再阻断启动：程序照常进入 TUI，并在未配置时自动进入
     // `/login` 引导用户补齐（见 `needs_login` 与 `interface::run`）。
     let settings = settings::Settings::load_default(&working_dir)
-        .map_err(|error| AgentError::Other(error.to_string()))?;
+        .map_err(|error| AgentError::Other(Box::new(error)))?;
     let needs_login = !settings.is_configured();
 
     // 模型目录：默认从 chat completions 的 base_url 推导 `/v1/models` 接口，
@@ -95,7 +95,7 @@ async fn main() -> Result<(), AgentError> {
 
     interface::run(agent, catalog, session_catalog, Some(current_session), needs_login)
         .await
-        .map_err(|error| AgentError::Other(error.to_string()))?;
+        .map_err(|error| AgentError::Other(Box::new(error)))?;
 
     Ok(())
 }

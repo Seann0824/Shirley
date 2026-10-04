@@ -16,16 +16,16 @@ use crate::message;
 /// "参数写错了"——后者它自己能改参数修好。
 #[derive(Debug, Serialize, thiserror::Error)]
 pub enum ToolError {
-    #[error("[执行错误]: {0}")]
+    #[error("[execution error]: {0}")]
     ExecutionError(String),
 
-    #[error("[重复注册错误]: {0}")]
+    #[error("[duplicate tool]: {0}")]
     RepetitionError(String),
 
-    #[error("[工具不存在]: {0}")]
+    #[error("[tool not found]: {0}")]
     NotFoundError(String),
 
-    #[error("[参数错误]: {0}")]
+    #[error("[invalid arguments]: {0}")]
     ArgumentsError(String),
 }
 
@@ -100,7 +100,7 @@ impl ToolManager {
         let tool_name = &tool.definition().name;
         if self.tools.contains_key(tool_name) {
             return Err(ToolError::RepetitionError(format!(
-                "{tool_name} 工具重复注册"
+                "tool already registered: {tool_name}"
             )));
         }
 
@@ -116,11 +116,11 @@ impl ToolManager {
     /// 用 `?` 自动收敛即可，不必在这里提前包装。
     pub async fn invoke(&self, input: &message::ToolCall) -> Result<serde_json::Value, ToolError> {
         let tool = self.tools.get(&input.name).ok_or_else(|| {
-            ToolError::NotFoundError(format!("工具不存在: {}", &input.name))
+            ToolError::NotFoundError(input.name.clone())
         })?;
 
         let arguments = serde_json::from_str(&input.arguments).map_err(|error| {
-            ToolError::ArgumentsError(format!("arguments 不是合法 JSON: {error}"))
+            ToolError::ArgumentsError(format!("arguments is not valid JSON: {error}"))
         })?;
 
         // 交给工具处理自己的参数

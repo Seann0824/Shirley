@@ -67,7 +67,7 @@ impl RecallStore {
     /// `&self`：store 由 `Arc` 共享（runtime 与 recall 工具各持一份），
     /// 入库走内部可变性。
     pub fn index(&self, chunks: Vec<Chunk>) {
-        let mut inner = self.inner.lock().expect("recall 锁中毒");
+        let mut inner = self.inner.lock().expect("recall lock poisoned");
         for chunk in chunks {
             let text = chunk.index_text();
             if text.trim().is_empty() {
@@ -84,7 +84,7 @@ impl RecallStore {
     /// 否则旧会话的 chunk 会污染检索。与 `index` 一样走内部可变性（`&self`），
     /// 因为 recall 工具与 runtime 共享同一 `Arc<RecallStore>`。
     pub fn clear(&self) {
-        let mut inner = self.inner.lock().expect("recall 锁中毒");
+        let mut inner = self.inner.lock().expect("recall lock poisoned");
         inner.index = Bm25Index::new(Bm25Params::default());
         inner.chunks.clear();
     }
@@ -95,7 +95,7 @@ impl RecallStore {
     /// 它能看到原文自己判断，比任何阈值都可靠（`docs/recall.md` 一、决策 2）。
     /// 返回克隆的 chunk（原文无损），避免锁跨越返回值生命周期。
     pub fn retrieve(&self, query: &str, k: usize) -> Vec<(f64, Chunk)> {
-        let inner = self.inner.lock().expect("recall 锁中毒");
+        let inner = self.inner.lock().expect("recall lock poisoned");
         inner
             .index
             .search(query, k)
@@ -120,12 +120,12 @@ impl Default for RecallStore {
 /// 只渲染对话性 chunk（用户 / assistant 文本）——工具类消息压根不入库。
 fn render_hits(hits: &[(f64, Chunk)]) -> String {
     if hits.is_empty() {
-        return "没有检索到相关内容。可尝试换个措辞再检索一次。".to_string();
+        return "no relevant history found; try rephrasing the query".to_string();
     }
-    let mut out = format!("召回到 {} 条历史内容：\n\n", hits.len());
+    let mut out = format!("recalled {} history item(s):\n\n", hits.len());
     for (seq, (score, chunk)) in hits.iter().enumerate() {
         out.push_str(&format!(
-            "--- [{} / 相关度 {:.2}] ---\n{}\n\n",
+            "--- [{} / score {:.2}] ---\n{}\n\n",
             seq + 1,
             score,
             render_chunk(chunk)
@@ -143,8 +143,8 @@ const INJECT_TRUNCATE: usize = 4000;
 
 fn render_chunk(chunk: &Chunk) -> String {
     match chunk {
-        Chunk::User { content } => format!("[用户曾说]\n{}", clip(content)),
-        Chunk::Assistant { content } => format!("[助手曾说]\n{}", clip(content)),
+        Chunk::User { content } => format!("[user previously said]\n{}", clip(content)),
+        Chunk::Assistant { content } => format!("[assistant previously said]\n{}", clip(content)),
     }
 }
 
@@ -154,7 +154,7 @@ fn clip(content: &str) -> String {
         return content.to_string();
     }
     let head: String = content.chars().take(INJECT_TRUNCATE).collect();
-    format!("{head}\n…（内容过长，此处仅展示前 {INJECT_TRUNCATE} 字符）")
+    format!("{head}\n... (content too long; only the first {INJECT_TRUNCATE} characters are shown)")
 }
 
 /// recall 工具（`docs/recall.md` 4.3）。
@@ -175,20 +175,21 @@ impl RecallTool {
             store,
             definition: ToolDefinition {
                 name: "recall".into(),
-                description: "检索被压缩掉的历史对话。当当前上下文中缺少用户之前提过的信息\
-                    （说过的话、约定、决策）且无法通过重新执行工具重建时调用。\
-                    query 用你自己的措辞描述要找的内容。"
+                description: "Search history that has been compacted away. Call this when the \
+                    current context is missing information the user mentioned earlier \
+                    (things they said, agreements, decisions) and it cannot be rebuilt by \
+                    re-running tools. Describe what you are looking for in your own words."
                     .into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
                         "query": {
                             "type": "string",
-                            "description": "检索词，描述要找的历史内容"
+                            "description": "search query describing the history you are looking for"
                         },
                         "k": {
                             "type": "integer",
-                            "description": "返回条数，默认 5",
+                            "description": "number of results to return, defaults to 5",
                             "minimum": 1,
                             "maximum": 20
                         }
@@ -215,13 +216,13 @@ impl Tool for RecallTool {
                 k: Option<usize>,
             }
             let args: Args = serde_json::from_value(input).map_err(|error| {
-                ToolError::ArgumentsError(format!("工具参数错误: {error}"))
+                ToolError::ArgumentsError(format!("invalid tool arguments: {error}"))
             })?;
             let k = args.k.unwrap_or(Self::DEFAULT_K).clamp(1, 20);
             let hits = store.retrieve(&args.query, k);
             let text = render_hits(&hits);
             serde_json::to_value(text).map_err(|error| {
-                ToolError::ExecutionError(format!("工具结果序列化失败: {error}"))
+                ToolError::ExecutionError(format!("failed to serialize tool result: {error}"))
             })
         })
     }

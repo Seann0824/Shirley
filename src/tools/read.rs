@@ -298,7 +298,7 @@ mod tests {
             matches!(err, ToolError::ArgumentsError(_)),
             "越界应是参数错误: {err:?}"
         );
-        assert!(err.to_string().contains("越界"), "应说明越界: {err}");
+        assert!(err.to_string().contains("outside workspace"), "应说明越界: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

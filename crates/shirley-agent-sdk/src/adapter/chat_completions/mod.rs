@@ -113,7 +113,7 @@ pub fn encode_request(
 
     if let Some(api_key) = &config.api_key {
         let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|_| AdapterError::Encode("API Key 无法构成有效请求头".into()))?;
+            .map_err(|error| AdapterError::Encode(format!("API key is not a valid header value: {error}")))?;
         authorization.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, authorization);
     }
@@ -145,19 +145,19 @@ pub fn encode_request(
 
 pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, AdapterError> {
     let response = serde_json::from_value::<dto::ModelResponse>(body.clone())
-        .map_err(|err| AdapterError::Decode(format!("响应解析失败: {err}")))?;
+        .map_err(|err| AdapterError::Decode(format!("failed to parse response: {err}")))?;
 
     // 开始转换 Message::Assistant and Message::Tool and finish_reason
     let choice = response
         .choices
         .first()
-        .ok_or_else(|| AdapterError::Decode("响应缺少 choices[0]".to_owned()))?;
+        .ok_or_else(|| AdapterError::Decode("response is missing choices[0]".to_owned()))?;
 
     let msg = &choice.message;
     let role = &msg.role;
     if role != "assistant" {
         return Err(AdapterError::Decode(format!(
-            "响应 role 不合法: {role}"
+            "unexpected response role: {role}"
         )));
     }
     let content = &msg.content;
@@ -250,12 +250,12 @@ fn finish_tool_calls(
     for (index, tool_call) in &tool_calls {
         if tool_call.id.is_empty() {
             return Err(AdapterError::Decode(format!(
-                "流式工具调用 index={index} 缺少 id"
+                "streamed tool call at index={index} is missing an id"
             )));
         }
         if tool_call.name.is_empty() {
             return Err(AdapterError::Decode(format!(
-                "流式工具调用 index={index} 缺少函数名"
+                "streamed tool call at index={index} is missing a function name"
             )));
         }
     }
@@ -300,7 +300,7 @@ pub async fn decode_stream_response(
                 if payload.is_empty() || payload == "[DONE]" {
                     continue;
                 }
-                let value = serde_json::from_str::<dto::ModelStreamResponse>(data.trim()).map_err(|e| AdapterError::Decode(format!("SSE 反序列化失败: {e}")))?;
+                let value = serde_json::from_str::<dto::ModelStreamResponse>(data.trim()).map_err(|e| AdapterError::Decode(format!("failed to deserialize SSE payload: {e}")))?;
                 if let Some(stream_usage) = value.usage {
                     let cached_input_tokens = stream_usage
                         .prompt_tokens_details

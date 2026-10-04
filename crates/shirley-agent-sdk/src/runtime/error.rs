@@ -24,11 +24,16 @@ pub enum AgentError {
     #[error(transparent)]
     Session(#[from] session::SessionError),
 
-    #[error("上下文压缩失败: {0}")]
+    #[error("[compression failed]: {0}")]
     Compression(String),
 
+    /// 兜底变体：收纳无法归入上面各层的错误（例如应用层的配置 / IO 错误）。
+    ///
+    /// 刻意持有 `Box<dyn Error>` 而不是 `String`：这样 [`std::error::Error::source`]
+    /// 链条不断，外部调用方可以 `downcast_ref` 拿到原始错误类型并结构化处理，
+    /// 而不是只能对着 `to_string()` 的文本猜。
     #[error("{0}")]
-    Other(String),
+    Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
 impl crate::error::SdkError for AgentError {

@@ -125,5 +125,5 @@ fn tool_error_converges_into_agent_error() {
 
     let agent_error: AgentError = ToolError::NotFoundError("nope".into()).into();
     // `transparent` 意味着顶层错误的展示文案就是内层的文案。
-    assert_eq!(agent_error.to_string(), "[工具不存在]: nope");
+    assert_eq!(agent_error.to_string(), "[tool not found]: nope");
 }

@@ -58,7 +58,7 @@ fn parse_config(attr: TokenStream) -> syn::Result<ToolConfig> {
         syn::Error::new(
             // Span::call_site 表示被调用的位置
             proc_macro2::Span::call_site(),
-            "缺少 description, 请填写 #tool(description = \"工具说明\")",
+            "missing description; write #tool(description = \"tool description\")",
         )
     })?;
 
@@ -76,7 +76,7 @@ fn parse_parameter_description(attribute: &Attribute) -> syn::Result<LitStr> {
     })?;
 
     // 如果写的 #[param()]
-    description.ok_or_else(|| syn::Error::new_spanned(attribute, "缺少 description"))
+    description.ok_or_else(|| syn::Error::new_spanned(attribute, "missing description"))
 }
 
 // 读取参数
@@ -87,14 +87,14 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<Vec<ToolParameter>> 
     for input in &mut function.sig.inputs {
         // self 和 普通参数 Typed location: String
         let FnArg::Typed(parameter) = input else {
-            return Err(syn::Error::new_spanned(input, "工具不支持 self 方法"));
+            return Err(syn::Error::new_spanned(input, "tools do not support self methods"));
         };
 
         // 可能是解构的元组, 目前只支持简单的
         let Pat::Ident(pattern) = parameter.pat.as_ref() else {
             return Err(syn::Error::new_spanned(
                 &parameter.pat,
-                "工具从哪好苏必须使用简单名称，不能解构",
+                "tool parameters must use a simple name; destructuring is not supported",
             ));
         };
 
@@ -103,7 +103,7 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<Vec<ToolParameter>> 
         if pattern.by_ref.is_some() || pattern.subpat.is_some() {
             return Err(syn::Error::new_spanned(
                 pattern,
-                "工具参数不支持 ref 或 @ 绑定",
+                "tool parameters do not support ref or @ bindings",
             ));
         }
 
@@ -113,20 +113,20 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<Vec<ToolParameter>> 
             if !attribute.path().is_ident("param") {
                 return Err(syn::Error::new_spanned(
                     attribute,
-                    "工具参数暂时只支持 #[param(...)] 注解",
+                    "tool parameters only support the #[param(...)] attribute",
                 ));
             }
 
             // 不能重复写
             if description.is_some() {
-                return Err(syn::Error::new_spanned(attribute, "#[param] 不能重复"));
+                return Err(syn::Error::new_spanned(attribute, "#[param] must not be repeated"));
             }
 
             description = Some(parse_parameter_description(attribute)?);
         }
 
         let description = description.ok_or_else(|| {
-            syn::Error::new_spanned(&parameter.pat, "缺少 #[param(description = \"参数说明\")]")
+            syn::Error::new_spanned(&parameter.pat, "missing #[param(description = \"parameter description\")]")
         })?;
 
         parameters.push(ToolParameter {
@@ -148,11 +148,11 @@ fn read_description(
 ) -> syn::Result<()> {
     // path 相当于 key
     if !meta.path.is_ident("description") {
-        return Err(meta.error("未知配置项，只支持 description"));
+        return Err(meta.error("unknown option; only description is supported"));
     }
     // 重复key判断
     if description.is_some() {
-        return Err(meta.error("description 不能重复填写"));
+        return Err(meta.error("description must not be repeated"));
     }
 
     // value() 消费 =，parse() 消费 value
@@ -160,7 +160,7 @@ fn read_description(
 
     // 检查值是否为空
     if value.value().trim().is_empty() {
-        return Err(syn::Error::new(value.span(), "description 不能为空"));
+        return Err(syn::Error::new(value.span(), "description must not be empty"));
     }
 
     *description = Some(value);
@@ -248,7 +248,7 @@ fn generate_tool(
                         let args = ::serde_json::from_value::<Arguments>(input)
                             .map_err(|error| {
                                 ::shirley_agent_sdk::ToolError::ArgumentsError(
-                                    ::std::format!("工具参数错误: {error}")
+                                    ::std::format!("invalid tool arguments: {error}")
                                 )
                         })?;
 
@@ -259,7 +259,7 @@ fn generate_tool(
                         ::serde_json::to_value(result)
                             .map_err(|error| {
                                 ::shirley_agent_sdk::ToolError::ExecutionError(
-                                    ::std::format!("工具结果序列化失败: {error}")
+                                    ::std::format!("failed to serialize tool result: {error}")
                                 )
                             })
 

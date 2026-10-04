@@ -75,20 +75,20 @@ pub trait SandboxBackend: Send + Sync {
 #[derive(Debug, thiserror::Error)]
 pub enum SandboxError {
     /// 后端在当前平台不可用（例如 Linux 上想用 sandbox-exec）。
-    #[error("[沙盒不可用]: {0}")]
+    #[error("[sandbox unavailable]: {0}")]
     BackendUnavailable(String),
 
     /// 后端启动失败。
-    #[error("[沙盒启动失败]: {0}")]
+    #[error("[sandbox spawn failed]: {0}")]
     Spawn(String),
 
     /// 后端不支持 spec 中要求的某项约束，且不允许降级。
-    #[error("[沙盒不支持该约束]: {0}")]
+    #[error("[unsupported sandbox constraint]: {0}")]
     Unsupported(String),
 
     /// 底层 IO 错误。`#[from]` 提供 `io::Error -> SandboxError` 的自动转换，
     /// 让调用点可以继续用 `?`；`#[source]` 保留错误链，便于向上追溯。
-    #[error("[沙盒 IO 错误]: {0}")]
+    #[error("[sandbox io error]: {0}")]
     Io(#[from] #[source] std::io::Error),
 }
 

@@ -21,15 +21,15 @@ pub struct WorkSpace {
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
     /// 请求的路径落在工作区根目录之外。
-    #[error("[路径越界]: {0}")]
+    #[error("[path outside workspace]: {0}")]
     OutsideRoot(String),
 
     /// 路径本身不合法（无法解析、指向符号链接等）。
-    #[error("[路径不合法]: {0}")]
+    #[error("[invalid path]: {0}")]
     InvalidPath(String),
 
     /// 底层文件系统错误。
-    #[error("[工作区 IO 错误]: {0}")]
+    #[error("[workspace io error]: {0}")]
     Io(#[source] io::Error),
 }
 

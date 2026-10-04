@@ -51,7 +51,7 @@ pub enum AdapterEvent {
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
     /// 网络层失败：连不上、连接被重置、读取响应体中断等。
-    #[error("[网络请求失败]: {0}")]
+    #[error("[transport failure]: {0}")]
     Transport(#[source] reqwest::Error),
 
     /// 服务端返回了非 2xx。状态码必须保留，它是可重试性的唯一依据。
@@ -59,15 +59,15 @@ pub enum AdapterError {
     Http { status: u16, body: String },
 
     /// 响应体解析失败（JSON 结构不符合协议、缺字段等）。
-    #[error("[响应解析失败]: {0}")]
+    #[error("[decode failure]: {0}")]
     Decode(String),
 
     /// 请求编码失败（例如 API Key 无法构成合法请求头）。
-    #[error("[请求编码失败]: {0}")]
+    #[error("[encode failure]: {0}")]
     Encode(String),
 
     /// 请求的协议还没有实现。绝不用 panic 表达"未实现"。
-    #[error("[协议未实现]: {protocol}")]
+    #[error("[unsupported protocol]: {protocol}")]
     UnsupportedProtocol { protocol: String },
 }
 
@@ -175,7 +175,7 @@ pub async fn invoke<'a>(
         if !config.stream {
             let text = response.text().await.map_err(AdapterError::Transport)?;
             let body = serde_json::from_str::<serde_json::Value>(&text)
-                .map_err(|e| AdapterError::Decode(format!("响应不是合法 JSON: {e}")))?;
+                .map_err(|e| AdapterError::Decode(format!("response body is not valid JSON: {e}")))?;
 
             let msg = decode(body)?;
             yield AdapterEvent::Finished(msg)

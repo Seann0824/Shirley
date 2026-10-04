@@ -106,7 +106,7 @@ impl<B: SandboxBackend> Sandbox<B> {
                 Ok(SandboxOutput {
                     stdout: String::new(), // 没拿到输出
                     // 生成一句说明，比如 "命令执行超时（5s）"。
-                    stderr: format!("命令执行超时（{}s）", effective.as_secs()),
+                    stderr: format!("command timed out after {}s", effective.as_secs()),
                     exit_code: None, // 被强杀，没有退出码
                     timed_out: true, // 标记超时
                     // 记录用的是哪个后端的标签。
