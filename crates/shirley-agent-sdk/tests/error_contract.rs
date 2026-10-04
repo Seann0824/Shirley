@@ -4,8 +4,8 @@
 //! 文案可以改，`ErrorKind` 与 `is_retryable` 的行为不能随便改——
 //! 上层的重试 / 降级决策全挂在它们身上。
 
-use agent_sdk::error::{ErrorKind, SdkError};
-use agent_sdk::{AdapterError, ModelProtocol};
+use shirley_agent_sdk::error::{ErrorKind, SdkError};
+use shirley_agent_sdk::{AdapterError, ModelProtocol};
 
 /// HTTP 状态码必须映射到正确的分类。
 /// 这是本次重构最核心的一条：以前状态码被拼进字符串，分类信息直接丢了。

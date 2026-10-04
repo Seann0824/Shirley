@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use agent_sdk::{Agent, AgentError, ModelConfig, ToolManager};
+use shirley_agent_sdk::{Agent, AgentError, ModelConfig, ToolManager};
 use session::SessionCatalog as _;
 mod interface;
 mod models;
@@ -63,7 +63,7 @@ async fn main() -> Result<(), AgentError> {
     // 保证升级不丢历史。启动时打开"最近修改"的会话；一份都没有就新建一个。
     let session_catalog = session::FileSessionCatalog::new(&working_dir);
     session_catalog.adopt_legacy()?;
-    let (current_session, session): (String, Arc<dyn agent_sdk::SessionStore>) =
+    let (current_session, session): (String, Arc<dyn shirley_agent_sdk::SessionStore>) =
         match session_catalog.latest()? {
             Some(entry) => (entry.name.clone(), session_catalog.open(&entry.name)?),
             None => {

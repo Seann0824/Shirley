@@ -1,7 +1,7 @@
 //! 应用侧的系统提示词构造。
 //!
 //! SDK 只提供"提示词可以是函数、并会拿到运行时上下文"的机制
-//! （`agent_sdk::SystemPrompt` / `SystemPromptContext`）。**拼什么内容**属于
+//! （`shirley_agent_sdk::SystemPrompt` / `SystemPromptContext`）。**拼什么内容**属于
 //! 业务决策，落在这里。
 //!
 //! 目前拼三块：
@@ -13,7 +13,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_sdk::{SystemPrompt, SystemPromptContext};
+use shirley_agent_sdk::{SystemPrompt, SystemPromptContext};
 
 /// 项目指南文件名。放在工作区根目录，作为 Agent 的工作参考。
 pub const GUIDE_FILE_NAME: &str = "Agent.md";

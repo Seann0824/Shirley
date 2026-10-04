@@ -22,14 +22,14 @@ graph TD
         TOOLS["tools/<br/>bash / read_file"]
     end
 
-    subgraph SDK["SDK 层 crates/agent-sdk/"]
+    subgraph SDK["SDK 层 crates/shirley-agent-sdk/"]
         RUNTIME["runtime/<br/>Agent / ReAct 循环 / 压缩"]
         MSG["message/<br/>Message / Usage"]
         ADAPTER["adapter/<br/>协议适配 / codec"]
         TOOLM["tool/<br/>Tool trait / ToolManager"]
     end
 
-    subgraph MACRO["宏层 crates/agent-sdk-macros/"]
+    subgraph MACRO["宏层 crates/shirley-agent-sdk-macros/"]
         TOOLMACRO["#[tool]<br/>生成 Arguments + GenerateTool"]
     end
 
@@ -199,7 +199,7 @@ sequenceDiagram
 | 系统提示词（静态/函数） | `runtime` + 应用层 | `runtime/prompt.rs`、`src/prompt.rs` | 已实现 |
 | 消息模型 / 序列化 | `message` | `message/mod.rs` | 已实现 |
 | 工具注册与并发调用 | `tool` + `runtime` | `tool/mod.rs`、`runtime/mod.rs` | 已实现 |
-| `#[tool]` 宏与参数 schema | 宏层 | `agent-sdk-macros/src/tool.rs` | 已实现 |
+| `#[tool]` 宏与参数 schema | 宏层 | `shirley-agent-sdk-macros/src/tool.rs` | 已实现 |
 | 上下文压缩 | `runtime` + `message` | `runtime/mod.rs`（`ContextSummary`） | 已实现，脆弱 |
 | usage / 缓存命中率 | `message` + `adapter` | `message/mod.rs`、`chat_completions` | 已实现 |
 | ChatCompletions 协议 | `adapter` | `adapter/chat_completions/` | 已实现 |

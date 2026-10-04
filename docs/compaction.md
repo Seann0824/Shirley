@@ -33,7 +33,7 @@ push 到 self.messages 末尾     →  Message::ContextSummary
 active_messages()            →  开头的 system + 从最后一个 ContextSummary 开始的消息
 ```
 
-对应 `crates/agent-sdk/src/runtime/mod.rs`。
+对应 `crates/shirley-agent-sdk/src/runtime/mod.rs`。
 
 **2.2 两个根因（同一个结构问题）**
 
@@ -303,11 +303,11 @@ self.messages = [system（Agent 重新生成）] + [新 ContextSummary] + messag
 
 **六、落点与改动清单**
 
-主要落在 `crates/agent-sdk/src/runtime/mod.rs`，新增一个 `token` 模块，外加 `src/main.rs` 的压缩指令文案。
+主要落在 `crates/shirley-agent-sdk/src/runtime/mod.rs`，新增一个 `token` 模块，外加 `src/main.rs` 的压缩指令文案。
 
 | 改动 | 位置 | 说明 |
 | --- | --- | --- |
-| 新增 `token` 模块 | `crates/agent-sdk/src/token/mod.rs` | `TokenCounter` trait + `HeuristicCounter`（带 `factor`） |
+| 新增 `token` 模块 | `crates/shirley-agent-sdk/src/token/mod.rs` | `TokenCounter` trait + `HeuristicCounter`（带 `factor`） |
 | `compact()` 取代 `compress_context` | `runtime/mod.rs` | 先算切点 → 只对 `messages[..cut]` 生成摘要 → 重建 `self.messages` |
 | 切点计算 `compute_cut()` | `runtime/mod.rs` | 见 4.5：20% 预算 + tool 配对修正 |
 | 校准状态 | `runtime/mod.rs` | 每次响应后用 `input_tokens` 更新 `factor` |

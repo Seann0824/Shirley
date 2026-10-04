@@ -31,7 +31,7 @@ let body = serde_json::json!({
 ChatCompletions 流式是 `text/event-stream`，每行 `data: {...}`，以 `data: [DONE]` 结束。当前实现没有单独的 `SseDecoder` 结构体，而是在 `decode_stream_response` 内用一个 `buffer: String` 按 `\n\n` 切事件：
 
 ```rust
-// crates/agent-sdk/src/adapter/chat_completions/mod.rs（现状）
+// crates/shirley-agent-sdk/src/adapter/chat_completions/mod.rs（现状）
 let mut buffer = String::new();
 while let Some(chunk) = byte_stream.next().await {
     buffer.push_str(&String::from_utf8_lossy(&chunk));

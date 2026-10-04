@@ -72,7 +72,7 @@ P0 完成的定义（可测）：
 P1 完成的定义：
 
 1. TUI 能看到逐字输出与 reasoning 流。（已实现）
-2. `cargo test -p agent-sdk` 覆盖 Usage 语义、压缩切片、阈值判断。（仍未做，SDK 侧 0 测试）
+2. `cargo test -p shirley-agent-sdk` 覆盖 Usage 语义、压缩切片、阈值判断。（仍未做，SDK 侧 0 测试）
 3. 缓存命中率有基准用例与阈值，UI 上的百分比有参照。（仍未做）
 
 **五、不做的事（明确划界）**

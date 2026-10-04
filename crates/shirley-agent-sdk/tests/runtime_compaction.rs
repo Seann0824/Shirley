@@ -5,9 +5,9 @@
 //! 以及 `CompactParts::rebuild` 的顺序与"恰好一条摘要"约束。
 //!
 //! 原先内联在 `runtime/mod.rs` 的 `mod tests`，拆模块后移到集成测试，
-//! 只依赖 `agent_sdk` 的公开 API。
+//! 只依赖 `shirley_agent_sdk` 的公开 API。
 
-use agent_sdk::{HeuristicCounter, Message, ToolCall, plan_cut};
+use shirley_agent_sdk::{HeuristicCounter, Message, ToolCall, plan_cut};
 
 
 fn system(text: &str) -> Message {

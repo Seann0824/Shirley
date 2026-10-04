@@ -3,9 +3,9 @@
 //! 覆盖：召回无损（原文逐字返回）、工具输出统一清空为占位标记、
 //! chunk 化的并发多工具配对、recall 工具的参数与返回。
 
-use agent_sdk::chunk_messages;
-use agent_sdk::{Tool, ToolError};
-use agent_sdk::{Message, RecallStore, RecallTool, ToolCall};
+use shirley_agent_sdk::chunk_messages;
+use shirley_agent_sdk::{Tool, ToolError};
+use shirley_agent_sdk::{Message, RecallStore, RecallTool, ToolCall};
 use std::sync::Arc;
 
 fn user(text: &str) -> Message {

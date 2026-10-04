@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
-use agent_sdk::workspace::{WorkSpace, WorkspaceError};
-use agent_sdk::{ToolError, tool};
+use shirley_agent_sdk::workspace::{WorkSpace, WorkspaceError};
+use shirley_agent_sdk::{ToolError, tool};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 
 /// 默认读取行数。模型不指定时用这个值，避免"顺手读整个文件"。
@@ -373,7 +373,7 @@ mod tests {
 
     #[tokio::test]
     async fn registers_and_invokes_through_tool_manager() {
-        use agent_sdk::{ToolCall, ToolManager};
+        use shirley_agent_sdk::{ToolCall, ToolManager};
 
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("manager");

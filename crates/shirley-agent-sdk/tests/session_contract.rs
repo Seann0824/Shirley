@@ -7,9 +7,9 @@
 //! 3. `rewind_last_user_turn` 同步截断日志（只截尾），且返回被丢弃的用户原文；
 //! 4. 不挂 session 时行为不变（纯内存）。
 //!
-//! 只依赖 `agent_sdk` 的公开 API。
+//! 只依赖 `shirley_agent_sdk` 的公开 API。
 
-use agent_sdk::{Agent, InMemoryStore, Message, ModelConfig, ModelProtocol, SessionStore};
+use shirley_agent_sdk::{Agent, InMemoryStore, Message, ModelConfig, ModelProtocol, SessionStore};
 use std::sync::Arc;
 
 fn model_config() -> ModelConfig {

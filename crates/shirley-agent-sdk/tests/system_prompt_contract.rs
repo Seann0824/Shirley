@@ -7,9 +7,9 @@
 //! 2. `Agent` 的 builder 接受 `.system_prompt(...)` 与 `.working_dir(...)`，
 //!    且函数形式的提示词在构造时就按工作目录解析。
 //!
-//! 这些断言只依赖 `agent_sdk` 的公开 API。
+//! 这些断言只依赖 `shirley_agent_sdk` 的公开 API。
 
-use agent_sdk::{Agent, ModelConfig, ModelProtocol, SystemPrompt, SystemPromptContext};
+use shirley_agent_sdk::{Agent, ModelConfig, ModelProtocol, SystemPrompt, SystemPromptContext};
 use std::path::PathBuf;
 
 fn model_config() -> ModelConfig {

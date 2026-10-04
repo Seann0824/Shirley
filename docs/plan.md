@@ -43,7 +43,7 @@ sandbox 是叶子模块，只面对 `std`，所以它可以把自己的错误定
 
 **3.1 交付物**
 
-新增 `crates/agent-sdk/src/error.rs`：
+新增 `crates/shirley-agent-sdk/src/error.rs`：
 
 - `ErrorKind`：7 个稳定分类，用于日志 / 指标 / 审计，不随文案变化。
   - `Transport` / `RateLimited` / `ServerError` / `BadRequest` / `Unsupported` / `ToolFailure` / `Internal`
@@ -53,7 +53,7 @@ sandbox 是叶子模块，只面对 `std`，所以它可以把自己的错误定
 - `ErrorKind` 的 `Display`：给每个分类一句稳定中文文案。
 - `SdkError` trait：`kind()` 必须实现，`is_retryable()` 默认由 `kind()` 推导，具体类型可覆盖。
 
-新增依赖：`crates/agent-sdk/Cargo.toml` 显式加入 `thiserror = "2.0.21"`。
+新增依赖：`crates/shirley-agent-sdk/Cargo.toml` 显式加入 `thiserror = "2.0.21"`。
 （该版本此前已被其他 crate 间接引入 `Cargo.lock`，但 SDK 自己没声明。）
 
 **3.2 各层改造**
@@ -117,7 +117,7 @@ if !status.is_success() {
 
 **3.7 测试**
 
-新增 `crates/agent-sdk/tests/error_contract.rs`，6 个用例，锁的是**分类语义而非文案**：
+新增 `crates/shirley-agent-sdk/tests/error_contract.rs`，6 个用例，锁的是**分类语义而非文案**：
 
 - `http_status_maps_to_kind`：429→`RateLimited`、5xx→`ServerError`、4xx→`BadRequest`
 - `unsupported_protocol_is_error_not_panic`：未实现协议返回 `Err`
@@ -129,7 +129,7 @@ if !status.is_success() {
 **3.8 验收结果**
 
 - `cargo check --workspace` 通过，无新增 warning（SDK 侧 11 条，全部是既有的 dead_code）。
-- `cargo test -p agent-sdk`：`error_contract` 6/6、`sandbox_smoke` 6/6、doc test 1/1。
+- `cargo test -p shirley-agent-sdk`：`error_contract` 6/6、`sandbox_smoke` 6/6、doc test 1/1。
 - 四层错误（`Tool` / `Adapter` / `Sandbox` / `Workspace`）共 11 个变体的 `Display` 输出已逐一核对，全部为 `[前缀]: 详情` 格式。
 - `cargo test --workspace` 有 1 个失败：`tools::bash::tests::reports_sandbox_degradation`。
   **该失败在改动前即存在**（已用 `git stash` 在干净代码上复现），原因是 `src/tools/bash.rs` 的 `render()`
@@ -155,9 +155,9 @@ if !status.is_success() {
 
 **T2 · `Tool` trait 签名归位**（P0，破坏面最大，放最后做）
 
-- 现状：`ToolFuture = Future<Output = Result<Value, AgentError>>`，但工具作者写的是 `Result<String, ToolError>`，宏里 `map_err(::agent_sdk::AgentError::ToolError)?` 硬转。结果是工具作者被迫感知 `AgentError`——而它是 SDK 边界类型，不是工具该看到的东西。
+- 现状：`ToolFuture = Future<Output = Result<Value, AgentError>>`，但工具作者写的是 `Result<String, ToolError>`，宏里 `map_err(::shirley_agent_sdk::AgentError::ToolError)?` 硬转。结果是工具作者被迫感知 `AgentError`——而它是 SDK 边界类型，不是工具该看到的东西。
 - 做法：`ToolFuture` 改为 `Result<serde_json::Value, ToolError>`；宏里删掉 `map_err`；由 runtime 在调用点用 `?` 收敛到 `AgentError`。这与 sandbox 一致——`ProcessBackend::execute` 只返回 `SandboxError`。
-- 影响面：`crates/agent-sdk-macros/src/tool.rs`、`crates/agent-sdk/src/tool/mod.rs`、`src/tools/bash.rs`。
+- 影响面：`crates/shirley-agent-sdk-macros/src/tool.rs`、`crates/shirley-agent-sdk/src/tool/mod.rs`、`src/tools/bash.rs`。
 - 验收：工具函数签名只需 `Result<_, ToolError>`；现有 6 个 bash 测试全过。
 
 **T3 · 重试与指数退避**（P0，依赖 T1）

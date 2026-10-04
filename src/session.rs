@@ -1,6 +1,6 @@
 //! 应用侧的会话存储实现（`docs/session.md`）。
 //!
-//! SDK 只定契约（`agent_sdk::SessionStore`），**具体落盘技术在这里决定**。
+//! SDK 只定契约（`shirley_agent_sdk::SessionStore`），**具体落盘技术在这里决定**。
 //! 当前选 **JSONL**——每行一条序列化的 `Message`，追加即 `write`，读回即逐行
 //! `serde_json::from_str`。选它的理由：零依赖、可读、可手工调试，且天然是
 //! append-only 的"日志"形状，与 `docs/session.md` 一.决策 4 完全对齐。
@@ -14,7 +14,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use agent_sdk::{Message, SessionError, SessionStore};
+use shirley_agent_sdk::{Message, SessionError, SessionStore};
 
 /// JSONL 会话日志：每行一条 `Message`。
 ///

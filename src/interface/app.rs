@@ -1,4 +1,4 @@
-use agent_sdk::{Agent, Message, Usage};
+use shirley_agent_sdk::{Agent, Message, Usage};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -1226,7 +1226,7 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_sdk::{ModelConfig, ModelProtocol};
+    use shirley_agent_sdk::{ModelConfig, ModelProtocol};
 
     fn app() -> App {
         let config = ModelConfig::builder()

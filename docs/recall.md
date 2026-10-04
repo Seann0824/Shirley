@@ -138,7 +138,7 @@ BM25 天生是"一个 query 对 N 个文档排序"的跨文档算法：IDF 依�
 **4.1 模块布局**
 
 ```
-crates/agent-sdk/src/recall/
+crates/shirley-agent-sdk/src/recall/
 ├── mod.rs        门面：RecallStore + Retriever trait（持久化层留空）
 ├── chunk.rs      分块策略（UserChunk / AssistantChunk、索引视图）
 ├── bm25.rs       BM25 实现（实现 Retriever）
@@ -229,7 +229,7 @@ v0 极端化决策：**压缩时对所有 Tool.content 统一替换为占位标�
 
 | 改动 | 位置 | 说明 |
 | --- | --- | --- |
-| 新增 `recall` 模块 | `crates/agent-sdk/src/recall/` | 5 个文件，见 4.1 |
+| 新增 `recall` 模块 | `crates/shirley-agent-sdk/src/recall/` | 5 个文件，见 4.1 |
 | `Retriever` / `RecallStore` 导出 | `lib.rs` | 检索器抽象进公开面（基础能力） |
 | `Agent` 持有 `recall` + 自动注册工具 | `runtime/agent.rs` | 构造时 `Arc<RecallStore>` + `RecallTool` |
 | 压缩时分块入库 | `runtime/agent.rs` `compress_context` | to_compress → chunk → index |

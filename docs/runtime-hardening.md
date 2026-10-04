@@ -15,7 +15,7 @@
 重试、降级、取消语义都依赖"这个错误能不能重试"。现在 `ModelError = String` 把状态码和语义全丢了。
 
 ```rust
-// crates/agent-sdk/src/adapter/error.rs（新增）
+// crates/shirley-agent-sdk/src/adapter/error.rs（新增）
 #[derive(Debug, thiserror::Error)]
 pub enum ModelError {
     #[error("网络请求失败: {0}")]

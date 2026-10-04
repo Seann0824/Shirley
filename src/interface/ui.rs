@@ -991,21 +991,21 @@ mod tests {
 
     #[test]
     fn edit_mode_start_row_matches_item_position() {
-        use agent_sdk::{Agent, ModelConfig, ModelProtocol};
+        use shirley_agent_sdk::{Agent, ModelConfig, ModelProtocol};
         let config = ModelConfig::builder()
             .protocol(ModelProtocol::ChatCompletions)
             .base_url("http://localhost")
             .model("test")
             .build();
         let mut app = App::new(Agent::builder().model_config(config).build().unwrap());
-        app.add_message(agent_sdk::Message::User { content: "hi".into() });
-        app.add_message(agent_sdk::Message::User { content: "bye".into() });
+        app.add_message(shirley_agent_sdk::Message::User { content: "hi".into() });
+        app.add_message(shirley_agent_sdk::Message::User { content: "bye".into() });
 
         // 非编辑态：视口从第 0 行开始。
         assert_eq!(MessageCache::new(&app, 40).start_row, 0);
 
         // 编辑态：视口顶到被编辑条目，头部行数即该条目的屏幕行号。
-        app.add_message(agent_sdk::Message::User { content: "edit me".into() });
+        app.add_message(shirley_agent_sdk::Message::User { content: "edit me".into() });
         app.set_rewind_edit_for_test(2);
         let cache = MessageCache::new(&app, 40);
         assert_eq!(cache.item_line_offsets.len(), 3);
@@ -1017,7 +1017,7 @@ mod tests {
     fn cache_row_count_matches_paragraph_word_wrap() {
         // 回归：`row_offsets` 必须与 ratatui `Paragraph` 的换行一致（按词边界，
         // 而非按字符数取整），否则 `max_scroll` 偏小，最新消息会被输入框遮挡。
-        use agent_sdk::{Agent, Message, ModelConfig, ModelProtocol};
+        use shirley_agent_sdk::{Agent, Message, ModelConfig, ModelProtocol};
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         use ratatui::widgets::{Paragraph, Wrap};

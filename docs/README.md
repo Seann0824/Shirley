@@ -37,7 +37,7 @@
 
 - 代码量：`src` + `crates` 共 2809 行
 - 测试：3 个（全部在 `read` 工具），SDK 侧 0 个
-- clippy：36 条警告（`agent-sdk` 32 条 + 应用层 4 条）
+- clippy：36 条警告（`shirley-agent-sdk` 32 条 + 应用层 4 条）
 - 已知 panic 点：`adapter::codec` 的 `_ => todo!()`、`adapter::invoke` 流式分支的 `_ => todo!()`、`decode_stream_response` 里 SSE `id:` 行的 `todo!()`
 - 未接线配置：`request_timeout`（已定义未用）、`ModelConfig.temperature` / `max_output_tokens`（已定义未进入请求体）
 - 未使用的 `StopReason`：`MaxStepsReached`、`Cancelled`（`Completed` 是当前唯一会被产生的值）

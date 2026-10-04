@@ -7,7 +7,7 @@ mod ui;
 mod update;
 
 pub async fn run(
-    agent: agent_sdk::Agent,
+    agent: shirley_agent_sdk::Agent,
     catalog: std::sync::Arc<dyn crate::models::ModelCatalog>,
     session_catalog: std::sync::Arc<dyn crate::session::SessionCatalog>,
     current_session: Option<String>,

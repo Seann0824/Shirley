@@ -15,8 +15,8 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | 层 | 位置 | 职责 |
 | --- | --- | --- |
 | 应用层 | `src/` | 一个可跑的 TUI 聊天 Agent，注册工具、驱动界面 |
-| SDK 层 | `crates/agent-sdk/` | 与业务无关的 Agent 基础能力：消息、工具、协议适配、ReAct 运行时、沙盒、工作区 |
-| 宏层 | `crates/agent-sdk-macros/` | `#[tool]` 属性宏，把普通 async 函数变成可被模型调用的工具 |
+| SDK 层 | `crates/shirley-agent-sdk/` | 与业务无关的 Agent 基础能力：消息、工具、协议适配、ReAct 运行时、沙盒、工作区 |
+| 宏层 | `crates/shirley-agent-sdk-macros/` | `#[tool]` 属性宏，把普通 async 函数变成可被模型调用的工具 |
 
 核心设计目标写在根目录的 `plan.md` 里：SDK 只沉淀"下次做 Agent 还会用到"的能力，不掺业务。当前聚焦的场景是"Coding Agent"，也就是拿它去做 TS 后端往 Rust 迁移这类长任务。
 
@@ -56,7 +56,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
   → 结束时给出 RunResult
 ```
 
-**SDK 对外只暴露这些**（见 `crates/agent-sdk/src/lib.rs`）：
+**SDK 对外只暴露这些**（见 `crates/shirley-agent-sdk/src/lib.rs`）：
 
 - `Agent`、`AgentError`、`AgentEvent`
 - `SystemPrompt`、`SystemPromptContext`（系统提示词：静态字符串或函数）
@@ -74,7 +74,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 
 **三、关键模块速查**
 
-**1. 消息模型** — `crates/agent-sdk/src/message/mod.rs`
+**1. 消息模型** — `crates/shirley-agent-sdk/src/message/mod.rs`
 
 `Message` 是一个带 `#[serde(tag = "role")]` 的枚举，共五种：
 
@@ -90,7 +90,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 - `cache_hit_rate()` 在未上报时返回 `None`，**不要把测不到当成 0% 命中**
 - `Add` 实现里对 `Option` 做的是"保留已知的一侧"，不是当 0 累加
 
-**2. 统一错误契约** — `crates/agent-sdk/src/error.rs`
+**2. 统一错误契约** — `crates/shirley-agent-sdk/src/error.rs`
 
 - `ErrorKind`：稳定的错误分类（`Transport` / `RateLimited` / `ServerError` / `BadRequest` / `Unsupported` / `ToolFailure` / `Internal`），用于日志、指标、重试决策
 - `SdkError` trait：`kind()` + `is_retryable()`（默认由 `ErrorKind::is_retryable` 推导）
@@ -98,7 +98,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 - 展示格式统一为 `[前缀]: 详情`，前缀留在变体旁，不从 `ErrorKind` 推导
 - **决策看分类，不看文案**：要判断重试与否，只依赖 `SdkError::is_retryable`，绝不 `match` 错误字符串
 
-**3. 协议适配层** — `crates/agent-sdk/src/adapter/`
+**3. 协议适配层** — `crates/shirley-agent-sdk/src/adapter/`
 
 - `ModelConfig` 用 `bon` 生成 builder：`protocol` / `base_url` / `model` / `api_key` / `request_timeout` / `stream` / `thinking` / `reasoning_effort` / `temperature` / `max_output_tokens` / `context_window_tokens`
 - `codec(protocol)` 返回一对函数指针 `(Encoder, Decoder)`，目前只有 `ChatCompletions` 有实现；`Responses` 和 `AnyhtopicMessages` 返回 `Err(AdapterError::UnsupportedProtocol)`（**不再 panic**）
@@ -111,7 +111,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 
 已知设计债：`encode_messages` 写在适配层，但作者自己注释说"这逻辑其实该在 message 侧"。`encode_request` 里 `thinking` 现在按 `config.thinking` 映射成 `enabled` / `disabled`（**流式已实现**，不再写死）。
 
-**4. 工具系统** — `crates/agent-sdk/src/tool/mod.rs`
+**4. 工具系统** — `crates/shirley-agent-sdk/src/tool/mod.rs`
 
 - `Tool` trait：`definition()` 拿元信息，`invoke(Value)` 返回 `ToolFuture`
 - `ToolManager`：注册时查重，`definitions()` **按名字排序**（这是为了让 prefix 稳定、提高缓存命中率，别随手删掉这个 sort）
@@ -119,7 +119,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 
 已知设计债：`ToolDefinition.parameters` 直接就是 OpenAI 格式的 JSON Schema，所以一旦要兼容 Anthropic，参数结构没法复用。`docs/adapter-layer.md` 里说得很清楚，正确做法是在中间加一层标准化的参数模型再往外转换。
 
-**5. `#[tool]` 宏** — `crates/agent-sdk-macros/src/tool.rs`
+**5. `#[tool]` 宏** — `crates/shirley-agent-sdk-macros/src/tool.rs`
 
 写法：
 
@@ -128,7 +128,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 pub async fn bash(
     #[param(description = "要执行的命令")] command: String,
     #[param(description = "超时时间（秒）")] timeout: Option<u64>,
-) -> Result<String, agent_sdk::ToolError> { ... }
+) -> Result<String, shirley_agent_sdk::ToolError> { ... }
 ```
 
 宏展开后会在同名 `mod` 里生成：`Arguments` 结构体（`Deserialize` + `JsonSchema` + `deny_unknown_fields`）、`GenerateTool`（实现 `Tool`）、`definition()`、`tool()`。调用方写 `tools::bash_tool::tool()` 注册即可。
@@ -139,7 +139,7 @@ pub async fn bash(
 - 参数描述必须写 `#[param(description = "...")]`，否则编译报错
 - 生成的 `invoke` 里调用的是 `super::#name`，所以**被修饰的函数和宏生成的 mod 必须在同一层级**
 
-**6. ReAct 运行时** — `crates/agent-sdk/src/runtime/`
+**6. ReAct 运行时** — `crates/shirley-agent-sdk/src/runtime/`
 
 这是整个项目的心脏。按职责拆成几个子模块，`mod.rs` 只负责接线与再导出：
 
@@ -149,7 +149,7 @@ pub async fn bash(
 - `error.rs`：顶层错误收敛（`AgentError` + `SdkError`）
 - `prompt.rs`：系统提示词（`SystemPrompt` / `SystemPromptContext`）
 
-`CompactParts` 的契约测试移到了 `crates/agent-sdk/tests/runtime_compaction.rs`（集成测试，只依赖公开 API）。
+`CompactParts` 的契约测试移到了 `crates/shirley-agent-sdk/tests/runtime_compaction.rs`（集成测试，只依赖公开 API）。
 
 - `Agent::new` 是 `bon` builder：`model_config` / `system_prompt` / `working_dir` / `messages` / `tools` / `compression_instruction`
 - `system_prompt` 类型是 `SystemPrompt`（不是 `String`）：既接受固定字符串（`From<String>` / `From<&str>`），也接受**函数** `Fn(&SystemPromptContext) -> String`。函数形式让提示词按运行时上下文动态生成——`SystemPromptContext` 目前携带 `working_dir`。`working_dir` 是独立 builder 参数，构造时会用它解析一次提示词
@@ -206,7 +206,7 @@ pub async fn bash(
 
 ---
 
-**5. 召回** — `crates/agent-sdk/src/recall/`（`docs/recall.md`）
+**5. 召回** — `crates/shirley-agent-sdk/src/recall/`（`docs/recall.md`）
 
 压缩丢失信息的退路。定位：**compaction 的自然配套，SDK 内部能力，应用层无感**。
 
@@ -229,7 +229,7 @@ pub async fn bash(
 
 **五、沙盒与工作区（SDK 新增能力）**
 
-**沙盒** — `crates/agent-sdk/src/sandbox/`
+**沙盒** — `crates/shirley-agent-sdk/src/sandbox/`
 
 | 文件 | 职责 |
 | --- | --- |
@@ -243,7 +243,7 @@ pub async fn bash(
 
 当前用 `ProcessBackend`，它会如实上报降级（隔离没生效）。真后端（macOS `sandbox-exec` / Linux `bwrap`）还没接。`SandboxBackend::execute` 返回 `impl Future`，trait 非 object-safe，暂时不能用 `Box<dyn>` 动态注入。
 
-**工作区** — `crates/agent-sdk/src/workspace/mod.rs`
+**工作区** — `crates/shirley-agent-sdk/src/workspace/mod.rs`
 
 `WorkSpace`：`new(root)` + `resolve(input)`，把相对路径解析到工作区根目录下并做越界校验。`WorkspaceError` 区分 `OutsideRoot`（越界被拒绝）和 `InvalidPath`（路径本身没法用）——模型靠这个差别决定换路径还是换写法。
 
@@ -263,10 +263,10 @@ cargo run
 常用命令：
 
 ```sh
-cargo build                      # 构建
-cargo test                       # 跑全部测试
-cargo test -p agent-sdk          # 只跑 SDK 测试
-cargo clippy --all-targets       # 静态检查
+cargo build                        # 构建
+cargo test                         # 跑全部测试
+cargo test -p shirley-agent-sdk    # 只跑 SDK 测试
+cargo clippy --all-targets         # 静态检查
 ```
 
 测试分布（应用层约 95 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`read.rs` 10 个、`session.rs` 10 个、`models.rs` 4 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`session_contract.rs` 7 个。

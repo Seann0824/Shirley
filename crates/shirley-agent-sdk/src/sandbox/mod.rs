@@ -15,7 +15,7 @@
 //! 典型用法：
 //!
 //! ```no_run
-//! use agent_sdk::sandbox::{Sandbox, SandboxSpec, backend::ProcessBackend};
+//! use shirley_agent_sdk::sandbox::{Sandbox, SandboxSpec, backend::ProcessBackend};
 //!
 //! # async fn demo() -> Result<(), Box<dyn std::error::Error>> {
 //! let sandbox = Sandbox::new(ProcessBackend::default());

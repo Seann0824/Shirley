@@ -4,9 +4,8 @@ version = 4
 
 [[package]]
 name = "Shirley"
-version = "0.1.0"
+version = "0.0.1-alpha"
 dependencies = [
- "agent-sdk",
  "chrono",
  "crossterm",
  "dirs",
@@ -21,37 +20,12 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "shirley-agent-sdk",
  "syn 3.0.6",
  "thiserror 2.0.21",
  "tokio",
  "toml",
  "unicode-width",
-]
-
-[[package]]
-name = "agent-sdk"
-version = "0.1.0"
-dependencies = [
- "agent-sdk-macros",
- "async-stream",
- "bon",
- "dotenvy",
- "futures",
- "reqwest",
- "schemars",
- "serde",
- "serde_json",
- "thiserror 2.0.21",
- "tokio",
-]
-
-[[package]]
-name = "agent-sdk-macros"
-version = "0.1.0"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn 3.0.6",
 ]
 
 [[package]]
@@ -2335,6 +2309,32 @@ dependencies = [
  "cfg-if",
  "cpufeatures 0.2.17",
  "digest",
+]
+
+[[package]]
+name = "shirley-agent-sdk"
+version = "0.0.1-alpha"
+dependencies = [
+ "async-stream",
+ "bon",
+ "dotenvy",
+ "futures",
+ "reqwest",
+ "schemars",
+ "serde",
+ "serde_json",
+ "shirley-agent-sdk-macros",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "shirley-agent-sdk-macros"
+version = "0.0.1-alpha"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 3.0.6",
 ]
 
 [[package]]

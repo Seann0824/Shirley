@@ -102,7 +102,7 @@ fn compression_triggers_at_exactly_eighty_percent() {
 
 ```mermaid
 graph TD
-    ROOT["crates/agent-sdk/tests/fixtures/"] --> CC["chat_completions/"]
+    ROOT["crates/shirley-agent-sdk/tests/fixtures/"] --> CC["chat_completions/"]
     CC --> F1["request_basic.json"]
     CC --> F2["request_with_tools.json"]
     CC --> F3["response_text.json"]
@@ -117,7 +117,7 @@ graph TD
 需要一个可控的假模型，才能测循环、重试、取消：
 
 ```rust
-// crates/agent-sdk/tests/support/mock_server.rs
+// crates/shirley-agent-sdk/tests/support/mock_server.rs
 pub struct MockModel {
     // 按顺序返回预设响应
     responses: Vec<ModelResponse>,
@@ -168,7 +168,7 @@ pub struct MockModel {
 - cargo test --all
 ```
 
-当前 36 条 clippy 警告（`agent-sdk` 32 条 + 应用层 4 条）要么修掉，要么显式 `allow` 并写明原因。`-D warnings` 是让"顺手能修的"不再堆积的唯一办法。
+当前 36 条 clippy 警告（`shirley-agent-sdk` 32 条 + 应用层 4 条）要么修掉，要么显式 `allow` 并写明原因。`-D warnings` 是让"顺手能修的"不再堆积的唯一办法。
 
 **九、验收**
 

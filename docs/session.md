@@ -75,7 +75,7 @@ session 有旧尾巴、messages 是真相，挂载后追加就分叉，下次冷
 **2.1 `SessionStore` trait**
 
 ```rust
-// crates/agent-sdk/src/session/mod.rs
+// crates/shirley-agent-sdk/src/session/mod.rs
 pub trait SessionStore: Send + Sync {
     /// 追加一条消息到日志尾部。压缩产生的 ContextSummary 也走这里。
     fn append(&self, message: &Message) -> Result<(), SessionError>;
@@ -278,7 +278,7 @@ graph TD
 **七、落地顺序（均已落地）**
 
 1. ~~**`session` 模块**：`SessionStore` + `SessionError` + `InMemoryStore`~~
-   ——已落地（`crates/agent-sdk/src/session/mod.rs`，对外经 `lib.rs` 导出）。
+   ——已落地（`crates/shirley-agent-sdk/src/session/mod.rs`，对外经 `lib.rs` 导出）。
 2. ~~**`Agent` 接线**：字段 + builder + 构造时"messages 空则 load" + 各写入点收敛~~
    ——已落地（`record()` 统一"push + append"；压缩走 `session.append(summary)`；
    `build()` 因此返回 `Result`，调用方用 `?` / `unwrap`）。

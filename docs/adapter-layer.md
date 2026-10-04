@@ -31,7 +31,7 @@ parameters: ::serde_json::json!(::schemars::schema_for!(Arguments)),
 `Message` 枚举本身已经是一个不错的中间表示，问题只在于"编码成协议格式"这一步放错了位置。方案：
 
 ```rust
-// crates/agent-sdk/src/message/codec.rs（新增）
+// crates/shirley-agent-sdk/src/message/codec.rs（新增）
 pub trait MessageCodec {
     type Wire;
     fn encode(&self, message: &Message) -> Result<Self::Wire, CodecError>;
@@ -50,7 +50,7 @@ pub trait MessageCodec {
 **4.1 中间模型**
 
 ```rust
-// crates/agent-sdk/src/tool/schema.rs（新增）
+// crates/shirley-agent-sdk/src/tool/schema.rs（新增）
 #[derive(Debug, Clone)]
 pub enum ParamType {
     String,

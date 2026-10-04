@@ -1,13 +1,13 @@
 [package]
 name = "Shirley"
-version = "0.1.0"
+version = "0.0.1-alpha"
 edition = "2024"
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 memchr = "2.7"
-agent-sdk = { version = "0.1.0", path = "./crates/agent-sdk" }
+shirley-agent-sdk = { version = "0.0.1-alpha", path = "./crates/shirley-agent-sdk" }
 syn = { version = "3.0.6", features = ["full"] }
 proc-macro2 = "1.0.107"
 quote = "1.0.47"
@@ -27,7 +27,7 @@ pulldown-cmark = { version = "0.13.0", default-features = false, features = ["ht
 
 [workspace]
 members = [
-    "crates/agent-sdk",
-    "crates/agent-sdk-macros",
+    "crates/shirley-agent-sdk",
+    "crates/shirley-agent-sdk-macros",
 ]
 resolver = "3"

@@ -1,6 +1,6 @@
 **Shirley 技术方案 · 进程沙盒（P0）**
 
-本文沉淀 `crates/agent-sdk/src/sandbox/` 当前的设计。它是 `security.md` 第六节"运行时约束"里"OS 级沙箱"那一步的落地，回答一个问题：**当 Agent 要执行外部命令时，怎么保证它跑在一个"假世界"里，闹不到真世界。**
+本文沉淀 `crates/shirley-agent-sdk/src/sandbox/` 当前的设计。它是 `security.md` 第六节"运行时约束"里"OS 级沙箱"那一步的落地，回答一个问题：**当 Agent 要执行外部命令时，怎么保证它跑在一个"假世界"里，闹不到真世界。**
 
 **一、为什么单独立一层**
 
@@ -122,7 +122,7 @@ flowchart LR
 5. 命令失败时模型能拿到 `stderr` 与 `exit_code`（承接 `security.md` 6.1）。
 6. 接真实后端后，尝试写工作区外必须失败，`degraded` 为空。
 
-当前已覆盖 1–5（见 `crates/agent-sdk/tests/sandbox_smoke.rs`，6 个用例）。第 6 项待接 `sandbox-exec` / `bwrap` 后端后补齐。
+当前已覆盖 1–5（见 `crates/shirley-agent-sdk/tests/sandbox_smoke.rs`，6 个用例）。第 6 项待接 `sandbox-exec` / `bwrap` 后端后补齐。
 
 **九、设计缺口：谁决定工具是否沙盒化**
 

@@ -3,10 +3,10 @@
 //! 锁的是这条承诺：**工具作者只需要返回 `ToolError`，不需要感知 `AgentError`。**
 //!
 //! 改造前 `ToolFuture` 的错误类型是 `AgentError`，宏里还写着
-//! `map_err(::agent_sdk::AgentError::Tool)?`，等于强迫每个工具作者引用 SDK 的顶层错误类型。
+//! `map_err(::shirley_agent_sdk::AgentError::Tool)?`，等于强迫每个工具作者引用 SDK 的顶层错误类型。
 //! 现在工具层只暴露 `ToolError`，由 runtime 在调用点收敛。
 
-use agent_sdk::{ToolCall, ToolError, ToolManager, tool};
+use shirley_agent_sdk::{ToolCall, ToolError, ToolManager, tool};
 
 /// 构造一次工具调用。
 ///
@@ -53,7 +53,7 @@ async fn tool_round_trip() {
 /// 工具返回的错误必须能穿过宏，且分类正确。
 #[tokio::test]
 async fn tool_error_passes_through() {
-    use agent_sdk::SdkError;
+    use shirley_agent_sdk::SdkError;
 
     let mut manager = ToolManager::new();
     manager.register(always_fails::tool()).expect("注册应成功");
@@ -67,7 +67,7 @@ async fn tool_error_passes_through() {
         "错误应原样穿过宏，实际: {error:?}"
     );
     // 分类也必须对：工具执行失败，重试同一份参数没有意义。
-    assert_eq!(error.kind(), agent_sdk::ErrorKind::ToolFailure);
+    assert_eq!(error.kind(), shirley_agent_sdk::ErrorKind::ToolFailure);
     assert!(!error.is_retryable());
 }
 
@@ -121,7 +121,7 @@ fn duplicate_registration_is_rejected() {
 /// 工具层错误要能自动收敛成顶层错误（`#[from]` 生效）。
 #[test]
 fn tool_error_converges_into_agent_error() {
-    use agent_sdk::AgentError;
+    use shirley_agent_sdk::AgentError;
 
     let agent_error: AgentError = ToolError::NotFoundError("nope".into()).into();
     // `transparent` 意味着顶层错误的展示文案就是内层的文案。

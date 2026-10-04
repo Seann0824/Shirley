@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use agent_sdk::sandbox::{Sandbox, SandboxOutput, SandboxSpec, backend::ProcessBackend};
-use agent_sdk::tool;
+use shirley_agent_sdk::sandbox::{Sandbox, SandboxOutput, SandboxSpec, backend::ProcessBackend};
+use shirley_agent_sdk::tool;
 
 // 静态拒绝列表：在真正的权限层（PermissionPolicy，见 docs/security.md 第五节）落地前的临时兜底。
 // 注意：字符串匹配可被绕过（/bin/rm、r''m、base64 | bash），
@@ -69,17 +69,17 @@ fn render(output: &SandboxOutput, command: &str) -> String {
 pub async fn bash(
     #[param(description = "要执行的命令")] command: String,
     #[param(description = "超时时间（秒）")] timeout: Option<u64>,
-) -> Result<String, agent_sdk::ToolError> {
+) -> Result<String, shirley_agent_sdk::ToolError> {
     // 静态兜底拒绝：明显破坏性命令直接拦下。
     // 这层是临时的，真正的边界在下面的沙盒。
     let tokens: Vec<&str> = command.split_whitespace().collect();
     if tokens.is_empty() {
-        return Err(agent_sdk::ToolError::ExecutionError(
+        return Err(shirley_agent_sdk::ToolError::ExecutionError(
             "命令不能为空".to_string(),
         ));
     }
     if tokens.iter().any(|arg| BLACKLIST.contains(arg)) {
-        return Err(agent_sdk::ToolError::ExecutionError(format!(
+        return Err(shirley_agent_sdk::ToolError::ExecutionError(format!(
             "命令包含黑名单命令: {BLACKLIST:?}"
         )));
     }
@@ -103,7 +103,7 @@ pub async fn bash(
 
     // 2. 执行。超时由 Sandbox 统一施加，这里不再自己包 tokio::time::timeout。
     let output = sandbox.run(&spec).await.map_err(|e| {
-        agent_sdk::ToolError::ExecutionError(format!("{command}: 沙盒执行失败: {e}"))
+        shirley_agent_sdk::ToolError::ExecutionError(format!("{command}: 沙盒执行失败: {e}"))
     })?;
 
     // 3. 渲染结果返回给模型。

@@ -1,4 +1,4 @@
-use agent_sdk::{Agent, AgentEvent, Message};
+use shirley_agent_sdk::{Agent, AgentEvent, Message};
 use futures::StreamExt;
 use std::sync::Arc;
 use tokio::sync::mpsc;

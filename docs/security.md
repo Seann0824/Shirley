@@ -48,7 +48,7 @@ LOCAL_CONTEXT_WINDOW_TOKENS=104858
 在 SDK 侧引入工作区概念，所有文件类工具与 `bash` 的 cwd 都受其约束：
 
 ```rust
-// crates/agent-sdk/src/workspace.rs（新增）
+// crates/shirley-agent-sdk/src/workspace.rs（新增）
 pub struct Workspace {
     root: PathBuf,          // 规范化后的绝对路径
 }
@@ -79,7 +79,7 @@ impl Workspace {
 把硬编码黑名单升级为 SDK 内的策略对象：
 
 ```rust
-// crates/agent-sdk/src/permission.rs（新增）
+// crates/shirley-agent-sdk/src/permission.rs（新增）
 pub enum Decision {
     Allow,
     Deny { reason: String },

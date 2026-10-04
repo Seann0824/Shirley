@@ -1,0 +1,17 @@
+[package]
+name = "shirley-agent-sdk-macros"
+version = "0.0.1-alpha"
+edition = "2024"
+description = "Procedural macros for shirley-agent-sdk (the #[tool] attribute)"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Seann0824/Shirley"
+keywords = ["agent", "ai", "llm", "tools"]
+
+
+[lib]
+proc-macro = true
+
+[dependencies]
+syn = { version = "3.0.6", features = ["full"] }
+proc-macro2 = "1.0.107"
+quote = "1.0.47"

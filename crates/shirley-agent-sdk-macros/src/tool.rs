@@ -206,7 +206,7 @@ fn generate_tool(
     let return_span = function.sig.output.span();
     // _ 让编译器推导成功值类型，错误类型固定为 SDK 的 ToolError
     let invoke_function = quote_spanned! {return_span=>
-        let outcome: ::std::result::Result<_, ::agent_sdk::ToolError> = super::#name(
+        let outcome: ::std::result::Result<_, ::shirley_agent_sdk::ToolError> = super::#name(
             #(#call_arguments),*
         ).await;
         let result = outcome?;
@@ -231,23 +231,23 @@ fn generate_tool(
 
             // 这里应该大写结构体？
             struct GenerateTool {
-                definition: ::agent_sdk::ToolDefinition,
+                definition: ::shirley_agent_sdk::ToolDefinition,
             }
 
-            impl ::agent_sdk::Tool for GenerateTool {
-                fn definition(&self) -> &::agent_sdk::ToolDefinition {
+            impl ::shirley_agent_sdk::Tool for GenerateTool {
+                fn definition(&self) -> &::shirley_agent_sdk::ToolDefinition {
                     &self.definition
                 }
 
                 // 接受 SDK 统一传入的 JSON 参数
-                fn invoke(&self, input: ::serde_json::Value) -> ::agent_sdk::ToolFuture<'_> {
+                fn invoke(&self, input: ::serde_json::Value) -> ::shirley_agent_sdk::ToolFuture<'_> {
                     // 1. 将 input 反序列化
 
                     // 2. 调用原始函数
                     Box::pin(async move {
                         let args = ::serde_json::from_value::<Arguments>(input)
                             .map_err(|error| {
-                                ::agent_sdk::ToolError::ArgumentsError(
+                                ::shirley_agent_sdk::ToolError::ArgumentsError(
                                     ::std::format!("工具参数错误: {error}")
                                 )
                         })?;
@@ -258,7 +258,7 @@ fn generate_tool(
                         // 返回序列话的json结果
                         ::serde_json::to_value(result)
                             .map_err(|error| {
-                                ::agent_sdk::ToolError::ExecutionError(
+                                ::shirley_agent_sdk::ToolError::ExecutionError(
                                     ::std::format!("工具结果序列化失败: {error}")
                                 )
                             })
@@ -267,8 +267,8 @@ fn generate_tool(
                 }
             }
 
-            pub fn definition() -> ::agent_sdk::ToolDefinition {
-                ::agent_sdk::ToolDefinition {
+            pub fn definition() -> ::shirley_agent_sdk::ToolDefinition {
+                ::shirley_agent_sdk::ToolDefinition {
                     name: ::std::string::String::from(
                         stringify!(#name)
                     ),
@@ -283,7 +283,7 @@ fn generate_tool(
                 }
             }
 
-            pub fn tool() -> impl ::agent_sdk::Tool + 'static {
+            pub fn tool() -> impl ::shirley_agent_sdk::Tool + 'static {
                 GenerateTool {
                     definition: definition()
                 }

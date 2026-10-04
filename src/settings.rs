@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
-use agent_sdk::ModelProtocol;
+use shirley_agent_sdk::ModelProtocol;
 use serde::{Deserialize, Serialize};
 
 /// 全局配置相对 `config_dir` 的位置。

@@ -13,7 +13,7 @@
 从上面的内容来看，能够简单的规划一下目录结构：
 
 ```sh
-agent_sdk
+shirley_agent_sdk
     dto
         UserMessage
         SystemMessage

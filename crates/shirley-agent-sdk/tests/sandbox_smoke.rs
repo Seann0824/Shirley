@@ -1,7 +1,7 @@
 //! 沙盒链路冒烟测试：验证 spec → backend → output 全链路可跑。
 //! 注意：这里用 ProcessBackend（无隔离），只验证编排逻辑，不验证隔离强度。
 
-use agent_sdk::sandbox::{backend::ProcessBackend, NetworkPolicy, Sandbox, SandboxSpec};
+use shirley_agent_sdk::sandbox::{backend::ProcessBackend, NetworkPolicy, Sandbox, SandboxSpec};
 use std::time::Duration;
 
 #[tokio::test]
