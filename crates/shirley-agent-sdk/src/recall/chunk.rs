@@ -104,6 +104,7 @@ mod tests {
         Message::Assistant {
             content: text.map(String::from),
             reasoning_content: Some("我需要看看文件".into()),
+            thinking_signature: None,
             tool_calls: calls
                 .iter()
                 .map(|(id, name)| ToolCall {

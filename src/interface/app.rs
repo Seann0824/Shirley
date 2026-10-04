@@ -906,6 +906,7 @@ impl App {
             Message::Assistant {
                 content,
                 reasoning_content,
+                thinking_signature: _,
                 tool_calls,
             } => {
                 // 思考先记下来，让消息顺序保持"先想后答"。

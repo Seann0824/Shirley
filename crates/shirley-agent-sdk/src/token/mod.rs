@@ -89,6 +89,7 @@ pub fn count_message(message: &message::Message) -> u64 {
         message::Message::Assistant {
             content,
             reasoning_content,
+            thinking_signature: _,
             tool_calls,
         } => {
             let mut total = ROLE_OVERHEAD;
@@ -287,11 +288,13 @@ mod tests {
         let plain = Message::Assistant {
             content: Some("答案".into()),
             reasoning_content: None,
+            thinking_signature: None,
             tool_calls: vec![],
         };
         let with_reasoning = Message::Assistant {
             content: Some("答案".into()),
             reasoning_content: Some("我先想想".into()),
+            thinking_signature: None,
             tool_calls: vec![],
         };
         assert!(
@@ -306,11 +309,13 @@ mod tests {
         let no_call = Message::Assistant {
             content: None,
             reasoning_content: None,
+            thinking_signature: None,
             tool_calls: vec![],
         };
         let one_call = Message::Assistant {
             content: None,
             reasoning_content: None,
+            thinking_signature: None,
             tool_calls: vec![ToolCall {
                 id: "call_1".into(),
                 name: "bash".into(),

@@ -110,16 +110,9 @@ fn encode_tool_schema(field: &ParamField) -> Value { /* -> input_schema */ }
    JSON Schema 本身就是跨协议中间表示，不必另造 `ParamType`；真正的差异在**消息
    item 结构**与**流式事件语义**上。
 2. **Anthropic Messages**：需要处理 `system` 独立字段、`tool_use` / `tool_result` 的内容块结构、`thinking` 块。差异最大，放最后。
-   **详细方案见 `docs/anthropic-messages-api.md`**——基于真实抓包，记录了三条最要命的差异
-   （工具结果在 user 消息里、thinking 必须回传、`input_tokens` 不含缓存）与
-   `thinking_signature` 的落地取舍。
-
-Anthropic 的关键差异（提前记录，避免以后返工）：
-
-- `system` 不在 `messages` 里，是顶层字段 → `encode_messages` 要把它摘出来。
-- 工具调用是 content block（`tool_use`），不是独立的 `tool_calls` 字段。
-- `max_tokens` 必填。
-- reasoning 通过 `thinking` 块返回，与 `reasoning_content` 语义不同，需要映射。
+   **已实现**（`docs/anthropic-messages-api.md`，基于真实抓包）。三条最要命的差异：
+   工具结果在 **user 消息**里（Anthropic 无 tool role）、thinking 块**必须回传**（带 signature，
+   否则 400）、`input_tokens` **不含缓存**（与 OpenAI 相反，映射时要加回 `cache_read`）。
 
 **六、顺手清理**
 

@@ -13,6 +13,13 @@ pub enum Message {
         content: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reasoning_content: Option<String>,
+        /// 思考块的完整性凭据（Anthropic `thinking` block 的 `signature`）。
+        ///
+        /// **协议中立**：它是"这段思考出自模型、未被篡改"的凭据，不是 Anthropic
+        /// 私货。Anthropic 要求把 thinking 块原样回传时带上它，否则 400；
+        /// 另两个协议不使用它（编码时忽略）。
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        thinking_signature: Option<String>,
         #[serde(default)]
         tool_calls: Vec<ToolCall>,
     },
@@ -116,6 +123,7 @@ impl fmt::Display for Message {
             Message::Assistant {
                 content,
                 reasoning_content,
+                thinking_signature: _,
                 tool_calls,
             } => {
                 if let Some(reasoning) = reasoning_content {

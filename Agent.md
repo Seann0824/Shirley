@@ -33,7 +33,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | `docs/streaming.md` | 流式输出与 reasoning 流式 |
 | `docs/adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 |
 | `docs/responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件（**已实现**） |
-| `docs/anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / thinking 回传 / usage 语义（**方案已定，待实现**） |
+| `docs/anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / thinking 回传 / usage 语义（**已实现**） |
 | `docs/testing.md` | SDK 单测策略、缓存命中率基准 |
 | `docs/plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 |
 
@@ -103,7 +103,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 **3. 协议适配层** — `crates/shirley-agent-sdk/src/adapter/`
 
 - `ModelConfig` 用 `bon` 生成 builder：`protocol` / `base_url` / `model` / `api_key` / `stream` / `thinking` / `reasoning_effort` / `temperature` / `max_output_tokens` / `context_window_tokens` / `tool_choice` / `extra_body`
-- `codec(protocol)` 返回三件套函数指针 `(Encoder, Decoder, StreamDecoder)`（请求编码 / 非流式解码 / 流式解码，流式也纳入 codec 抽象，`invoke` 里不再有按协议硬分支）。**`ChatCompletions` 与 `Responses` 均已实现**；`AnthropicMessages` 返回 `Err(AdapterError::UnsupportedProtocol)`（**不再 panic**）
+- `codec(protocol)` 返回三件套函数指针 `(Encoder, Decoder, StreamDecoder)`（请求编码 / 非流式解码 / 流式解码，流式也纳入 codec 抽象，`invoke` 里不再有按协议硬分支）。**三个协议均已实现**（`ChatCompletions` / `Responses` / `AnthropicMessages`），`UnsupportedProtocol` 变体保留供未来协议使用
 - `invoke()` 返回 `Stream<Item = Result<AdapterEvent, AdapterError>>`：
   - 非流式：读完整 body、decode，产出单个 `Finished(ModelResponse)`
   - 流式：走 `decode_stream_response`，逐块产出 `ReasoningDelta` / `ContentDelta` / `Finished`
@@ -305,7 +305,7 @@ cargo clippy --all-targets         # 静态检查
 
 **明确没做的**：
 
-1. **多协议**：`ChatCompletions` / `Responses` 已实现（含流式）；`AnthropicMessages` 仍返回 `UnsupportedProtocol`（差异最大，排在最后，见 `docs/responses-api.md` 与 `docs/adapter-layer.md`）
+1. ~~**多协议**~~：`ChatCompletions` / `Responses` / `AnthropicMessages` **三协议均已实现**（含流式）。Anthropic 适配见 `docs/anthropic-messages-api.md`（`x-api-key` 头、`tool_result` 在 user 消息里、thinking 必须回传带 signature、`input_tokens` 不含缓存需加回 `cache_read`）
 2. **工具参数中间层**：目前直接生成 OpenAI schema，跨协议复用不了
 3. **真沙盒后端**：只有 `ProcessBackend`（无隔离），`sandbox-exec` / `bwrap` 未接
 4. **记忆系统**：完全没做。`plan.md` 里给了方向——任务结束后不能直接总结入库，要先做"蒸馏验证"判断出最佳路径再沉淀

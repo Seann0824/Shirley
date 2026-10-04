@@ -18,6 +18,7 @@ fn assistant_with_calls(ids: &[&str]) -> Message {
     Message::Assistant {
         content: None,
         reasoning_content: None,
+        thinking_signature: None,
         tool_calls: ids
             .iter()
             .map(|id| ToolCall {
@@ -78,6 +79,7 @@ fn recall_step_not_reindexed() {
         Message::Assistant {
             content: Some("让我回忆一下".into()),
             reasoning_content: None,
+            thinking_signature: None,
             tool_calls: vec![ToolCall {
                 id: "r".into(),
                 name: "recall".into(),

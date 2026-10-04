@@ -57,6 +57,7 @@ fn encode_input(messages: &[message::Message]) -> (Option<String>, Vec<Value>) {
             message::Message::Assistant {
                 content,
                 reasoning_content: _,
+                thinking_signature: _,
                 tool_calls,
             } => {
                 // 文本与工具调用是兄弟 item，分别 push。
@@ -234,6 +235,7 @@ fn decode_output(response: &dto::Response) -> ModelResponse {
         message: message::Message::Assistant {
             content: (!content.is_empty()).then_some(content),
             reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
+            thinking_signature: None,
             tool_calls,
         },
         finish_reason,
@@ -413,6 +415,7 @@ mod tests {
         let messages = vec![message::Message::Assistant {
             content: Some("我来查一下".into()),
             reasoning_content: Some("思考".into()),
+            thinking_signature: None,
             tool_calls: vec![message::ToolCall {
                 id: "call_1".into(),
                 name: "bash".into(),
@@ -503,6 +506,7 @@ mod tests {
                 content,
                 reasoning_content,
                 tool_calls,
+                ..
             } => {
                 assert_eq!(content.as_deref(), Some("答案"));
                 assert_eq!(reasoning_content.as_deref(), Some("先想"));

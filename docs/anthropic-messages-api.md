@@ -1,6 +1,10 @@
 # Anthropic Messages 协议适配
 
-> 目标：让 `ModelProtocol::AnthropicMessages` 从 `UnsupportedProtocol` 变成可用实现。
+> **状态：已实现**（2025-10）。`ModelProtocol::AnthropicMessages` 已从 `UnsupportedProtocol`
+> 变为可用实现，含流式；编解码单测 16 个 + 流式单测 3 个全绿，3 个真实网络测试
+> （`#[ignore]`，需 `DEEPSEEK_API_KEY`）已对 `https://api.deepseek.com/anthropic/v1/messages` 跑通。
+>
+> 本文档写于实现之前，保留了当时的调研结论与取舍；文末"待定项"已全部拍板并落地。
 >
 > 与 Responses 的关系：`docs/responses-api.md` 讲的是"同一份 item 列表的两种展开"，
 > 本文讲的是"三个协议里结构差异最大的一个"。抽象层本身见 `docs/adapter-layer.md`。
@@ -291,13 +295,15 @@ Responses 的终态对象自带完整 `output`，我们**不用**聚合 delta。
 
 ---
 
-**七、待定项（实现前需要拍板）**
+**七、决策记录（实现时已拍板）**
 
-1. **`thinking_signature` 是否进 `Message`**（2.4）。建议进。
-2. **`max_tokens` 默认值**（2.5）。建议 4096，可配置。
-3. **`cache_creation_input_tokens` 是否计入分母**（3.3）。建议 v0 不计。
-4. **tool_result 合并 vs 逐条**（2.2）。建议逐条。
-5. **`reasoning_effort` 在 Anthropic 下的去处**（2.1）。建议忽略。
+1. **`thinking_signature` 进 `Message`** —— **已采纳**。`Message::Assistant` 新增
+   `thinking_signature: Option<String>`（`#[serde(default, skip_serializing_if)]`）。
+   对 ChatCompletions / Responses 编码零影响（前者忽略、后者本就不回传思考）。
+2. **`max_tokens` 默认值** —— **已采纳 4096**（`DEFAULT_MAX_TOKENS`）。
+3. **`cache_creation_input_tokens` 不计入分母** —— **已采纳**（v0 只算 `cache_read`）。
+4. **tool_result 逐条发**（每条 Tool 消息一条 user 消息）—— **已采纳**。
+5. **`reasoning_effort` 忽略** —— **已采纳**（Anthropic 无对应字段）。
 
 ---
 
@@ -307,3 +313,8 @@ Responses 的终态对象自带完整 `output`，我们**不用**聚合 delta。
   也是"工具参数标准化"结论的第三次印证——三协议都吃 JSON Schema。
 - `docs/responses-api.md`：同为协议适配，结构对称；两文可对照阅读。
 - `docs/security.md`：`x-api-key` 头的敏感标记（`set_sensitive(true)`）同 Bearer。
+
+**实现落点**：`crates/shirley-agent-sdk/src/adapter/anthropic_messages/{mod.rs,dto.rs}`；
+`adapter::codec` 增加分支；`Message::Assistant` 增加 `thinking_signature` 字段
+（`crates/shirley-agent-sdk/src/message/mod.rs`）。三协议现已全部实现，`codec` 的
+`UnsupportedProtocol` 兜底分支不再可达（变体保留供未来协议使用）。

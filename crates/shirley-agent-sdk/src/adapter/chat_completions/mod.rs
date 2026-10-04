@@ -28,6 +28,7 @@ fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
             message::Message::Assistant {
                 content,
                 reasoning_content,
+                thinking_signature: _,
                 tool_calls,
             } => {
                 let mut value = serde_json::json!({
@@ -247,6 +248,7 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adapter
         message: message::Message::Assistant {
             content: content.clone(),
             reasoning_content,
+            thinking_signature: None,
             tool_calls,
         },
         finish_reason,
@@ -392,6 +394,7 @@ pub fn decode_stream_response(
                 message: message::Message::Assistant {
                     content: (!content.is_empty()).then_some(content),
                     reasoning_content: (!reasoning_content.is_empty()).then_some(reasoning_content),
+                    thinking_signature: None,
                     tool_calls,
                 },
                 finish_reason,

@@ -1,3 +1,4 @@
+mod anthropic_messages;
 mod chat_completions;
 mod responses;
 mod sse;
@@ -156,9 +157,11 @@ fn codec(protocol: &ModelProtocol) -> Result<(Encoder, Decoder, StreamDecoder), 
             responses::decode_response,
             responses::decode_stream_response,
         )),
-        other => Err(AdapterError::UnsupportedProtocol {
-            protocol: format!("{other:?}"),
-        }),
+        ModelProtocol::AnthropicMessages => Ok((
+            anthropic_messages::encode_request,
+            anthropic_messages::decode_response,
+            anthropic_messages::decode_stream_response,
+        )),
     }
 }
 
