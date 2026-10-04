@@ -91,7 +91,7 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             KeyCode::End => app.move_cursor_end(),
             KeyCode::Up => app.history_prev(),
             KeyCode::Down => app.history_next(),
-            // 滚轮已让位于终端原生选择（见 event.rs），滚动改由 PageUp / PageDown 承担。
+            // 键盘翻页：与鼠标滚轮等价，方便不想用鼠标时滚动（见 event.rs）。
             KeyCode::PageUp => app.scroll_by(-3),
             KeyCode::PageDown => app.scroll_by(3),
             KeyCode::Char('a') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -109,6 +109,9 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
         // 括号粘贴整体插入：粘贴文本里的换行只当作普通字符写入输入框，
         // 绝不触发发送，避免粘贴多行内容时消息被自动发出去。
         Event::Paste(text) => app.insert_input(&text),
+        // 鼠标事件由 `Tui::handle_mouse` 直接处理（需要缓冲区与剪贴板），
+        // 不会走到这里；保留空分支只是为了穷尽枚举。
+        Event::Mouse(_) => {}
         Event::Resize(_width, _height) => {}
     }
     None

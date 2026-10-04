@@ -2,6 +2,7 @@ mod app;
 mod command;
 mod event;
 mod markdown;
+mod selection;
 mod tui;
 mod ui;
 mod update;

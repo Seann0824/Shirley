@@ -1,3 +1,4 @@
+use ratatui::layout::Position;
 use shirley_agent_sdk::{Agent, Message, Usage};
 use std::sync::Arc;
 use std::time::Instant;
@@ -7,6 +8,7 @@ use crate::session::{EmptySessionCatalog, SessionCatalog, SessionEntry};
 
 use super::command::{CommandManager, CommandOutcome, DEFAULT_PREFIX};
 
+use super::selection::Selection;
 use super::ui::MessageCache;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -178,6 +180,9 @@ pub struct App {
     /// `/login` 落盘的目标配置文件覆盖；`None` 时用工作区默认路径。
     /// 存在的意义是让测试写到临时目录，而不是污染真实工作区。
     config_path: Option<std::path::PathBuf>,
+    /// 鼠标拖动选区；`None` 表示当前没有选中任何文本。
+    /// 由 `selection` 模块渲染高亮并提取文本，松开左键即复制。
+    selection: Option<Selection>,
 }
 
 impl App {
@@ -242,6 +247,7 @@ impl App {
             command_hint: None,
             login: None,
             config_path: None,
+            selection: None,
         }
     }
 
@@ -308,6 +314,36 @@ impl App {
         };
         self.scroll = clamped;
         self.auto_scroll = clamped >= max;
+    }
+
+    /// 开始一次鼠标拖动选区（左键按下）。
+    pub fn begin_selection(&mut self, position: Position) {
+        self.selection = Some(Selection::new(position));
+    }
+
+    /// 延伸当前选区到新位置（拖动中）。
+    pub fn extend_selection(&mut self, position: Position) {
+        if let Some(selection) = self.selection.as_mut() {
+            selection.extend(position);
+        }
+    }
+
+    /// 结束当前选区（左键松开）：清空并返回选中内容（原地单击返回 `None`）。
+    ///
+    /// 文本提取需要缓冲区，故由调用方（渲染后拿到缓冲区的主循环）负责，
+    /// 这里只负责把状态收走，避免旧选区残留到下一次拖动。
+    pub fn take_selection(&mut self) -> Option<Selection> {
+        self.selection.take()
+    }
+
+    /// 当前选区（供渲染层高亮）。
+    pub fn selection(&self) -> Option<&Selection> {
+        self.selection.as_ref()
+    }
+
+    /// 鼠标滚轮滚动：正数向下。与键盘 `PageUp`/`PageDown` 共用同一套滚动逻辑。
+    pub fn scroll_lines(&mut self, delta: i32) {
+        self.scroll_by(delta);
     }
 
     pub fn should_exit(&self) -> bool {

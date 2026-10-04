@@ -24,6 +24,7 @@ ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29.0"
 unicode-width = "0.2"
 pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
+arboard = { version = "3.6.1", default-features = false }
 
 [workspace]
 members = [

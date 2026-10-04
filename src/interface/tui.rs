@@ -1,10 +1,12 @@
-use shirley_agent_sdk::{Agent, AgentEvent, Message};
+use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use futures::StreamExt;
+use ratatui::{buffer::Buffer, layout::Position};
+use shirley_agent_sdk::{Agent, AgentEvent, Message};
 use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::{app::App, event::EventHandler, ui, update};
+use super::{app::App, event::Event, event::EventHandler, ui, update};
 use crate::models::ModelCatalog;
 use crate::session::SessionCatalog;
 
@@ -48,6 +50,11 @@ pub struct Tui<'a> {
     app: App,
     /// 向运行中的 agent 任务发送取消信号（用户按 Esc 打断时触发）。
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
+    /// 最近一帧渲染后的缓冲区。鼠标松开时据此把选区坐标映射回文本。
+    last_buffer: Option<Buffer>,
+    /// 系统剪贴板句柄，首次复制时惰性创建并常驻。
+    /// 常驻的意义在于：某些平台（X11）需要进程存活期间一直持有剪贴板内容。
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl<'a> Tui<'a> {
@@ -72,14 +79,76 @@ impl<'a> Tui<'a> {
             events,
             app,
             cancel: None,
+            last_buffer: None,
+            clipboard: None,
         }
     }
 
     pub fn draw(&mut self) -> std::io::Result<()> {
-        // 拆开借用，terminal 和 app 都要 &mut
+        // 拆开借用，terminal 和 app 都要 &mut。
         let app = &mut self.app;
-        self.terminal.draw(|frame| ui::draw(frame, app))?;
+        let completed = self.terminal.draw(|frame| {
+            ui::draw(frame, app);
+            // 选区高亮画在一切之上：直接给缓冲区单元格叠反色，随帧刷出。
+            if let Some(selection) = app.selection() {
+                selection.highlight(frame.buffer_mut());
+            }
+        })?;
+        // 仅在存在选区时留存本帧缓冲区（供松开左键时提取文本）：克隆整块缓冲区
+        // 不便宜，没必要每帧都做。拖动过程中每帧都会走到这里，故松开时必有快照。
+        if app.selection().is_some() {
+            self.last_buffer = Some(completed.buffer.clone());
+        }
         Ok(())
+    }
+
+    /// 处理鼠标事件：左键拖动 = 选中并自动复制；滚轮 = 滚动。
+    fn handle_mouse(&mut self, mouse: MouseEvent) {
+        let position = Position::new(mouse.column, mouse.row);
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => self.app.begin_selection(position),
+            MouseEventKind::Drag(MouseButton::Left) => self.app.extend_selection(position),
+            MouseEventKind::Up(MouseButton::Left) => self.finish_selection(),
+            MouseEventKind::ScrollUp => self.app.scroll_lines(-3),
+            MouseEventKind::ScrollDown => self.app.scroll_lines(3),
+            _ => {}
+        }
+    }
+
+    /// 松开左键：提取选中文本并写入系统剪贴板（原地单击不复制）。
+    fn finish_selection(&mut self) {
+        let Some(selection) = self.app.take_selection() else {
+            return;
+        };
+        if selection.is_click() {
+            return;
+        }
+        let Some(buffer) = self.last_buffer.as_ref() else {
+            return;
+        };
+        let text = selection.text(buffer);
+        if text.is_empty() {
+            return;
+        }
+        self.copy_to_clipboard(&text);
+    }
+
+    /// 写入系统剪贴板。失败时以系统消息告知，不静默吞掉。
+    fn copy_to_clipboard(&mut self, text: &str) {
+        let result = match self.clipboard.as_mut() {
+            Some(clipboard) => clipboard.set_text(text.to_owned()),
+            None => match arboard::Clipboard::new() {
+                Ok(mut clipboard) => {
+                    let result = clipboard.set_text(text.to_owned());
+                    self.clipboard = Some(clipboard);
+                    result
+                }
+                Err(error) => Err(error),
+            },
+        };
+        if let Err(error) = result {
+            self.app.add_system_message(format!("复制到剪贴板失败：{error}"));
+        }
     }
 
     pub fn exit(&mut self) {
@@ -126,42 +195,49 @@ impl<'a> Tui<'a> {
                 // 终端事件必须优先于流式更新被消费：AI 回复期间 updates_rx 持续就绪，
                 // 若排在按键之前（biased 模式），Esc 等按键会被无限"饿死"，无法打断。
                 event = self.events.next() => {
-                    if let Some(prompt) = update::update(&mut self.app, event?)
-                        && let Some(agent) = self.app.take_agent()
-                    {
-                        let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
-                        self.cancel = Some(cancel_tx);
-                        response = Some(tokio::spawn(run_agent(
-                            agent,
-                            prompt,
-                            updates_tx.clone(),
-                            cancel_rx,
-                        )));
-                    }
-                    // 用户请求打断：向运行中的任务发送取消信号（一次性）。
-                    if self.app.interrupt_requested()
-                        && let Some(cancel) = self.cancel.take()
-                    {
-                        let _ = cancel.send(());
-                    }
-                    // `/model` 触发了模型列表加载：把目录移入后台任务，
-                    // 结果经 `picker_tx` 回传后由上面的分支打开选择器。
-                    if self.app.take_picker_request() {
-                        let catalog = self.app.catalog();
-                        let tx = picker_tx.clone();
-                        tokio::spawn(async move {
-                            let entries = catalog.list().await;
-                            let _ = tx.send(entries);
-                        });
-                    }
-                    // `/session` 触发了会话列表加载：会话目录是本地扫描（同步），
-                    // 直接在主循环取列表并打开选择器即可，无需后台任务。
-                    if self.app.take_session_picker_request() {
-                        let catalog = self.app.session_catalog();
-                        match catalog.list() {
-                            Ok(entries) => self.app.open_session_picker(entries),
-                            Err(error) => {
-                                self.app.add_system_message(format!("加载会话列表失败：{error}"))
+                    // 鼠标事件不走 `update`：选区需要最近一帧的缓冲区与系统剪贴板，
+                    // 这两样只有 `Tui` 持有，故在这里直接处理。
+                    match event? {
+                        Event::Mouse(mouse) => self.handle_mouse(mouse),
+                        event => {
+                            if let Some(prompt) = update::update(&mut self.app, event)
+                                && let Some(agent) = self.app.take_agent()
+                            {
+                                let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
+                                self.cancel = Some(cancel_tx);
+                                response = Some(tokio::spawn(run_agent(
+                                    agent,
+                                    prompt,
+                                    updates_tx.clone(),
+                                    cancel_rx,
+                                )));
+                            }
+                            // 用户请求打断：向运行中的任务发送取消信号（一次性）。
+                            if self.app.interrupt_requested()
+                                && let Some(cancel) = self.cancel.take()
+                            {
+                                let _ = cancel.send(());
+                            }
+                            // `/model` 触发了模型列表加载：把目录移入后台任务，
+                            // 结果经 `picker_tx` 回传后由上面的分支打开选择器。
+                            if self.app.take_picker_request() {
+                                let catalog = self.app.catalog();
+                                let tx = picker_tx.clone();
+                                tokio::spawn(async move {
+                                    let entries = catalog.list().await;
+                                    let _ = tx.send(entries);
+                                });
+                            }
+                            // `/session` 触发了会话列表加载：会话目录是本地扫描（同步），
+                            // 直接在主循环取列表并打开选择器即可，无需后台任务。
+                            if self.app.take_session_picker_request() {
+                                let catalog = self.app.session_catalog();
+                                match catalog.list() {
+                                    Ok(entries) => self.app.open_session_picker(entries),
+                                    Err(error) => self
+                                        .app
+                                        .add_system_message(format!("加载会话列表失败：{error}")),
+                                }
                             }
                         }
                     }
