@@ -260,6 +260,31 @@ fn decode_output(response: &dto::Response) -> ModelResponse {
     }
 }
 
+/// 流式终态解码：以 `response.output` 为准，**reasoning 缺失时回填累计的 delta**。
+///
+/// 为什么需要回填：Responses 的流式 `response.completed` 理论上携带完整
+/// `output`（含 reasoning item），但实测 DeepSeek 兼容层只回 message item，
+/// reasoning 仅以 delta 形式出现。若不回填，`Message::Assistant.reasoning_content`
+/// 会恒为 `None`，TUI 上思考内容一闪即被终态消息抹掉。
+///
+/// 契约：`output` 里**有** reasoning item 时以它为准（完整、权威）；没有才用
+/// 累计值兜底——两者不会互相覆盖，也不会重复。
+fn decode_output_with_reasoning(
+    response: &dto::Response,
+    accumulated_reasoning: &str,
+) -> ModelResponse {
+    let mut decoded = decode_output(response);
+    if let message::Message::Assistant {
+        reasoning_content, ..
+    } = &mut decoded.message
+        && reasoning_content.is_none()
+        && !accumulated_reasoning.is_empty()
+    {
+        *reasoning_content = Some(accumulated_reasoning.to_owned());
+    }
+    decoded
+}
+
 /// finish_reason 判定：Responses **没有** `finish_reason` 字段，
 /// 工具调用要看 `output` 里有没有 `function_call`。
 fn finish_reason(response: &dto::Response, has_tool_calls: bool) -> ModelFinishReason {
@@ -349,7 +374,11 @@ where
     Box::pin(async_stream::try_stream! {
         futures::pin_mut!(byte_stream);
         let mut buffer = String::new();
-        // delta 仅用于实时渲染；终态以 `response.completed` 携带的完整对象为准。
+        // 实时渲染靠 delta 增量；但**终态不能只信 `response.completed`**：
+        // 部分服务端（实测 DeepSeek 兼容层）在流式的 completed.output 里**丢弃
+        // reasoning item**，只留 message——若只依赖它，思考内容会被抹掉。
+        // 因此这里像 ChatCompletions 一样累计 reasoning delta，Finished 时回填。
+        let mut reasoning_content = String::new();
         while let Some(chunk) = byte_stream.next().await {
             let chunk = chunk.map_err(AdapterError::Transport)?;
             buffer.push_str(&String::from_utf8_lossy(&chunk));
@@ -375,16 +404,23 @@ where
                     dto::StreamEvent::ReasoningTextDelta { delta }
                     | dto::StreamEvent::ReasoningSummaryTextDelta { delta } => {
                         if !delta.is_empty() {
+                            reasoning_content.push_str(&delta);
                             yield AdapterEvent::ReasoningDelta(delta);
                         }
                     }
                     dto::StreamEvent::Completed { response } => {
-                        yield AdapterEvent::Finished(decode_output(&response));
+                        yield AdapterEvent::Finished(decode_output_with_reasoning(
+                            &response,
+                            &reasoning_content,
+                        ));
                         return;
                     }
                     dto::StreamEvent::Incomplete { response } => {
                         // 截断也是合法终态，照常产出 Finished（finish_reason = Length）。
-                        yield AdapterEvent::Finished(decode_output(&response));
+                        yield AdapterEvent::Finished(decode_output_with_reasoning(
+                            &response,
+                            &reasoning_content,
+                        ));
                         return;
                     }
                     dto::StreamEvent::Failed { response } => {
@@ -812,7 +848,40 @@ mod tests {
             "summary delta 应产 ReasoningDelta，实际: {:?}",
             events[0]
         );
-        assert!(matches!(&events[1], AdapterEvent::Finished(_)));
+        // 关键回归：completed.output 为空（服务端丢弃 reasoning item）时，
+        // Finished 必须回填累计的 reasoning，否则 TUI 上思考内容会被抹掉。
+        match &events[1] {
+            AdapterEvent::Finished(response) => match &response.message {
+                message::Message::Assistant {
+                    reasoning_content, ..
+                } => assert_eq!(
+                    reasoning_content.as_deref(),
+                    Some("summary-think"),
+                    "终态应回填累计 reasoning"
+                ),
+                other => panic!("应为 assistant，实际: {other:?}"),
+            },
+            other => panic!("应为 Finished，实际: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn stream_reasoning_from_output_wins_over_accumulated() {
+        // output 里**有** reasoning item 时以它为准（完整、权威），不被累计值覆盖。
+        let chunks = vec![
+            "event: response.reasoning_summary_text.delta\ndata: {\"type\":\"response.reasoning_summary_text.delta\",\"summary_index\":0,\"delta\":\"partial\"}\n\n",
+            "event: response.completed\ndata: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output\":[{\"type\":\"reasoning\",\"summary\":[{\"type\":\"summary_text\",\"text\":\"full\"}]},{\"type\":\"message\",\"role\":\"assistant\",\"content\":[{\"type\":\"output_text\",\"text\":\"ok\"}]}]}}\n\n",
+        ];
+        let events = collect_stream(chunks).await;
+        match events.last().unwrap() {
+            AdapterEvent::Finished(response) => match &response.message {
+                message::Message::Assistant {
+                    reasoning_content, ..
+                } => assert_eq!(reasoning_content.as_deref(), Some("full")),
+                other => panic!("应为 assistant，实际: {other:?}"),
+            },
+            other => panic!("应为 Finished，实际: {other:?}"),
+        }
     }
 
     #[tokio::test]
