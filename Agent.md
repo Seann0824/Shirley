@@ -33,7 +33,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | `docs/streaming.md` | 流式输出与 reasoning 流式 |
 | `docs/adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 |
 | `docs/responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件（**已实现**） |
-| `docs/anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / thinking 回传 / usage 语义（**已实现**） |
+| `docs/anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / 流式分片聚合 / usage 语义（**已实现**） |
 | `docs/testing.md` | SDK 单测策略、缓存命中率基准 |
 | `docs/plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 |
 
@@ -305,7 +305,7 @@ cargo clippy --all-targets         # 静态检查
 
 **明确没做的**：
 
-1. ~~**多协议**~~：`ChatCompletions` / `Responses` / `AnthropicMessages` **三协议均已实现**（含流式）。Anthropic 适配见 `docs/anthropic-messages-api.md`（`x-api-key` 头、`tool_result` 在 user 消息里、thinking 必须回传带 signature、`input_tokens` 不含缓存需加回 `cache_read`）
+1. ~~**多协议**~~：`ChatCompletions` / `Responses` / `AnthropicMessages` **三协议均已实现**（含流式）。Anthropic 适配见 `docs/anthropic-messages-api.md`（`x-api-key` 头、`tool_result` 在 user 消息里、`input_tokens` 不含缓存需加回 `cache_read`、流式 `input_json_delta` 分片聚合；**协议差异全部收敛在适配层，`Message` 未改动**）
 2. **工具参数中间层**：目前直接生成 OpenAI schema，跨协议复用不了
 3. **真沙盒后端**：只有 `ProcessBackend`（无隔离），`sandbox-exec` / `bwrap` 未接
 4. **记忆系统**：完全没做。`plan.md` 里给了方向——任务结束后不能直接总结入库，要先做"蒸馏验证"判断出最佳路径再沉淀

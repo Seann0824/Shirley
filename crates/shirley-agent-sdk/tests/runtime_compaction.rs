@@ -24,7 +24,6 @@ fn assistant_calls(ids: &[&str]) -> Message {
     Message::Assistant {
         content: None,
         reasoning_content: None,
-        thinking_signature: None,
         tool_calls: ids
             .iter()
             .map(|id| ToolCall {

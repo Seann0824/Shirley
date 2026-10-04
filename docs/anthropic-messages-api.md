@@ -28,8 +28,8 @@ DeepSeek 也接受 Claude 模型名（`claude-opus*` → `deepseek-v4-pro`，
 | 工具结果 | role=tool 消息 | `function_call_output` item | **user 消息里的** `tool_result` block |
 | 工具参数 | JSON **字符串** | JSON **字符串** | JSON **对象** |
 | 工具 schema | `function.parameters` | `parameters` | `input_schema` |
-| 思考 | `reasoning_content` | `reasoning` item | `thinking` block（**带 signature**） |
-| 思考回传 | 可选 | 不回传 | **必须回传**（否则 400） |
+| 思考 | `reasoning_content` | `reasoning` item | `thinking` block（带 `signature`） |
+| 思考回传 | 可选 | 不回传 | 可回传（**服务端不校验 signature**，见 2.4） |
 | 结束原因 | `finish_reason` | 无字段，看 output | `stop_reason` |
 | 流式收尾 | `data: [DONE]` | `response.completed` | `message_stop`（无 `[DONE]`） |
 | 流式工具参数 | `index` 聚合 | 终态自带完整 | `input_json_delta` **分片聚合** |
@@ -37,8 +37,8 @@ DeepSeek 也接受 Claude 模型名（`claude-opus*` → `deepseek-v4-pro`，
 
 三条最要命的：
 1. **工具结果放在 `user` 消息里**（不是独立 role），且是 content block；
-2. **thinking 必须回传**（带 signature），否则下一轮直接 400；
-3. **`input_tokens` 不含缓存**，命中率算法与 OpenAI 相反。
+2. **`input_tokens` 不含缓存**，命中率算法与 OpenAI 相反；
+3. **流式工具参数靠 `input_json_delta` 分片聚合**（与 Responses 的"终态自带完整"相反）。
 
 ---
 
@@ -81,9 +81,9 @@ DeepSeek 也接受 Claude 模型名（`claude-opus*` → `deepseek-v4-pro`，
 **assistant 块顺序**：`thinking`（若 `reasoning_content` 非空）→ `text`（若 content 非空）
 → 每个 `tool_use`。顺序重要：thinking 必须在前。
 
-**thinking 回传**：`reasoning_content` 非空时必须产出
-`{"type":"thinking","thinking": <reasoning_content>, "signature": <…>}`。
-signature 从哪来见 2.4——**这是本协议最大的结构性代价**。
+**thinking 回传**：`reasoning_content` 非空时产出
+`{"type":"thinking","thinking": <reasoning_content>}`。
+**不需要带 `signature`**——见 2.4（这一点当初判断错了，已实测纠正）。
 
 **工具结果**：`Tool` 消息编码成 **`role:"user"`** 的消息（Anthropic 没有 tool role）。
 多个连续 Tool 消息可以合并进同一条 user 消息的多个 `tool_result` block，
@@ -98,34 +98,40 @@ signature 从哪来见 2.4——**这是本协议最大的结构性代价**。
 `input_schema` 就是 `ToolDefinition.parameters`（JSON Schema），**只改键名**。
 又一次印证：JSON Schema 是跨协议中间表示，三协议都直接吃它。
 
-**2.4 thinking signature（关键设计点）**
+**2.4 thinking 的 signature：不需要回传（结论已纠正）**
 
 真实抓包：
 - 非流式：`thinking` block 直接带 `signature` 字段（DeepSeek 给的是个 UUID 样字符串）。
 - 流式：`thinking_delta` 逐片给 thinking 文本，**最后一个 `signature_delta`** 给签名。
-- 第二轮**必须**把 thinking block（含 signature）原样回传，否则：
-  `400 The content[].thinking in the thinking mode must be passed back to the API.`
 
-问题：内部 `Message::Assistant.reasoning_content: Option<String>` **装不下 signature**。
+**最初（错误）的结论**：认为"thinking 必须原样回传，且必须带 signature，否则 400"，
+理由是抓到过 `400 The content[].thinking in the thinking mode must be passed back to the API.`。
 
-**方案（v0，最小改动）**：给 `reasoning_content` 附加一个**私有包装**，把 signature
-随文本一起序列化进那个字符串，Anthropic 编码时再拆出来。缺点是污染了 `reasoning_content`
-的语义（它本该是纯文本）。**不采用**——理由见下。
+**实测纠错**：那条 400 **与 signature 无关**。逐项复现（同一 endpoint、同一模型）：
 
-**方案（推荐，v1）**：新增 `ToolCall` 之外的旁路字段：
-`Message::Assistant` 增加 `thinking_signature: Option<String>`
-（`#[serde(default, skip_serializing_if = "Option::is_none")]`）。
-- ChatCompletions / Responses 编码**忽略**它（零影响）。
-- Anthropic 编码：`reasoning_content` + `thinking_signature` 一起产出 thinking block。
-- Anthropic 解码：把 signature 写回该字段。
-- 持久化：`session.rs` 的 JSONL 会自然带上它（`Message` 的 serde）。
+| 回传的 assistant | 结果 |
+| --- | --- |
+| 真实 tool_use id（32 字符，服务端下发）+ 不回传 thinking | **200** |
+| 真实 id + thinking 无 signature | **200** |
+| 真实 id + thinking + 空 signature | **200** |
+| 手造假 id `call_1` + **不回传 thinking** | **400**（就是那条报错） |
+| 手造假 id `call_1` + 回传 thinking（signature 随便写） | **200** |
 
-这个字段是**协议中立**的（"思考块的完整性凭据"），不是 Anthropic 私货，
-所以放进 `Message` 是合理的，不违反 SDK 边界原则。
+判据是 **`tool_use.id` 的形状**（长度 / 前缀），不是 signature：最初那次 400 是抓包时
+**手工伪造了 `call_1`** 这个假 id，服务端匹配不上，才回了那句误导性的提示。
+只要 id 是服务端真实下发的（agent 路径永远如此），**回传与不回传 thinking 都是 200**。
 
-> 若不想动 `Message`：退一步只做"无 signature 回传"，
-> 代价是**带思考的多轮工具调用在 Anthropic 下会 400**。
-> 因为工具调用几乎总伴随思考，这个退路实际不可用——**建议做 v1**。
+**因此**：signature **不进 `Message`**，也无需在适配层保存。`reasoning_content`
+（纯文本）就是 thinking 的全部所需——它既是"思考块"的文本，也是回传时的内容。
+这一版曾短暂加过 `Message::Assistant.thinking_signature`，已移除：
+
+- 它违反了分层——即便 signature 真需要回传，那也是**适配层的会话态**
+  （"上一轮原始 thinking block"），属于协议实现细节，不该让 `Message` 承担。
+- 而它连"技术上必要"都不成立，更没有理由污染 `Message`。
+
+> 教训：报错文案会撒谎。`content[].thinking must be passed back` 把矛头指向 thinking，
+> 真因却是 id。定位协议问题要**做变量隔离**（一次只改一个因素），
+> 而不是照抄服务端的错误措辞——否则会把一个适配层细节升格成核心模型字段。
 
 **2.5 max_tokens**
 
@@ -228,7 +234,7 @@ usage.cache_reported_input_tokens = Some(总输入)                  // 命中�
 | --- | --- | --- |
 | `text_delta` | `text` | → `ContentDelta` |
 | `thinking_delta` | `thinking` | → `ReasoningDelta` |
-| `signature_delta` | `signature` | 记入当前 thinking 块的 signature |
+| `signature_delta` | `signature` | **忽略**（服务端不校验，见 2.4） |
 | `input_json_delta` | `partial_json` | **追加到当前 tool_use 块的 arguments 字符串** |
 
 **4.3 工具参数分片聚合（与 Responses 的关键差异）**
@@ -261,8 +267,8 @@ Responses 的终态对象自带完整 `output`，我们**不用**聚合 delta。
 **5.3 复用**：`adapter::sse`（分帧 + 取 `data:`）直接复用，与 Responses 共享。
 
 **5.4 需要改的共享代码**：
-- `message/mod.rs`：`Message::Assistant` 增加 `thinking_signature: Option<String>`
-  （见 2.4）。**这是唯一需要动内部模型的点**，且对另两个协议零影响。
+- ~~`message/mod.rs` 增加 `thinking_signature`~~ ——**最终未改**（见 2.4，
+  signature 无需回传，`Message` 保持原样，这是分层架构的应有之义）。
 - `settings.rs`：别名已就绪（`anthropic_messages` / `anthropic` / `messages`）。
 
 **5.5 请求头**：Anthropic 用 **`x-api-key`**（不是 `Authorization: Bearer`）
@@ -274,7 +280,7 @@ Responses 的终态对象自带完整 `output`，我们**不用**聚合 delta。
 
 1. **编码**：system / ContextSummary → 顶层 `system`，不进 `messages`。
 2. **编码**：`Tool` → `role:"user"` 的 `tool_result` block（**不是** tool role）。
-3. **编码**：assistant 块顺序 = thinking → text → tool_use；thinking 带 signature。
+3. **编码**：assistant 块顺序 = thinking → text → tool_use；thinking **不带 signature**。
 4. **编码**：工具 schema 用 `input_schema` 键名，值与 `parameters` 相同。
 5. **编码**：`thinking` 对象形状；`reasoning_effort` 被忽略而非硬塞。
 6. **解码**：`content[]` 三类块合成一条 assistant；`input` 对象 → `arguments` 字符串。
@@ -282,7 +288,7 @@ Responses 的终态对象自带完整 `output`，我们**不用**聚合 delta。
 8. **解码（usage）**：`input_tokens` **加上** `cache_read`；命中率分母 = 总输入。
 9. **解码（usage）**：`cache_read` 缺失 → `cached_input_tokens == None`（不是 0）。
 10. **流式**：`text_delta`→ContentDelta、`thinking_delta`→ReasoningDelta、
-    `signature_delta` 被记录。
+    `signature_delta` 被忽略。
 11. **流式**：`input_json_delta` 按 index 聚合出完整 arguments。
 12. **流式**：`message_start` + `message_delta` 两处 usage 合并；`message_stop` 收尾。
 13. **流式**：**没有 `[DONE]`** 也能正确 `Finished`。
@@ -290,16 +296,16 @@ Responses 的终态对象自带完整 `output`，我们**不用**聚合 delta。
 
 真实网络测试（`#[ignore]`，需 `DEEPSEEK_API_KEY`）：
 `live_anthropic_round_trip`（纯文本）、`live_anthropic_tool_round_trip`
-（**含 thinking 回传**——这是最关键的，验证 signature 链路）、
-`live_anthropic_streaming_tool_call`。
+（多轮工具调用）、`live_anthropic_streaming_tool_call`（流式分片聚合）。
+三者均已在 `https://api.deepseek.com/anthropic/v1/messages` 跑通。
 
 ---
 
 **七、决策记录（实现时已拍板）**
 
-1. **`thinking_signature` 进 `Message`** —— **已采纳**。`Message::Assistant` 新增
-   `thinking_signature: Option<String>`（`#[serde(default, skip_serializing_if)]`）。
-   对 ChatCompletions / Responses 编码零影响（前者忽略、后者本就不回传思考）。
+1. ~~**`thinking_signature` 进 `Message`**~~ —— **已撤销**。实测 signature 无需回传
+   （见 2.4），且即便需要，那也是适配层的会话态，不该由 `Message` 承担。
+   `Message` 保持原样，`reasoning_content` 就是 thinking 的全部所需。
 2. **`max_tokens` 默认值** —— **已采纳 4096**（`DEFAULT_MAX_TOKENS`）。
 3. **`cache_creation_input_tokens` 不计入分母** —— **已采纳**（v0 只算 `cache_read`）。
 4. **tool_result 逐条发**（每条 Tool 消息一条 user 消息）—— **已采纳**。
@@ -315,6 +321,6 @@ Responses 的终态对象自带完整 `output`，我们**不用**聚合 delta。
 - `docs/security.md`：`x-api-key` 头的敏感标记（`set_sensitive(true)`）同 Bearer。
 
 **实现落点**：`crates/shirley-agent-sdk/src/adapter/anthropic_messages/{mod.rs,dto.rs}`；
-`adapter::codec` 增加分支；`Message::Assistant` 增加 `thinking_signature` 字段
-（`crates/shirley-agent-sdk/src/message/mod.rs`）。三协议现已全部实现，`codec` 的
-`UnsupportedProtocol` 兜底分支不再可达（变体保留供未来协议使用）。
+`adapter::codec` 增加分支。**`Message` 未改动**——协议差异全部收敛在适配层，
+这正是分层的目的。三协议现已全部实现，`codec` 的 `UnsupportedProtocol`
+兜底分支不再可达（变体保留供未来协议使用）。

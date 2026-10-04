@@ -6,7 +6,7 @@
 //!
 //! 与另两个协议的三条要命差异：
 //! 1. **工具结果放在 `user` 消息里**（Anthropic 没有 tool role），是 `tool_result` block；
-//! 2. **thinking 块必须原样回传**（带 `signature`），否则下一轮 400；
+//! 2. thinking 通过 `reasoning_content` 承载（`signature` 无需回传，实测不校验）；
 //! 3. **`input_tokens` 不含缓存读取**（与 OpenAI 相反），映射时要加回 `cache_read`。
 
 mod dto;
@@ -56,20 +56,14 @@ fn encode_messages(messages: &[message::Message]) -> (Option<String>, Vec<Value>
             message::Message::Assistant {
                 content,
                 reasoning_content,
-                thinking_signature,
                 tool_calls,
             } => {
                 let mut blocks: Vec<Value> = Vec::new();
                 if let Some(reasoning) = reasoning_content {
-                    // 有思考就必须带上 signature（Anthropic 要求原样回传）。
-                    let mut block = serde_json::json!({
+                    blocks.push(serde_json::json!({
                         "type": "thinking",
                         "thinking": reasoning,
-                    });
-                    if let Some(signature) = thinking_signature {
-                        block["signature"] = serde_json::json!(signature);
-                    }
-                    blocks.push(block);
+                    }));
                 }
                 if let Some(content) = content
                     && !content.is_empty()
@@ -211,28 +205,18 @@ fn apply_extra_body(body: &mut Value, extra: &Value) {
 
 /// `content[]` → 内部 assistant 消息。
 ///
-/// 多块合成一条：thinking → `reasoning_content`（+signature）、
+/// 多块合成一条：thinking → `reasoning_content`、
 /// text → `content`（拼接）、tool_use → `ToolCall`。
 fn decode_content(content: &[dto::ContentBlock]) -> message::Message {
     let mut text = String::new();
     let mut thinking = String::new();
-    let mut signature: Option<String> = None;
     let mut tool_calls = Vec::new();
 
     for block in content {
         match block {
             dto::ContentBlock::Text { text: chunk } => text.push_str(chunk),
-            dto::ContentBlock::Thinking {
-                thinking: chunk,
-                signature: sig,
-            } => {
-                thinking.push_str(chunk);
-                if let Some(sig) = sig
-                    && !sig.is_empty()
-                {
-                    signature = Some(sig.clone());
-                }
-            }
+            // signature 不回传（实测服务端不校验；见 docs/anthropic-messages-api.md）。
+            dto::ContentBlock::Thinking { thinking: chunk, .. } => thinking.push_str(chunk),
             dto::ContentBlock::ToolUse { id, name, input } => {
                 if id.is_empty() {
                     continue;
@@ -251,7 +235,6 @@ fn decode_content(content: &[dto::ContentBlock]) -> message::Message {
     message::Message::Assistant {
         content: (!text.is_empty()).then_some(text),
         reasoning_content: (!thinking.is_empty()).then_some(thinking),
-        thinking_signature: signature,
         tool_calls,
     }
 }
@@ -320,7 +303,6 @@ where
         // 流内聚合状态。
         let mut text = String::new();
         let mut thinking = String::new();
-        let mut signature: Option<String> = None;
         // 按 content block 的 `index` 聚合工具参数（input_json_delta 分片拼接）。
         let mut tools: Vec<(usize, String, String, String)> = Vec::new(); // (index, id, name, args)
         // usage 分两处给：message_start 给 input 侧，message_delta 给 output 侧。
@@ -361,9 +343,8 @@ where
                             thinking.push_str(&chunk);
                             yield AdapterEvent::ReasoningDelta(chunk);
                         }
-                        dto::Delta::Signature { signature: sig } => {
-                            signature = Some(sig);
-                        }
+                        // signature 不回传，忽略（实测服务端不校验）。
+                        dto::Delta::Signature { .. } => {}
                         dto::Delta::InputJson { partial_json } => {
                             if let Some(entry) = tools.iter_mut().find(|(i, ..)| *i == index) {
                                 entry.3.push_str(&partial_json);
@@ -380,7 +361,6 @@ where
                         let response = assemble_stream_response(
                             &text,
                             &thinking,
-                            signature.clone(),
                             &tools,
                             stop_reason.clone(),
                             input_usage.as_ref(),
@@ -401,7 +381,6 @@ where
 fn assemble_stream_response(
     text: &str,
     thinking: &str,
-    signature: Option<String>,
     tools: &[(usize, String, String, String)],
     stop_reason: Option<String>,
     input_usage: Option<&dto::Usage>,
@@ -419,7 +398,6 @@ fn assemble_stream_response(
     let assistant = message::Message::Assistant {
         content: (!text.is_empty()).then(|| text.to_owned()),
         reasoning_content: (!thinking.is_empty()).then(|| thinking.to_owned()),
-        thinking_signature: signature,
         tool_calls,
     };
 
@@ -569,7 +547,6 @@ mod tests {
         let messages = vec![message::Message::Assistant {
             content: Some("我来查".into()),
             reasoning_content: Some("先想".into()),
-            thinking_signature: Some("sig-1".into()),
             tool_calls: vec![message::ToolCall {
                 id: "call_1".into(),
                 name: "bash".into(),
@@ -581,7 +558,8 @@ mod tests {
         assert_eq!(blocks.len(), 3);
         assert_eq!(blocks[0]["type"], serde_json::json!("thinking"));
         assert_eq!(blocks[0]["thinking"], serde_json::json!("先想"));
-        assert_eq!(blocks[0]["signature"], serde_json::json!("sig-1"));
+        // signature 不回传（实测服务端不校验），编码时不应出现。
+        assert!(blocks[0].get("signature").is_none());
         assert_eq!(blocks[1]["type"], serde_json::json!("text"));
         assert_eq!(blocks[2]["type"], serde_json::json!("tool_use"));
         // input 必须是 JSON 对象，不是字符串。
@@ -706,12 +684,11 @@ mod tests {
             message::Message::Assistant {
                 content,
                 reasoning_content,
-                thinking_signature,
                 tool_calls,
+                ..
             } => {
                 assert_eq!(content.as_deref(), Some("答案"));
                 assert_eq!(reasoning_content.as_deref(), Some("先想"));
-                assert_eq!(thinking_signature.as_deref(), Some("sig-1"));
                 assert_eq!(tool_calls.len(), 1);
                 // input 对象 → arguments 字符串。
                 assert_eq!(tool_calls[0].arguments, "{\"command\":\"ls\"}");
@@ -826,13 +803,10 @@ mod tests {
                     message::Message::Assistant {
                         content,
                         reasoning_content,
-                        thinking_signature,
                         ..
                     } => {
                         assert_eq!(content.as_deref(), Some("Hello"));
                         assert_eq!(reasoning_content.as_deref(), Some("think"));
-                        // signature_delta 必须被记录，否则下一轮回传会 400。
-                        assert_eq!(thinking_signature.as_deref(), Some("sig-1"));
                     }
                     other => panic!("应为 assistant，实际: {other:?}"),
                 }
@@ -980,13 +954,11 @@ mod tests {
     }
 
     /// 真实网络的**工具往返**测试（默认 ignored），验证最关键的链路：
-    /// 第一轮模型发起 `tool_use`（**并产生 thinking + signature**），
+    /// 第一轮模型发起 `tool_use`（并可能产生 thinking），
     /// 我们回传 assistant（含 thinking 块）与 `tool_result`，
     /// 第二轮拿到最终文本。
     ///
-    /// 这一步锁死两个设计赌注：
-    /// 1. `tool_result` 必须放在 user 消息里；
-    /// 2. thinking 块必须原样回传（带 signature），否则 400。
+    /// 这一步锁死：`tool_result` 必须放在 user 消息里（Anthropic 无 tool role）。
     #[tokio::test]
     #[ignore = "真实网络调用，需 DEEPSEEK_API_KEY"]
     async fn live_anthropic_tool_round_trip() {
@@ -1015,16 +987,7 @@ mod tests {
         ];
         let first = run_once(&client, &config, &first_messages, &tools).await;
         let call_id = match &first.message {
-            message::Message::Assistant {
-                tool_calls,
-                thinking_signature,
-                ..
-            } => {
-                eprintln!("thinking_signature = {thinking_signature:?}");
-                assert!(
-                    thinking_signature.is_some(),
-                    "非流式下 thinking block 应带 signature（否则回传会 400）"
-                );
+            message::Message::Assistant { tool_calls, .. } => {
                 let call = tool_calls.first().expect("应发起一次工具调用");
                 eprintln!("tool_call = {} / {}", call.id, call.name);
                 assert_eq!(call.name, "get_weather");
@@ -1035,7 +998,7 @@ mod tests {
         };
         assert_eq!(first.finish_reason, ModelFinishReason::ToolCalls);
 
-        // 第二轮：**原样回传** first.message（含 thinking + signature）+ tool_result。
+        // 第二轮：回传 first.message（含 thinking）+ tool_result。
         let second_messages = vec![
             message::Message::System {
                 content: "你是助手。".into(),
@@ -1111,21 +1074,12 @@ mod tests {
         let finished = finished.expect("流应产出 Finished");
         eprintln!("reasoning = {} chars", reasoning.len());
         match &finished.message {
-            message::Message::Assistant {
-                tool_calls,
-                thinking_signature,
-                ..
-            } => {
+            message::Message::Assistant { tool_calls, .. } => {
                 let call = tool_calls.first().expect("终态应含 tool_use");
                 eprintln!("tool_call = {} / {} / {}", call.id, call.name, call.arguments);
                 assert_eq!(call.name, "get_weather");
                 assert!(!call.id.is_empty(), "tool_use id 不应为空");
                 assert!(call.arguments.contains("city"), "arguments 应为聚合后的完整 JSON");
-                // 流式下 signature 必须被记录，否则后续回传会 400。
-                assert!(
-                    thinking_signature.is_some(),
-                    "流式应记录 thinking signature"
-                );
             }
             other => panic!("应为含工具调用的 assistant，实际: {other:?}"),
         }

@@ -1036,7 +1036,6 @@ mod tests {
                     "这是一个很长的回复第 {i} 条，用来测试换行与遮挡问题，abcdefghijklmnopqrstuvwxyz0123456789"
                 )),
                 reasoning_content: None,
-                thinking_signature: None,
                 tool_calls: vec![],
             });
         }

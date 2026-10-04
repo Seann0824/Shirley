@@ -30,7 +30,6 @@ fn assistant(text: &str) -> Message {
     Message::Assistant {
         content: Some(text.into()),
         reasoning_content: None,
-        thinking_signature: None,
         tool_calls: Vec::new(),
     }
 }

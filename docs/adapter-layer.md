@@ -111,8 +111,10 @@ fn encode_tool_schema(field: &ParamField) -> Value { /* -> input_schema */ }
    item 结构**与**流式事件语义**上。
 2. **Anthropic Messages**：需要处理 `system` 独立字段、`tool_use` / `tool_result` 的内容块结构、`thinking` 块。差异最大，放最后。
    **已实现**（`docs/anthropic-messages-api.md`，基于真实抓包）。三条最要命的差异：
-   工具结果在 **user 消息**里（Anthropic 无 tool role）、thinking 块**必须回传**（带 signature，
-   否则 400）、`input_tokens` **不含缓存**（与 OpenAI 相反，映射时要加回 `cache_read`）。
+   工具结果在 **user 消息**里（Anthropic 无 tool role）、`input_tokens` **不含缓存**
+   （与 OpenAI 相反，映射时要加回 `cache_read`）、流式工具参数靠 **`input_json_delta`
+   分片聚合**（与 Responses 的"终态自带完整"相反）。**协议差异全部收敛在适配层，
+   `Message` 未改动**——分层的目的正在于此。
 
 **六、顺手清理**
 
