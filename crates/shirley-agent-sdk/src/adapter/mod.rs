@@ -1,4 +1,6 @@
 mod chat_completions;
+mod responses;
+mod sse;
 
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
@@ -11,7 +13,7 @@ use crate::{message, tool};
 pub enum ModelProtocol {
     ChatCompletions,
     Responses,
-    AnyhtopicMessages,
+    AnthropicMessages,
 }
 
 #[derive(bon::Builder)]
@@ -47,6 +49,7 @@ pub struct ModelConfig {
     pub extra_body: Option<serde_json::Value>,
 }
 
+#[derive(Debug)]
 pub enum AdapterEvent {
     ReasoningDelta(String),
     ContentDelta(String),
@@ -132,16 +135,26 @@ pub struct PreparedRequest {
 
 type Encoder = fn(&ModelConfig, &ModelRequest<'_>) -> Result<PreparedRequest, AdapterError>;
 type Decoder = fn(serde_json::Value) -> Result<ModelResponse, AdapterError>;
+/// 流式解码。也纳入 codec，避免 `invoke` 里出现"每加一个协议多一个硬分支"。
+type StreamDecoder = fn(reqwest::Response) -> Pin<
+    Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send>,
+>;
 
-/// 按协议取编解码函数对。
+/// 按协议取编解码函数三件套：请求编码 / 非流式解码 / 流式解码。
 ///
 /// 未实现的协议返回 `Err` 而不是 panic：切换协议是运行时行为，
 /// 不能让它把宿主进程带走（见 `docs/runtime-hardening.md` 第七节）。
-fn codec(protocol: &ModelProtocol) -> Result<(Encoder, Decoder), AdapterError> {
+fn codec(protocol: &ModelProtocol) -> Result<(Encoder, Decoder, StreamDecoder), AdapterError> {
     match protocol {
         ModelProtocol::ChatCompletions => Ok((
             chat_completions::encode_request,
             chat_completions::decode_response,
+            chat_completions::decode_stream_response,
+        )),
+        ModelProtocol::Responses => Ok((
+            responses::encode_request,
+            responses::decode_response,
+            responses::decode_stream_response,
         )),
         other => Err(AdapterError::UnsupportedProtocol {
             protocol: format!("{other:?}"),
@@ -172,7 +185,7 @@ pub async fn invoke<'a>(
     input: ModelRequest<'a>,
 ) -> Pin<Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send + 'a>> {
     Box::pin(async_stream::try_stream! {
-        let (encode, decode) = codec(&config.protocol)?;
+        let (encode, decode, decode_stream) = codec(&config.protocol)?;
         let prepared = encode(config, &input)?;
         let response = client
             .post(&prepared.url)
@@ -193,14 +206,7 @@ pub async fn invoke<'a>(
             let msg = decode(body)?;
             yield AdapterEvent::Finished(msg)
         } else {
-            let mut stream = match &config.protocol {
-                ModelProtocol::ChatCompletions => {
-                    chat_completions::decode_stream_response(response).await
-                }
-                other => Err(AdapterError::UnsupportedProtocol {
-                    protocol: format!("{other:?}"),
-                })?,
-            };
+            let mut stream = decode_stream(response);
             while let Some(event) = stream.next().await {
                 yield event?;
             }

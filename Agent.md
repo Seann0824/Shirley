@@ -32,6 +32,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | `docs/runtime-hardening.md` | max_steps、重试、超时、取消、压缩健壮性 |
 | `docs/streaming.md` | 流式输出与 reasoning 流式 |
 | `docs/adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 |
+| `docs/responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件（**已实现**） |
 | `docs/testing.md` | SDK 单测策略、缓存命中率基准 |
 | `docs/plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 |
 
@@ -101,7 +102,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 **3. 协议适配层** — `crates/shirley-agent-sdk/src/adapter/`
 
 - `ModelConfig` 用 `bon` 生成 builder：`protocol` / `base_url` / `model` / `api_key` / `stream` / `thinking` / `reasoning_effort` / `temperature` / `max_output_tokens` / `context_window_tokens` / `tool_choice` / `extra_body`
-- `codec(protocol)` 返回一对函数指针 `(Encoder, Decoder)`，目前只有 `ChatCompletions` 有实现；`Responses` 和 `AnyhtopicMessages` 返回 `Err(AdapterError::UnsupportedProtocol)`（**不再 panic**）
+- `codec(protocol)` 返回三件套函数指针 `(Encoder, Decoder, StreamDecoder)`（请求编码 / 非流式解码 / 流式解码，流式也纳入 codec 抽象，`invoke` 里不再有按协议硬分支）。**`ChatCompletions` 与 `Responses` 均已实现**；`AnthropicMessages` 返回 `Err(AdapterError::UnsupportedProtocol)`（**不再 panic**）
 - `invoke()` 返回 `Stream<Item = Result<AdapterEvent, AdapterError>>`：
   - 非流式：读完整 body、decode，产出单个 `Finished(ModelResponse)`
   - 流式：走 `decode_stream_response`，逐块产出 `ReasoningDelta` / `ContentDelta` / `Finished`
@@ -118,7 +119,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 - `ToolContext`：类型擦除的运行时上下文容器（`Arc<HashMap<TypeId, Arc<dyn Any>>>`）。工具并发执行，所以上下文只能是 `Arc<Mutex<T>>` 这类内部可变性句柄；应用用 `ToolContext::new().with(data)` 注入，工具用 `ctx.get::<T>()` 取回。`Agent` builder 的 `.tool_context()` 传入，每次调用前 clone 分发（`Arc`，只加引用计数）。见 `docs/sdk-gaps.md` gap-1
 - `ToolError` 分四类：`ExecutionError` / `RepetitionError` / `NotFoundError` / `ArgumentsError`
 
-已知设计债：`ToolDefinition.parameters` 直接就是 OpenAI 格式的 JSON Schema，所以一旦要兼容 Anthropic，参数结构没法复用。`docs/adapter-layer.md` 里说得很清楚，正确做法是在中间加一层标准化的参数模型再往外转换。
+关于 `ToolDefinition.parameters`：它直接就是 JSON Schema。原先记为"绑死 OpenAI"的债，做 Responses 适配时得到修正——**Responses 的 `tools[].parameters` 也是 JSON Schema**，只少一层 `function` 包装。所以 JSON Schema 本身就是跨协议中间表示，不必另造 `ParamType`；真正的协议差异在**消息 item 结构**与**流式事件语义**上（见 `docs/responses-api.md`、`docs/adapter-layer.md`）。
 
 **5. `#[tool]` 宏** — `crates/shirley-agent-sdk-macros/src/tool.rs`
 
@@ -303,7 +304,7 @@ cargo clippy --all-targets         # 静态检查
 
 **明确没做的**：
 
-1. **多协议**：`Responses` 和 `AnyhtopicMessages` 返回 `UnsupportedProtocol`（不再是 `todo!()` panic，但也没实现）
+1. **多协议**：`ChatCompletions` / `Responses` 已实现（含流式）；`AnthropicMessages` 仍返回 `UnsupportedProtocol`（差异最大，排在最后，见 `docs/responses-api.md` 与 `docs/adapter-layer.md`）
 2. **工具参数中间层**：目前直接生成 OpenAI schema，跨协议复用不了
 3. **真沙盒后端**：只有 `ProcessBackend`（无隔离），`sandbox-exec` / `bwrap` 未接
 4. **记忆系统**：完全没做。`plan.md` 里给了方向——任务结束后不能直接总结入库，要先做"蒸馏验证"判断出最佳路径再沉淀

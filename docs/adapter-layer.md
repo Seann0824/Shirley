@@ -103,7 +103,12 @@ fn encode_tool_schema(field: &ParamField) -> Value { /* -> input_schema */ }
 
 `codec` 的 `todo!()` 修复见 `runtime-hardening.md`。落地顺序建议：
 
-1. **Responses**：与 ChatCompletions 同源，差异最小，先做。
+1. **Responses**：与 ChatCompletions 同源，差异最小，先做。**已完成**（`adapter/responses/`，含流式；方案见 `docs/responses-api.md`）。
+   **详细方案见 `docs/responses-api.md`**——它把本节的"工具参数标准化"结论推进了一步：
+   Responses 的 `tools[].parameters` 与 ChatCompletions 的
+   `tools[].function.parameters` **都接受 JSON Schema**，只差一层包装。这印证了
+   JSON Schema 本身就是跨协议中间表示，不必另造 `ParamType`；真正的差异在**消息
+   item 结构**与**流式事件语义**上。
 2. **Anthropic Messages**：需要处理 `system` 独立字段、`tool_use` / `tool_result` 的内容块结构、`thinking` 块。差异最大，放最后。
 
 Anthropic 的关键差异（提前记录，避免以后返工）：
@@ -115,12 +120,13 @@ Anthropic 的关键差异（提前记录，避免以后返工）：
 
 **六、顺手清理**
 
-- `ModelProtocol::AnyhtopicMessages` → `AnthropicMessages`（拼写）。**仍在**（`adapter/mod.rs`）。
-- `ModelfinishReaon` → `ModelFinishReason`（少个 i）。**仍在**（`adapter/mod.rs` 定义，`chat_completions/mod.rs` 多处使用）。
+- `ModelProtocol::AnyhtopicMessages` → `AnthropicMessages`（拼写）。**已修**（`adapter/mod.rs`，同步 `settings.rs` 别名与 `error_contract.rs`）。
+- `ModelfinishReaon` → `ModelFinishReason`（少个 i）。**已修**（现为 `ModelFinishReason`）。
 - `use serde_json::{Value, map}` 的 `map` 未使用。**已清**（现在只剩 `use serde_json::Value;`）。
 
 **七、验收**
 
-1. `ToolDefinition` 不再暴露裸 OpenAI schema，而是标准模型。
+1. `ToolDefinition.parameters` 的语义明确为"协议无关的 JSON Schema"（它本就是标准
+   JSON Schema，不是 OpenAI 私有），协议差异收敛在 `encode_tool_schema` 一处。
 2. 新增一个协议只需实现 `MessageCodec` + `encode_tool_schema`，不改 `Message` / `Tool` 定义。
 3. 现有 `bash` / `read` 工具在改造后行为不变（回归测试保护）。

@@ -296,9 +296,9 @@ fn parse_protocol(name: &str) -> Result<ModelProtocol, SettingsError> {
     match normalized.as_str() {
         "chat_completions" | "chatcompletions" | "openai" => Ok(ModelProtocol::ChatCompletions),
         "responses" => Ok(ModelProtocol::Responses),
-        "anyhtopic_messages" | "anthropic" | "messages" => Ok(ModelProtocol::AnyhtopicMessages),
+        "anthropic_messages" | "anthropic" | "messages" => Ok(ModelProtocol::AnthropicMessages),
         other => Err(SettingsError::Invalid(format!(
-            "未知协议 `{other}`，可选：chat_completions / responses / anyhtopic_messages"
+            "未知协议 `{other}`，可选：chat_completions / responses / anthropic_messages"
         ))),
     }
 }

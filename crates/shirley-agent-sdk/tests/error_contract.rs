@@ -39,9 +39,9 @@ fn unsupported_protocol_is_error_not_panic() {
     assert_eq!(error.kind(), ErrorKind::Unsupported);
     assert!(!error.is_retryable());
 
-    // 两个未实现协议都还在枚举里（防止有人删了变体却忘了实现）。
+    // 协议变体都还在枚举里（防止有人删了变体却忘了实现）。
     let _ = ModelProtocol::Responses;
-    let _ = ModelProtocol::AnyhtopicMessages;
+    let _ = ModelProtocol::AnthropicMessages;
 }
 
 /// 解析 / 编码失败属于内部错误：重试同一份输入不会变好。

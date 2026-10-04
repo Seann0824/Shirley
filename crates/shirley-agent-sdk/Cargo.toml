@@ -16,6 +16,7 @@ schemars = { version = "1.2.2", features = ["derive"] }
 bon = "3.10.1"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }
 futures = "0.3.34"
+bytes = "1"
 async-stream = "0.3"
 dotenvy = "0.15.7"
 tokio = { version = "1.53.1", features = ["process", "time", "io-util", "fs"] }

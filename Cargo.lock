@@ -2317,6 +2317,7 @@ version = "0.0.2-alpha"
 dependencies = [
  "async-stream",
  "bon",
+ "bytes",
  "dotenvy",
  "futures",
  "reqwest",

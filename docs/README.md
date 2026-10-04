@@ -16,6 +16,7 @@
 | `session.md` | 会话持久化与恢复：SessionStore 契约 / 日志派生 recall / rewind 语义 | P0 |
 | `streaming.md` | 流式输出与 reasoning 流式 | P1 |
 | `adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 | P1 |
+| `responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件 / 落地方式 | P1 |
 | `sdk-gaps.md` | SDK 能力缺口修复：工具上下文注入（已落地）/ 请求体留口（已落地）/ 工具顺序保序（不做） | P0 |
 | `testing.md` | SDK 单测策略、缓存命中率基准 | P1 |
 | `plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 | P0 |
@@ -39,7 +40,7 @@
 - 代码量：`src` + `crates` 共 2809 行
 - 测试：3 个（全部在 `read` 工具），SDK 侧 0 个
 - clippy：36 条警告（`shirley-agent-sdk` 32 条 + 应用层 4 条）
-- 已知 panic 点：`adapter::codec` 的 `_ => todo!()`、`adapter::invoke` 流式分支的 `_ => todo!()`、`decode_stream_response` 里 SSE `id:` 行的 `todo!()`
-- 未接线配置：`request_timeout`（已定义未用）、`ModelConfig.temperature` / `max_output_tokens`（已定义未进入请求体）
+- 已知 panic 点：**已清除**。`codec` / `invoke` 的未实现协议改为返回 `Err(UnsupportedProtocol)`（见 `docs/runtime-hardening.md`）
+- 未接线配置：**已接线**。`temperature` / `max_output_tokens` / `tool_choice` 进入请求体，并新增 `extra_body` 逃生口（见 `docs/sdk-gaps.md` gap-4；`request_timeout` 字段已移除）
 - 未使用的 `StopReason`：`MaxStepsReached`、`Cancelled`（`Completed` 是当前唯一会被产生的值）
 - 已落地（写方案时尚未做）：流式输出（`stream` 配置 + `ContentDelta` / `ReasoningDelta` 事件 + SSE 增量解析）、TUI 直接消费 `AgentEvent`

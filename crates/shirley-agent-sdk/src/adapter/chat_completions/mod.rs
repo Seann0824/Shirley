@@ -299,7 +299,7 @@ fn finish_tool_calls(
 }
 
 //
-pub async fn decode_stream_response(
+pub fn decode_stream_response(
     response: reqwest::Response,
 ) -> Pin<Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send>> {
     Box::pin(async_stream::try_stream! {
