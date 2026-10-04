@@ -16,6 +16,11 @@ Responses 与 ChatCompletions 是**两套 wire 协议，不是同一个协议的
 > 2. 流式**只认终态事件**（`response.completed` / `incomplete` / `failed`），
 >    delta 仅用于实时渲染，不做 `function_call_arguments` 分片聚合——因为终态对象
 >    已携带完整 `output`，比靠 delta 拼更可靠（本文四.4 的"双轨、以终态为准"）。
+>
+> **按 OpenAI 官方 schema 对齐的修正**（DeepSeek 本质是 OpenAI 兼容实现）：
+> reasoning 以 `summary` 为主、`content` 为回退；流式补认
+> `response.reasoning_summary_text.delta`；非流式 `failed` 与流式一样转 `AdapterError`；
+> 历史 assistant 文本改用纯字符串 content。
 
 ---
 
@@ -26,7 +31,7 @@ Responses 与 ChatCompletions 是**两套 wire 协议，不是同一个协议的
 | 维度 | ChatCompletions | Responses |
 | --- | --- | --- |
 | 端点 | `POST /v1/chat/completions` | `POST /responses` |
-| 消息 | `messages: [{role, content}]` | `input: string \| item[]`，system 走顶层 `instructions` |
+| 消息 | `messages: [{role, content}]` | `input: string \| item[]`，system 作为 `{role:"system"}` item 留在原位 |
 | 工具调用 | assistant 上的 `tool_calls[]`；结果走 `role:"tool"` | 顶层 `function_call` / `function_call_output` item；结果按 `call_id` 配对 |
 | 工具参数 | `tools[].function.parameters` | `tools[].parameters`（少一层 `function` 包装） |
 | 流式结束 | `data: [DONE]` | **没有 `[DONE]`**，以 `response.completed/incomplete/failed` 收尾 |
@@ -46,7 +51,7 @@ Responses 与 ChatCompletions 是**两套 wire 协议，不是同一个协议的
 | 我们的字段 | Responses 键 | 说明 |
 | --- | --- | --- |
 | `model` | `model` | 必填 |
-| system prompt | `instructions` | **不是** system 消息，是顶层字符串；作为首条 system 消息注入 |
+| system prompt | input 里的 `{type:"message", role:"system", content}` | 作为普通 item 留在原位（**不用顶层 `instructions`**：它会被服务端插到 `input` 之前，把中段/末尾 system 搬到最前，破坏前缀缓存） |
 | `stream` | `stream` | 布尔 |
 | `temperature` | `temperature` | 范围 `[0, 2]`；思考模式下不生效 |
 | `max_output_tokens` | `max_output_tokens` | 含可见输出 + 思维链 token |
@@ -67,10 +72,10 @@ Responses 与 ChatCompletions 是**两套 wire 协议，不是同一个协议的
 
 | 内部 Message | 产出 item |
 | --- | --- |
-| `System` | 摘出来 → 顶层 `instructions`（多个则拼接）；**不**放进 `input` |
+| `System` | `{type:"message", role:"system", content:"<字符串>"}`，**原位保留** |
 | `ContextSummary` | 同 `System`（我们内部用它承载压缩摘要，语义上就是 system 级指令） |
 | `User` | `{type:"message", role:"user", content: <string>}` |
-| `Assistant`（有文本） | `{type:"message", role:"assistant", content:[{type:"output_text", text}]}` |
+| `Assistant`（有文本） | `{type:"message", role:"assistant", content:"<纯字符串>"}`（历史文本用字符串，`output_text` 只属**输出** item，输入侧 `EasyInputMessage` 不接受它） |
 | `Assistant`（有 tool_calls） | 每个调用产出一个 `{type:"function_call", call_id, name, arguments}` item |
 | `Assistant`（既有文本又有 tool_calls） | 文本 item + 若干 `function_call` item（兄弟关系） |
 | `Tool` | `{type:"function_call_output", call_id, output: <string>}` |
@@ -130,8 +135,11 @@ JSON Schema 本身就是跨协议的中间表示，差异只在包装层**。因
 
 **解码规则**：遍历 `output[]`，按 `type` 分派：
 
-- `reasoning` → 拼接其 `content[].text`（`reasoning_text` 块）为 `reasoning_content`；
-  `summary` 字段被接受但不会生成内容，忽略。
+- `reasoning` → 取 `summary[].text`（`summary_text` 块）为 `reasoning_content`；
+  OpenAI 系推理模型默认**只回 `summary`**（schema 里 `summary` 是 required，`content`
+  才是可选），`content`（`reasoning_text`，原始 CoT）通常为空。DeepSeek 等实现走
+  `content`。两者取非空者、互为回退——不要只读 `content`，否则对 OpenAI 系模型
+  `reasoning_content` 恒为空。
 - `message` → 拼接 `content[].text`（`output_text` 块）为 `content`。
 - `function_call` → 收集为 `tool_calls[]`，`call_id`/`name`/`arguments` 直接映射。
 
@@ -146,7 +154,8 @@ JSON Schema 本身就是跨协议的中间表示，差异只在包装层**。因
 | `completed` 且 `output` 含 `function_call` | `ToolCalls` |
 | `completed` 否则 | `Stop` |
 | `incomplete` 且 `incomplete_details.reason == "max_output_tokens"` | `Length` |
-| `failed` | 建议映射为 `AdapterError`（携带 `error`），而非 `Other` |
+| `failed` | 映射为 `AdapterError`（携带 `error`）——非流式与流式**一致** |
+| `cancelled` / `queued` | `Other(status)`，不误报 `Stop` |
 
 注意：Responses **没有 `finish_reason` 字段**，判定工具调用要**看 output 里有没有
 `function_call` item**，不能像 ChatCompletions 那样读一个字符串。
@@ -191,6 +200,7 @@ data: {"type":"response.output_text.delta","sequence_number":11,
 | `response.output_item.added` / `.done` | 记录 item 边界（见下） |
 | `response.content_part.added` / `.done` | 忽略 |
 | `response.reasoning_text.delta` | → `AdapterEvent::ReasoningDelta(delta)` |
+| `response.reasoning_summary_text.delta` | → `AdapterEvent::ReasoningDelta(delta)`（OpenAI 系推理流的**摘要**增量，字段是 `summary_index`） |
 | `response.reasoning_text.done` | 忽略（delta 已累计） |
 | `response.output_text.delta` | → `AdapterEvent::ContentDelta(delta)` |
 | `response.output_text.done` | 忽略 |
@@ -299,7 +309,7 @@ SSE 分帧可以抽成公共工具函数，但**事件语义必须各写各的**
 **六、验证清单**
 
 1. **编码**：一条含 system + user + assistant(文本+tool_calls) + tool 的对话，
-   `input` 展开为正确的 item 序列，`instructions` 独立、不在 `input` 里。
+   `input` 展开为正确的 item 序列，`System` 作为 `role:"system"` item 在 `input` 原位。
 2. **编码**：`reasoning_effort` 包成 `{"reasoning":{"effort":...}}`；
    `max_output_tokens` 键名正确。
 3. **解码（非流式）**：`output` 含 reasoning + message + function_call 时，

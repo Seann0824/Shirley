@@ -110,6 +110,8 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 - `ensure_success` 单独抽出来做状态检查，保证错误体与状态码一起保留（重试决策的唯一依据）
 - `chat_completions/mod.rs` 里 `encode_messages` / `encode_tools` 做的是"内部 Message → OpenAI 格式"的转换；`dto.rs` 只做反序列化结构定义
 - `temperature` / `max_output_tokens` / `tool_choice` 已接线（`Some` 时才写入请求体，`max_output_tokens` 在 ChatCompletions 上的键名是 `max_tokens`）；`extra_body` 是覆盖请求体的逃生口（浅合并，`null` 删除键）；`thinking` 仅在开启时写 `{"type":"enabled"}`。见 `docs/sdk-gaps.md` gap-4
+- Responses 解码按 OpenAI 官方 schema 对齐（DeepSeek 本质是 OpenAI 兼容实现）：reasoning 取 `summary`（`summary_text`，OpenAI 系默认只回这个）优先、`content`（`reasoning_text`，DeepSeek 走这个）回退；流式同时认 `response.reasoning_text.delta` 与 `response.reasoning_summary_text.delta`；**非流式 `status:"failed"` 与流式一样转 `AdapterError`**（`cancelled`/`queued` 归 `Other`，不误报 `Stop`）；历史 assistant 文本用**纯字符串** content（`output_text` 只属输出 item，输入侧不接受）
+- Responses 的 `encode_input` 是**纯保序映射**：system 作为普通 `{role:"system"}` item 留在 `input` 原位，**不用顶层 `instructions`**（后者会被服务端插到 `input` 之前，把中段/末尾 system 搬到最前，破坏 KV 前缀缓存）。保序 = 追加消息不动前缀，是缓存命中的结构性保证；**别在这里加 sort / 分组 / 位置调整**
 
 已知设计债：`encode_messages` 写在适配层，但作者自己注释说"这逻辑其实该在 message 侧"。`encode_request` 里 `thinking` 现在按 `config.thinking` 映射成 `enabled` / `disabled`（**流式已实现**，不再写死）。
 

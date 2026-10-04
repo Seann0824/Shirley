@@ -62,6 +62,12 @@ pub struct MessageItem {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReasoningItem {
+    /// 推理摘要（`summary_text` 块）。OpenAI 系推理模型默认只回这个，
+    /// `content`（原始 CoT）通常为空——见 `ReasoningItem.summary`（schema 里是
+    /// `required` 字段）。
+    #[serde(default)]
+    pub summary: Option<Content>,
+    /// 原始推理文本（`reasoning_text` 块）。部分实现（如 DeepSeek）走这里。
     #[serde(default)]
     pub content: Option<Content>,
 }
@@ -140,6 +146,13 @@ pub enum StreamEvent {
     },
     #[serde(rename = "response.reasoning_text.delta")]
     ReasoningTextDelta {
+        #[serde(default)]
+        delta: String,
+    },
+    /// OpenAI 系推理模型的**摘要**增量（`summary_text`），与 `reasoning_text.delta`
+    /// 并列；字段是 `summary_index` 而非 `content_index`，但我们只关心 `delta`。
+    #[serde(rename = "response.reasoning_summary_text.delta")]
+    ReasoningSummaryTextDelta {
         #[serde(default)]
         delta: String,
     },
