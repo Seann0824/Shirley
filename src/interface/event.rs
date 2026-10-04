@@ -1,8 +1,5 @@
 use crossterm::{
-    event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-        KeyEvent, MouseEvent, MouseEventKind,
-    },
+    event::{self, DisableBracketedPaste, EnableBracketedPaste, KeyEvent},
     execute,
 };
 use std::{
@@ -19,7 +16,6 @@ pub enum Event {
     Key(KeyEvent),
     // 终端以「括号粘贴」形式整体送来的文本，内部可能含换行。
     Paste(String),
-    Mouse(MouseEvent),
     Resize(u16, u16),
 }
 
@@ -33,7 +29,11 @@ impl EventHandler {
     pub fn new() -> std::io::Result<Self> {
         // 打开括号粘贴：粘贴内容会被终端包成一个 Paste 事件整体送达，
         // 其中的换行不再被拆成一个个 Enter 键，从而避免误触发送。
-        execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
+        //
+        // **不开启鼠标捕获**：捕获会把"拖动选择文本"从终端手里抢走，
+        // 导致用户无法用终端原生的方式选中 / 复制（这是"TUI 里复制不了文本"的
+        // 根因）。滚轮滚动因此改由键盘 `PageUp` / `PageDown` 承担。
+        execute!(std::io::stdout(), EnableBracketedPaste)?;
         let (sender, receiver) = mpsc::unbounded_channel();
         let running = Arc::new(AtomicBool::new(true));
         let worker_running = Arc::clone(&running);
@@ -50,12 +50,6 @@ impl EventHandler {
                 let next = match event::read() {
                     Ok(event::Event::Key(key)) => Event::Key(key),
                     Ok(event::Event::Paste(text)) => Event::Paste(text),
-                    Ok(event::Event::Mouse(mouse)) => match mouse.kind {
-                        MouseEventKind::ScrollUp | MouseEventKind::ScrollDown => {
-                            Event::Mouse(mouse)
-                        }
-                        _ => continue,
-                    },
                     Ok(event::Event::Resize(width, height)) => Event::Resize(width, height),
                     Ok(_) => continue,
                     Err(error) => {
@@ -89,10 +83,6 @@ impl Drop for EventHandler {
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
-        let _ = execute!(
-            std::io::stdout(),
-            DisableBracketedPaste,
-            DisableMouseCapture
-        );
+        let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     }
 }
