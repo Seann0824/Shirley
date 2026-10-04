@@ -314,6 +314,29 @@ SSE 分帧可以抽成公共工具函数，但**事件语义必须各写各的**
    `cache_hit_rate()` 返回 `None`（不是 0）。
 9. **回归**：ChatCompletions 路径行为完全不变。
 
+**验证状态**：1–9 条均已由单测覆盖（`adapter::responses::tests`，12 条 + `adapter::sse` 3 条）。
+此外有 **3 条真实网络测试**（默认 `#[ignore]`），已对 `https://api.deepseek.com` 跑通：
+
+```sh
+export DEEPSEEK_API_KEY=...
+# 可选：SHIRLEY_RESPONSES_BASE_URL / SHIRLEY_RESPONSES_MODEL
+cargo test -p shirley-agent-sdk --lib responses::tests::live -- --ignored --nocapture
+```
+
+| 测试 | 验证内容 | 结果 |
+| --- | --- | --- |
+| `live_responses_round_trip` | 流式纯文本往返 | `content="Hi"`，`finish=Stop`，usage 正确 |
+| `live_responses_tool_round_trip` | 非流式工具往返（发起 → 回传 output → 收尾） | 两轮均正确，`call_id` 配对被服务端接受 |
+| `live_responses_streaming_tool_call` | 流式工具调用 | 终态含完整 `function_call`，`finish=ToolCalls` |
+
+真实抓包确认的两个事实（都写进了实现）：
+
+1. **流式终态 `response.completed` 的 `output` 携带完整 item 列表**（`reasoning` +
+   `function_call`，含完整 `call_id` / `name` / `arguments`）——所以**无需**聚合
+   `function_call_arguments.delta`，本文四.4 的"以终态为准"成立。
+2. 服务端**会上报 `cached_tokens: 0`**（而非省略），因此 `cached_input_tokens`
+   会是 `Some(0)`；这符合契约——`Some(0)` 表示"确实命中 0"，`None` 才表示"未上报"。
+
 ---
 
 **七、与其它文档的关系**

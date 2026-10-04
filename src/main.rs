@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
-use shirley_agent_sdk::{Agent, AgentError, ModelConfig, ToolManager};
 use session::SessionCatalog as _;
+use shirley_agent_sdk::{Agent, AgentError, ModelConfig, ToolManager};
 mod interface;
 mod models;
 mod prompt;
@@ -93,9 +93,15 @@ async fn main() -> Result<(), AgentError> {
         .session(session)
         .build()?;
 
-    interface::run(agent, catalog, session_catalog, Some(current_session), needs_login)
-        .await
-        .map_err(|error| AgentError::Other(Box::new(error)))?;
+    interface::run(
+        agent,
+        catalog,
+        session_catalog,
+        Some(current_session),
+        needs_login,
+    )
+    .await
+    .map_err(|error| AgentError::Other(Box::new(error)))?;
 
     Ok(())
 }

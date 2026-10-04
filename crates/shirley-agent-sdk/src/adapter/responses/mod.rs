@@ -639,4 +639,266 @@ mod tests {
         let error = event.expect_err("failed 应转为错误");
         assert!(error.to_string().contains("boom"), "错误应携带详情: {error}");
     }
+
+    /// 真实网络端到端测试（默认 ignored）。
+    ///
+    /// 需要环境变量：
+    /// - `DEEPSEEK_API_KEY`（必填，缺失即跳过并返回）
+    /// - `SHIRLEY_RESPONSES_BASE_URL`（可选，默认 `https://api.deepseek.com/responses`）
+    /// - `SHIRLEY_RESPONSES_MODEL`（可选，默认 `deepseek-flash`）
+    ///
+    /// 跑法：
+    /// ```sh
+    /// cargo test -p shirley-agent-sdk --lib responses::tests::live -- --ignored --nocapture
+    /// ```
+    #[tokio::test]
+    #[ignore = "真实网络调用，需 DEEPSEEK_API_KEY"]
+    async fn live_responses_round_trip() {
+        let Ok(api_key) = std::env::var("DEEPSEEK_API_KEY") else {
+            eprintln!("跳过：未设置 DEEPSEEK_API_KEY");
+            return;
+        };
+        let base_url = std::env::var("SHIRLEY_RESPONSES_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com/responses".to_owned());
+        let model = std::env::var("SHIRLEY_RESPONSES_MODEL")
+            .unwrap_or_else(|_| "deepseek-flash".to_owned());
+
+        let config = ModelConfig::builder()
+            .protocol(ModelProtocol::Responses)
+            .base_url(base_url)
+            .model(model)
+            .api_key(api_key)
+            .stream(true)
+            .build();
+
+        let messages = vec![
+            message::Message::System {
+                content: "You are a helpful assistant.".into(),
+            },
+            message::Message::User {
+                content: "Say hi in exactly one word.".into(),
+            },
+        ];
+        let tools: Vec<&tool::ToolDefinition> = vec![];
+        let request = ModelRequest {
+            messages: &messages,
+            tools: &tools,
+        };
+
+        let client = reqwest::Client::new();
+        let mut stream = crate::adapter::invoke(&client, &config, request).await;
+        use futures::StreamExt;
+
+        let mut content = String::new();
+        let mut reasoning = String::new();
+        let mut finished = None;
+        while let Some(event) = stream.next().await {
+            match event.expect("流式事件不应报错") {
+                AdapterEvent::ContentDelta(delta) => content.push_str(&delta),
+                AdapterEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
+                AdapterEvent::Finished(response) => {
+                    finished = Some(response);
+                    break;
+                }
+            }
+        }
+
+        let finished = finished.expect("流应产出 Finished");
+        eprintln!("content   = {content:?}");
+        eprintln!("reasoning = {} chars", reasoning.len());
+        eprintln!("finish    = {:?}", finished.finish_reason);
+        eprintln!("usage     = {:?}", finished.usage);
+
+        assert!(
+            !content.trim().is_empty(),
+            "应拿到非空文本输出，实际: {content:?}"
+        );
+        assert!(
+            finished.usage.input_tokens > 0,
+            "usage.input_tokens 应 > 0"
+        );
+    }
+
+    /// 真实网络的**工具往返**测试（默认 ignored）：第一轮模型发起 function_call，
+    /// 我们回传 function_call_output，第二轮拿到最终文本。
+    ///
+    /// 这一步专门验证请求编码的 `function_call` / `function_call_output`
+    /// 与 `call_id` 配对是否被服务端接受。
+    #[tokio::test]
+    #[ignore = "真实网络调用，需 DEEPSEEK_API_KEY"]
+    async fn live_responses_tool_round_trip() {
+        let Ok(api_key) = std::env::var("DEEPSEEK_API_KEY") else {
+            eprintln!("跳过：未设置 DEEPSEEK_API_KEY");
+            return;
+        };
+        let base_url = std::env::var("SHIRLEY_RESPONSES_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com/responses".to_owned());
+        let model = std::env::var("SHIRLEY_RESPONSES_MODEL")
+            .unwrap_or_else(|_| "deepseek-flash".to_owned());
+
+        let config = ModelConfig::builder()
+            .protocol(ModelProtocol::Responses)
+            .base_url(base_url)
+            .model(model)
+            .api_key(api_key)
+            .stream(false)
+            .build();
+
+        let tool_definition = tool::ToolDefinition {
+            name: "get_weather".into(),
+            description: "查询城市天气".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "city": { "type": "string" } },
+                "required": ["city"],
+                "additionalProperties": false
+            }),
+        };
+        let tools = vec![&tool_definition];
+        let client = reqwest::Client::new();
+
+        // 第一轮：期望模型发起 function_call。
+        let first_messages = vec![
+            message::Message::System {
+                content: "你是助手。".into(),
+            },
+            message::Message::User {
+                content: "北京现在天气如何？用工具查。".into(),
+            },
+        ];
+        let first = run_once(&client, &config, &first_messages, &tools).await;
+        let (call_id, call_name) = match &first.message {
+            message::Message::Assistant { tool_calls, .. } => {
+                let call = tool_calls.first().expect("应发起一次工具调用");
+                eprintln!("tool_call = {} / {}", call.id, call.name);
+                (call.id.clone(), call.name.clone())
+            }
+            other => panic!("第一轮应为含工具调用的 assistant，实际: {other:?}"),
+        };
+        assert_eq!(first.finish_reason, ModelFinishReason::ToolCalls);
+        assert_eq!(call_name, "get_weather");
+
+        // 第二轮：回传 function_call_output。
+        let second_messages = vec![
+            message::Message::System {
+                content: "你是助手。".into(),
+            },
+            message::Message::User {
+                content: "北京现在天气如何？用工具查。".into(),
+            },
+            first.message.clone(),
+            message::Message::Tool {
+                tool_call_id: call_id,
+                content: Some("晴，25℃".into()),
+            },
+        ];
+        let second = run_once(&client, &config, &second_messages, &tools).await;
+        match &second.message {
+            message::Message::Assistant { content, .. } => {
+                let text = content.clone().unwrap_or_default();
+                eprintln!("final = {text:?}");
+                assert!(!text.trim().is_empty(), "第二轮应给出最终文本");
+            }
+            other => panic!("第二轮应为文本 assistant，实际: {other:?}"),
+        }
+        assert_eq!(second.finish_reason, ModelFinishReason::Stop);
+    }
+
+    /// 跑一次非流式请求，返回唯一一个 Finished。
+    async fn run_once(
+        client: &reqwest::Client,
+        config: &ModelConfig,
+        messages: &[message::Message],
+        tools: &[&tool::ToolDefinition],
+    ) -> ModelResponse {
+        use futures::StreamExt;
+        let request = ModelRequest { messages, tools };
+        let mut stream = crate::adapter::invoke(client, config, request).await;
+        while let Some(event) = stream.next().await {
+            if let AdapterEvent::Finished(response) = event.expect("请求不应报错") {
+                return response;
+            }
+        }
+        panic!("流应产出 Finished");
+    }
+
+    /// 真实网络的**流式工具调用**测试（默认 ignored）。
+    ///
+    /// 锁死一个关键设计赌注：终态 `response.completed` 携带完整 `output`
+    /// （含 `function_call`），所以我们无需聚合 `function_call_arguments.delta`。
+    #[tokio::test]
+    #[ignore = "真实网络调用，需 DEEPSEEK_API_KEY"]
+    async fn live_responses_streaming_tool_call() {
+        let Ok(api_key) = std::env::var("DEEPSEEK_API_KEY") else {
+            eprintln!("跳过：未设置 DEEPSEEK_API_KEY");
+            return;
+        };
+        let base_url = std::env::var("SHIRLEY_RESPONSES_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com/responses".to_owned());
+        let model = std::env::var("SHIRLEY_RESPONSES_MODEL")
+            .unwrap_or_else(|_| "deepseek-flash".to_owned());
+
+        let config = ModelConfig::builder()
+            .protocol(ModelProtocol::Responses)
+            .base_url(base_url)
+            .model(model)
+            .api_key(api_key)
+            .stream(true)
+            .build();
+
+        let tool_definition = tool::ToolDefinition {
+            name: "get_weather".into(),
+            description: "查询城市天气".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "city": { "type": "string" } },
+                "required": ["city"]
+            }),
+        };
+        let tools = vec![&tool_definition];
+        let messages = vec![
+            message::Message::System {
+                content: "你是助手。".into(),
+            },
+            message::Message::User {
+                content: "北京天气？用工具查。".into(),
+            },
+        ];
+        let request = ModelRequest {
+            messages: &messages,
+            tools: &tools,
+        };
+
+        use futures::StreamExt;
+        let client = reqwest::Client::new();
+        let mut stream = crate::adapter::invoke(&client, &config, request).await;
+        let mut reasoning = String::new();
+        let mut finished = None;
+        while let Some(event) = stream.next().await {
+            match event.expect("流式事件不应报错") {
+                AdapterEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
+                AdapterEvent::ContentDelta(_) => {}
+                AdapterEvent::Finished(response) => {
+                    finished = Some(response);
+                    break;
+                }
+            }
+        }
+
+        let finished = finished.expect("流应产出 Finished");
+        eprintln!("reasoning = {} chars", reasoning.len());
+        eprintln!("finish    = {:?}", finished.finish_reason);
+        match &finished.message {
+            message::Message::Assistant { tool_calls, .. } => {
+                let call = tool_calls.first().expect("终态应含 function_call");
+                eprintln!("tool_call = {} / {} / {}", call.id, call.name, call.arguments);
+                assert_eq!(call.name, "get_weather");
+                assert!(!call.id.is_empty(), "call_id 不应为空");
+                assert!(call.arguments.contains("city"), "arguments 应为完整 JSON");
+            }
+            other => panic!("应为含工具调用的 assistant，实际: {other:?}"),
+        }
+        assert_eq!(finished.finish_reason, ModelFinishReason::ToolCalls);
+        assert!(!reasoning.is_empty(), "流式应产出 reasoning delta");
+    }
 }
