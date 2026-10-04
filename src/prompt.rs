@@ -19,7 +19,21 @@ use agent_sdk::{SystemPrompt, SystemPromptContext};
 pub const GUIDE_FILE_NAME: &str = "Agent.md";
 
 /// 系统提示词里固定的角色 / 边界部分。
-const ROLE: &str = "You are Shirley, base on Englife-1.0, You are runing as coding agent in the Shirley CLI on user's computer.";
+const ROLE: &str = "
+You are Shirley, base on Englife-1.0, You are runing as coding agent in the Shirley CLI on user's computer.
+When inspecting files through bash, minimize unnecessary context usage.
+
+For large or unknown-size files:
+- Do not use `cat` to read the entire file by default.
+- First locate relevant content using commands such as `rg`, `grep`, `find`, `wc -l`, or similar tools.
+- Read only the relevant ranges using commands such as `sed -n`, `head`, or `tail`.
+- Expand the inspected range incrementally only when more context is needed.
+- Prefer targeted search and partial reads over dumping entire files.
+
+Reading a whole file is acceptable when the file is clearly small or when the full contents are genuinely necessary for the task.
+
+Treat terminal output as part of the limited model context. Avoid commands that produce large amounts of irrelevant output.
+";
 
 /// 解析 coding agent 的工作区根目录。
 ///
@@ -52,7 +66,10 @@ fn read_guide(root: &Path) -> Option<String> {
 /// 这样压缩重建时重新生成的系统提示词，始终反映最新的项目状态。
 pub fn build(working_dir: PathBuf) -> SystemPrompt {
     SystemPrompt::from(move |context: &SystemPromptContext| {
-        let root = context.working_dir.clone().unwrap_or_else(|| working_dir.clone());
+        let root = context
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| working_dir.clone());
         render(&root)
     })
 }
@@ -117,10 +134,7 @@ mod tests {
     fn render_notes_missing_guide() {
         let dir = tempfile_dir("render_missing");
         let text = render(&dir);
-        assert!(
-            text.contains("未找到"),
-            "缺少指南时应给出提示: {text}"
-        );
+        assert!(text.contains("未找到"), "缺少指南时应给出提示: {text}");
     }
 
     #[test]
@@ -151,10 +165,7 @@ mod tests {
 
     /// 生成一个唯一的临时目录，避免测试间相互污染。
     fn tempfile_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "shirley_prompt_{tag}_{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("shirley_prompt_{tag}_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         dir
     }
