@@ -159,7 +159,9 @@ fn clip(content: &str) -> String {
 
 /// recall 工具（`docs/recall.md` 4.3）。
 ///
-/// 手写实现 `Tool`（宏生成的工具是无状态的，这里要持有 `Arc<RecallStore>`）。
+/// 手写实现 `Tool`：这里的状态（`Arc<RecallStore>`）由工具自己持有，
+/// 不走 `ToolContext` 注入——因为 store 与 runtime 共享同一份 `Arc`，
+/// 在构造时绑定比让每个调用从上下文取更直接。
 /// query 由 AI 生成——不替 AI 构造 query，少一个不确定性来源。
 pub struct RecallTool {
     store: Arc<RecallStore>,
@@ -207,7 +209,7 @@ impl Tool for RecallTool {
         &self.definition
     }
 
-    fn invoke(&self, input: serde_json::Value) -> ToolFuture<'_> {
+    fn invoke(&self, input: serde_json::Value, _ctx: crate::tool::ToolContext) -> ToolFuture<'_> {
         let store = self.store.clone();
         Box::pin(async move {
             #[derive(serde::Deserialize)]

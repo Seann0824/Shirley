@@ -117,30 +117,66 @@ pub fn encode_request(
         authorization.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, authorization);
     }
-    //  todo: 这里目前没有处理工具注入逻辑，以及思考逻辑。
-    let thinking = match config.thinking {
-        true => "enabled",
-        false => "disabled",
-    };
-
-    let body = serde_json::json!({
+    let mut body = serde_json::json!({
         "model": &config.model,
         // 这里应该转换对吧，但是看情况，我们现在主要以ChatCompletion 为唯一协议，其他协议都是根据这个协议适配过去的
         "messages": encode_messages(input.messages),
         "tools": encode_tools(input.tools),
-        "thinking": {
-            "type": thinking,
-        },
-        "reasoning_effort": &config.reasoning_effort,
         "stream": &config.stream,
     });
 
-    // 2. 处理工具
+    // 可选字段：只在 Some 时才写入，避免向严格校验的端点发送 null。
+    if let Some(temperature) = config.temperature {
+        body["temperature"] = serde_json::json!(temperature);
+    }
+    // 注意线上键名是 ChatCompletions 的 `max_tokens`，而非 Responses 的
+    // `max_output_tokens`。需要 `max_completion_tokens` 等变体时走 extra_body。
+    if let Some(max_output_tokens) = config.max_output_tokens {
+        body["max_tokens"] = serde_json::json!(max_output_tokens);
+    }
+    if let Some(reasoning_effort) = &config.reasoning_effort {
+        body["reasoning_effort"] = serde_json::json!(reasoning_effort);
+    }
+    if let Some(tool_choice) = &config.tool_choice {
+        body["tool_choice"] = tool_choice.clone();
+    }
+    // thinking 只有开启时才写。`{"type":"enabled"}` 是部分厂商的私有约定，
+    // 关闭时发 `disabled` 多数端点不接受，所以关闭就完全省略。
+    if config.thinking {
+        body["thinking"] = serde_json::json!({ "type": "enabled" });
+    }
+
+    // 逃生口最后应用：应用能覆盖标准字段、补厂商私有字段，或删除字段。
+    if let Some(extra) = &config.extra_body {
+        apply_extra_body(&mut body, extra);
+    }
+
     Ok(PreparedRequest {
         url: config.base_url.clone(),
         headers,
         body,
     })
+}
+
+/// 把 `extra` 浅合并进请求体。
+///
+/// - 应用键覆盖标准键；
+/// - 值为 `null` 表示**删除**该键（让应用能移除 SDK 默认写入的字段）；
+/// - `extra` 不是对象时忽略（保持请求体不变）。
+fn apply_extra_body(body: &mut Value, extra: &Value) {
+    let Value::Object(extra) = extra else {
+        return;
+    };
+    let Value::Object(body) = body else {
+        return;
+    };
+    for (key, value) in extra {
+        if value.is_null() {
+            body.remove(key);
+        } else {
+            body.insert(key.clone(), value.clone());
+        }
+    }
 }
 
 pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, AdapterError> {
@@ -363,4 +399,114 @@ pub async fn decode_stream_response(
             });
         }
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ModelProtocol;
+
+    fn config() -> ModelConfig {
+        ModelConfig::builder()
+            .protocol(ModelProtocol::ChatCompletions)
+            .base_url("http://localhost/v1/chat/completions")
+            .model("test-model")
+            .build()
+    }
+
+    fn request<'a>(
+        messages: &'a [message::Message],
+        tools: &'a [&'a tool::ToolDefinition],
+    ) -> ModelRequest<'a> {
+        ModelRequest { messages, tools }
+    }
+
+    fn body(config: &ModelConfig) -> Value {
+        let empty: Vec<message::Message> = vec![];
+        let tools: Vec<&tool::ToolDefinition> = vec![];
+        encode_request(config, &request(&empty, &tools))
+            .expect("编码应成功")
+            .body
+    }
+
+    #[test]
+    fn optional_fields_are_omitted_by_default() {
+        let body = body(&config());
+        assert!(body.get("temperature").is_none());
+        assert!(body.get("max_tokens").is_none());
+        assert!(body.get("reasoning_effort").is_none());
+        assert!(body.get("tool_choice").is_none());
+        // thinking 默认 false → 不写该字段（不发 disabled）
+        assert!(body.get("thinking").is_none());
+    }
+
+    #[test]
+    fn optional_fields_are_encoded_when_set() {
+        let config = ModelConfig::builder()
+            .protocol(ModelProtocol::ChatCompletions)
+            .base_url("http://localhost/v1/chat/completions")
+            .model("test-model")
+            .temperature(0.2)
+            .max_output_tokens(1024)
+            .reasoning_effort("low")
+            .tool_choice(serde_json::json!("required"))
+            .thinking(true)
+            .build();
+
+        let body = body(&config);
+        assert_eq!(body["temperature"], serde_json::json!(0.2));
+        assert_eq!(body["max_tokens"], serde_json::json!(1024));
+        assert_eq!(body["reasoning_effort"], serde_json::json!("low"));
+        assert_eq!(body["tool_choice"], serde_json::json!("required"));
+        assert_eq!(body["thinking"], serde_json::json!({ "type": "enabled" }));
+    }
+
+    #[test]
+    fn extra_body_overrides_standard_fields() {
+        let config = ModelConfig::builder()
+            .protocol(ModelProtocol::ChatCompletions)
+            .base_url("http://localhost/v1/chat/completions")
+            .model("test-model")
+            .reasoning_effort("low")
+            .extra_body(serde_json::json!({
+                "reasoning_effort": "high",
+                "enable_thinking": true,
+            }))
+            .build();
+
+        let body = body(&config);
+        assert_eq!(body["reasoning_effort"], serde_json::json!("high"));
+        assert_eq!(body["enable_thinking"], serde_json::json!(true));
+    }
+
+    #[test]
+    fn extra_body_null_deletes_key() {
+        let config = ModelConfig::builder()
+            .protocol(ModelProtocol::ChatCompletions)
+            .base_url("http://localhost/v1/chat/completions")
+            .model("test-model")
+            .thinking(true)
+            .extra_body(serde_json::json!({ "thinking": null }))
+            .build();
+
+        let body = body(&config);
+        assert!(
+            body.get("thinking").is_none(),
+            "null 应删除 thinking 键，实际: {body}"
+        );
+    }
+
+    #[test]
+    fn extra_body_ignores_non_object() {
+        let config = ModelConfig::builder()
+            .protocol(ModelProtocol::ChatCompletions)
+            .base_url("http://localhost/v1/chat/completions")
+            .model("test-model")
+            .extra_body(serde_json::json!("not an object"))
+            .build();
+
+        let body = body(&config);
+        // 非对象忽略，标准字段保持完好
+        assert_eq!(body["model"], serde_json::json!("test-model"));
+    }
 }

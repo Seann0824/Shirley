@@ -64,7 +64,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 - `Message`、`ToolCall`、`Usage`
 - `ModelConfig`、`ModelProtocol`、`AdapterError`
 - `ErrorKind`、`SdkError`（统一错误契约）
-- `tool`（宏）、`ToolManager`、`Tool`、`ToolDefinition`、`ToolError`
+- `tool`（宏）、`ToolManager`、`Tool`、`ToolDefinition`、`ToolError`、`ToolContext`
 - `sandbox`（`Sandbox` / `SandboxSpec` / `SandboxOutput` / `SandboxBackend` / `ProcessBackend` / `SandboxError` / `NetworkPolicy` / `Capabilities`）
 - `workspace`（`WorkSpace` / `WorkspaceError`）
 
@@ -100,21 +100,22 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 
 **3. 协议适配层** — `crates/shirley-agent-sdk/src/adapter/`
 
-- `ModelConfig` 用 `bon` 生成 builder：`protocol` / `base_url` / `model` / `api_key` / `request_timeout` / `stream` / `thinking` / `reasoning_effort` / `temperature` / `max_output_tokens` / `context_window_tokens`
+- `ModelConfig` 用 `bon` 生成 builder：`protocol` / `base_url` / `model` / `api_key` / `stream` / `thinking` / `reasoning_effort` / `temperature` / `max_output_tokens` / `context_window_tokens` / `tool_choice` / `extra_body`
 - `codec(protocol)` 返回一对函数指针 `(Encoder, Decoder)`，目前只有 `ChatCompletions` 有实现；`Responses` 和 `AnyhtopicMessages` 返回 `Err(AdapterError::UnsupportedProtocol)`（**不再 panic**）
 - `invoke()` 返回 `Stream<Item = Result<AdapterEvent, AdapterError>>`：
   - 非流式：读完整 body、decode，产出单个 `Finished(ModelResponse)`
   - 流式：走 `decode_stream_response`，逐块产出 `ReasoningDelta` / `ContentDelta` / `Finished`
 - `ensure_success` 单独抽出来做状态检查，保证错误体与状态码一起保留（重试决策的唯一依据）
 - `chat_completions/mod.rs` 里 `encode_messages` / `encode_tools` 做的是"内部 Message → OpenAI 格式"的转换；`dto.rs` 只做反序列化结构定义
-- `request_timeout` / `temperature` / `max_output_tokens` 目前**已定义但没进请求体**（`encode_request` 只写了 model / messages / tools / thinking / reasoning_effort / stream）
+- `temperature` / `max_output_tokens` / `tool_choice` 已接线（`Some` 时才写入请求体，`max_output_tokens` 在 ChatCompletions 上的键名是 `max_tokens`）；`extra_body` 是覆盖请求体的逃生口（浅合并，`null` 删除键）；`thinking` 仅在开启时写 `{"type":"enabled"}`。见 `docs/sdk-gaps.md` gap-4
 
 已知设计债：`encode_messages` 写在适配层，但作者自己注释说"这逻辑其实该在 message 侧"。`encode_request` 里 `thinking` 现在按 `config.thinking` 映射成 `enabled` / `disabled`（**流式已实现**，不再写死）。
 
 **4. 工具系统** — `crates/shirley-agent-sdk/src/tool/mod.rs`
 
-- `Tool` trait：`definition()` 拿元信息，`invoke(Value)` 返回 `ToolFuture`
+- `Tool` trait：`definition()` 拿元信息，`invoke(Value, ToolContext)` 返回 `ToolFuture`
 - `ToolManager`：注册时查重，`definitions()` **按名字排序**（这是为了让 prefix 稳定、提高缓存命中率，别随手删掉这个 sort）
+- `ToolContext`：类型擦除的运行时上下文容器（`Arc<HashMap<TypeId, Arc<dyn Any>>>`）。工具并发执行，所以上下文只能是 `Arc<Mutex<T>>` 这类内部可变性句柄；应用用 `ToolContext::new().with(data)` 注入，工具用 `ctx.get::<T>()` 取回。`Agent` builder 的 `.tool_context()` 传入，每次调用前 clone 分发（`Arc`，只加引用计数）。见 `docs/sdk-gaps.md` gap-1
 - `ToolError` 分四类：`ExecutionError` / `RepetitionError` / `NotFoundError` / `ArgumentsError`
 
 已知设计债：`ToolDefinition.parameters` 直接就是 OpenAI 格式的 JSON Schema，所以一旦要兼容 Anthropic，参数结构没法复用。`docs/adapter-layer.md` 里说得很清楚，正确做法是在中间加一层标准化的参数模型再往外转换。
@@ -129,6 +130,19 @@ pub async fn bash(
     #[param(description = "要执行的命令")] command: String,
     #[param(description = "超时时间（秒）")] timeout: Option<u64>,
 ) -> Result<String, shirley_agent_sdk::ToolError> { ... }
+```
+
+有状态工具可声明一个 `ToolContext`（或 `&ToolContext`）参数——它**不进入参数 schema**，由 SDK 在调用时注入，按原位置传给函数（一个工具最多一个）：
+
+```rust
+#[tool(description = "把计数加一")]
+async fn bump(ctx: &ToolContext, #[param(description = "增量")] by: u32) -> Result<u32, ToolError> {
+    let session = ctx.get::<Arc<Mutex<Session>>>()
+        .ok_or_else(|| ToolError::ExecutionError("session not provided".into()))?;
+    let mut guard = session.lock().unwrap();
+    guard.counter += by;
+    Ok(guard.counter)
+}
 ```
 
 宏展开后会在同名 `mod` 里生成：`Arguments` 结构体（`Deserialize` + `JsonSchema` + `deny_unknown_fields`）、`GenerateTool`（实现 `Tool`）、`definition()`、`tool()`。调用方写 `tools::bash_tool::tool()` 注册即可。
@@ -296,7 +310,7 @@ cargo clippy --all-targets         # 静态检查
 5. **权限控制 / 行为限制**：只有 bash 的硬编码黑名单 + 沙盒，没有通用的权限层（`docs/security.md` 里的 `PermissionPolicy` 还没落地）
 6. **任务规划**：长任务怎么拆解、怎么跟踪进度，还没设计
 7. **`apply_patch` 工具**：还没做（`plan.md` 里提到）
-8. **未接线配置**：`request_timeout` / `temperature` / `max_output_tokens` 定义了但没进请求体
+8. ~~未接线配置~~：`temperature` / `max_output_tokens` / `tool_choice` 已接线，并新增 `extra_body` 逃生口（见 `docs/sdk-gaps.md` gap-4）
 9. **未使用的 `StopReason`**：`MaxStepsReached` / `Cancelled` 定义了但不会产生（没有 max_steps 和取消机制）
 10. **压缩重试**：压缩失败直接中断，`plan.md` 提到"压缩失败重试有时能成功"
 11. **recall 的技术债**（`docs/recall.md` 第八节）：无持久化（进程结束即失）；BM25 只做词面匹配（同义改写召回不了，embedding 混合召回未做，`fuse.rs`/RRF 留接口）；中文无分词器（单字切，有噪声）；工具结果统一清空丢弃了不可重建的调用（一次性快照重跑拿不到当时结果，等工具能力细分后回填 per-call 判定）。**（曾经的坑已修：初版误把工具类消息也入库 + 漏了防递归，导致召回内容雪球式膨胀——见 `docs/recall.md` 2.2 注）**

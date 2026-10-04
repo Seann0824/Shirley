@@ -32,6 +32,19 @@ pub struct ModelConfig {
     pub temperature: Option<f64>,
     pub max_output_tokens: Option<u32>,
     pub context_window_tokens: Option<u64>,
+    /// `tool_choice` 原样透传（`"auto"` / `"none"` / `"required"` 或对象）。
+    ///
+    /// 用 [`serde_json::Value`] 而非枚举：各家取值形态不一，枚举会反复破 API。
+    /// `None` 表示不发送该字段（沿用端点默认）。
+    pub tool_choice: Option<serde_json::Value>,
+    /// 覆盖 / 追加请求体的逃生口。
+    ///
+    /// 各厂商私有字段（`enable_thinking` / `thinking_budget` / `{type:"enabled"}` …）
+    /// 差异极大，逐个加分支是无底洞。应用把要改的字段放这里，SDK 在标准字段
+    /// 构造完成后做一次**浅合并**：应用键覆盖标准键，**值为 `null` 表示删除该键**
+    /// （这样应用能彻底移除 SDK 默认写入的字段）。`None` 表示不做任何覆盖。
+    #[builder(into)]
+    pub extra_body: Option<serde_json::Value>,
 }
 
 pub enum AdapterEvent {

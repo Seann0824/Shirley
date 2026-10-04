@@ -400,7 +400,10 @@ mod tests {
             name: "read_file".into(),
             arguments: r#"{"path":"m.txt","start_line":1,"line_count":1}"#.into(),
         };
-        let output = manager.invoke(&call).await.expect("调用应成功");
+        let output = manager
+            .invoke(&call, shirley_agent_sdk::ToolContext::new())
+            .await
+            .expect("调用应成功");
         let text = output.as_str().unwrap_or_default();
         assert!(text.contains("alpha"), "应读到内容: {text}");
         assert!(!text.contains("beta"), "应受行数限制: {text}");

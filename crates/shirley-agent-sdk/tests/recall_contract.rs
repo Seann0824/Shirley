@@ -4,7 +4,7 @@
 //! chunk 化的并发多工具配对、recall 工具的参数与返回。
 
 use shirley_agent_sdk::chunk_messages;
-use shirley_agent_sdk::{Tool, ToolError};
+use shirley_agent_sdk::{Tool, ToolContext, ToolError};
 use shirley_agent_sdk::{Message, RecallStore, RecallTool, ToolCall};
 use std::sync::Arc;
 
@@ -105,17 +105,19 @@ async fn recall_tool_invocation() -> Result<(), ToolError> {
     let tool = RecallTool::new(store);
 
     let output = tool
-        .invoke(serde_json::json!({ "query": "用户 名字 代号", "k": 3 }))
+        .invoke(serde_json::json!({ "query": "用户 名字 代号", "k": 3 }), ToolContext::new())
         .await?;
     let text = output.as_str().expect("返回应是字符串");
     assert!(text.contains("用户名叫夏莉"), "recall 结果应含原文");
 
     // 缺 query → 参数错误
-    let err = tool.invoke(serde_json::json!({ "k": 1 })).await;
+    let err = tool.invoke(serde_json::json!({ "k": 1 }), ToolContext::new()).await;
     assert!(err.is_err());
 
     // 无命中 → 友好提示（不报错）
-    let output = tool.invoke(serde_json::json!({ "query": "zzz 不存在的词" })).await?;
+    let output = tool
+        .invoke(serde_json::json!({ "query": "zzz 不存在的词" }), ToolContext::new())
+        .await?;
     assert!(output.as_str().unwrap().contains("no relevant history"));
     Ok(())
 }

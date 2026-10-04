@@ -1,3 +1,5 @@
+use std::any::{Any, TypeId};
+use std::sync::Arc;
 use std::{collections::HashMap, pin::Pin};
 
 use serde::Serialize;
@@ -52,6 +54,48 @@ pub type ToolName = String;
 pub type ToolFuture<'a> =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ToolError>> + Send + 'a>>;
 
+/// 工具运行时上下文。
+///
+/// 工具在 ReAct 循环里是**并发执行**的（`runtime/agent.rs` 用 `FuturesUnordered`），
+/// 所以上下文不可能是 `&mut Session`——多个工具同时跑、同时要可变借用同一份会话
+/// 必然冲突。唯一可行的形态是**内部可变性句柄**（`Arc<Mutex<Session>>` 之类）。
+///
+/// 本类型是类型擦除的容器：应用把任意 `Send + Sync + 'static` 数据用
+/// [`ToolContext::with`] 塞进去，工具用 [`ToolContext::get`] 取回。存的是 `Arc`，
+/// clone 只增加引用计数，可以低成本地按调用分发。
+///
+/// ```
+/// use shirley_agent_sdk::ToolContext;
+/// use std::sync::Mutex;
+///
+/// let ctx = ToolContext::new().with(Mutex::new(42_u32));
+/// let value = ctx.get::<Mutex<u32>>().expect("session not provided");
+/// assert_eq!(*value.lock().unwrap(), 42);
+/// ```
+#[derive(Clone, Default)]
+pub struct ToolContext {
+    inner: Arc<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
+}
+
+impl ToolContext {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// 存入一份应用数据。同一类型重复存入时后写入者覆盖。
+    pub fn with<T: Any + Send + Sync>(mut self, value: T) -> Self {
+        Arc::make_mut(&mut self.inner).insert(TypeId::of::<T>(), Arc::new(value));
+        self
+    }
+
+    /// 取出应用数据。类型不匹配或未注入时返回 `None`。
+    pub fn get<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
+        self.inner
+            .get(&TypeId::of::<T>())
+            .and_then(|value| value.clone().downcast::<T>().ok())
+    }
+}
+
 pub struct ToolDefinition {
     pub name: String,
 
@@ -65,7 +109,8 @@ pub trait Tool: Send + Sync {
     fn definition(&self) -> &ToolDefinition;
 
     // SDK 内部调用接受JSON, 通过识别到调用工具后，反序列化到对应的 Argument 类型
-    fn invoke(&self, input: serde_json::Value) -> ToolFuture<'_>;
+    // ctx 是调用级运行时上下文，见 [`ToolContext`]。
+    fn invoke(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture<'_>;
 }
 pub struct ToolManager {
     tools: HashMap<ToolName, Box<dyn Tool>>,
@@ -114,7 +159,11 @@ impl ToolManager {
     ///
     /// 返回 `ToolError`：调用方（runtime）如果需要 `AgentError`，
     /// 用 `?` 自动收敛即可，不必在这里提前包装。
-    pub async fn invoke(&self, input: &message::ToolCall) -> Result<serde_json::Value, ToolError> {
+    pub async fn invoke(
+        &self,
+        input: &message::ToolCall,
+        ctx: ToolContext,
+    ) -> Result<serde_json::Value, ToolError> {
         let tool = self.tools.get(&input.name).ok_or_else(|| {
             ToolError::NotFoundError(input.name.clone())
         })?;
@@ -124,6 +173,6 @@ impl ToolManager {
         })?;
 
         // 交给工具处理自己的参数
-        tool.invoke(arguments).await
+        tool.invoke(arguments, ctx).await
     }
 }

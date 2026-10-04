@@ -21,6 +21,16 @@ struct ToolParameter {
     description: LitStr,
 }
 
+// 一次工具调用里、按原函数参数顺序排列的实参。
+// 上下文参数不进入参数 Schema，但仍要按位置传给原函数，所以这里保留顺序。
+enum CallArgument {
+    // 从 JSON 参数反序列化来的普通参数
+    Field(Ident),
+    // 运行时上下文（由 SDK 注入），见 SDK 的 ToolContext。
+    // by_ref 表示原函数声明的是 `&ToolContext`，否则是按值 `ToolContext`。
+    Context { by_ref: bool },
+}
+
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
     // 根据解析结果分别处理
     match try_expand(attr, item) {
@@ -36,11 +46,11 @@ fn try_expand(attr: TokenStream, item: TokenStream) -> syn::Result<proc_macro2::
     let mut function = syn::parse::<ItemFn>(item)?;
 
     // 提取参数信息，同时清除已经消费的辅助注解
-    let parameters = extract_parameters(&mut function)?;
+    let (parameters, call_arguments) = extract_parameters(&mut function)?;
 
     // 根据收集的信息生成代码。
     // generate_tool 返回代码 token，用 Ok 包装成成功结果。
-    Ok(generate_tool(function, config, parameters))
+    Ok(generate_tool(function, config, parameters, call_arguments))
 }
 
 // 解析 #tool[(...)] 括号里面的内容
@@ -79,9 +89,36 @@ fn parse_parameter_description(attribute: &Attribute) -> syn::Result<LitStr> {
     description.ok_or_else(|| syn::Error::new_spanned(attribute, "missing description"))
 }
 
-// 读取参数
-fn extract_parameters(function: &mut ItemFn) -> syn::Result<Vec<ToolParameter>> {
+// 判断上下文参数是不是引用形式（`&ToolContext`）。
+fn context_is_by_ref(ty: &Type) -> bool {
+    matches!(ty, Type::Reference(_))
+}
+
+// 判断一个类型是不是运行时上下文参数（ToolContext）。
+//
+// 按类型路径的最后一段匹配，这样 `ToolContext` 与
+// `shirley_agent_sdk::ToolContext` 两种写法都能识别。
+fn is_tool_context_type(ty: &Type) -> bool {
+    // `&ToolContext` 与 `ToolContext` 都算
+    let ty = match ty {
+        Type::Reference(reference) => reference.elem.as_ref(),
+        other => other,
+    };
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "ToolContext")
+}
+
+// 读取参数。返回 (进入 Schema 的参数, 按原顺序排列的调用实参)。
+fn extract_parameters(function: &mut ItemFn) -> syn::Result<(Vec<ToolParameter>, Vec<CallArgument>)> {
     let mut parameters = vec![];
+    let mut call_arguments = vec![];
+    let mut has_context = false;
 
     // sig 是函数签名，inputs 是参数列表
     for input in &mut function.sig.inputs {
@@ -107,6 +144,28 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<Vec<ToolParameter>> 
             ));
         }
 
+        // 上下文参数：不进入 Schema，单独按位置传给原函数。
+        if is_tool_context_type(&parameter.ty) {
+            if has_context {
+                return Err(syn::Error::new_spanned(
+                    &parameter.ty,
+                    "a tool accepts at most one ToolContext parameter",
+                ));
+            }
+            if let Some(attribute) = parameter.attrs.first() {
+                return Err(syn::Error::new_spanned(
+                    attribute,
+                    "ToolContext parameters must not carry #[param(...)]; \
+                     the context is injected by the SDK, not by the model",
+                ));
+            }
+            has_context = true;
+            call_arguments.push(CallArgument::Context {
+                by_ref: context_is_by_ref(&parameter.ty),
+            });
+            continue;
+        }
+
         let mut description = None;
 
         for attribute in &parameter.attrs {
@@ -129,6 +188,8 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<Vec<ToolParameter>> 
             syn::Error::new_spanned(&parameter.pat, "missing #[param(description = \"parameter description\")]")
         })?;
 
+        call_arguments.push(CallArgument::Field(pattern.ident.clone()));
+
         parameters.push(ToolParameter {
             name: pattern.ident.clone(),
             ty: (*parameter.ty).clone(),
@@ -138,7 +199,7 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<Vec<ToolParameter>> 
         // 清除 param 辅助注解
         parameter.attrs.clear();
     }
-    Ok(parameters)
+    Ok((parameters, call_arguments))
 }
 
 // 通用读取#[xxx(description = xxx)]
@@ -173,6 +234,7 @@ fn generate_tool(
     function: ItemFn,
     config: ToolConfig,
     parameters: Vec<ToolParameter>,
+    call_arguments: Vec<CallArgument>,
 ) -> proc_macro2::TokenStream {
     // 原始函数名
     let name = &function.sig.ident;
@@ -194,11 +256,17 @@ fn generate_tool(
         }
     });
 
-    let call_arguments = parameters.iter().map(|parameter| {
-        let field_name = &parameter.name;
-
-        quote! {
+    let call_arguments = call_arguments.iter().map(|argument| match argument {
+        CallArgument::Field(field_name) => quote! {
             args.#field_name
+        },
+        // 按原函数的声明形式传：`&ToolContext` 借引用，`ToolContext` 按值移动。
+        CallArgument::Context { by_ref } => {
+            if *by_ref {
+                quote! { &__tool_context }
+            } else {
+                quote! { __tool_context.clone() }
+            }
         }
     });
 
@@ -239,8 +307,12 @@ fn generate_tool(
                     &self.definition
                 }
 
-                // 接受 SDK 统一传入的 JSON 参数
-                fn invoke(&self, input: ::serde_json::Value) -> ::shirley_agent_sdk::ToolFuture<'_> {
+                // 接受 SDK 统一传入的 JSON 参数与运行时上下文
+                fn invoke(
+                    &self,
+                    input: ::serde_json::Value,
+                    __tool_context: ::shirley_agent_sdk::ToolContext,
+                ) -> ::shirley_agent_sdk::ToolFuture<'_> {
                     // 1. 将 input 反序列化
 
                     // 2. 调用原始函数

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "Shirley"
-version = "0.0.1"
+version = "0.0.2-alpha"
 dependencies = [
  "chrono",
  "crossterm",
@@ -2313,7 +2313,7 @@ dependencies = [
 
 [[package]]
 name = "shirley-agent-sdk"
-version = "0.0.1"
+version = "0.0.2-alpha"
 dependencies = [
  "async-stream",
  "bon",
@@ -2330,7 +2330,7 @@ dependencies = [
 
 [[package]]
 name = "shirley-agent-sdk-macros"
-version = "0.0.1"
+version = "0.0.2-alpha"
 dependencies = [
  "proc-macro2",
  "quote",

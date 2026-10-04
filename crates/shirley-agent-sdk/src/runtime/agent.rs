@@ -40,6 +40,11 @@ pub struct Agent {
     /// 持久化的是**原始 Message 全量日志**；召回库由它派生，不单独落盘。
     /// system 提示词不入日志——恢复时由 [`Agent::system_message`] 现生成。
     session: Option<Arc<dyn SessionStore>>,
+    /// 工具运行时上下文（见 [`tool::ToolContext`]）。
+    ///
+    /// 每次工具调用前 clone 一份分发下去——`ToolContext` 内部是 `Arc`，
+    /// clone 只增加引用计数。应用用它给有状态工具注入会话句柄等数据。
+    tool_context: tool::ToolContext,
 }
 
 #[bon::bon]
@@ -53,6 +58,7 @@ impl Agent {
         #[builder(default = tool::ToolManager::new())] mut tools: tool::ToolManager,
         #[builder(into)] compression_instruction: Option<String>,
         #[builder(into)] session: Option<Arc<dyn SessionStore>>,
+        #[builder(default)] tool_context: tool::ToolContext,
     ) -> Result<Self, AgentError> {
         // 召回是 compaction 的自然配套（`docs/recall.md` 决策 2）：存储与工具共享 Arc，
         // recall 工具在此自动注册进 ToolManager，应用层完全无感。
@@ -88,6 +94,7 @@ impl Agent {
             token_counter: token::HeuristicCounter::new(),
             recall,
             session,
+            tool_context,
         })
     }
 
@@ -345,9 +352,12 @@ impl Agent {
                                         };
 
                                         let tools = &self.tools;
+                                        // ToolContext 内部是 Arc，clone 只加引用计数；
+                                        // 在循环里 clone 而不是把 self 捕获进 async 块。
+                                        let ctx = self.tool_context.clone();
 
                                         tasks.push(async move {
-                                            let content = match tools.invoke(call).await {
+                                            let content = match tools.invoke(call, ctx).await {
                                                 Ok(output) => output.to_string(),
                                                 // TODO: 感觉这里不太合理，不过如果消费者是AI合理，外部消费者应该通过 AgentEvent 把错误信息传递出去
                                                 Err(error) => error.to_string(),

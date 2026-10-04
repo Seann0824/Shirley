@@ -6,7 +6,7 @@
 //! `map_err(::shirley_agent_sdk::AgentError::Tool)?`，等于强迫每个工具作者引用 SDK 的顶层错误类型。
 //! 现在工具层只暴露 `ToolError`，由 runtime 在调用点收敛。
 
-use shirley_agent_sdk::{ToolCall, ToolError, ToolManager, tool};
+use shirley_agent_sdk::{ToolCall, ToolContext, ToolError, ToolManager, tool};
 
 /// 构造一次工具调用。
 ///
@@ -45,7 +45,7 @@ async fn tool_round_trip() {
     manager.register(add::tool()).expect("注册应成功");
 
     let call = tool_call("call_1", "add", r#"{"left": 2, "right": 3}"#);
-    let output = manager.invoke(&call).await.expect("调用应成功");
+    let output = manager.invoke(&call, ToolContext::new()).await.expect("调用应成功");
 
     assert_eq!(output, serde_json::json!(5));
 }
@@ -59,7 +59,7 @@ async fn tool_error_passes_through() {
     manager.register(always_fails::tool()).expect("注册应成功");
 
     let call = tool_call("call_1", "always_fails", r#"{"message": "炸了"}"#);
-    let error = manager.invoke(&call).await.expect_err("应该失败");
+    let error = manager.invoke(&call, ToolContext::new()).await.expect_err("应该失败");
 
     // 工具自己抛的 ExecutionError 必须原样保留，而不是被包成别的东西。
     assert!(
@@ -79,7 +79,7 @@ async fn bad_arguments_are_reported_as_arguments_error() {
 
     // 缺字段
     let call = tool_call("call_1", "add", r#"{"left": 2}"#);
-    let error = manager.invoke(&call).await.expect_err("缺字段应失败");
+    let error = manager.invoke(&call, ToolContext::new()).await.expect_err("缺字段应失败");
     assert!(
         matches!(error, ToolError::ArgumentsError(_)),
         "缺字段应是 ArgumentsError，实际: {error:?}"
@@ -87,7 +87,7 @@ async fn bad_arguments_are_reported_as_arguments_error() {
 
     // arguments 根本不是 JSON
     let call = tool_call("call_2", "add", "not json");
-    let error = manager.invoke(&call).await.expect_err("非法 JSON 应失败");
+    let error = manager.invoke(&call, ToolContext::new()).await.expect_err("非法 JSON 应失败");
     assert!(
         matches!(error, ToolError::ArgumentsError(_)),
         "非法 JSON 应是 ArgumentsError，实际: {error:?}"
@@ -99,7 +99,7 @@ async fn bad_arguments_are_reported_as_arguments_error() {
 async fn unknown_tool_is_not_found() {
     let manager = ToolManager::new();
     let call = tool_call("call_1", "nope", "{}");
-    let error = manager.invoke(&call).await.expect_err("不存在的工具应失败");
+    let error = manager.invoke(&call, ToolContext::new()).await.expect_err("不存在的工具应失败");
     assert!(
         matches!(error, ToolError::NotFoundError(_)),
         "应是 NotFoundError，实际: {error:?}"
