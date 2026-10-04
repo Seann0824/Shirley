@@ -41,7 +41,7 @@ cargo clippy --all-targets
 `shirley-agent-sdk` can be used as a standalone library:
 
 ```sh
-cargo add shirley-agent-sdk@0.0.1-alpha
+cargo add shirley-agent-sdk
 ```
 
 See [`crates/shirley-agent-sdk/README.md`](crates/shirley-agent-sdk/README.md) for details.

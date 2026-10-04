@@ -4,7 +4,7 @@ A business-agnostic Agent SDK for Rust. It packages the building blocks needed t
 
 The [Shirley](https://github.com/Seann0824/Shirley) TUI coding agent is built on top of it.
 
-> **Status: `0.0.1-alpha`** — the API is still changing. Pre-release versions are not selected by `cargo add` by default, so pin the version explicitly.
+> **Status: `0.0.1`** — an early release; the API is still changing.
 
 ## Features
 
@@ -20,7 +20,7 @@ The [Shirley](https://github.com/Seann0824/Shirley) TUI coding agent is built on
 ## Installation
 
 ```sh
-cargo add shirley-agent-sdk@0.0.1-alpha
+cargo add shirley-agent-sdk
 ```
 
 `shirley-agent-sdk-macros` (the implementation of the `#[tool]` macro) is pulled in automatically as a transitive dependency — no need to add it yourself.

@@ -1,6 +1,6 @@
 [package]
 name = "shirley-agent-sdk"
-version = "0.0.1-alpha"
+version = "0.0.1"
 edition = "2024"
 description = "Agent SDK for building LLM agents: messages, tools, protocol adapters, ReAct runtime, sandbox and workspace"
 license = "MIT OR Apache-2.0"
@@ -11,7 +11,7 @@ readme = "README.md"
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-shirley-agent-sdk-macros = { version = "0.0.1-alpha", path = "../shirley-agent-sdk-macros" }
+shirley-agent-sdk-macros = { version = "0.0.1", path = "../shirley-agent-sdk-macros" }
 schemars = { version = "1.2.2", features = ["derive"] }
 bon = "3.10.1"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }

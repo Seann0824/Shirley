@@ -1,6 +1,6 @@
 [package]
 name = "shirley-agent-sdk-macros"
-version = "0.0.1-alpha"
+version = "0.0.1"
 edition = "2024"
 description = "Procedural macros for shirley-agent-sdk (the #[tool] attribute)"
 license = "MIT OR Apache-2.0"

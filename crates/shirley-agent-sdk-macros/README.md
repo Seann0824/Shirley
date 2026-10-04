@@ -8,7 +8,7 @@ Procedural macros for [`shirley-agent-sdk`](https://crates.io/crates/shirley-age
 
 ```toml
 [dependencies]
-shirley-agent-sdk = "0.0.1-alpha"
+shirley-agent-sdk = "0.0.1"
 ```
 
 ## The `#[tool]` macro
