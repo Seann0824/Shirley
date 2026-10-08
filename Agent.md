@@ -34,6 +34,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | `docs/adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 |
 | `docs/responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件（**已实现**） |
 | `docs/anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / 流式分片聚合 / usage 语义（**已实现**） |
+| `docs/todo.md` | 任务账本 `todo`：模型自维护、跨压缩存活的任务状态 / 每轮末尾注入（**已实现**） |
 | `docs/testing.md` | SDK 单测策略、缓存命中率基准 |
 | `docs/plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 |
 | `docs/tool-lifecycle.md` | 工具生命周期：`ToolContext` 归 `ToolManager` / `on_register`（created）/ `on_unregister`（destroy）/ `unregister`（**已实现**） |
@@ -285,6 +286,26 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
 - **工具输出统一清空**：压缩时 Tool.content 替换为占位标记（`[工具结果已省略以节省上下文；如仍需要，请重新执行调用获取当前状态]`），AI 走重建路径。这是 v0 有意的技术债（见下）。
 - `<compacted_range>` 模板措辞已更新：重建路径（重新读取/执行）与召回路径（recall 工具）显式分立——这是 AI"感知到自己忘了"的钩子。
 
+**5.1 任务账本（todo）** — `crates/shirley-agent-sdk/src/todo/`（`docs/todo.md`）
+
+压缩的第三个配套能力：recall 找回"用户说过什么"，todo 记录"我做到哪了"。定位：
+**compaction 的自然配套，SDK 内部能力，应用层无感**——与 recall 一样在 `Agent::new`
+里自动注册工具、自动注入。
+
+| 文件 | 职责 |
+| --- | --- |
+| `mod.rs` | `TodoStore`（`Arc<Mutex<TaskState>>`，与 `RecallStore` 同款）+ `TodoUpdate` / `TodoStep`（补丁入参）+ `TodoTool`（手写 `Tool`，持有 `Arc<TodoStore>`）+ `TASK_STATE_HEADER` + 单测 |
+
+核心设计（`docs/todo.md` 二、三个核心决策）：
+
+- **模型写，不做程序化推断**：暴露 `todo` 工具，模型自己决定何时更新（与 recall"检索 AI 触发"同一哲学——状态判断发生在 AI 层最准）。
+- **不进 `self.messages`，每轮作为 system 追加在末尾注入**：账本单独持有，压缩碰不到它，天然跨压缩存活；注入位置选**末尾**是因为追加不动前面的前缀，账本稳定时前缀缓存照常命中（`responses-api.md` 里"system 原位保留"正是为这个）。代价是模型每次调 `todo` 会让"账本那条 system 之后"的前缀失效——这是"每轮可见"的固有代价，用"放末尾 + 只写变化"压到最小。三个适配器都能处理任意位置 system（ChatCompletions 原样输出 / Responses 原位保留 / Anthropic 摘到顶层 `system`）。
+- **补丁语义**：`goal` 设置替换、`steps` **整体替换**（清单短，每轮重发全量天然自纠）、`add_findings` / `add_open_questions` **追加**、`clear` 重置；未提供的字段保持原样。
+- **渲染成 XML**（`<task_state>` / `<goal>` / `<steps>` / `<findings>` / `<open_questions>`）：空账本不注入；`&` / `<` / `>` 转义；`MAX_RENDER_CHARS = 4000` 超限截断并显式标注（防账本自己垄断上下文）。
+- **切换会话清空**：`Agent::switch_session` 里除 `recall.clear()` 外还 `todo.clear()`——旧会话任务状态绝不残留。
+
+实现位置：`todo/mod.rs`（数据 + 工具 + 单测）、`runtime/agent.rs`（持有 `Arc<TodoStore>`、注册、`active_messages()` 末尾注入、`switch_session` 清空）。对外 re-export `TASK_STATE_HEADER` / `TodoStep` / `TodoStore` / `TodoTool` / `TodoUpdate`。已知缺口见 `docs/todo.md` 第七节（无持久化 / 无自动清理 / 注入即失前缀缓存 / 模型可能不用）。
+
 ---
 
 **五、沙盒与工作区（SDK 新增能力）**
@@ -346,6 +367,7 @@ cargo clippy --all-targets         # 静态检查
 - 工作区路径越界校验
 - 统一错误契约（`ErrorKind` / `SdkError`）
 - 召回：压缩段入库 + BM25 检索 + recall 工具（AI 主动触发）
+- 任务账本：`todo` 工具（模型自维护）+ 每轮末尾注入（跨压缩存活），`Agent::new` 自动注册、`switch_session` 自动清空
 
 **明确没做的**：
 

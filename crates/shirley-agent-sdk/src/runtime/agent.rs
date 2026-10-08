@@ -6,6 +6,7 @@ use crate::adapter;
 use crate::adapter::ModelRequest;
 use crate::message;
 use crate::recall::{self, RecallStore};
+use crate::todo::{self, TodoStore};
 use crate::session::SessionStore;
 use crate::token;
 use crate::tool;
@@ -35,6 +36,9 @@ pub struct Agent {
     /// 召回存储（`docs/recall.md`）：被压缩掉对话段的内存存档 + BM25 检索。
     /// SDK 内部能力，应用层无感；recall 工具持有同一 `Arc` 的另一份引用。
     recall: Arc<RecallStore>,
+    /// 任务账本（`todo` 模块）：模型自己维护、跨上下文压缩存活的任务状态。
+    /// SDK 内部能力，应用层无感；`todo` 工具持有同一 `Arc` 的另一份引用。
+    todo: Arc<TodoStore>,
     /// 会话日志（`docs/session.md`）：`None` 表示不落盘（行为与现状一致）。
     ///
     /// 持久化的是**原始 Message 全量日志**；召回库由它派生，不单独落盘。
@@ -58,6 +62,9 @@ impl Agent {
         // recall 工具在此自动注册进 ToolManager，应用层完全无感。
         let recall = Arc::new(RecallStore::new());
         let _ = tools.register(recall::RecallTool::new(recall.clone()));
+        // 任务账本是压缩的配套能力：账本跨压缩存活，模型用 `todo` 工具自己维护。
+        let todo = Arc::new(TodoStore::new());
+        let _ = tools.register(todo::TodoTool::new(todo.clone()));
 
         // 恢复语义（`docs/session.md` 三.2）：`messages` 与 `session` 二者只有一个真相源。
         //   - `messages` 非空 → 以它为准（真相在调用方传入的消息里）；
@@ -87,6 +94,7 @@ impl Agent {
             compression_pending: false,
             token_counter: token::HeuristicCounter::new(),
             recall,
+            todo,
             session,
         })
     }
@@ -134,6 +142,7 @@ impl Agent {
         // 先清干净：旧会话的 messages 与召回语料绝不能残留到新会话里。
         self.messages.clear();
         self.recall.clear();
+        self.todo.clear();
         self.compression_pending = false;
         Self::restore_from_session(&mut self.messages, &self.recall, &session)?;
         self.session = Some(session);
@@ -466,7 +475,7 @@ impl Agent {
             .messages
             .iter()
             .rposition(|msg| matches!(msg, message::Message::ContextSummary { .. }));
-        match last_summary {
+        let mut active = match last_summary {
             None => self.messages.clone(),
             Some(index) => {
                 let mut active: Vec<_> = self
@@ -478,7 +487,21 @@ impl Agent {
                 active.extend_from_slice(&self.messages[index..]);
                 active
             }
+        };
+        // 任务账本（`todo` 模块）作为一条 system 消息**追加在末尾**注入。
+        //
+        // 位置选末尾的理由：
+        //   - 账本不进 `self.messages`，压缩碰不到它，跨压缩存活；
+        //   - 追加在尾部不动前面的前缀，账本内容稳定时前缀缓存照常命中
+        //     （Responses 适配器把 system 原位保留，正是为了这一点）；
+        //   - 账本只在模型调用 `todo` 时变化，届时前缀才失效——这是"必须每轮
+        //     可见"的固有代价，无法避免，只能把变化点压到最小。
+        if let Some(ledger) = self.todo.render() {
+            active.push(message::Message::System {
+                content: format!("{}\n\n{ledger}", todo::TASK_STATE_HEADER),
+            });
         }
+        active
     }
 
     /// 压缩上下文：算切点 → 切三段 → 只对 `to_compress` 求摘要 → 重建消息。
@@ -596,5 +619,83 @@ fn strip_tool_outputs(messages: &mut [message::Message]) {
         {
             *text = "[tool result omitted to save context; re-run the call to get the current state if still needed]".to_string();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::todo::TodoUpdate;
+
+    fn agent() -> Agent {
+        let config = adapter::ModelConfig::builder()
+            .protocol(adapter::ModelProtocol::ChatCompletions)
+            .base_url("http://localhost")
+            .model("test")
+            .build();
+        Agent::builder()
+            .model_config(config)
+            .system_prompt("你是 Shirley")
+            .build()
+            .unwrap()
+    }
+
+    /// 空账��不注入任何东西（避免每轮多出一条无意义的 system）。
+    #[test]
+    fn empty_ledger_is_not_injected() {
+        let agent = agent();
+        let active = agent.active_messages();
+        assert_eq!(active.len(), 1, "只有置顶 system");
+        assert!(matches!(active[0], message::Message::System { .. }));
+    }
+
+    /// 账本作为**最后一条** system 注入，且不进入 `self.messages`
+    /// （因此压缩重建 `self.messages` 时碰不到它）。
+    #[test]
+    fn ledger_is_appended_and_not_persisted() {
+        let agent = agent();
+        agent.todo.apply(TodoUpdate {
+            goal: Some("实现 todo 工具".into()),
+            steps: Some(vec![crate::todo::TodoStep {
+                text: "接运行时".into(),
+                done: false,
+            }]),
+            ..Default::default()
+        });
+
+        // 账本不在工作集里——压缩 / rewind 都动不到它。
+        assert!(
+            !agent
+                .messages
+                .iter()
+                .any(|m| matches!(m, message::Message::System { content } if content.contains("<task_state>"))),
+            "账本不应写入 self.messages"
+        );
+
+        let active = agent.active_messages();
+        let last = active.last().expect("至少有一条");
+        let message::Message::System { content } = last else {
+            panic!("末条应是注入的 system 账本");
+        };
+        assert!(content.contains(todo::TASK_STATE_HEADER));
+        assert!(content.contains("<goal>实现 todo 工具</goal>"));
+        assert!(content.contains("- [ ] 接运行时"));
+        // 置顶的原始 system 仍在最前。
+        assert!(matches!(&active[0], message::Message::System { content } if content == "你是 Shirley"));
+    }
+
+    /// 切换会话时账本被清空——旧会话的任务状态不能残留到新会话。
+    #[test]
+    fn switch_session_clears_ledger() {
+        let mut agent = agent();
+        agent.todo.apply(TodoUpdate {
+            goal: Some("旧任务".into()),
+            ..Default::default()
+        });
+        assert!(agent.todo.render().is_some());
+
+        let store: Arc<dyn SessionStore> = Arc::new(crate::session::InMemoryStore::new());
+        agent.switch_session(store).unwrap();
+        assert!(agent.todo.render().is_none(), "切换会话应清空账本");
     }
 }

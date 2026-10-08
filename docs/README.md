@@ -13,6 +13,7 @@
 | `runtime-hardening.md` | max_steps、重试、超时、取消、压缩健壮性 | P0 |
 | `compaction.md` | 上下文压缩优化：切点压缩 + 分层保留 + recall 依据 | P0 |
 | `recall.md` | 压缩后召回：分块 / BM25 / Retriever 抽象 / 工具输出清空 | P0 |
+| `todo.md` | 任务账本 `todo`：模型自维护、跨压缩存活的任务状态 / 每轮末尾注入（**已实现**） | P0 |
 | `session.md` | 会话持久化与恢复：SessionStore 契约 / 日志派生 recall / rewind 语义 | P0 |
 | `streaming.md` | 流式输出与 reasoning 流式 | P1 |
 | `adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 | P1 |

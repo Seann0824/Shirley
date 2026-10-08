@@ -5,6 +5,7 @@ mod runtime;
 pub mod recall;
 pub mod session;
 pub mod sandbox;
+pub mod todo;
 pub mod token;
 mod tool;
 pub mod workspace;
@@ -20,5 +21,6 @@ pub use runtime::{
 };
 pub use recall::{Chunk, RecallStore, RecallTool, Retriever, ScoredChunk, chunk_messages};
 pub use session::{InMemoryStore, SessionError, SessionStore};
+pub use todo::{TASK_STATE_HEADER, TodoStep, TodoStore, TodoTool, TodoUpdate};
 pub use token::{HeuristicCounter, TokenCounter, count_message, count_messages, count_text};
 pub use tool::*;
