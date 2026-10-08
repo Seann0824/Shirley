@@ -38,6 +38,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | `docs/plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 |
 | `docs/tool-lifecycle.md` | 工具生命周期：`ToolContext` 归 `ToolManager` / `on_register`（created）/ `on_unregister`（destroy）/ `unregister`（**已实现**） |
 | `docs/tool-macro.md` | 工具宏表达力：函数宏扩展可选伴生钩子，lifecycle 由宏接线（**已实现**） |
+| `docs/desktop-interface.md` | 桌面界面：Tauri 2 + React 迁移 shiwen 聊天 UI / 共享 LCA（`AgentEvent`）/ 剥离 shiwen 定制逻辑（**M0–M2 已落地**） |
 
 ---
 
@@ -252,6 +253,15 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
   - 配置全走环境变量（`DEEPSEEK_API_KEY` 必填，其余有默认）；**未配置时不注册**，模型看不到该工具
 
 > `read` 工具曾在 commit `aaf0081` 被移除（当时判断"一个 bash 就够"），但裸 `cat` 没有输出上限，容易把上下文灌满。现已以 `read_file` 的形式**重新引入**，并补上工作区约束、行/字节上限与密钥脱敏。后续计划加 `apply_patch`（见根目录 `plan.md`）。
+
+**桌面界面（`docs/desktop-interface.md`，M0–M2 已落地）**：与 TUI **并存**的 Tauri 2 桌面界面，把 shiwen 的聊天 UI（React/TS + Tailwind 4）迁进来。两者是**兄弟界面、共享 LCA**——不是"TUI 上叠一层 web"：`interface/` 里全是 ratatui 专属逻辑，webview 是独立窗口，二者不能同时画同一份对话。共享层是 SDK 的 `Agent`（`run_stream()` → `AgentEvent` 流）+ `bootstrap::Bootstrap` 的应用装配；desktop 侧用 Tauri command/event 消费同一份 `AgentEvent`，落点 `src/interface/desktop/`。
+
+- **启动**：`cargo run`（默认 TUI）不变；桌面窗口用 `cargo desktop`（= `cargo run --features desktop -- --desktop`，别名见 `.cargo/config.toml`），或 `SHIRLEY_INTERFACE=desktop cargo run --features desktop`。**注意 `--features` 是 cargo 参数，程序参数必须放在 `--` 之后**，否则程序看不到 `--desktop` 会退回 TUI。Tauri 依赖是 **feature-gated + optional**（`desktop` feature），默认构建不触碰 webview 工具链。
+- **结构**：`src/interface/desktop/`（Rust：`mod.rs` 门面 / `wire.rs` 事件映射 / `shell.rs` Tauri 壳）+ `src/interface/desktop/web/`（React+TS+Vite+Tailwind 4 前端，`dist` 由 `tauri.conf.json` 的 `frontendDist` 指向）。构建前端：`cd src/interface/desktop/web && npm install && npm run build`。
+- **commands**：`agent_send`（发起一轮，事件经 `agent://event` 推回）/ `agent_model_name` / `agent_list_models` / `agent_set_model`（热切换模型，不重建 Agent）/ `agent_cancel`（预留）。模型切换选择器放在发送按钮旁（`ModelSelector.tsx`，走 `AiChatComposer` 的 `trailingAction` 槽位），目录与切换都转发 Rust 侧 `ModelCatalog` / `Agent::set_model`，与 TUI 的 `/model` 同语义。
+- **事件桥**：`wire.rs` 把 `AgentEvent` → `AgentEventWire`（JSON，`web/src/types/wire.ts` 为契约）。为支撑工具卡，`ToolStarted` / `ToolFinished` 两个既有变体**追加**了字段（`arguments` / `ok` / `output` / `elapsed_ms`）——字段追加、TUI 用 `..` 忽略，零破坏；仍未派生 `Serialize`（协议差异收敛在边界）。
+- **前端桥**：`web/src/lib/bridge.ts` 双模式（Tauri `invoke`/`listen` vs 纯浏览器 mock），`npm run dev` 可独立调试 UI。
+- **剥离决策（已确认）**：A2UI / entity / citation / space / share / OCR / SSE 线格式全删；**审批（approval）代码路径保留在 `AiToolExecutionCard.tsx`，但 `AssistantMessage.tsx` 第一期不渲染审批态执行项**；引入 Node/npm/Vite 构建链已获用户允许。
 
 ---
 

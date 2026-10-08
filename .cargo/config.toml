@@ -1,0 +1,4 @@
+# 便捷别名：`cargo desktop` = 带 desktop feature 启动桌面界面。
+# （`--features` 是 cargo 参数，程序参数要放在 `--` 之后，否则程序看不到 `--desktop`。）
+[alias]
+desktop = "run --features desktop -- --desktop"

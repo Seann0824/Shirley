@@ -3,3 +3,6 @@
 .shirley/
 # workspace 成员不应有独立 lock，统一用根目录的
 crates/*/Cargo.lock
+
+# Tauri 构建产物（桌面界面，见 docs/desktop-interface.md）
+/gen

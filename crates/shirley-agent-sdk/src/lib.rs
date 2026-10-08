@@ -14,7 +14,8 @@ pub use shirley_agent_sdk_macros::tool;
 pub use error::{ErrorKind, SdkError};
 pub use message::{Message, ToolCall, Usage};
 pub use runtime::{
-    Agent, AgentError, AgentEvent, CompactParts, CutPlan, SystemPrompt, SystemPromptContext,
+    Agent, AgentError, AgentEvent, CompactParts, CutPlan, RunResult, StopReason, SystemPrompt,
+    SystemPromptContext,
     plan_cut,
 };
 pub use recall::{Chunk, RecallStore, RecallTool, Retriever, ScoredChunk, chunk_messages};

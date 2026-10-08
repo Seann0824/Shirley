@@ -1,0 +1,67 @@
+@import "tailwindcss";
+@import "./tokens.css";
+
+/* Shirley 桌面界面：只保留对话渲染需要的基础样式，
+   已剥离 shiwen 的 article-body / 批注 / space 等定制层。 */
+
+@layer base {
+  :root {
+    color: var(--color-ink);
+    background: var(--color-canvas);
+    color-scheme: light;
+    font-family: var(--font-sans);
+    font-synthesis: none;
+  }
+  :root[data-theme="dark"] {
+    color-scheme: dark;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+    min-height: 100%;
+  }
+  body {
+    margin: 0;
+    min-width: 320px;
+    background: var(--color-canvas);
+    color: var(--color-ink);
+  }
+  body,
+  button,
+  input,
+  textarea {
+    font-family: var(--font-sans);
+  }
+  button,
+  a {
+    -webkit-tap-highlight-color: transparent;
+  }
+}
+
+/* Streamdown 代码块滚动条：与 ScrollArea 保持一致 */
+[data-ai-markdown] [data-streamdown="code-block-body"] {
+  overscroll-behavior-x: contain;
+  scrollbar-color: color-mix(in srgb, var(--color-ink) 22%, transparent) transparent;
+  scrollbar-width: thin;
+}
+[data-ai-markdown] [data-streamdown="code-block-body"]::-webkit-scrollbar {
+  height: 6px;
+}
+[data-ai-markdown] [data-streamdown="code-block-body"]::-webkit-scrollbar-thumb {
+  border: 1px solid transparent;
+  border-radius: 9999px;
+  background-color: color-mix(in srgb, var(--color-ink) 22%, transparent);
+  background-clip: padding-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

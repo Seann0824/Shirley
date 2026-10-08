@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Shirley 桌面窗口默认能力：事件监听（消费 AgentEvent）。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

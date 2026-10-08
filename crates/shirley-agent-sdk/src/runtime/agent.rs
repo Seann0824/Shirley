@@ -351,6 +351,7 @@ impl Agent {
                                         yield AgentEvent::ToolStarted {
                                             call_id: call.id.clone(),
                                             name: call.name.clone(),
+                                            arguments: call.arguments.clone(),
                                         };
 
                                         let tools = &self.tools;
@@ -361,20 +362,24 @@ impl Agent {
                                         let ctx = self.tools.context().clone();
 
                                         tasks.push(async move {
-                                            let content = match tools.invoke(call, ctx).await {
-                                                Ok(output) => output.to_string(),
+                                            let started = std::time::Instant::now();
+                                            let (ok, content) = match tools.invoke(call, ctx).await {
+                                                Ok(output) => (true, output.to_string()),
                                                 // TODO: 感觉这里不太合理，不过如果消费者是AI合理，外部消费者应该通过 AgentEvent 把错误信息传递出去
-                                                Err(error) => error.to_string(),
+                                                Err(error) => (false, error.to_string()),
                                             };
-                                            (call, content)
+                                            (call, ok, content, started.elapsed().as_millis() as u64)
                                         });
                                     }
 
                                     let mut tool_messages = Vec::with_capacity(tool_calls.len());
-                                    while let Some((call, content)) = tasks.next().await {
+                                    while let Some((call, ok, content, elapsed_ms)) = tasks.next().await {
                                         yield AgentEvent::ToolFinished {
                                             call_id: call.id.clone(),
                                             name: call.name.clone(),
+                                            ok,
+                                            output: content.clone(),
+                                            elapsed_ms,
                                         };
 
                                         let tool_message = message::Message::Tool {

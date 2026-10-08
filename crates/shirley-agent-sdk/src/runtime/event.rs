@@ -33,8 +33,22 @@ pub enum AgentEvent {
     CompressionStarted,
     CompressionFinished,
     ContextUsage { used_tokens: u64, limit_tokens: u64 },
-    ToolStarted { call_id: String, name: String },
-    ToolFinished { call_id: String, name: String },
+    ToolStarted {
+        call_id: String,
+        name: String,
+        /// 工具调用参数（原始 JSON 字符串），供界面展示调用意图。
+        arguments: String,
+    },
+    ToolFinished {
+        call_id: String,
+        name: String,
+        /// 工具执行是否成功（`Err` 分支为 `false`）。
+        ok: bool,
+        /// 工具返回内容；失败时为错误文案（与落库的 tool message 一致）。
+        output: String,
+        /// 执行耗时（毫秒），供界面展示。
+        elapsed_ms: u64,
+    },
     // 每次模型调用后上报，便于实时观察缓存命中
     Usage(message::Usage),
     Finished(RunResult),
@@ -54,12 +68,13 @@ impl fmt::Display for AgentEvent {
                 let _ = write!(f, "上下文用量: {used_tokens}/{limit_tokens}");
                 Ok(())
             }
-            Self::ToolStarted { call_id, name } => {
+            Self::ToolStarted { call_id, name, .. } => {
                 let _ = write!(f, "🔧 Tool Started [{call_id}]: {name}");
                 Ok(())
             }
-            Self::ToolFinished { call_id, name } => {
-                let _ = write!(f, "✅ Tool Finished [{call_id}]: {name}");
+            Self::ToolFinished { call_id, name, ok, .. } => {
+                let mark = if *ok { "✅" } else { "❌" };
+                let _ = write!(f, "{mark} Tool Finished [{call_id}]: {name}");
                 Ok(())
             }
             Self::Usage(usage) => {

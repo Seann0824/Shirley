@@ -26,6 +26,15 @@ crossterm = "0.29.0"
 unicode-width = "0.2"
 pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
 arboard = { version = "3.6.1", default-features = false }
+tauri = { version = "2", optional = true }
+
+[features]
+default = []
+# 桌面界面（Tauri 2 壳）。默认关闭，避免 TUI-only 构建被迫拉入 webview 依赖。
+desktop = ["dep:tauri"]
+
+[build-dependencies]
+tauri-build = { version = "2", default-features = false }
 
 [workspace]
 members = [

@@ -17,5 +17,5 @@ mod prompt;
 pub use agent::Agent;
 pub use compaction::{CompactParts, CutPlan, plan_cut};
 pub use error::AgentError;
-pub use event::AgentEvent;
+pub use event::{AgentEvent, RunResult, StopReason};
 pub use prompt::{SystemPrompt, SystemPromptContext};
