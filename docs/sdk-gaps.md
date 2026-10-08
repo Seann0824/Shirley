@@ -164,9 +164,13 @@ let body = serde_json::json!({
 **三、gap-1：工具运行时上下文注入（已落地）**
 
 > 落地实现：`ToolContext`（`tool/mod.rs`）+ `Tool::invoke` 新增 `ctx` 参数 +
-> `Agent` 的 `.tool_context()` builder + 宏识别 `ToolContext` / `&ToolContext` 参数
-> （不进入 schema，按原位置传给原函数）。回归测试 `tests/tool_context.rs`（5 个）。
-> 下面保留原始设计推导，其中"方案 A"即最终采用形态。
+> 宏识别 `ToolContext` / `&ToolContext` 参数（不进入 schema，按原位置传给原函数）。
+> 回归测试 `tests/tool_context.rs`（5 个）。
+>
+> **后续演进**：原先的 `Agent` 的 `.tool_context()` builder **已被移除**——`ToolContext`
+> 的所有权移入 `ToolManager`，并新增注册钩子 `on_register` / `on_unregister`（注入与
+> 清理），见 `docs/tool-lifecycle.md`、`docs/tool-macro.md`。下面保留原始设计推导，
+> 其中"方案 A"即最终采用形态；**注入途径以 lifecycle 文档为准**。
 
 **3.1 现状**
 
@@ -265,7 +269,7 @@ let session = ctx.get::<Mutex<Session>>().expect("session not provided");
 | `Tool::invoke` 加 `ctx` 参数 | **是** | 所有手写 `impl Tool`（含 `RecallTool`、应用手工工具） |
 | `ToolManager::invoke` 加 `ctx` | **是** | runtime、测试 |
 | 新增 `ToolContext` | 否（新增） | 无 |
-| `Agent` builder 加 `.tool_context()` | 否（新增） | 无 |
+| ~~`Agent` builder 加 `.tool_context()`~~ | —— | **已被移除**，改由 `ToolManager` 持有 `ToolContext`（见 `docs/tool-lifecycle.md`） |
 | 宏支持 ctx 参数 | 否（向后兼容） | 无 |
 
 → 发 **`0.0.2`**。
@@ -276,7 +280,7 @@ let session = ctx.get::<Mutex<Session>>().expect("session not provided");
 
 | 缺口 | 状态 | 落点 |
 | --- | --- | --- |
-| gap-1 工具上下文 | **已落地** | `ToolContext` + `Tool::invoke` 加 `ctx` + `Agent::tool_context` + 宏识别 ctx 参数；测试 `tests/tool_context.rs`（5） |
+| gap-1 工具上下文 | **已落地** | `ToolContext` + `Tool::invoke` 加 `ctx` + 宏识别 ctx 参数；测试 `tests/tool_context.rs`（5）。所有权后移入 `ToolManager`（`docs/tool-lifecycle.md`） |
 | gap-4 请求体留口 | **已落地** | `ModelConfig::tool_choice` / `extra_body` + `encode_request` 重构；单测 `chat_completions::tests`（5） |
 | gap-2 工具顺序保序 | **不做** | 见 1.6 |
 

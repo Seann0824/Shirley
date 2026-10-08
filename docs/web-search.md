@@ -24,15 +24,21 @@
   不需要新增 SDK 契约。
 - 类比：`bash` / `read_file` 也在应用层，因为它们绑定了"这台机器 / 这个工作区"。
 
-因此落地在 `src/tools/web_search.rs`，用 `#[tool]` 宏 + `ToolContext` 注入：
+因此落地在 `src/tools/web_search.rs`，用 `#[tool]` 宏 + **注册钩子（`on_register`）**：
 
 - 工具函数 `web_search(ctx: &ToolContext, query: String)` **本身无状态**——宏生成的
   `GenerateTool` 只持有 `definition`。
-- 运行所需的 HTTP 客户端 / 凭据 / 配置由 `WebSearchState` 承载，构造时经
-  `ToolContext::with(state)` 注入；函数内 `ctx.get::<WebSearchState>()` 取回。
+- 运行所需的 HTTP 客户端 / 凭据 / 配置由 `WebSearchState` 承载；它**不在应用层单独
+  构造、单独传入**，而是由宏声明的注册钩子 `web_search_on_register` 在**注册时**读 env
+  并 `ctx.insert(state)` 注入——"注册工具"与"注入依赖"合成同一步，不会漂移
+  （`docs/tool-lifecycle.md`）。函数内 `ctx.get::<WebSearchState>()` 取回。
+- 注销钩子 `web_search_on_unregister` 在工具被 `ToolManager::unregister` 移除时
+  `ctx.remove::<WebSearchState>()`——状态是 `web_search` 私有的 newtype，由它自己清掉。
 - 状态**只读**，`ctx.get` 返回 `Arc`，多个并发调用共享同一份，无需 `Mutex`。
 - 参数 schema 由 `schemars` 从函数签名**自动生成**（`ToolContext` 参数被宏排除出
   schema），省去手写 `json!({...})`。
+- 未配置 `DEEPSEEK_API_KEY`（或显式关闭）时注册钩子返回 `Err`，`main.rs` 据此打印
+  "未启用"——工具不入表，模型看不到一个永远失败的工具。
 
 ## 三、请求 / 响应契约（与源实现逐字段对齐）
 
@@ -97,7 +103,11 @@
 
 ## 七、测试
 
-`src/tools/web_search.rs` 内 10 个单测：响应映射（citation 归并 / 去重 / URL 过滤 /
+`src/tools/web_search.rs` 内 11 个单测：响应映射（citation 归并 / 去重 / URL 过滤 /
 截断）、缺失结构化 block 报错、base_url 校验、请求体携带服务端工具、**宏生成的 schema
 正确**（只有 `query`、`ctx` 不入 schema）、空 query 拒绝、未知参数拒绝、**缺状态报未初始化**、
-**不跟随重定向**、**总超时生效**（后两个用本地 `TcpListener` 起假服务端）。
+**注册钩子注入状态 / 注销钩子清理状态**、**不跟随重定向**、**总超时生效**（后两个用本地
+`TcpListener` 起假服务端）。
+
+生命周期机制本身（`on_register` / `on_unregister` / `unregister` / `ToolContext::remove`）
+另由 SDK 侧 `crates/shirley-agent-sdk/tests/tool_lifecycle.rs`（5 个）覆盖。

@@ -36,6 +36,8 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | `docs/anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / 流式分片聚合 / usage 语义（**已实现**） |
 | `docs/testing.md` | SDK 单测策略、缓存命中率基准 |
 | `docs/plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 |
+| `docs/tool-lifecycle.md` | 工具生命周期：`ToolContext` 归 `ToolManager` / `on_register`（created）/ `on_unregister`（destroy）/ `unregister`（**已实现**） |
+| `docs/tool-macro.md` | 工具宏表达力：函数宏扩展可选伴生钩子，lifecycle 由宏接线（**已实现**） |
 
 ---
 
@@ -117,9 +119,9 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 
 **4. 工具系统** — `crates/shirley-agent-sdk/src/tool/mod.rs`
 
-- `Tool` trait：`definition()` 拿元信息，`invoke(Value, ToolContext)` 返回 `ToolFuture`
-- `ToolManager`：注册时查重，`definitions()` **按名字排序**（这是为了让 prefix 稳定、提高缓存命中率，别随手删掉这个 sort）
-- `ToolContext`：类型擦除的运行时上下文容器（`Arc<HashMap<TypeId, Arc<dyn Any>>>`）。工具并发执行，所以上下文只能是 `Arc<Mutex<T>>` 这类内部可变性句柄；应用用 `ToolContext::new().with(data)` 注入，工具用 `ctx.get::<T>()` 取回。`Agent` builder 的 `.tool_context()` 传入，每次调用前 clone 分发（`Arc`，只加引用计数）。见 `docs/sdk-gaps.md` gap-1
+- `Tool` trait：`definition()` 拿元信息，`invoke(Value, ToolContext)` 返回 `ToolFuture`；另有**两个默认钩子** `on_register`（= created）/ `on_unregister`（= destroy），默认 `Ok(())`——无状态工具零改动。`executed` 就是 `invoke` 本身，不另设钩子。见 `docs/tool-lifecycle.md`
+- `ToolManager`：持有 `ToolContext`（**不再是 `Agent` 的独立 builder 参数**）；注册时查重，`definitions()` **按名字排序**（这是为了让 prefix 稳定、提高缓存命中率，别随手删掉这个 sort）。新增 `unregister(name)`（先移出表 → 再调 `on_unregister`，best-effort，未注册返回 `NotFoundError`）、`context()` / `context_mut()`
+- `ToolContext`：类型擦除的运行时上下文容器（`Arc<HashMap<TypeId, Arc<dyn Any>>>`）。工具并发执行，所以上下文只能是 `Arc<Mutex<T>>` 这类内部可变性句柄；工具用 `ctx.get::<T>()` 取回。写入的两种途径：**注册钩子 `ctx.insert(value)`**（推荐，注册与注入同一步，不会漂移）或应用层 `with(data)`；清理用 `ctx.remove::<T>()`（按 `TypeId`，**每个工具请用自己的 newtype 状态**，避免误删同类型）。runtime 每次调用前 `self.tools.context().clone()` 分发（`Arc`，只加引用计数）。见 `docs/sdk-gaps.md` gap-1、`docs/tool-lifecycle.md`
 - `ToolError` 分四类：`ExecutionError` / `RepetitionError` / `NotFoundError` / `ArgumentsError`
 
 关于 `ToolDefinition.parameters`：它直接就是 JSON Schema。原先记为"绑死 OpenAI"的债，做 Responses 适配时得到修正——**Responses 的 `tools[].parameters` 也是 JSON Schema**，只少一层 `function` 包装。所以 JSON Schema 本身就是跨协议中间表示，不必另造 `ParamType`；真正的协议差异在**消息 item 结构**与**流式事件语义**上（见 `docs/responses-api.md`、`docs/adapter-layer.md`）。
@@ -149,13 +151,34 @@ async fn bump(ctx: &ToolContext, #[param(description = "增量")] by: u32) -> Re
 }
 ```
 
-宏展开后会在同名 `mod` 里生成：`Arguments` 结构体（`Deserialize` + `JsonSchema` + `deny_unknown_fields`）、`GenerateTool`（实现 `Tool`）、`definition()`、`tool()`。调用方写 `tools::bash_tool::tool()` 注册即可。
+可选**伴生钩子**：`on_register` / `on_unregister` 接的是用户写的普通函数（签名固定
+`fn(&mut ToolContext) -> Result<(), ToolError>`），宏把它们 wire 进生成的 `impl Tool`——
+用户只写实现，不碰 `Tool` trait / schema（这是硬约束："宏是唯一入口"）。不写钩子 = 空实现：
+
+```rust
+#[tool(description = "联网搜索", on_register = ws_on_register, on_unregister = ws_on_unregister)]
+async fn web_search(ctx: &ToolContext, #[param(description = "查询")] query: String)
+    -> Result<String, ToolError> { ... }
+
+fn ws_on_register(ctx: &mut ToolContext) -> Result<(), ToolError> {
+    ctx.insert(WebSearchState::from_env()?);   // 注册即注入依赖
+    Ok(())
+}
+fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
+    ctx.remove::<WebSearchState>();
+    Ok(())
+}
+```
+
+钩子定义仍在 `Tool` trait 上，宏只"引用"；详见 `docs/tool-lifecycle.md`、`docs/tool-macro.md`。
+
+宏展开后会在同名 `mod` 里生成：`Arguments` 结构体（`Deserialize` + `JsonSchema` + `deny_unknown_fields`）、`GenerateTool`（实现 `Tool`，含钩子覆写）、`definition()`、`tool()`。调用方写 `tools::bash_tool::tool()` 注册即可。
 
 宏的约束（踩过的坑）：
 
 - 函数不能用 `self`，参数不能解构、不能 `ref` / `@` 绑定
 - 参数描述必须写 `#[param(description = "...")]`，否则编译报错
-- 生成的 `invoke` 里调用的是 `super::#name`，所以**被修饰的函数和宏生成的 mod 必须在同一层级**
+- 生成的 `invoke` 里调用的是 `super::#name`，所以**被修饰的函数和宏生成的 mod 必须在同一层级**（钩子同理：`on_register = f` 要求 `f` 与工具函数同层，宏生成 `super::f` 引用）
 
 **6. ReAct 运行时** — `crates/shirley-agent-sdk/src/runtime/`
 
@@ -222,7 +245,7 @@ async fn bump(ctx: &ToolContext, #[param(description = "增量")] by: u32) -> Re
   - 返回**纯文本带行号**（非 JSON），截断时在末尾提示 `start_line=<下一行>` 续读——模型可直接读、可续读
 
 - `web_search`（`src/tools/web_search.rs`）：**联网搜索**，迁移自拾文（`shiwen-open-source`）。不走主模型路由，而是对 DeepSeek 的 **Anthropic-compatible Messages API**（`POST {base_url}/messages`）单独发一次有界请求，用服务端工具 `web_search_20250305` 拿回结构化来源（`web_search_tool_result`），归一化后作为**不可信外部数据**交给主模型。要点见 `docs/web-search.md`：
-  - **形态**：`#[tool]` 宏 + `ToolContext`。工具函数无状态，运行所需的 client / 凭据 / 配置由 `WebSearchState` 承载，经 `ToolContext::with(state)` 注入、`ctx.get::<WebSearchState>()` 取回（只读 `Arc`，并发共享无需锁）；参数 schema 由宏从签名自动生成（`ToolContext` 不入 schema）
+  - **形态**：`#[tool]` 宏 + **注册钩子（`on_register`）**。工具函数无状态，运行所需的 client / 凭据 / 配置由 `WebSearchState` 承载，由 `web_search_on_register` 在**注册时**读 env 并 `ctx.insert(state)` 注入——"注册工具"与"注入依赖"合成同一步，不会漂移；`web_search_on_unregister` 注销时 `ctx.remove::<WebSearchState>()`。函数内 `ctx.get::<WebSearchState>()` 取回（只读 `Arc`，并发共享无需锁）；参数 schema 由宏从签名自动生成（`ToolContext` 不入 schema）。见 `docs/tool-lifecycle.md`
   - 参数只有 `query`（非空、≤300 字符）；返回 JSON `{summary, query, sources[], truncated}`
   - 归一化：按 URL 归并 citation snippet、去重、只留 http(s)、按 `max_results` 截断；**只认结构化 block，缺失即报错，绝不伪造来源**
   - 安全：**不跟随重定向**、响应体 2MB 上限、总超时（`tokio::time::timeout`）
@@ -295,7 +318,7 @@ cargo test -p shirley-agent-sdk    # 只跑 SDK 测试
 cargo clippy --all-targets         # 静态检查
 ```
 
-测试分布（应用层约 95 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`read.rs` 10 个、`session.rs` 10 个、`models.rs` 4 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`session_contract.rs` 7 个。
+测试分布（应用层约 95 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`read.rs` 10 个、`session.rs` 10 个、`models.rs` 4 个、`web_search.rs` 11 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`session_contract.rs` 7 个、`recall_contract.rs` 5 个、`tool_lifecycle.rs` 5 个、`tool_context.rs` 5 个、`runtime_compaction.rs` 20 个、`system_prompt_contract.rs` 4 个。
 
 ---
 

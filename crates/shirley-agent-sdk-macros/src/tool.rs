@@ -8,6 +8,14 @@ use syn::{Attribute, FnArg, Ident, ItemFn, LitStr, Pat, Type, parse::Parser, spa
 struct ToolConfig {
     // LisStr 带有位置信息
     description: LitStr,
+
+    // 可选的注册钩子（= created）：注册时执行的伴生函数名。
+    // 函数签名须为 `fn(&mut ToolContext) -> Result<(), ToolError>`。
+    on_register: Option<Ident>,
+
+    // 可选的注销钩子（= destroy）：注销时执行的伴生函数名。
+    // 函数签名须为 `fn(&mut ToolContext) -> Result<(), ToolError>`。
+    on_unregister: Option<Ident>,
 }
 
 struct ToolParameter {
@@ -54,12 +62,26 @@ fn try_expand(attr: TokenStream, item: TokenStream) -> syn::Result<proc_macro2::
 }
 
 // 解析 #tool[(...)] 括号里面的内容
+//
+// 支持的键：
+// - `description = "..."`（必填）
+// - `on_register = fn_name`（可选，= created 钩子）
+// - `on_unregister = fn_name`（可选，= destroy 钩子）
 fn parse_config(attr: TokenStream) -> syn::Result<ToolConfig> {
     let mut description: Option<LitStr> = None;
+    let mut on_register: Option<Ident> = None;
+    let mut on_unregister: Option<Ident> = None;
 
-    // 属性解析器，目前只支持 description
-    // 它会对每个逗号分隔的配置项调用这个闭包 #tool(a=1,b=2,...)
-    let parser = syn::meta::parser(|meta| read_description(meta, &mut description));
+    // 属性解析器：对每个逗号分隔的配置项调用这个闭包 #tool(a=1,b=2,...)
+    let parser = syn::meta::parser(|meta| {
+        if meta.path.is_ident("on_register") {
+            return read_hook(meta, &mut on_register, "on_register");
+        }
+        if meta.path.is_ident("on_unregister") {
+            return read_hook(meta, &mut on_unregister, "on_unregister");
+        }
+        read_description(meta, &mut description)
+    });
 
     parser.parse(attr)?;
 
@@ -72,7 +94,25 @@ fn parse_config(attr: TokenStream) -> syn::Result<ToolConfig> {
         )
     })?;
 
-    Ok(ToolConfig { description })
+    Ok(ToolConfig {
+        description,
+        on_register,
+        on_unregister,
+    })
+}
+
+// 读取 `on_register` / `on_unregister` 的值：一个伴生函数名（Ident）。
+fn read_hook(
+    meta: syn::meta::ParseNestedMeta<'_>,
+    slot: &mut Option<Ident>,
+    key: &str,
+) -> syn::Result<()> {
+    if slot.is_some() {
+        return Err(meta.error(format!("{key} must not be repeated")));
+    }
+    let value: Ident = meta.value()?.parse()?;
+    *slot = Some(value);
+    Ok(())
 }
 
 // 解析 #[param()]
@@ -270,6 +310,31 @@ fn generate_tool(
         }
     });
 
+    // 可选的注册 / 注销钩子：生成 `on_register` / `on_unregister` 覆写，
+    // 直接调用用户写的伴生函数（与工具函数同层，故走 `super::`）。
+    // 没写钩子就不生成覆写——`GenerateTool` 自动继承 trait 的默认空实现。
+    let on_register_impl = config.on_register.as_ref().map(|hook| {
+        quote! {
+            fn on_register(
+                &mut self,
+                ctx: &mut ::shirley_agent_sdk::ToolContext,
+            ) -> ::std::result::Result<(), ::shirley_agent_sdk::ToolError> {
+                super::#hook(ctx)
+            }
+        }
+    });
+
+    let on_unregister_impl = config.on_unregister.as_ref().map(|hook| {
+        quote! {
+            fn on_unregister(
+                &mut self,
+                ctx: &mut ::shirley_agent_sdk::ToolContext,
+            ) -> ::std::result::Result<(), ::shirley_agent_sdk::ToolError> {
+                super::#hook(ctx)
+            }
+        }
+    });
+
     // 获取返回值类型的代码位置
     let return_span = function.sig.output.span();
     // _ 让编译器推导成功值类型，错误类型固定为 SDK 的 ToolError
@@ -306,6 +371,9 @@ fn generate_tool(
                 fn definition(&self) -> &::shirley_agent_sdk::ToolDefinition {
                     &self.definition
                 }
+
+                #on_register_impl
+                #on_unregister_impl
 
                 // 接受 SDK 统一传入的 JSON 参数与运行时上下文
                 fn invoke(

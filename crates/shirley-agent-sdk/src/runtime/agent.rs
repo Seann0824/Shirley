@@ -40,11 +40,6 @@ pub struct Agent {
     /// 持久化的是**原始 Message 全量日志**；召回库由它派生，不单独落盘。
     /// system 提示词不入日志——恢复时由 [`Agent::system_message`] 现生成。
     session: Option<Arc<dyn SessionStore>>,
-    /// 工具运行时上下文（见 [`tool::ToolContext`]）。
-    ///
-    /// 每次工具调用前 clone 一份分发下去——`ToolContext` 内部是 `Arc`，
-    /// clone 只增加引用计数。应用用它给有状态工具注入会话句柄等数据。
-    tool_context: tool::ToolContext,
 }
 
 #[bon::bon]
@@ -58,7 +53,6 @@ impl Agent {
         #[builder(default = tool::ToolManager::new())] mut tools: tool::ToolManager,
         #[builder(into)] compression_instruction: Option<String>,
         #[builder(into)] session: Option<Arc<dyn SessionStore>>,
-        #[builder(default)] tool_context: tool::ToolContext,
     ) -> Result<Self, AgentError> {
         // 召回是 compaction 的自然配套（`docs/recall.md` 决策 2）：存储与工具共享 Arc，
         // recall 工具在此自动注册进 ToolManager，应用层完全无感。
@@ -94,7 +88,6 @@ impl Agent {
             token_counter: token::HeuristicCounter::new(),
             recall,
             session,
-            tool_context,
         })
     }
 
@@ -221,6 +214,15 @@ impl Agent {
     pub fn set_provider(&mut self, base_url: impl Into<String>, api_key: Option<String>) {
         self.model_config.base_url = base_url.into();
         self.model_config.api_key = api_key;
+    }
+
+    /// 移除一个已注册的工具（与 [`ToolManager::register`] 对称的运行时接缝）。
+    ///
+    /// 触发工具的 `on_unregister`（= destroy），用于运行期动态启停工具。
+    /// 名字未注册时返回 `Err`。与 `set_model` / `set_provider` / `switch_session`
+    /// 同风格：不重建 `Agent`。
+    pub fn unregister_tool(&mut self, name: &str) -> Result<(), AgentError> {
+        self.tools.unregister(name).map_err(Into::into)
     }
 
     /// 对话历史的只读视图。
@@ -354,7 +356,9 @@ impl Agent {
                                         let tools = &self.tools;
                                         // ToolContext 内部是 Arc，clone 只加引用计数；
                                         // 在循环里 clone 而不是把 self 捕获进 async 块。
-                                        let ctx = self.tool_context.clone();
+                                        // 上下文由 ToolManager 持有（工具在 on_register
+                                        // 里写入），这里只取一份 clone 分发下去。
+                                        let ctx = self.tools.context().clone();
 
                                         tasks.push(async move {
                                             let content = match tools.invoke(call, ctx).await {

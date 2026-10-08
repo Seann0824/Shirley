@@ -19,6 +19,8 @@
 | `responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件 / 落地方式 | P1 |
 | `anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / thinking 回传 / usage 语义（**已实现**） | P1 |
 | `sdk-gaps.md` | SDK 能力缺口修复：工具上下文注入（已落地）/ 请求体留口（已落地）/ 工具顺序保序（不做） | P0 |
+| `tool-lifecycle.md` | 工具生命周期：`ToolContext` 归 `ToolManager` / `on_register`（created）/ `on_unregister`（destroy）/ `unregister`（**已实现**） | P0 |
+| `tool-macro.md` | 工具宏表达力：函数宏扩展可选伴生钩子（`on_register` / `on_unregister`），lifecycle 由宏接线（**已实现**） | P1 |
 | `testing.md` | SDK 单测策略、缓存命中率基准 | P1 |
 | `plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 | P0 |
 | `web-search.md` | 联网搜索工具 `web_search`：Anthropic-compatible Messages API / 归一化 / 配置（**已实现**） | P1 |
