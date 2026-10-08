@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use session::SessionCatalog as _;
-use shirley_agent_sdk::{Agent, AgentError, ModelConfig, ToolManager};
+use shirley_agent_sdk::{Agent, AgentError, ModelConfig, ToolContext, ToolManager};
 mod interface;
 mod models;
 mod prompt;
@@ -44,6 +44,23 @@ async fn main() -> Result<(), AgentError> {
     let mut tool_manager = ToolManager::new();
     let _ = tool_manager.register(tools::bash_tool::tool());
     let _ = tool_manager.register(tools::read_file_tool::tool());
+
+    // 联网搜索（`docs/web-search.md`）：走 DeepSeek 的 Anthropic-compatible
+    // Messages API，服务端工具 `web_search_20250305`。未配置 `DEEPSEEK_API_KEY`
+    // 或显式关闭时不注册——模型不会看到一个永远失败的工具。
+    //
+    // 工具本身无状态（`#[tool]` 宏），运行所需的 client / 凭据 / 配置由
+    // `WebSearchState` 承载，经 `ToolContext` 注入。未配置时既不注册工具、
+    // 也不注入状态。
+    let mut tool_context = ToolContext::new();
+    match tools::WebSearchState::from_env() {
+        Ok(Some(state)) => {
+            let _ = tool_manager.register(tools::web_search_tool::tool());
+            tool_context = tool_context.with(state);
+        }
+        Ok(None) => {}
+        Err(error) => eprintln!("[web_search] 未启用：{error}"),
+    }
 
     // 调用返回 Future；await 等待它执行完成。
     let mut model_config = ModelConfig::builder()
@@ -88,6 +105,7 @@ async fn main() -> Result<(), AgentError> {
         ",
         )
         .tools(tool_manager)
+        .tool_context(tool_context)
         .session(session)
         .build()?;
 

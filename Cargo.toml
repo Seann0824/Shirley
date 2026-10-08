@@ -19,6 +19,7 @@ dirs = "6"
 thiserror = "2.0.21"
 futures = "0.3.34"
 reqwest = { version = "0.13.5", features = ["json"] }
+url = "2.5.8"
 chrono = "0.4.45"
 ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
 crossterm = "0.29.0"

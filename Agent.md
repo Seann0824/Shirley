@@ -221,6 +221,13 @@ async fn bump(ctx: &ToolContext, #[param(description = "增量")] by: u32) -> Re
   - **二进制探测**：开头 8KB 出现 NUL 即拒绝；目录引导用 `ls`
   - 返回**纯文本带行号**（非 JSON），截断时在末尾提示 `start_line=<下一行>` 续读——模型可直接读、可续读
 
+- `web_search`（`src/tools/web_search.rs`）：**联网搜索**，迁移自拾文（`shiwen-open-source`）。不走主模型路由，而是对 DeepSeek 的 **Anthropic-compatible Messages API**（`POST {base_url}/messages`）单独发一次有界请求，用服务端工具 `web_search_20250305` 拿回结构化来源（`web_search_tool_result`），归一化后作为**不可信外部数据**交给主模型。要点见 `docs/web-search.md`：
+  - **形态**：`#[tool]` 宏 + `ToolContext`。工具函数无状态，运行所需的 client / 凭据 / 配置由 `WebSearchState` 承载，经 `ToolContext::with(state)` 注入、`ctx.get::<WebSearchState>()` 取回（只读 `Arc`，并发共享无需锁）；参数 schema 由宏从签名自动生成（`ToolContext` 不入 schema）
+  - 参数只有 `query`（非空、≤300 字符）；返回 JSON `{summary, query, sources[], truncated}`
+  - 归一化：按 URL 归并 citation snippet、去重、只留 http(s)、按 `max_results` 截断；**只认结构化 block，缺失即报错，绝不伪造来源**
+  - 安全：**不跟随重定向**、响应体 2MB 上限、总超时（`tokio::time::timeout`）
+  - 配置全走环境变量（`DEEPSEEK_API_KEY` 必填，其余有默认）；**未配置时不注册**，模型看不到该工具
+
 > `read` 工具曾在 commit `aaf0081` 被移除（当时判断"一个 bash 就够"），但裸 `cat` 没有输出上限，容易把上下文灌满。现已以 `read_file` 的形式**重新引入**，并补上工作区约束、行/字节上限与密钥脱敏。后续计划加 `apply_patch`（见根目录 `plan.md`）。
 
 ---
@@ -273,7 +280,7 @@ async fn bump(ctx: &ToolContext, #[param(description = "增量")] by: u32) -> Re
 想跑起来：
 
 ```sh
-cp .env.example .env   # 其实没有 example，照 .env 的键名自己写
+cp .env.example .env   # 按需修改；.env 已在 .gitignore 中
 cargo run
 ```
 

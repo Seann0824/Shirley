@@ -21,6 +21,8 @@
 | `sdk-gaps.md` | SDK 能力缺口修复：工具上下文注入（已落地）/ 请求体留口（已落地）/ 工具顺序保序（不做） | P0 |
 | `testing.md` | SDK 单测策略、缓存命中率基准 | P1 |
 | `plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 | P0 |
+| `web-search.md` | 联网搜索工具 `web_search`：Anthropic-compatible Messages API / 归一化 / 配置（**已实现**） | P1 |
+
 
 ---
 
