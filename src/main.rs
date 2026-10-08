@@ -60,17 +60,15 @@ async fn main() -> Result<(), AgentError> {
     // 会话持久化（`docs/session.md`）：把原始 Message 全量日志落到工作区。
     // 多会话布局：每份会话是 `.shirley/sessions/<name>.jsonl`（见 `session` 模块）。
     // 旧的单文件日志 `.shirley/session.jsonl` 会在首次启动时被收编为一份会话，
-    // 保证升级不丢历史。启动时打开"最近修改"的会话；一份都没有就新建一个。
+    // 保证升级不丢历史。
+    //
+    // 启动时**直接开一份新会话**（而不是恢复"最近修改"的旧会话）：用户跑 coding
+    // agent 的起点应是一段干净的新对话，避免一上来就背上历史会话的上下文。历史
+    // 会话仍在目录里，需要时用 `/session` 选择器打开即可。
     let session_catalog = session::FileSessionCatalog::new(&working_dir);
     session_catalog.adopt_legacy()?;
-    let (current_session, session): (String, Arc<dyn shirley_agent_sdk::SessionStore>) =
-        match session_catalog.latest()? {
-            Some(entry) => (entry.name.clone(), session_catalog.open(&entry.name)?),
-            None => {
-                let (entry, store) = session_catalog.create()?;
-                (entry.name, store)
-            }
-        };
+    let (entry, session) = session_catalog.create()?;
+    let current_session = entry.name;
     let session_catalog: Arc<dyn session::SessionCatalog> = Arc::new(session_catalog);
 
     let agent = Agent::builder()

@@ -329,15 +329,17 @@ graph TD
 
 **决策 3：会话目录（`SessionCatalog`）收敛"会话从哪来"，与 `ModelCatalog` 对称。**
 
-`src/session.rs` 定义 `SessionCatalog` trait（`list` / `open` / `create` / `latest` / `entry`）
+`src/session.rs` 定义 `SessionCatalog` trait（`list` / `open` / `create`）
 与本地实现 `FileSessionCatalog`。`/session` 指令与选择器 UI 只依赖接口，
 将来若要换成远端 / 数据库后端，UI 不用改。
 
-**决策 4：启动恢复"最近修改"的会话，兼容旧单文件日志。**
+**决策 4：启动直接开一份新会话，兼容旧单文件日志。**
 
-`main.rs` 启动时打开目录里最近修改的会话；一份都没有就新建一个。
-若发现旧版单文件 `<root>/.shirley/session.jsonl` 且目录尚空，则把它收编为
-`legacy` 会话（`adopt_legacy`），保证升级不丢历史。
+`main.rs` 启动时**直接 `create()` 一份新会话**（而非恢复"最近修改"的旧会话）：
+用户跑 coding agent 的起点应是一段干净的新对话，避免一上来就背上历史会话的
+上下文。历史会话仍在 `.shirley/sessions/` 目录里，需要时用 `/session` 选择器打开。
+若发现旧版单文件 `<root>/.shirley/session.jsonl` 且目录尚空，则先把它收编为
+`legacy` 会话（`adopt_legacy`），保证升级不丢历史（收编后新会话照常另开一份）。
 
 **决策 5：选择器把"切换"与"新建"合并成一个面板。**
 

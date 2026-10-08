@@ -146,10 +146,6 @@ pub trait SessionCatalog: Send + Sync {
 
     /// 新建一个空会话，返回它的条目与存储。
     fn create(&self) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError>;
-
-    /// 最近一次修改的会话（用于启动时恢复上次会话）；没有会话时返回 `None`。
-    fn latest(&self) -> Result<Option<SessionEntry>, SessionError>;
-
 }
 
 /// 基于本地目录的会话目录：`<root>/.shirley/sessions/<name>.jsonl`。
@@ -266,11 +262,6 @@ impl SessionCatalog for FileSessionCatalog {
         };
         Ok((entry, store))
     }
-
-    fn latest(&self) -> Result<Option<SessionEntry>, SessionError> {
-        Ok(self.list()?.into_iter().next())
-    }
-
 }
 
 /// 读取会话首条用户消息作为预览（截断到 40 个字符）。读不到返回空串。
@@ -320,11 +311,6 @@ impl SessionCatalog for EmptySessionCatalog {
     fn create(&self) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError> {
         Err(SessionError::Backend("空会话目录不支持新建会话".into()))
     }
-
-    fn latest(&self) -> Result<Option<SessionEntry>, SessionError> {
-        Ok(None)
-    }
-
 }
 
 #[cfg(test)]
@@ -469,25 +455,6 @@ mod tests {
         // 40 个字符 + 省略号。
         assert_eq!(preview.chars().count(), 41);
         assert!(preview.ends_with('…'));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn catalog_latest_prefers_most_recently_modified() {
-        let dir = tmp_dir("latest");
-        let catalog = FileSessionCatalog::new(&dir);
-        let (first, store_a) = catalog.create().unwrap();
-        // 确保两次创建落在不同的秒级时间戳上（fresh_name 基于秒）。
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let (second, store_b) = catalog.create().unwrap();
-        store_b.append(&user("newer")).unwrap();
-        // 触碰 first 的文件，使其成为最近修改。
-        store_a.append(&user("touched")).unwrap();
-        let latest = catalog.latest().unwrap().unwrap();
-        assert!(
-            latest.name == first.name || latest.name == second.name,
-            "latest 必须是已存在的会话"
-        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 
