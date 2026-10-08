@@ -138,74 +138,78 @@ export function App() {
       <header className="flex h-12 shrink-0 items-center border-b border-line px-4">
         <span className="font-display text-body-sm text-ink">Shirley</span>
       </header>
-      <AiConversationTranscript
-        messages={messages}
-        conversationKey="main"
-        extraContentKey={busy ? "busy" : ""}
-        emptyContent={
-          <p className="px-1 py-10 text-center text-body-sm text-muted">
-            开始和 Shirley 对话吧。输入 <kbd className="font-utility">@</kbd> 可引用工作区文件。
-          </p>
-        }
-        renderMessageContent={(message) =>
-          message.role === "assistant" ? (
-            <AssistantMessage
-              content={message.content}
-              streaming={message.status === "streaming"}
-              executions={toolRuns[String(message.id)] ?? []}
-            />
-          ) : (
-            <div className="flex min-w-0 flex-col gap-1.5">
-              <FileChips references={message.references ?? []} />
-              {message.content && <span>{message.content}</span>}
-            </div>
-          )
-        }
-      />
-      {error && (
-        <p className="mx-3 mb-1 text-body-sm text-danger-ink" role="alert">
-          {error}
-        </p>
-      )}
-      <div className="relative shrink-0 px-3 pb-3">
-        {mentions.popoverOpen && (
-          <div className="absolute inset-x-3 bottom-full z-30 mb-1">
-            <FileMentionPopover
-              open={mentions.popoverOpen}
-              query={mentions.query}
-              results={mentions.results}
-              loading={mentions.loading}
-              error={mentions.error}
-              selectedIndex={mentions.selectedIndex}
-              onSelect={mentions.selectResult}
-              onQueryChange={mentions.setQuery}
-              onKeyDown={mentions.handleKeyDown}
-              onRetry={() => mentions.setQuery(mentions.query)}
-            />
-          </div>
-        )}
-        <AiChatComposer
-          id="shirley-composer"
-          label="发送消息"
-          value={input}
-          placeholder="给 Shirley 发消息…（输入 @ 引用文件）"
-          busy={busy}
-          textareaRef={mentions.textareaRef}
-          textareaOnKeyDown={mentions.handleKeyDown}
-          onValueChange={mentions.handleValueChange}
-          onSend={() => void send()}
-          onStop={stop}
-          trailingAction={
-            <ModelSelector current={model} onSelect={(value) => void switchModel(value)} />
+      {/* 固定宽度居中（对齐 shiwen AiConversationSurface 的 max-w-190 = 760px）：
+          聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}
+      <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
+        <AiConversationTranscript
+          messages={messages}
+          conversationKey="main"
+          extraContentKey={busy ? "busy" : ""}
+          emptyContent={
+            <p className="px-1 py-10 text-center text-body-sm text-muted">
+              开始和 Shirley 对话吧。输入 <kbd className="font-utility">@</kbd> 可引用工作区文件。
+            </p>
           }
-        >
-          <FileChips
-            references={mentions.references}
-            onRemove={mentions.removeReference}
-            className="px-2 pt-2"
-          />
-        </AiChatComposer>
-      </div>
+          renderMessageContent={(message) =>
+            message.role === "assistant" ? (
+              <AssistantMessage
+                content={message.content}
+                streaming={message.status === "streaming"}
+                executions={toolRuns[String(message.id)] ?? []}
+              />
+            ) : (
+              <div className="flex min-w-0 flex-col gap-1.5">
+                <FileChips references={message.references ?? []} />
+                {message.content && <span>{message.content}</span>}
+              </div>
+            )
+          }
+        />
+        {error && (
+          <p className="mx-3 mb-1 text-body-sm text-danger-ink" role="alert">
+            {error}
+          </p>
+        )}
+        <div className="relative shrink-0 px-3 pb-3">
+          {mentions.popoverOpen && (
+            <div className="absolute inset-x-3 bottom-full z-30 mb-1">
+              <FileMentionPopover
+                open={mentions.popoverOpen}
+                query={mentions.query}
+                results={mentions.results}
+                loading={mentions.loading}
+                error={mentions.error}
+                selectedIndex={mentions.selectedIndex}
+                onSelect={mentions.selectResult}
+                onQueryChange={mentions.setQuery}
+                onKeyDown={mentions.handleKeyDown}
+                onRetry={() => mentions.setQuery(mentions.query)}
+              />
+            </div>
+          )}
+          <AiChatComposer
+            id="shirley-composer"
+            label="发送消息"
+            value={input}
+            placeholder="给 Shirley 发消息…（输入 @ 引用文件）"
+            busy={busy}
+            textareaRef={mentions.textareaRef}
+            textareaOnKeyDown={mentions.handleKeyDown}
+            onValueChange={mentions.handleValueChange}
+            onSend={() => void send()}
+            onStop={stop}
+            trailingAction={
+              <ModelSelector current={model} onSelect={(value) => void switchModel(value)} />
+            }
+          >
+            <FileChips
+              references={mentions.references}
+              onRemove={mentions.removeReference}
+              className="px-2 pt-2"
+            />
+          </AiChatComposer>
+        </div>
+      </section>
     </div>
   );
 }

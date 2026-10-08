@@ -136,6 +136,36 @@ Shirley 里真实存在的可引用对象只有**工作区里的文件与目录*
 - **检索边界**：只在工作区根下遍历，跳过 `.git` / `node_modules` / `target` / `dist` 等，
   条目数设上限；这与 `read_file` 工具的工作区约束同源，但**在应用层实现**，不碰 SDK。
 
+### 4.3.1 markdown 渲染对齐（**已修**）
+
+`AiMarkdown.tsx` 与 shiwen **逐字节相同**（只差 `cn` 的 import 路径），所以渲染不一致**不在组件**，
+在 **CSS**：Shirley 的 `styles/index.css` 漏了 shiwen 的那行 `@source`。
+
+Tailwind 4 默认**不扫描 `node_modules`**。streamdown 把 markdown 各块级元素的 utility 类
+（`mt-6` / `text-2xl` / `border-border` / `text-muted-foreground` / `divide-y` / `wrap-anywhere` …）
+写在它打包后的 JS 字符串里；不显式告诉 Tailwind 去扫这份 JS，这些类**一个都不会被编进产物 CSS**，
+markdown 就以「无样式」渲染（标题不放大、列表没间距、代码块没边框/底色、引用块没竖线）。
+shiwen 的 `index.css` 有 `@source ".../node_modules/streamdown/dist/*.js"`，Shirley 迁移时漏掉。
+
+修复：在 `web/src/styles/index.css` 补回该 `@source`（路径按 Shirley 的 `web/` 层级写成
+`../../node_modules/streamdown/dist/*.js`），并补齐代码块滚动条的 `-track` / `-thumb:hover` 两条
+（对齐 shiwen `globals.css`）。**改前端目录结构时，这行 `@source` 的相对路径要跟着调。**
+
+### 4.3.2 聊天区固定宽度 + 连续工具调用收集（**已对齐**）
+
+shiwen 的 `AiConversationSurface` 把**转写区 + 输入框**一起包在
+`<section className="mx-auto flex h-full w-full max-w-190 min-h-0 flex-col">` 里
+（`max-w-190` = `calc(var(--spacing) * 190)` = 760px）。Shirley 原先没这层包裹，聊天区随窗口拉满。
+修复：`App.tsx` 补上同款 `<section className="mx-auto w-full max-w-190 min-h-0 flex-1 flex-col">`
+包裹 `AiConversationTranscript` + 错误行 + 输入框，聊天区与输入框都固定宽度居中。
+
+「连续工具调用收集到一起」：shiwen 的 `FreeChatAssistantMessage` 只把**用户可见**的执行项
+（`pending` / 审批中 / 带 `entity_url` 的完成项）单独成卡，其余**全部**塞进一个
+`AiToolActivityDisclosure` 折叠区，渲染成一行「查看处理过程 · N 项」。Shirley 没有 entity / 审批渲染，
+所以**所有**执行项都归入折叠区（`AssistantMessage.tsx`：`executions` 非空就生成单个
+`tool-activity` item），连续的工具调用被收成一行，而不是每个调用铺一张卡。
+`AiToolActivityDisclosure` 内部仍按 `content_offset` 排序、并对连续失败做聚合（`toolErrorUtils`）。
+
 ### 4.4 要保留的（用户真正喜欢的「聊天交互和 UI」）
 
 - `AiChatComposer`：自适应增高 textarea、Enter 发送 / Shift+Enter 换行、发送 / 停止按钮。
@@ -143,6 +173,8 @@ Shirley 里真实存在的可引用对象只有**工作区里的文件与目录*
 - `AiMarkdown`：流式 markdown 渲染（`streamdown`，`parseIncompleteMarkdown`）。
 - `useMessageAutoScroll`：跟随最新（离底才停止跟随）。
 - 工具执行卡片 / 活动折叠的视觉。
+- 聊天区固定宽度（`max-w-190`，见 4.3.2）。
+- 连续工具调用收集成折叠区（见 4.3.2）。
 - `tokens.css` 的暖灰设计语言。
 
 ---
@@ -248,6 +280,7 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String
 - [ ] 思考显示 / 工具参数展开 / 滚动等交互对齐 TUI
 
 **M4 · 收敛与文档**
+- [x] markdown 渲染对齐 shiwen（补 `@source` 让 Tailwind 扫 streamdown，见 4.3.1）
 - [ ] 若指令逻辑重复，下沉共享 `commands` 模块
 - [ ] 更新 `Agent.md`、`docs/architecture.md`（新增 desktop 数据流图）
 

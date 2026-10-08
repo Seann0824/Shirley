@@ -1,6 +1,13 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
+/* 让 Tailwind 扫描 streamdown 打包后的 JS，把 markdown 各块级元素用到的
+   utility 类（`mt-6` / `text-2xl` / `border-border` / `bg-sidebar` /
+   `text-muted-foreground` / `divide-y` …）编进产物 CSS。
+   Tailwind 4 默认不扫描 node_modules；漏掉这行，markdown 会以「无样式」渲染，
+   与 shiwen 不一致（shiwen 的 index.css 有对应的 @source）。 */
+@source "../../node_modules/streamdown/dist/*.js";
+
 /* Shirley 桌面界面：只保留对话渲染需要的基础样式，
    已剥离 shiwen 的 article-body / 批注 / space 等定制层。 */
 
@@ -48,11 +55,17 @@
 [data-ai-markdown] [data-streamdown="code-block-body"]::-webkit-scrollbar {
   height: 6px;
 }
+[data-ai-markdown] [data-streamdown="code-block-body"]::-webkit-scrollbar-track {
+  background: transparent;
+}
 [data-ai-markdown] [data-streamdown="code-block-body"]::-webkit-scrollbar-thumb {
   border: 1px solid transparent;
   border-radius: 9999px;
   background-color: color-mix(in srgb, var(--color-ink) 22%, transparent);
   background-clip: padding-box;
+}
+[data-ai-markdown] [data-streamdown="code-block-body"]::-webkit-scrollbar-thumb:hover {
+  background-color: color-mix(in srgb, var(--color-ink) 35%, transparent);
 }
 
 @media (prefers-reduced-motion: reduce) {

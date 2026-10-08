@@ -39,7 +39,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | `docs/plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 |
 | `docs/tool-lifecycle.md` | 工具生命周期：`ToolContext` 归 `ToolManager` / `on_register`（created）/ `on_unregister`（destroy）/ `unregister`（**已实现**） |
 | `docs/tool-macro.md` | 工具宏表达力：函数宏扩展可选伴生钩子，lifecycle 由宏接线（**已实现**） |
-| `docs/desktop-interface.md` | 桌面界面：Tauri 2 + React 迁移 shiwen 聊天 UI / 共享 LCA（`AgentEvent`）/ 剥离 shiwen 定制逻辑（**M0–M3 已落地**，含 `@` 引用重绑工作区文件） |
+| `docs/desktop-interface.md` | 桌面界面：Tauri 2 + React 迁移 shiwen 聊天 UI / 共享 LCA（`AgentEvent`）/ 剥离 shiwen 定制逻辑（**M0–M3 已落地**，含 `@` 引用重绑工作区文件、markdown 渲染对齐、聊天区固定宽度 `max-w-190`、连续工具调用收集成折叠区） |
 
 ---
 
@@ -262,6 +262,7 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
 - **commands**：`agent_send`（发起一轮，事件经 `agent://event` 推回；可选 `references` 为 `@` 引用的工作区路径，由 `compose_prompt` 拼进本轮 prompt）/ `agent_model_name` / `agent_list_models` / `agent_set_model`（热切换模型，不重建 Agent）/ `agent_search_files`（`@` 引用的工作区文件检索，纯应用层 `workspace_search`，不碰 SDK）/ `agent_cancel`（预留）。模型切换选择器放在发送按钮旁（`ModelSelector.tsx`，走 `AiChatComposer` 的 `trailingAction` 槽位），目录与切换都转发 Rust 侧 `ModelCatalog` / `Agent::set_model`，与 TUI 的 `/model` 同语义。
 - **`@` 引用**（`web/src/lib/file-mentions/`）：迁移自 shiwen 的 entity-mentions 交互骨架，对象**重绑到工作区文件/目录**（`useFileMentions` / `FileChips` / `FileMentionPopover`）；输入 `@` 触发候选浮层、选中生成 chip、发送时路径拼进本轮 prompt。检索落在应用层 `src/workspace_search.rs`（工作区遍历 + 关键词排序，跳过 `.git`/`node_modules`/`target` 等）。**引用不是 Agent 的对外契约**——`Message` / `AgentEvent` 未改，SDK 未新增对外类型。
 - **事件桥**：`wire.rs` 把 `AgentEvent` → `AgentEventWire`（JSON，`web/src/types/wire.ts` 为契约）。为支撑工具卡，`ToolStarted` / `ToolFinished` 两个既有变体**追加**了字段（`arguments` / `ok` / `output` / `elapsed_ms`）——字段追加、TUI 用 `..` 忽略，零破坏；仍未派生 `Serialize`（协议差异收敛在边界）。
+- **渲染对齐 shiwen**（见 `docs/desktop-interface.md` 4.3.1 / 4.3.2）：① markdown 与 shiwen 不一致**不在组件**（`AiMarkdown.tsx` 逐字节相同），在 `styles/index.css` 漏了 shiwen 的 `@source ".../node_modules/streamdown/dist/*.js"`——Tailwind 4 默认不扫 `node_modules`，streamdown 的 utility 类全没生成，补回即修复；② 聊天区固定宽度 `max-w-190`（760px）居中，`App.tsx` 用 `<section>` 包裹转写区 + 输入框；③ 连续工具调用收集进一个 `AiToolActivityDisclosure` 折叠区（「查看处理过程 · N 项」），不再每个调用铺一张卡。
 - **前端桥**：`web/src/lib/bridge.ts` 双模式（Tauri `invoke`/`listen` vs 纯浏览器 mock），`npm run dev` 可独立调试 UI。
 - **剥离决策（已确认）**：A2UI / entity / citation / space / share / OCR / SSE 线格式全删；**审批（approval）代码路径保留在 `AiToolExecutionCard.tsx`，但 `AssistantMessage.tsx` 第一期不渲染审批态执行项**；引入 Node/npm/Vite 构建链已获用户允许。
 
