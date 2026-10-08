@@ -30,6 +30,10 @@ pub struct Bootstrap {
     pub current_session: Option<String>,
     /// 缺模型服务配置（缺 `base_url`）：界面据此进入 `/login` 引导。
     pub needs_login: bool,
+    /// 工作区根目录。桌面界面用它做 `@` 文件检索（`workspace_search`）；
+    /// TUI-only 构建下没人读，故放行 dead_code。
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    pub working_dir: PathBuf,
 }
 
 impl Bootstrap {
@@ -91,7 +95,7 @@ impl Bootstrap {
             .model_config(model_config)
             // 提示词以函数形式传入：每次解析都读取当前工作目录与项目 Agent.md。
             .system_prompt(prompt::build(working_dir.clone()))
-            .working_dir(working_dir)
+            .working_dir(working_dir.clone())
             .compression_instruction(
                 r"
             你在为 coding agent 压缩对话上下文。请忠实保留用户下达的原始指令与约束，
@@ -109,6 +113,7 @@ impl Bootstrap {
             session_catalog,
             current_session: Some(current_session),
             needs_login,
+            working_dir,
         })
     }
 }

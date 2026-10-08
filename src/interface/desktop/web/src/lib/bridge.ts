@@ -17,15 +17,33 @@ export type ModelEntry = {
   provider: string;
 };
 
+/** `@` 引用可选的条目（与 Rust 侧 `FileEntryWire` 对齐）。 */
+export type FileEntry = {
+  path: string;
+  name: string;
+  kind: "file" | "dir";
+};
+
 export type AgentBridge = {
-  /** 发送一条用户消息，返回事件流订阅句柄。 */
-  send: (text: string, onEvent: (event: AgentEventWire) => void) => Promise<StreamHandle>;
+  /**
+   * 发送一条用户消息，返回事件流订阅句柄。
+   *
+   * `references` 是 `@` 引用的工作区路径；Rust 侧会把它们拼进这一轮的 prompt，
+   * 与消息正文一起交给 Agent（引用不是 Agent 的对外契约，只是这一轮输入的一部分）。
+   */
+  send: (
+    text: string,
+    references: string[],
+    onEvent: (event: AgentEventWire) => void,
+  ) => Promise<StreamHandle>;
   /** 当前会话的模型名，用于页脚展示。 */
   modelName: () => Promise<string>;
   /** 列出可选模型（模型目录由 Rust 侧 `ModelCatalog` 提供）。 */
   listModels: () => Promise<ModelEntry[]>;
   /** 热切换模型：不重建 Agent，只换 `ModelConfig::model`。 */
   setModel: (value: string) => Promise<void>;
+  /** 按关键词检索工作区文件（`@` 引用用，纯应用层）。 */
+  searchFiles: (query: string) => Promise<FileEntry[]>;
 };
 
 const isTauri =
@@ -42,9 +60,9 @@ async function createTauriBridge(): Promise<AgentBridge> {
     handler?.(event.payload);
   });
   return {
-    async send(text, onEvent) {
+    async send(text, references, onEvent) {
       handler = onEvent;
-      await invoke("agent_send", { text });
+      await invoke("agent_send", { text, references });
       return {
         cancel: () => {
           handler = null;
@@ -61,17 +79,23 @@ async function createTauriBridge(): Promise<AgentBridge> {
     async setModel(value) {
       await invoke("agent_set_model", { model: value });
     },
+    async searchFiles(query) {
+      return invoke<FileEntry[]>("agent_search_files", { query });
+    },
   };
 }
 
 function createMockBridge(): AgentBridge {
   return {
-    async send(text, onEvent) {
+    async send(text, references, onEvent) {
       let cancelled = false;
       const emit = (event: AgentEventWire) => {
         if (!cancelled) onEvent(event);
       };
       void (async () => {
+        if (references.length > 0) {
+          emit({ type: "content_delta", text: `（mock）引用 ${references.join(", ")} · ` });
+        }
         emit({ type: "content_delta", text: "（mock）收到：" });
         for (const ch of text) {
           await new Promise((r) => setTimeout(r, 20));
@@ -93,6 +117,19 @@ function createMockBridge(): AgentBridge {
     },
     async setModel() {
       // mock：不持久化，仅让选择器有反馈。
+    },
+    async searchFiles(query) {
+      // mock：返回几个假条目，让 `@` 弹层在纯浏览器下可调试。
+      const all: FileEntry[] = [
+        { path: "src/main.rs", name: "main.rs", kind: "file" },
+        { path: "src/bootstrap.rs", name: "bootstrap.rs", kind: "file" },
+        { path: "src/prompt.rs", name: "prompt.rs", kind: "file" },
+        { path: "src/interface", name: "interface", kind: "dir" },
+        { path: "README.md", name: "README.md", kind: "file" },
+      ];
+      const q = query.trim().toLowerCase();
+      if (!q) return all;
+      return all.filter((entry) => entry.path.toLowerCase().includes(q));
     },
   };
 }

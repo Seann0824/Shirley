@@ -7,6 +7,7 @@ mod prompt;
 mod session;
 mod settings;
 mod tools;
+mod workspace_search;
 
 /// 界面模式：TUI（默认）或桌面界面。
 ///

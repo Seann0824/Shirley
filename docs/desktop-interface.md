@@ -99,7 +99,7 @@ Shirley 现在只有一个界面：`src/interface/` 下的 ratatui TUI。本方�
 | shiwen 专有 | 为什么只属于 shiwen | 处置 |
 | --- | --- | --- |
 | **A2UI surfaces**（`A2uiTurnSurface` / `A2uiClientAction` / `AiQuestionSurface`） | shiwen 自有的服务端驱动结构化 UI 协议 | 删 |
-| **实体提及 / chips**（`EntityChips` / `EntityMentionPopover` / `useEntityMentions`） | article/space/document/material——shiwen 知识库 | 删 |
+| **实体提及 / chips**（`EntityChips` / `EntityMentionPopover` / `useEntityMentions`） | article/space/document/material——shiwen 知识库 | **迁移其交互骨架，对象改绑工作区文件**（见 4.3） |
 | **引用**（`[[citation:id]]` 插件 / `inlineCitationMarkdown` / `StreamCitations`） | 绑定 shiwen 检索 + 实体 URL | 删 |
 | **工具审批流**（`approval_state` / `onToolDecision` / 卡片上的 approve/reject） | shiwen human-in-the-loop 关卡；Shirley 暂无权限层 | **保留代码，第一期不展示**（用户已确认） |
 | **实体/空间/文章锚定**（`host_kind` / `promoted_space_id` / `host_repository`） | shiwen 工作区模型 | 删 |
@@ -114,9 +114,29 @@ Shirley 现在只有一个界面：`src/interface/` 下的 ratatui TUI。本方�
 >
 > **已确认（用户）**：
 > - **审批流保留代码，第一期不展示**——`approval_state` / `onToolDecision` 的数据结构与回调链路先原样迁入，渲染层第一期不画审批按钮；后续接权限层时再启用。
+> - **`@` 引用保留交互、对象重绑工作区文件**（见 4.3）——不再按"entity 概念一律删"处理。
 > - 其余条目默认全部删除。
 
-### 4.3 要保留的（用户真正喜欢的「聊天交互和 UI」）
+### 4.3 `@` 引用（迁移 + 重绑，**已落地**）
+
+shiwen 的 `@` 逻辑（输入 `@` 触发候选浮层、选中生成 chip、`EntityChips` 回显）交互骨架值得留，
+但它绑定的对象是 shiwen 知识库实体（article/space/document/category/conversation/material）。
+Shirley 里真实存在的可引用对象只有**工作区里的文件与目录**，故**重绑**而非照搬：
+
+| shiwen 源 | Shirley 落点 | 变化 |
+| --- | --- | --- |
+| `lib/entity-mentions/useEntityMentions.ts` | `web/src/lib/file-mentions/useFileMentions.ts` | 对象换成 `FileReference`；检索走 Rust 侧 `agent_search_files`（本地文件系统），不再分页 / cursor |
+| `lib/entity-mentions/EntityChips.tsx` | `web/src/lib/file-mentions/FileChips.tsx` | 图标收敛为 文件 / 目录；去掉 material OCR / 删除资料 |
+| `lib/entity-mentions/EntityMentionPopover.tsx` | `web/src/lib/file-mentions/FileMentionPopover.tsx` | 去掉分组（article/space/…）、OCR 徽标、分页「加载更多」；只留搜索框 + 结果列表 + 键盘选择 |
+| `lib/entity-mentions/entityLoader.ts` | Rust `src/workspace_search.rs` + `agent_search_files` | 检索落到应用层（工作区遍历 + 关键词排序），不经 SDK |
+
+- **引用如何进模型**：`@` 只作用于界面——选中后把 `@query` 从正文抹掉、生成 chip，发送时
+  由 `shell.rs::compose_prompt` 把引用路径拼进**这一轮**的 prompt。**引用不是 Agent 的对外
+  契约**：`Message` / `AgentEvent` 都不动，SDK 未因此新增任何对外类型（见第八节验收第 4 条）。
+- **检索边界**：只在工作区根下遍历，跳过 `.git` / `node_modules` / `target` / `dist` 等，
+  条目数设上限；这与 `read_file` 工具的工作区约束同源，但**在应用层实现**，不碰 SDK。
+
+### 4.4 要保留的（用户真正喜欢的「聊天交互和 UI」）
 
 - `AiChatComposer`：自适应增高 textarea、Enter 发送 / Shift+Enter 换行、发送 / 停止按钮。
 - `AiMessageTimeline`：按 `content_offset` 把文本块与工具卡按时间线交错。
@@ -222,6 +242,7 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String
 
 **M3 · 补齐会话与指令**
 - [x] 模型切换选择器（放在发送按钮旁，`ModelSelector.tsx` + `agent_list_models` / `agent_set_model`）
+- [x] `@` 引用：工作区文件/目录的提及浮层 + chip 展示（见 4.3；`agent_search_files` + `file-mentions/`）
 - [ ] 会话列表 / 切换（`SessionCatalog`）
 - [ ] `/login` `/session` 等指令的 desktop 呈现
 - [ ] 思考显示 / 工具参数展开 / 滚动等交互对齐 TUI
@@ -236,7 +257,7 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String
 
 1. `cargo run`（默认）行为与今天完全一致（TUI 不受影响）。
 2. `cargo desktop`（= `cargo run --features desktop -- --desktop`）打开 Tauri 窗口，能发消息、看到流式回复与工具执行卡片。
-3. 前端不出现任何 shiwen 专有概念（A2UI / entity / citation / space / share）；审批链路代码保留但第一期不渲染审批态。
+3. 前端不出现任何 shiwen 专有概念（A2UI / entity / citation / space / share）；审批链路代码保留但第一期不渲染审批态。`@` 引用是**重绑到工作区文件**后的通用交互，不算 shiwen 概念。
 4. `Agent` / `AgentEvent` 契约不变（SDK 未因桌面界面新增对外类型）。
 5. `cargo test` 全绿（含既有红测试基线不变）。
 

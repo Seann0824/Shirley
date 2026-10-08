@@ -9,12 +9,15 @@ import {
 import { AiConversationMinimap } from "@/components/ai/AiConversationMinimap";
 import { AiAssistantAvatar } from "./AiAssistantAvatar";
 import { AiMarkdown } from "@/components/ai/AiMarkdown";
+import type { FileReference } from "@/lib/file-mentions/types";
 
 export type AiTranscriptMessage = {
   id: Key;
   role: "user" | "assistant";
   content: string;
   status?: "streaming" | "complete" | "error";
+  /** 用户消息上引用的工作区文件/目录（`@` 引用回显用）。 */
+  references?: FileReference[];
 };
 
 export function AiConversationTranscript({

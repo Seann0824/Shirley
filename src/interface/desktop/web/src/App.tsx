@@ -6,6 +6,10 @@ import {
 import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { AssistantMessage } from "@/components/AssistantMessage";
 import { ModelSelector } from "@/components/ai/ModelSelector";
+import { FileChips } from "@/lib/file-mentions/FileChips";
+import { FileMentionPopover } from "@/lib/file-mentions/FileMentionPopover";
+import { useFileMentions } from "@/lib/file-mentions/useFileMentions";
+import type { FileReference } from "@/lib/file-mentions/types";
 import { agentBridge, type StreamHandle } from "@/lib/bridge";
 import type { AiToolExecution } from "@/types/ai";
 
@@ -23,22 +27,28 @@ export function App() {
   const [model, setModel] = useState("");
   const handleRef = useRef<StreamHandle | null>(null);
 
+  const mentions = useFileMentions(input, setInput);
+
   useEffect(() => {
     void agentBridge()
       .then((bridge) => bridge.modelName().then(setModel).catch(() => {}));
   }, []);
 
   const send = useCallback(async () => {
+    // 浮层打开时，回车先确认当前高亮的引用，而不是发送。
+    if (mentions.popoverOpen && mentions.confirmSelection()) return;
     const text = input.trim();
     if (!text || busy) return;
+    const references = mentions.references;
     setInput("");
+    mentions.clearReferences();
     setError("");
     setBusy(true);
 
     const assistantId = nextId();
     setMessages((prev) => [
       ...prev,
-      { id: nextId(), role: "user", content: text, status: "complete" },
+      { id: nextId(), role: "user", content: text, status: "complete", references },
       { id: assistantId, role: "assistant", content: "", status: "streaming" },
     ]);
     setToolRuns((prev) => ({ ...prev, [assistantId]: [] }));
@@ -51,57 +61,61 @@ export function App() {
     };
 
     const bridge = await agentBridge();
-    handleRef.current = await bridge.send(text, (event) => {
-      switch (event.type) {
-        case "content_delta":
-          patchMessage((m) => ({ ...m, content: m.content + event.text }));
-          break;
-        case "reasoning_delta":
-          // 第一期思考流不单独成区，先并入正文之后的处理留待 M3。
-          break;
-        case "tool_started":
-          patchTools((tools) => [
-            ...tools,
-            {
-              id: event.call_id,
-              call_id: event.call_id,
-              tool_name: event.name,
-              status: "running",
-              summary: "",
-              input: safeParseArgs(event.arguments),
-            },
-          ]);
-          break;
-        case "tool_finished":
-          patchTools((tools) =>
-            tools.map((tool) =>
-              tool.call_id === event.call_id
-                ? {
-                    ...tool,
-                    status: event.ok ? "complete" : "error",
-                    summary: event.output.slice(0, 200),
-                    error: event.ok ? null : event.output,
-                  }
-                : tool,
-            ),
-          );
-          break;
-        case "error":
-          setError(event.message);
-          patchMessage((m) => ({ ...m, status: "error" }));
-          setBusy(false);
-          handleRef.current = null;
-          break;
-        case "finished":
-          patchMessage((m) => ({ ...m, status: "complete" }));
-          setBusy(false);
-          handleRef.current = null;
-          break;
-        default:
-          break;
-      }
-    });
-  }, [busy, input]);
+    handleRef.current = await bridge.send(
+      text,
+      references.map((reference) => reference.path),
+      (event) => {
+        switch (event.type) {
+          case "content_delta":
+            patchMessage((m) => ({ ...m, content: m.content + event.text }));
+            break;
+          case "reasoning_delta":
+            // 第一期思考流不单独成区，先并入正文之后的处理留待 M3。
+            break;
+          case "tool_started":
+            patchTools((tools) => [
+              ...tools,
+              {
+                id: event.call_id,
+                call_id: event.call_id,
+                tool_name: event.name,
+                status: "running",
+                summary: "",
+                input: safeParseArgs(event.arguments),
+              },
+            ]);
+            break;
+          case "tool_finished":
+            patchTools((tools) =>
+              tools.map((tool) =>
+                tool.call_id === event.call_id
+                  ? {
+                      ...tool,
+                      status: event.ok ? "complete" : "error",
+                      summary: event.output.slice(0, 200),
+                      error: event.ok ? null : event.output,
+                    }
+                  : tool,
+              ),
+            );
+            break;
+          case "error":
+            setError(event.message);
+            patchMessage((m) => ({ ...m, status: "error" }));
+            setBusy(false);
+            handleRef.current = null;
+            break;
+          case "finished":
+            patchMessage((m) => ({ ...m, status: "complete" }));
+            setBusy(false);
+            handleRef.current = null;
+            break;
+          default:
+            break;
+        }
+      },
+    );
+  }, [busy, input, mentions]);
 
   const stop = useCallback(() => {
     handleRef.current?.cancel();
@@ -130,7 +144,7 @@ export function App() {
         extraContentKey={busy ? "busy" : ""}
         emptyContent={
           <p className="px-1 py-10 text-center text-body-sm text-muted">
-            开始和 Shirley 对话吧。
+            开始和 Shirley 对话吧。输入 <kbd className="font-utility">@</kbd> 可引用工作区文件。
           </p>
         }
         renderMessageContent={(message) =>
@@ -141,7 +155,10 @@ export function App() {
               executions={toolRuns[String(message.id)] ?? []}
             />
           ) : (
-            message.content
+            <div className="flex min-w-0 flex-col gap-1.5">
+              <FileChips references={message.references ?? []} />
+              {message.content && <span>{message.content}</span>}
+            </div>
           )
         }
       />
@@ -150,20 +167,44 @@ export function App() {
           {error}
         </p>
       )}
-      <div className="shrink-0 px-3 pb-3">
+      <div className="relative shrink-0 px-3 pb-3">
+        {mentions.popoverOpen && (
+          <div className="absolute inset-x-3 bottom-full z-30 mb-1">
+            <FileMentionPopover
+              open={mentions.popoverOpen}
+              query={mentions.query}
+              results={mentions.results}
+              loading={mentions.loading}
+              error={mentions.error}
+              selectedIndex={mentions.selectedIndex}
+              onSelect={mentions.selectResult}
+              onQueryChange={mentions.setQuery}
+              onKeyDown={mentions.handleKeyDown}
+              onRetry={() => mentions.setQuery(mentions.query)}
+            />
+          </div>
+        )}
         <AiChatComposer
           id="shirley-composer"
           label="发送消息"
           value={input}
-          placeholder="给 Shirley 发消息…"
+          placeholder="给 Shirley 发消息…（输入 @ 引用文件）"
           busy={busy}
-          onValueChange={setInput}
+          textareaRef={mentions.textareaRef}
+          textareaOnKeyDown={mentions.handleKeyDown}
+          onValueChange={mentions.handleValueChange}
           onSend={() => void send()}
           onStop={stop}
           trailingAction={
             <ModelSelector current={model} onSelect={(value) => void switchModel(value)} />
           }
-        />
+        >
+          <FileChips
+            references={mentions.references}
+            onRemove={mentions.removeReference}
+            className="px-2 pt-2"
+          />
+        </AiChatComposer>
       </div>
     </div>
   );
