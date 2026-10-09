@@ -1,5 +1,5 @@
 use ratatui::layout::Position;
-use shirley_agent_sdk::{Agent, Message, Usage};
+use shirley_agent_sdk::{Agent, AgentEvent, Message, Usage};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -7,6 +7,7 @@ use crate::models::{ModelCatalog, ModelEntry, StaticCatalog};
 use crate::session::{EmptySessionCatalog, SessionCatalog, SessionEntry};
 
 use super::command::{CommandManager, CommandOutcome, DEFAULT_PREFIX};
+use super::session::SessionManager;
 
 use super::selection::Selection;
 use super::ui::MessageCache;
@@ -108,7 +109,9 @@ pub struct LoginFlow {
 }
 
 pub struct App {
-    agent: Option<Agent>,
+    /// 多会话编排器：每会话一个独立 `Agent`，`active` 指向前台。
+    /// 单会话（测试）时内部只有一个会话，`active` 恒指它。
+    sessions: SessionManager,
     exit: bool,
     input: String,
     input_cursor: usize,
@@ -118,21 +121,9 @@ pub struct App {
     history_index: Option<usize>,
     // 进入历史浏览前暂存的未发送输入，用于向下回到末尾时恢复。
     history_draft: String,
-    items: Vec<Item>,
-    waiting: bool,
-    waiting_since: Option<Instant>,
     show_thinking: bool,
     // 是否展开工具调用的完整参数（默认收起，只显示一行摘要）。
     show_tool_args: bool,
-    scroll: usize,
-    auto_scroll: bool,
-    // 渲染层每帧回写，输入层拿不到布局所以存这儿
-    max_scroll: usize,
-    last_usage: Option<Usage>,
-    total_usage: Usage,
-    compressing: bool,
-    context_usage: Option<(u64, u64)>,
-    streaming_delta_start: Option<usize>,
     pub(crate) message_cache: Option<MessageCache>,
     /// 快捷指令解析器。只作用于 TUI，不参与任何发送给 AI 的上下文。
     commands: CommandManager,
@@ -149,29 +140,17 @@ pub struct App {
     /// `/model` 被触发、但模型列表尚未加载完成时置位。
     /// 由 TUI 主循环取走并异步加载目录（列表可能来自远端）。
     picker_requested: bool,
-    /// 会话目录：`/session` 的会话来源。接口稳定，实现可换（本地目录 / 远端）。
-    session_catalog: Arc<dyn SessionCatalog>,
     /// 打开中的会话选择器；`None` 表示未打开。
     session_picker: Option<SessionPicker>,
     /// `/session` 被触发、但会话列表尚未加载完成时置位。
     /// 由 TUI 主循环取走并加载目录后打开选择器。
     session_picker_requested: bool,
-    /// 当前会话名（供选择器打标 / 状态展示）；`None` 表示未命名（内存会话）。
-    current_session: Option<String>,
-    /// 本轮回复开始时 UI `items` 的长度，打断时据此回退界面。
-    ui_turn_start: Option<usize>,
-    /// 本轮提交的输入，打断后退回输入框供修改重发。
-    turn_prompt: Option<String>,
-    /// 用户按 Esc 请求打断当前回复；由主循环读取后触发取消（不清除，待完成时消费）。
-    interrupt_requested: bool,
     /// `/rewind` 已确认的回溯点：被编辑消息的 UI `items` 下标。
     ///
     /// 回溯只作用于**最后一条用户消息**（`docs/session.md` 一.决策 4），
     /// 因此只需记 UI 下标；Agent 侧回退由 `rewind_last_user_turn` 确定性完成。
     /// 下次提交前先回退到这里，再作为全新一轮发送。
     rewind_target: Option<usize>,
-    /// 待滚动到的 UI 条目下标：回溯确认后置位，渲染层据此把该消息滚入视野。
-    /// 渲染层取走即清空（一次性）。
     /// 输入框提示语覆盖：指令打开的编辑态（如回溯编辑）用它说明"Enter 重发 / Esc 取消"。
     /// 为空时用默认提示。任何普通输入都会清掉它。
     command_hint: Option<String>,
@@ -185,10 +164,25 @@ pub struct App {
     selection: Option<Selection>,
 }
 
+impl std::ops::Deref for App {
+    type Target = super::session::Session;
+    /// 前台会话字段的透明访问：`self.items` / `self.agent` / `self.waiting` …
+    /// 全部解析到 `sessions.active()`（"当前会话的视图"）。
+    fn deref(&self) -> &Self::Target {
+        self.sessions.active()
+    }
+}
+
+impl std::ops::DerefMut for App {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.sessions.active_mut()
+    }
+}
+
 impl App {
     /// 用内置静态模型目录构造（默认）。
     ///
-    /// 主要供测试与不关心目录注入的场景使用；主程序走 [`App::with_catalogs`]。
+    /// 主要供测试与不关心目录注入的场景使用；主程序走 [`App::with_manager`]。
     #[allow(dead_code)]
     pub fn new(agent: Agent) -> Self {
         Self::with_catalog(agent, Arc::new(StaticCatalog::builtin()))
@@ -202,33 +196,28 @@ impl App {
         Self::with_catalogs(agent, catalog, Arc::new(EmptySessionCatalog))
     }
 
-    /// 注入模型目录与会话目录构造。`/model` 与 `/session` 各自的数据来源。
+    /// 注入模型目录与会话目录构造（单会话，供测试使用）。
+    #[allow(dead_code)]
     pub fn with_catalogs(
         agent: Agent,
         catalog: Arc<dyn ModelCatalog>,
         session_catalog: Arc<dyn SessionCatalog>,
     ) -> Self {
+        Self::with_manager(SessionManager::single(agent, None, session_catalog), catalog)
+    }
+
+    /// 用已装配好的多会话编排器构造（TUI / desktop 走这里）。
+    pub fn with_manager(sessions: SessionManager, catalog: Arc<dyn ModelCatalog>) -> Self {
         Self {
-            agent: Some(agent),
+            sessions,
             exit: false,
             input: String::new(),
             input_cursor: 0,
             history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
-            items: Vec::new(),
-            waiting: false,
-            waiting_since: None,
             show_thinking: true,
             show_tool_args: false,
-            scroll: 0,
-            auto_scroll: true,
-            max_scroll: 0,
-            last_usage: None,
-            total_usage: Usage::default(),
-            compressing: false,
-            context_usage: None,
-            streaming_delta_start: None,
             message_cache: None,
             commands: CommandManager::new(DEFAULT_PREFIX),
             suggestions: Vec::new(),
@@ -236,13 +225,8 @@ impl App {
             catalog,
             picker: None,
             picker_requested: false,
-            session_catalog,
             session_picker: None,
             session_picker_requested: false,
-            current_session: None,
-            ui_turn_start: None,
-            turn_prompt: None,
-            interrupt_requested: false,
             rewind_target: None,
             command_hint: None,
             login: None,
@@ -259,26 +243,8 @@ impl App {
         &self.total_usage
     }
 
-    pub fn record_usage(&mut self, usage: Usage) {
-        self.total_usage = self.total_usage + usage;
-        self.last_usage = Some(usage);
-    }
-
-    pub fn start_compression(&mut self) {
-        self.compressing = true;
-    }
-
-    pub fn finish_compression(&mut self) {
-        self.compressing = false;
-        self.context_usage = None;
-    }
-
     pub fn is_compressing(&self) -> bool {
         self.compressing
-    }
-
-    pub fn record_context_usage(&mut self, used_tokens: u64, limit_tokens: u64) {
-        self.context_usage = Some((used_tokens, limit_tokens));
     }
 
     pub fn context_usage(&self) -> Option<(u64, u64)> {
@@ -589,13 +555,14 @@ impl App {
     }
 
     pub fn take_agent(&mut self) -> Option<Agent> {
-        self.agent.take()
+        self.sessions.active_mut().agent.take()
     }
 
     pub fn restore_agent(&mut self, agent: Agent) {
-        self.agent = Some(agent);
-        self.waiting = false;
-        self.waiting_since = None;
+        let session = self.sessions.active_mut();
+        session.agent = Some(agent);
+        session.waiting = false;
+        session.waiting_since = None;
     }
 
     /// 本轮回复结束（正常完成或被用户打断）后的收尾。
@@ -891,85 +858,25 @@ impl App {
         }
     }
 
+    /// 把一条 `AgentEvent` 累加到当前前台会话（共享 `Session::apply_event`）。
+    ///
+    /// TUI 与 desktop 走同一条累加路径：事件处理只此一处，界面只读结果。
+    /// `Err` 是运行期错误文案，渲染成错误条目。
+    pub fn apply_event(&mut self, event: Result<AgentEvent, String>) {
+        self.sessions.active_mut().apply_event(event);
+        self.message_cache = None;
+    }
+
+    /// 追加一条消息条目（并失效渲染缓存）。
     fn push_message(&mut self, role: Role, content: String, thinking: bool) {
-        self.items.push(Item::Message(ChatMessage {
-            role,
-            content,
-            thinking,
-        }));
+        self.sessions.active_mut().push_message(role, content, thinking);
         self.message_cache = None;
     }
 
-    pub fn append_streaming_delta(&mut self, delta: String, thinking: bool) {
-        if delta.is_empty() {
-            return;
-        }
-
-        if self.streaming_delta_start.is_some() {
-            if let Some(Item::Message(message)) = self.items.last_mut()
-                && message.role == Role::Assistant
-                && message.thinking == thinking
-            {
-                message.content.push_str(&delta);
-                self.message_cache = None;
-                return;
-            }
-        } else {
-            self.streaming_delta_start = Some(self.items.len());
-        }
-
-        self.push_message(Role::Assistant, delta, thinking);
-    }
-
-    pub fn finish_streaming_deltas(&mut self) {
-        if let Some(start) = self.streaming_delta_start.take() {
-            self.items.truncate(start);
-            self.message_cache = None;
-        }
-    }
-
-    pub fn start_tool_calls(&mut self, calls: Vec<ToolCallView>) {
-        if calls.is_empty() {
-            return;
-        }
-        self.items.push(Item::Tools(ToolGroup { calls }));
-        self.message_cache = None;
-    }
-
+    /// 从一条落库消息重建条目（测试与历史回放用；`apply_event` 内部走 `Session`）。
     pub fn add_message(&mut self, message: Message) {
-        match message {
-            Message::User { content } => self.push_message(Role::User, content, false),
-            Message::Assistant {
-                content,
-                reasoning_content,
-                tool_calls,
-            } => {
-                // 思考先记下来，让消息顺序保持"先想后答"。
-                if let Some(reasoning) = reasoning_content.filter(|r| !r.trim().is_empty()) {
-                    self.push_message(Role::Assistant, reasoning, true);
-                }
-                if let Some(content) = content.filter(|c| !c.is_empty()) {
-                    self.push_message(Role::Assistant, content, false);
-                }
-                if !tool_calls.is_empty() {
-                    let calls = tool_calls
-                        .into_iter()
-                        .map(|call| ToolCallView {
-                            name: call.name,
-                            arguments: call.arguments,
-                        })
-                        .collect();
-                    self.start_tool_calls(calls);
-                }
-            }
-            Message::ContextSummary { content } => self.push_message(Role::Summary, content, false),
-            Message::Tool { .. } | Message::System { .. } => {}
-        }
-    }
-
-    pub fn add_error(&mut self, error: String) {
-        self.compressing = false;
-        self.push_message(Role::Error, error, false);
+        self.sessions.active_mut().add_message(message);
+        self.message_cache = None;
     }
 
     /// TUI 本地系统提示（如指令反馈），不进入发送给 AI 的上下文。
@@ -1113,24 +1020,19 @@ impl App {
 
     /// 会话目录句柄（供主循环加载列表）。
     pub fn session_catalog(&self) -> Arc<dyn SessionCatalog> {
-        Arc::clone(&self.session_catalog)
+        self.sessions.catalog()
     }
 
-    /// 当前会话名（供状态展示）。
+    /// 当前（前台）会话名（供状态展示）。
     pub fn current_session(&self) -> Option<&str> {
-        self.current_session.as_deref()
-    }
-
-    /// 记录当前会话名（启动时由主循环从上次会话恢复后设置）。
-    pub fn set_current_session(&mut self, name: Option<String>) {
-        self.current_session = name;
+        self.sessions.active_name()
     }
 
     /// 用加载好的会话列表打开选择器，高亮当前会话。
     ///
     /// 列表首项固定插入「＋ 新建会话」哨兵，让"切换"与"新建"在同一个面板里完成。
     pub fn open_session_picker(&mut self, mut entries: Vec<SessionEntry>) {
-        let current = self.current_session.clone();
+        let current = self.sessions.active_name().map(str::to_owned);
         // 哨兵项置顶：name 为空串代表"新建"。
         let mut all = vec![SessionEntry {
             name: SessionPicker::NEW_NAME.to_owned(),
@@ -1175,33 +1077,21 @@ impl App {
         self.message_cache = None;
         self.command_hint = None;
         let entry = picker.entries.get(picker.selected).cloned()?;
-        let catalog = Arc::clone(&self.session_catalog);
 
-        let (name, store) = if entry.name == SessionPicker::NEW_NAME {
-            // 惰性新建：此刻不落盘，切换后发首条消息才真正建文件。
-            match catalog.create_lazy(None) {
-                Ok((created, store)) => (created.name, store),
-                Err(error) => {
-                    self.add_system_message(format!("新建会话失败：{error}"));
-                    return None;
-                }
-            }
+        // 编排交给 `SessionManager`：新建 / 切换都只挪 `active` 指针，
+        // **不重建 Agent**（已加载的会话直接复用其就绪 Agent；未加载的经工厂恢复）。
+        let result = if entry.name == SessionPicker::NEW_NAME {
+            self.sessions.create_new(None)
         } else {
-            match catalog.open(&entry.name) {
-                Ok(store) => (entry.name.clone(), store),
-                Err(error) => {
-                    self.add_system_message(format!("打开会话失败：{error}"));
-                    return None;
-                }
+            self.sessions.switch_to(&entry.name)
+        };
+        let name = match result {
+            Ok(name) => name,
+            Err(error) => {
+                self.add_system_message(format!("切换会话失败：{error}"));
+                return None;
             }
         };
-
-        let agent = self.agent.as_mut()?;
-        if let Err(error) = agent.switch_session(store) {
-            self.add_system_message(format!("切换会话失败：{error}"));
-            return None;
-        }
-        self.current_session = Some(name.clone());
         // 会话已换：界面重放新会话历史，并重置与会话绑定的统计量。
         self.rebuild_items_from_agent();
         self.reset_session_stats();

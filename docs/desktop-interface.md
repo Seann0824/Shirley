@@ -322,52 +322,62 @@ shiwen 的 `AiConversationSurface` 把**转写区 + 输入框**一起包在
 | `Finished(RunResult)` | 结束本轮（对应 `onDone`） |
 | `Err(AgentError)` | 错误态（对应 `onError`） |
 
-**Rust 侧桥接**（示意）：
+**Rust 侧桥接**（示意，已按多会话演进）：
 ```rust
 #[tauri::command]
-async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String) -> Result<(), String> {
-    // Agent 放 Option：运行期间 take 出去移入后台任务，结束后放回
-    // （与 TUI 同款 take/restore 手法，避免并发驱动同一 Agent）。
-    let mut agent = state.take_agent().ok_or("agent 正在运行中")?;
+async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String, session: Option<String>) -> Result<(), String> {
+    // 按**会话名**取（未传则回落前台会话）；运行期间把该会话的 Agent 移入后台任务，
+    // 结束后按名放回。不同会话各持独立 Agent，可真正并行。
+    let name = resolve_session(&state, session).await?;
+    // `begin_turn` = 取走 Agent + 乐观记入用户消息（`apply_event` 有意忽略
+    // `MessageAdded(User)`，用户消息须由驱动方记录——与 TUI `submit` 对称）。
+    let mut agent = state.sessions.lock().await
+        .begin_turn(&name, text.clone()).ok_or("agent 正在运行中")?;
     tauri::async_runtime::spawn(async move {
         let mut stream = agent.run_stream(&text);
         while let Some(event) = stream.next().await {
-            let wire = match event {
-                Ok(event) => AgentEventWire::from_event(event),
-                Err(error) => AgentEventWire::Error { message: error.to_string() },
+            let update = match event {
+                Ok(event) => Ok(AgentEventWire::from_event(event).with_session(&name)),
+                Err(error) => Err(error.to_string()),
             };
-            let _ = app.emit("agent://event", wire);   // 序列化成前端可消费的 JSON
+            // 事实源在 SessionManager：把事件喂给**对应会话**（按名，不依赖 active 指针）。
+            state.sessions.lock().await.apply_event(&name, update);
         }
-        state.restore_agent(agent);
+        state.sessions.lock().await.restore_agent(&name, agent);
     });
     Ok(())
 }
 ```
-前端 `listen("agent://event", ...)` 后按上表 dispatch 到 store（见 `web/src/lib/bridge.ts`）。
+每个 `Session` 自持一条 `broadcast` 通道；`agent_subscribe { session }` 在同一把锁内
+**先 `subscribe` 再 `snapshot`**（保证不丢 / 不重），起一个 per-session pump 任务把
+该会话事件经 `agent://event` 推给前端；`agent_unsubscribe { session }` abort 该 pump。
+前端按 `AgentEventWire.session` 把事件路由到对应会话视图（见 `web/src/lib/bridge.ts`）。
 
 **Tauri commands 一览**（`src/interface/desktop/shell.rs`）：
 
 | command | 作用 |
 | --- | --- |
-| `agent_send { text }` | 发起一轮 `run_stream`，事件经 `agent://event` 推送 |
+| `agent_send { text, references?, session? }` | 发起一轮 `run_stream`（`session` 缺省回落前台会话），事件经 `agent://event` 推送 |
 | `agent_model_name` | 当前模型名（页脚 / 选择器展示） |
 | `agent_list_models` | 列出可选模型（转发 `ModelCatalog`） |
 | `agent_set_model { model }` | 热切换模型（`Agent::set_model`，不重建 Agent） |
 | `agent_search_files { query }` | `@` 引用的工作区文件检索（应用层 `workspace_search`，不碰 SDK） |
 | `agent_list_sessions` | 列出全部会话（转发 `SessionCatalog::list`，按最近修改降序） |
 | `agent_current_session` | 当前会话名（无则 `null`） |
-| `agent_new_session { title? }` | 新建会话（可命名���并切换过去（`create_named` + `switch_session`） |
-| `agent_switch_session { name }` | 切换到指定会话（`Agent::switch_session`，与 TUI 同一接缝） |
+| `agent_new_session { title? }` | 新建会话（可命名）并切换过去（`SessionManager::create_new`） |
+| `agent_switch_session { name }` | 切换到指定会话（`SessionManager::switch_to`，与 TUI 同一编排器） |
 | `agent_rename_session { name, title }` | 重命名会话（只改标题 sidecar，不改标识 / 内容） |
 | `agent_delete_session { name }` | 删除会话（连同日志与标题） |
 | `agent_load_history` | 回放当前会话历史（User / Assistant 正文）供前端重建 transcript |
+| `agent_subscribe { session }` | 订阅某会话：同锁内 `subscribe` + `snapshot`，返回 `SessionSnapshotWire { session, items, running }` 并起 pump |
+| `agent_unsubscribe { session }` | 退订某会话：abort 其 pump |
 | `agent_cancel` | 预留（SDK 取消机制未落地，见 `Agent.md` 缺口 9） |
 
 > **模型切换选择器**：放在发送按钮旁边（`AiChatComposer` 的 `trailingAction` 槽位，`ModelSelector.tsx`）。目录与切换都走 Rust 侧（`agent_list_models` / `agent_set_model`），前端不持有模型状态——与 TUI 的 `/model` 同语义，只是从「浮层面板」变成「发送栏内联下拉」。
 
-> **会话管理选择器**（`SessionSelector.tsx`，放在顶栏标题旁）：参照 Codex 的 `/resume` picker，提供列出 / 切换 / 新建（可命名）/ 重命名（内联编辑）/ 删除（两次点击确认）。会话目录与全部操作都走 Rust 侧 `SessionCatalog`——**与 TUI 共用同一个实现、同一份 `<root>/.shirley/sessions` 数据**（见 `docs/session.md` 八.决策 7）。切换 / 新建 / 删除与 `agent_send` 共用 `Arc<Mutex<Option<Agent>>>`：运行中拒绝，不会并发驱动。前端不持有会话状态，切换后调 `agent_load_history` 重建 transcript。
+> **会话管理选择器**（`SessionSelector.tsx`，放在顶栏标题旁）：参照 Codex 的 `/resume` picker，提供列出 / 切换 / 新建（可命名）/ 重命名（内联编辑）/ 删除（两次点击确认）。会话目录与全部操作都走 Rust 侧 `SessionCatalog`——**与 TUI 共用同一个实现、同一份 `<root>/.shirley/sessions` 数据**（见 `docs/session.md` 八.决策 7）。切换 / 新建 / 删除经 `SessionManager`（每个会话各持独立 `Agent`，运行中只拒绝该会话）。**前端按会话订阅事件**：切到某会话即 `agent_subscribe`（拿 `SessionSnapshot` 重建 transcript）+ 订阅其事件流；切走 `agent_unsubscribe`。后台会话照常运行，事件按 `AgentEventWire.session` 路由到各自视图，不串台。
 
-> **注意**：`AgentEvent` 目前是 `Debug`，**未派生 `Serialize`**。桥接层需要一个 `to_wire` 把 `AgentEvent` / `Message` 映射成前端 DTO（不直接给 SDK 加 `Serialize`，保持 SDK 契约小、协议差异收敛在边界——与 `docs/README.md` 原则一一致）。已落地为 `src/interface/desktop/wire.rs`。
+> **注意**：`AgentEvent` 目前是 `Debug + Clone`（`Clone` 是每会话 `broadcast` 通道复用事件所需），**未派生 `Serialize`**。桥接层需要一个 `to_wire` 把 `AgentEvent` / `Message` 映射成前端 DTO（不直接给 SDK 加 `Serialize`，保持 SDK 契约小、协议差异收敛在边界——与 `docs/README.md` 原则一一致）。已落地为 `src/interface/desktop/wire.rs`。
 >
 > 为支撑工具卡，`ToolStarted` / `ToolFinished` 两个既有变体**扩展了字段**（`arguments` / `ok` / `output` / `elapsed_ms`）。这是 SDK 对外契约的一次小改：字段是**追加**的，既有消费者（TUI 用 `..` 忽略）零改动；仍未派生 `Serialize`。
 

@@ -11,7 +11,7 @@ import type { SessionEntry } from "@/lib/bridge";
  *
  * 只是「会话目录 + 切换 / 新建 / 重命名 / 删除」的薄 UI——目录与操作都由 Rust
  * 侧的 `SessionCatalog` 提供（与 TUI 共用同一份 `<root>/.shirley/sessions`），
- * 前端不持有会话状态。切换走后端 `Agent::switch_session`，与 TUI 同一接缝。
+ * 前端不持有会话状态。切换走后端 `SessionManager`（`agent_switch_session`），与 TUI 同一编排器。
  *
  * 视觉与 `ModelSelector` / `FileMentionPopover` 对齐：`rounded-card` 弹层、
  * 列表行（hover `bg-quiet`、选中 `bg-selected`）、`ScrollArea` 滚动、`Separator` 分隔。

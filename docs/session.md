@@ -316,9 +316,17 @@ graph TD
 名字默认取创建时间戳（`YYYYMMDD-HHMMSS`），**目录扫描即"列出会话"**——
 不需要额外的索引文件，也不会出现"索引与日志对不上"的一致性问题（延续决策 1 的单一数据源）。
 
-**决策 2：切换是 SDK 的接缝，不是应用的 hack。**
+**决策 2：切换是 SDK 的接缝，不是应用的 hack。**（**已演进：接缝上移到应用层**）
 
-`Agent::switch_session(Arc<dyn SessionStore>)` 是唯一新增的 SDK 对外方法，
+> **本决策已被 `docs/multi-session.md` 取代**。多会话并行落地（P1）后，
+> `Agent::switch_session(Arc<dyn SessionStore>)` 已**从 SDK 移除**——"哪个会话活跃"
+> 是应用层编排，由 `SessionManager` 的 `active` 指针承担。每个 `Agent` 对应一份
+> 固定日志源，不再有"切换当前会话"这个动作。SDK 只保留 `SessionStore` 契约与
+> `Agent::new` 的"从日志恢复工作集"逻辑（持久化是合法的 SDK 能力）。
+> 下面这段是**单会话时代的过渡语义**，保留作历史记录；当前实现见
+> `src/interface/session.rs` 的 `SessionManager::switch_to`。
+
+`Agent::switch_session(Arc<dyn SessionStore>)` 曾是唯一新增的 SDK 对外方法，
 与 `/model` 的 `set_model` 对称：模型配置、系统提示词、工作目录、工具、压缩指令
 **原样保留**，只替换"当前会话"这一件事。语义与 `Agent::new` 的恢复路径**共用同一套规则**
 （`restore_from_session`）：清空内存工作集与召回库 → 从新日志重建 → 按当前上下文
@@ -379,12 +387,12 @@ desktop 的 `agent_new_session` 同走 `create_lazy`，语义一致。
 
 两个界面**共用同一个 `FileSessionCatalog` 实例所描述的目录**
 （`<root>/.shirley/sessions`）——这就是"共用一份数据"的落点：在 catalog 层
-补齐操作，两个界面自动共享。desktop 侧把 `Bootstrap` 里的 `session_catalog`
+补齐操作，两个界面自动共享。desktop 侧把工厂里的 `session_catalog`
 （此前 TUI 专用）一并塞进 `DesktopState`，新增 commands：
 
 - `agent_list_sessions` / `agent_current_session`：列出 / 查询当前会话；
 - `agent_new_session(title?)` / `agent_switch_session(name)`：新建（可命名）/
-  切换，均走 `Agent::switch_session`（与 TUI **同一接缝**）；
+  切换，均走应用层 `SessionManager`（`create_new` / `switch_to`，与 TUI **同一编排器**）；
 - `agent_rename_session(name, title)` / `agent_delete_session(name)`：管理；
 - `agent_load_history`：从 `agent.messages()` 取 User / Assistant 正文
   （跳 system / tool / context_summary）成 `HistoryMessageWire`，前端据此重建

@@ -267,7 +267,7 @@ sequenceDiagram
 
 上一版以"无调用方"否掉 `destroy`。本方案通过**同时**提供 `unregister` 造出调用方。但要诚实说明"调用方"分两层：
 
-1. **SDK 层**：`ToolManager::unregister` 是公开 API，`Agent` 应暴露对称的接缝（与 `set_model` / `set_provider` / `switch_session` 同风格）：
+1. **SDK 层**：`ToolManager::unregister` 是公开 API，`Agent` 应暴露对称的接缝（与 `set_model` / `set_provider` / `unregister_tool` 同风格）：
 
    ```rust
    impl Agent {

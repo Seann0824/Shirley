@@ -145,8 +145,9 @@ struct TaskState {
   确认过的事实**，是"提炼"不是"压缩"。
 - **账本与 recall 互补**：recall 找回"用户说过什么"，账本记录"我做到哪了"。
   两者都不入 `self.messages`，都跨压缩存活。
-- **切换会话要清空**：`Agent::switch_session` 里除了 `recall.clear()`，还要 `todo.clear()`
-  ——旧会话的任务状态绝不能残留到新会话（与召回语料同一处理）。
+- **切换会话天然隔离**：多会话落地后每个会话自持独立 `Agent`（`SessionManager`），
+  账本随 `Agent` 一并搁置——旧会话的任务状态不会残留到新会话（与召回语料同一处理）。
+  （单会话时代曾有 `Agent::switch_session` 里的显式 `todo.clear()`，该接缝已移除。）
 
 ---
 
@@ -155,7 +156,7 @@ struct TaskState {
 - **注册**：`Agent::new` 里 `tools.register(TodoTool::new(todo.clone()))`，与 recall 工具
   相邻。应用层 `main.rs` 一行不用改。
 - **注入**：`active_messages()` 末尾追加（见决策 2）。
-- **清空**：`Agent::switch_session` 里 `todo.clear()`。
+- **清空**：随会话切换（每会话独立 `Agent`）天然隔离；无跨会话残留。
 - **持久化**：留空（进程结束即失）。与 recall 同款技术债——若将来要做持久化，
   `TodoStore` 的接口（`apply` / `render` / `clear`）已足够挂载后端。
 
@@ -166,7 +167,7 @@ struct TaskState {
 | 文件 | 职责 |
 | --- | --- |
 | `crates/shirley-agent-sdk/src/todo/mod.rs` | `TodoStore` / `TodoUpdate` / `TodoStep` / `TodoTool` / `TASK_STATE_HEADER` / 单测 |
-| `crates/shirley-agent-sdk/src/runtime/agent.rs` | 持有 `Arc<TodoStore>`、注册工具、`active_messages()` 末尾注入、`switch_session` 清空 |
+| `crates/shirley-agent-sdk/src/runtime/agent.rs` | 持有 `Arc<TodoStore>`、注册工具、`active_messages()` 末尾注入 |
 
 对外只 re-export `TASK_STATE_HEADER` / `TodoStep` / `TodoStore` / `TodoTool` / `TodoUpdate`
 （`lib.rs`），供测试与上层观测。

@@ -12,7 +12,7 @@ mod workspace_search;
 /// 界面模式：TUI（默认）或桌面界面。
 ///
 /// 通过启动参数 `--desktop` 选择，环境变量 `SHIRLEY_INTERFACE=desktop` 亦可。
-/// 两个界面共享同一份 [`bootstrap::Bootstrap`] 装配产物（见 `docs/desktop-interface.md`）。
+/// 两个界面共享同一份 [`bootstrap::AgentFactory`] 装配产物（见 `docs/desktop-interface.md`）。
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     Tui,
@@ -39,12 +39,12 @@ async fn main() -> Result<(), AgentError> {
     let working_dir = prompt::workspace_root();
 
     // 应用装配（配置 / 模型目录 / 工具 / 会话 / Agent）——两个界面共用。
-    let bootstrap = bootstrap::Bootstrap::assemble(working_dir)?;
+    let factory = bootstrap::AgentFactory::assemble(working_dir)?;
 
     match Mode::from_env_and_args() {
-        Mode::Tui => interface::run(bootstrap).await,
+        Mode::Tui => interface::run(factory).await,
         // 桌面界面：进入 Tauri 事件循环（阻塞主线程）。
-        Mode::Desktop => interface::desktop::run(bootstrap),
+        Mode::Desktop => interface::desktop::run(factory),
     }
     .map_err(|error| AgentError::Other(Box::new(error)))?;
 

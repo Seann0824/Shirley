@@ -1,12 +1,14 @@
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use futures::StreamExt;
 use ratatui::{buffer::Buffer, layout::Position};
-use shirley_agent_sdk::{Agent, AgentEvent, Message};
+use shirley_agent_sdk::{Agent, AgentEvent};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use super::session::SessionManager;
 use super::{app::App, event::Event, event::EventHandler, ui, update};
-use crate::bootstrap::Bootstrap;
+use crate::models::ModelCatalog;
+use std::sync::Arc;
 
 async fn run_agent(
     mut agent: Agent,
@@ -59,17 +61,14 @@ impl<'a> Tui<'a> {
     pub fn new(
         terminal: &'a mut ratatui::DefaultTerminal,
         events: EventHandler,
-        bootstrap: Bootstrap,
+        sessions: SessionManager,
+        model_catalog: Arc<dyn ModelCatalog>,
+        needs_login: bool,
     ) -> Self {
-        let mut app = App::with_catalogs(
-            bootstrap.agent,
-            bootstrap.model_catalog,
-            bootstrap.session_catalog,
-        );
-        app.set_current_session(bootstrap.current_session);
+        let mut app = App::with_manager(sessions, model_catalog);
         // 未配置模型服务时自动进入 `/login`：把"缺配置"从启动错误变成 TUI 内
         // 的一次引导。用户可随时 Esc 取消（取消后仍可手动 `/login`）。
-        if bootstrap.needs_login {
+        if needs_login {
             app.start_login();
         }
         Self {
@@ -153,30 +152,12 @@ impl<'a> Tui<'a> {
         self.app.exit();
     }
 
+    /// 把一条 `AgentEvent` 累加到前台会话。
+    ///
+    /// 累加逻辑收敛在 `Session::apply_event`（与 desktop 共享同一条事件处理路径）——
+    /// TUI 只做转发，不再自己 match 事件。
     fn apply(&mut self, update: Result<AgentEvent, String>) {
-        match update {
-            Ok(AgentEvent::MessageAdded(Message::User { .. })) => {}
-            Ok(AgentEvent::MessageAdded(message)) => {
-                if matches!(&message, Message::Assistant { .. }) {
-                    self.app.finish_streaming_deltas();
-                }
-                self.app.add_message(message);
-            }
-            Ok(AgentEvent::ContentDelta(delta)) => self.app.append_streaming_delta(delta, false),
-            Ok(AgentEvent::ReasoningDelta(delta)) => self.app.append_streaming_delta(delta, true),
-            Ok(AgentEvent::Usage(usage)) => self.app.record_usage(usage),
-            Ok(AgentEvent::CompressionStarted) => self.app.start_compression(),
-            Ok(AgentEvent::CompressionFinished) => self.app.finish_compression(),
-            Ok(AgentEvent::ContextUsage {
-                used_tokens,
-                limit_tokens,
-            }) => self.app.record_context_usage(used_tokens, limit_tokens),
-            Err(error) => self.app.add_error(error),
-            // Tool and run-finished events do not need a separate TUI update.
-            Ok(AgentEvent::ToolStarted { .. })
-            | Ok(AgentEvent::ToolFinished { .. })
-            | Ok(AgentEvent::Finished(_)) => {}
-        }
+        self.app.apply_event(update);
     }
 
     pub async fn run(&mut self) -> std::io::Result<()> {
@@ -280,8 +261,12 @@ impl<'a> Tui<'a> {
 
 pub async fn run(
     terminal: &mut ratatui::DefaultTerminal,
-    bootstrap: Bootstrap,
+    sessions: SessionManager,
+    model_catalog: Arc<dyn ModelCatalog>,
+    needs_login: bool,
 ) -> std::io::Result<()> {
     let events = EventHandler::new()?;
-    Tui::new(terminal, events, bootstrap).run().await
+    Tui::new(terminal, events, sessions, model_catalog, needs_login)
+        .run()
+        .await
 }

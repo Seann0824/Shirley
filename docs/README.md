@@ -15,6 +15,7 @@
 | `recall.md` | 压缩后召回：分块 / BM25 / Retriever 抽象 / 工具输出清空 | P0 |
 | `todo.md` | 任务账本 `todo`：模型自维护、跨压缩存活的任务状态 / 每轮末尾注入（**已实现**） | P0 |
 | `session.md` | 会话持久化与恢复：SessionStore 契约 / 日志派生 recall / rewind 语义 | P0 |
+| `multi-session.md` | 多会话并行：多个 Agent 各跑各的 / 事件按会话隔离（通道归 Session 自持）/ 每会话 spawn + 上限 / 移除 `switch_session`（编排归应用层）/ 同会话多驱动不支持（**P1 已落地**：SessionManager + AgentFactory + SDK 移除 switch_session；P2/P3 未落地） | P1 |
 | `streaming.md` | 流式输出与 reasoning 流式 | P1 |
 | `adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 | P1 |
 | `responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件 / 落地方式 | P1 |

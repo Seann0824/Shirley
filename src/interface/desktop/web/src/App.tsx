@@ -16,112 +16,182 @@ import {
 import { useFileMentionSearch } from "@/lib/file-mentions/useFileMentionSearch";
 import { stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
-import { agentBridge, type HistoryMessage, type StreamHandle } from "@/lib/bridge";
+import { agentBridge, type SessionSubscription } from "@/lib/bridge";
+import type { AgentEventWire, SessionSnapshot } from "@/types/wire";
 import type { AiSegment, AiToolExecution } from "@/types/ai";
 
 let messageSeq = 0;
 const nextId = () => `m${++messageSeq}`;
 
+/**
+ * 单个会话的视图状态（transcript + 每轮段落 + busy / 错误）。
+ *
+ * 多会话：事件按会话打标，每个会话各持一份视图；当前会话渲染，后台会话照常累加
+ * （不因切走丢上下文）。切换会话 = 换渲染哪一份 + 换订阅哪个会话的事件流。
+ */
+type SessionView = {
+  messages: AiTranscriptMessage[];
+  turnSegments: Record<string, AiSegment[]>;
+  busy: boolean;
+  error: string;
+};
+
+function emptyView(): SessionView {
+  return { messages: [], turnSegments: {}, busy: false, error: "" };
+}
+
 export function App() {
-  const [messages, setMessages] = useState<AiTranscriptMessage[]>([]);
-  // 每个 assistant 轮次按事件发生顺序切成的线性段落流（思考/正文/工具组交错），
-  // 对标 TUI 的 items 数组。放 state 才能触发重渲染（直接改 ref 数组不会重渲染——曾踩过）。
-  const [turnSegments, setTurnSegments] = useState<Record<string, AiSegment[]>>({});
+  // 每个会话一份视图（后台会话也保留，切回不丢）。
+  const [views, setViews] = useState<Record<string, SessionView>>({});
+  const [sessionName, setSessionName] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [references, setReferences] = useState<FileReference[]>([]);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
   const [model, setModel] = useState("");
-  const [sessionName, setSessionName] = useState<string | null>(null);
-  const handleRef = useRef<StreamHandle | null>(null);
+  // UI 级错误（切换 / 新建 / 删除 / 模型切换失败）；运行期错误进各会话视图的 `error`。
+  const [uiError, setUiError] = useState("");
 
   const mentionSearch = useFileMentionSearch();
   const editorRef = useRef<MentionEditorHandle>(null);
+  // 当前订阅句柄（切走时退订）。
+  const subRef = useRef<SessionSubscription | null>(null);
+  // 每个会话当前在跑的 assistant 轮次 id（事件按它落点）。
+  const turnRef = useRef<Map<string, string>>(new Map());
+  // 快照应用前缓冲事件（订阅与快照之间到达的增量不丢）。
+  const readyRef = useRef<Set<string>>(new Set());
+  const bufferRef = useRef<Map<string, AgentEventWire[]>>(new Map());
 
-  // 用历史消息重建 transcript（切换 / 新建会话后调用）。历史里只有可展示的
-  // User / Assistant 正文，没有流式段落——每条 assistant 建一个正文段落即可。
-  const rebuildFromHistory = useCallback((history: HistoryMessage[]) => {
-    const ids = history.map(() => nextId());
-    setMessages(
-      history.map((message, index) => ({
-        id: ids[index],
-        role: message.role,
-        content: message.content,
-        status: "complete",
-      })),
-    );
-    const segments: Record<string, AiSegment[]> = {};
-    history.forEach((message, index) => {
-      if (message.role === "assistant") {
-        segments[ids[index]] = [{ kind: "content", text: message.content }];
+  // 把一个事件应用到指定会话的视图（纯函数式更新，避免闭包过期）。
+  const applyEvent = useCallback((session: string, event: AgentEventWire) => {
+    const needsTurn =
+      event.type === "content_delta" ||
+      event.type === "reasoning_delta" ||
+      event.type === "tool_started" ||
+      event.type === "tool_finished";
+    let assistantId = turnRef.current.get(session) ?? null;
+    if (needsTurn && !assistantId) {
+      assistantId = nextId();
+      turnRef.current.set(session, assistantId);
+    }
+    setViews((prev) => {
+      const view = prev[session] ?? emptyView();
+      let next = view;
+      if (
+        needsTurn &&
+        assistantId &&
+        !view.messages.some((message) => message.id === assistantId)
+      ) {
+        next = {
+          ...view,
+          messages: [
+            ...view.messages,
+            { id: assistantId, role: "assistant", content: "", status: "streaming" },
+          ],
+          turnSegments: { ...view.turnSegments, [assistantId]: [] },
+        };
       }
+      return { ...prev, [session]: applyWireEvent(next, event, assistantId) };
     });
-    setTurnSegments(segments);
   }, []);
 
-  const loadHistory = useCallback(async () => {
-    const bridge = await agentBridge();
-    const [name, history] = await Promise.all([bridge.currentSession(), bridge.loadHistory()]);
-    setSessionName(name);
-    rebuildFromHistory(history);
-  }, [rebuildFromHistory]);
+  // 订阅一个会话：退订旧的，拿快照重建视图，再叠加之后的事件。
+  const openSession = useCallback(
+    async (session: string) => {
+      const bridge = await agentBridge();
+      subRef.current?.unsubscribe();
+      subRef.current = null;
+      readyRef.current.delete(session);
+      bufferRef.current.delete(session);
+      turnRef.current.delete(session);
+      const sub = await bridge.openSession(session, (event) => {
+        // 快照尚未应用：先缓冲，待快照落地后按序补放（不丢、不重）。
+        if (!readyRef.current.has(session)) {
+          const buffer = bufferRef.current.get(session) ?? [];
+          buffer.push(event);
+          bufferRef.current.set(session, buffer);
+          return;
+        }
+        applyEvent(session, event);
+      });
+      subRef.current = sub;
+      const { view, lastAssistantId } = viewFromSnapshot(sub.snapshot);
+      if (lastAssistantId) turnRef.current.set(session, lastAssistantId);
+      setViews((prev) => ({ ...prev, [session]: view }));
+      readyRef.current.add(session);
+      const buffered = bufferRef.current.get(session) ?? [];
+      bufferRef.current.delete(session);
+      for (const event of buffered) applyEvent(session, event);
+      setSessionName(session);
+    },
+    [applyEvent],
+  );
 
   useEffect(() => {
-    void agentBridge().then(async (bridge) => {
+    void (async () => {
+      const bridge = await agentBridge();
       await bridge.modelName().then(setModel).catch(() => {});
-      await loadHistory().catch(() => {});
-    });
-  }, [loadHistory]);
+      const name = await bridge.currentSession().catch(() => null);
+      if (name) await openSession(name).catch(() => {});
+    })();
+  }, [openSession]);
 
   const switchSession = useCallback(
     async (name: string) => {
       try {
-        setError("");
+        setUiError("");
         const bridge = await agentBridge();
         await bridge.switchSession(name);
-        await loadHistory();
+        await openSession(name);
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [loadHistory],
+    [openSession],
   );
 
   const newSession = useCallback(
     async (title: string | null) => {
       try {
-        setError("");
+        setUiError("");
         const bridge = await agentBridge();
-        await bridge.newSession(title);
-        await loadHistory();
+        const entry = await bridge.newSession(title);
+        await openSession(entry.name);
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [loadHistory],
+    [openSession],
   );
 
   const renameSession = useCallback(async (name: string, title: string) => {
     try {
-      setError("");
+      setUiError("");
       await (await agentBridge()).renameSession(name, title);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setUiError(e instanceof Error ? e.message : String(e));
     }
   }, []);
 
   const deleteSession = useCallback(
     async (name: string) => {
       try {
-        setError("");
-        await (await agentBridge()).deleteSession(name);
-        // 删的若是当前会话，重新加载（后端已把 current 清空）。
-        if (name === sessionName) await loadHistory();
+        setUiError("");
+        const bridge = await agentBridge();
+        await bridge.deleteSession(name);
+        // 删的若是当前会话，重新打开后端选中的会话（可能为空）。
+        if (name === sessionName) {
+          const current = await bridge.currentSession().catch(() => null);
+          if (current) await openSession(current);
+          else {
+            subRef.current?.unsubscribe();
+            subRef.current = null;
+            setSessionName(null);
+          }
+        }
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [loadHistory, sessionName],
+    [openSession, sessionName],
   );
 
   const send = useCallback(async () => {
@@ -129,119 +199,56 @@ export function App() {
     // content 必须保留占位符**——`InlineReferences` 正是按占位符位置把 chip 落回
     // 正文的，剥掉就一个 tag 都渲染不出来（曾经的 bug）。
     const plain = stripTokens(input).trim();
-    if (!plain || busy) return;
+    const session = sessionName;
+    if (!plain || !session) return;
+    if ((views[session]?.busy ?? false)) return;
     const display = input.trim();
     const refs = references;
     setInput("");
     setReferences([]);
-    setError("");
-    setBusy(true);
+    setUiError("");
 
     const assistantId = nextId();
-    setMessages((prev) => [
-      ...prev,
-      { id: nextId(), role: "user", content: display, status: "complete", references: refs },
-      { id: assistantId, role: "assistant", content: "", status: "streaming" },
-    ]);
-    setTurnSegments((prev) => ({ ...prev, [assistantId]: [] }));
-
-    const patchMessage = (patch: (m: AiTranscriptMessage) => AiTranscriptMessage) => {
-      setMessages((prev) => prev.map((m) => (m.id === assistantId ? patch(m) : m)));
-    };
-    // 线性追加/合并段落。合并规则对标 TUI `append_streaming_delta`：连续同类型
-    // 的增量并进同一段，类型一换就新开一段——于是渲染顺序天然是
-    // 思考 → 正文 → 工具 → 正文 → 思考 → 工具 ……，而不是按内容偏移归并。
-    const appendSegment = (segment: AiSegment) => {
-      setTurnSegments((prev) => {
-        const segments = prev[assistantId] ?? [];
-        const last = segments.at(-1);
-        if (segment.kind === "content" && last?.kind === "content") {
-          return { ...prev, [assistantId]: [...segments.slice(0, -1), { ...last, text: last.text + segment.text }] };
-        }
-        if (segment.kind === "reasoning" && last?.kind === "reasoning") {
-          return { ...prev, [assistantId]: [...segments.slice(0, -1), { ...last, text: last.text + segment.text }] };
-        }
-        if (segment.kind === "tools" && last?.kind === "tools") {
-          return { ...prev, [assistantId]: [...segments.slice(0, -1), { ...last, executions: [...last.executions, ...segment.executions] }] };
-        }
-        return { ...prev, [assistantId]: [...segments, segment] };
-      });
-    };
+    turnRef.current.set(session, assistantId);
+    setViews((prev) => {
+      const view = prev[session] ?? emptyView();
+      return {
+        ...prev,
+        [session]: {
+          ...view,
+          messages: [
+            ...view.messages,
+            { id: nextId(), role: "user", content: display, status: "complete", references: refs },
+            { id: assistantId, role: "assistant", content: "", status: "streaming" },
+          ],
+          turnSegments: { ...view.turnSegments, [assistantId]: [] },
+          busy: true,
+          error: "",
+        },
+      };
+    });
 
     const bridge = await agentBridge();
-    handleRef.current = await bridge.send(
-      plain,
-      refs.map((reference) => reference.path),
-      (event) => {
-        switch (event.type) {
-          case "content_delta":
-            appendSegment({ kind: "content", text: event.text });
-            patchMessage((m) => ({ ...m, content: m.content + event.text }));
-            break;
-          case "reasoning_delta":
-            appendSegment({ kind: "reasoning", text: event.text });
-            break;
-          case "tool_started":
-            appendSegment({
-              kind: "tools",
-              executions: [
-                {
-                  id: event.call_id,
-                  call_id: event.call_id,
-                  tool_name: event.name,
-                  status: "running",
-                  summary: "",
-                  input: safeParseArgs(event.arguments),
-                },
-              ],
-            });
-            break;
-          case "tool_finished":
-            // 只改已有工具段的对应执行项（不新开段）。
-            setTurnSegments((prev) => ({
-              ...prev,
-              [assistantId]: (prev[assistantId] ?? []).map((segment) =>
-                segment.kind === "tools"
-                  ? {
-                      ...segment,
-                      executions: segment.executions.map((tool) =>
-                        tool.call_id === event.call_id
-                          ? {
-                              ...tool,
-                              status: event.ok ? "complete" : "error",
-                              summary: event.output.slice(0, 200),
-                              error: event.ok ? null : event.output,
-                            }
-                          : tool,
-                      ),
-                    }
-                  : segment,
-              ),
-            }));
-            break;
-          case "error":
-            setError(event.message);
-            patchMessage((m) => ({ ...m, status: "error" }));
-            setBusy(false);
-            handleRef.current = null;
-            break;
-          case "finished":
-            patchMessage((m) => ({ ...m, status: "complete" }));
-            setBusy(false);
-            handleRef.current = null;
-            break;
-          default:
-            break;
-        }
-      },
-    );
-  }, [busy, input, references]);
+    try {
+      await bridge.send(session, plain, refs.map((reference) => reference.path));
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      setViews((prev) => {
+        const view = prev[session] ?? emptyView();
+        return { ...prev, [session]: { ...view, busy: false, error: message } };
+      });
+    }
+  }, [input, references, sessionName, views]);
 
-  const stop = useCallback(() => {
-    handleRef.current?.cancel();
-    handleRef.current = null;
-    setBusy(false);
-  }, []);
+  const stop = useCallback(async () => {
+    const session = sessionName;
+    if (!session) return;
+    await (await agentBridge()).cancel(session).catch(() => {});
+    setViews((prev) => {
+      const view = prev[session] ?? emptyView();
+      return { ...prev, [session]: { ...view, busy: false } };
+    });
+  }, [sessionName]);
 
   const switchModel = useCallback(async (value: string) => {
     try {
@@ -249,9 +256,13 @@ export function App() {
       await bridge.setModel(value);
       setModel(value);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+      setUiError(e instanceof Error ? e.message : String(e));
     }
   }, []);
+
+  const view = sessionName ? (views[sessionName] ?? emptyView()) : emptyView();
+  const busy = view.busy;
+  const error = uiError || view.error;
 
   return (
     <div className="flex h-screen w-full min-h-0 flex-col bg-canvas">
@@ -278,8 +289,8 @@ export function App() {
           聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}
       <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
         <AiConversationTranscript
-          messages={messages}
-          conversationKey="main"
+          messages={view.messages}
+          conversationKey={sessionName ?? "main"}
           extraContentKey={busy ? "busy" : ""}
           emptyContent={
             <div className="flex flex-col items-center gap-4 px-4 py-6 text-center sm:py-10">
@@ -304,7 +315,7 @@ export function App() {
               <AssistantMessage
                 content={message.content}
                 streaming={message.status === "streaming"}
-                segments={turnSegments[String(message.id)] ?? []}
+                segments={view.turnSegments[String(message.id)] ?? []}
               />
             ) : (
               <InlineReferences content={message.content} references={message.references ?? []} />
@@ -340,7 +351,7 @@ export function App() {
             busy={busy}
             onValueChange={() => {}}
             onSend={() => void send()}
-            onStop={stop}
+            onStop={() => void stop()}
             trailingAction={
               <ModelSelector current={model} onSelect={(value) => void switchModel(value)} />
             }
@@ -366,6 +377,216 @@ export function App() {
       </section>
     </div>
   );
+}
+
+/**
+ * 把一个事件应用到视图（纯函数）。
+ *
+ * 合并规则对标 TUI `append_streaming_delta`：连续同类型的增量并进同一段，类型一换
+ * 就新开一段——渲染顺序天然是 思考 → 正文 → 工具 → 正文 → 思考 → 工具 ……。
+ */
+function applyWireEvent(
+  view: SessionView,
+  event: AgentEventWire,
+  assistantId: string | null,
+): SessionView {
+  switch (event.type) {
+    case "content_delta": {
+      if (!assistantId) return view;
+      return {
+        ...view,
+        messages: view.messages.map((message) =>
+          message.id === assistantId
+            ? { ...message, content: message.content + event.text, status: "streaming" }
+            : message,
+        ),
+        turnSegments: appendSegment(view.turnSegments, assistantId, {
+          kind: "content",
+          text: event.text,
+        }),
+      };
+    }
+    case "reasoning_delta": {
+      if (!assistantId) return view;
+      return {
+        ...view,
+        turnSegments: appendSegment(view.turnSegments, assistantId, {
+          kind: "reasoning",
+          text: event.text,
+        }),
+      };
+    }
+    case "tool_started": {
+      if (!assistantId) return view;
+      return {
+        ...view,
+        turnSegments: appendSegment(view.turnSegments, assistantId, {
+          kind: "tools",
+          executions: [
+            {
+              id: event.call_id,
+              call_id: event.call_id,
+              tool_name: event.name,
+              status: "running",
+              summary: "",
+              input: safeParseArgs(event.arguments),
+            },
+          ],
+        }),
+      };
+    }
+    case "tool_finished": {
+      if (!assistantId) return view;
+      return {
+        ...view,
+        turnSegments: updateTool(view.turnSegments, assistantId, event),
+      };
+    }
+    case "error": {
+      return {
+        ...view,
+        error: event.message,
+        busy: false,
+        messages: view.messages.map((message) =>
+          message.id === assistantId ? { ...message, status: "error" } : message,
+        ),
+      };
+    }
+    case "finished": {
+      return {
+        ...view,
+        busy: false,
+        messages: view.messages.map((message) =>
+          message.id === assistantId ? { ...message, status: "complete" } : message,
+        ),
+      };
+    }
+    default:
+      return view;
+  }
+}
+
+function appendSegment(
+  segments: Record<string, AiSegment[]>,
+  assistantId: string,
+  segment: AiSegment,
+): Record<string, AiSegment[]> {
+  const current = segments[assistantId] ?? [];
+  const last = current.at(-1);
+  if (segment.kind === "content" && last?.kind === "content") {
+    return {
+      ...segments,
+      [assistantId]: [...current.slice(0, -1), { ...last, text: last.text + segment.text }],
+    };
+  }
+  if (segment.kind === "reasoning" && last?.kind === "reasoning") {
+    return {
+      ...segments,
+      [assistantId]: [...current.slice(0, -1), { ...last, text: last.text + segment.text }],
+    };
+  }
+  if (segment.kind === "tools" && last?.kind === "tools") {
+    return {
+      ...segments,
+      [assistantId]: [
+        ...current.slice(0, -1),
+        { ...last, executions: [...last.executions, ...segment.executions] },
+      ],
+    };
+  }
+  return { ...segments, [assistantId]: [...current, segment] };
+}
+
+function updateTool(
+  segments: Record<string, AiSegment[]>,
+  assistantId: string,
+  event: Extract<AgentEventWire, { type: "tool_finished" }>,
+): Record<string, AiSegment[]> {
+  return {
+    ...segments,
+    [assistantId]: (segments[assistantId] ?? []).map((segment) =>
+      segment.kind === "tools"
+        ? {
+            ...segment,
+            executions: segment.executions.map((tool) =>
+              tool.call_id === event.call_id
+                ? {
+                    ...tool,
+                    status: event.ok ? "complete" : "error",
+                    summary: event.output.slice(0, 200),
+                    error: event.ok ? null : event.output,
+                  }
+                : tool,
+            ),
+          }
+        : segment,
+    ),
+  };
+}
+
+/**
+ * 从会话快照重建视图（订阅一个已积累历史的会话时用）。
+ *
+ * 快照是 `ItemWire` 序列（message / tools）；两条 user 消息之间的所有 assistant /
+ * 工具条目归并成**同一轮** assistant（与实时流的"一轮一个 assistantId"口径一致）。
+ * 返回视图 + 最后一个 assistant 轮次 id（供后续增量落点）。
+ */
+function viewFromSnapshot(snapshot: SessionSnapshot): {
+  view: SessionView;
+  lastAssistantId: string | null;
+} {
+  const messages: AiTranscriptMessage[] = [];
+  const turnSegments: Record<string, AiSegment[]> = {};
+  let currentAssistantId: string | null = null;
+
+  const ensureAssistant = (): string => {
+    if (!currentAssistantId) {
+      const id = nextId();
+      currentAssistantId = id;
+      messages.push({ id, role: "assistant", content: "", status: "complete" });
+      turnSegments[id] = [];
+    }
+    return currentAssistantId;
+  };
+
+  for (const item of snapshot.items) {
+    if (item.kind === "message") {
+      if (item.role === "user") {
+        messages.push({ id: nextId(), role: "user", content: item.content, status: "complete" });
+        currentAssistantId = null;
+        continue;
+      }
+      // assistant / summary / system / error 一律落到 assistant 轮次。
+      const id = ensureAssistant();
+      if (item.thinking) {
+        turnSegments[id].push({ kind: "reasoning", text: item.content });
+      } else {
+        turnSegments[id].push({ kind: "content", text: item.content });
+        const message = messages.find((m) => m.id === id);
+        if (message) message.content += item.content;
+      }
+    } else {
+      const id = ensureAssistant();
+      turnSegments[id].push({
+        kind: "tools",
+        executions: item.calls.map(
+          (call): AiToolExecution => ({
+            id: call.name,
+            call_id: call.name,
+            tool_name: call.name,
+            status: "complete",
+            summary: "",
+            input: safeParseArgs(call.arguments),
+          }),
+        ),
+      });
+    }
+  }
+
+  return {
+    view: { messages, turnSegments, busy: snapshot.running, error: "" },
+    lastAssistantId: currentAssistantId,
+  };
 }
 
 function safeParseArgs(args: string): Record<string, unknown> | undefined {

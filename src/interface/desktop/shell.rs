@@ -1,25 +1,28 @@
-//! Tauri 2 壳：把 `Bootstrap` 的 `Agent` 接进 webview。
+//! Tauri 2 壳：把 `AgentFactory` 造出的多会话 `Agent` 接进 webview。
 //!
 //! 事件契约（与 `web/src/lib/bridge.ts` 对齐）：
-//! - command `agent_send { text, references }`：发起一轮 `run_stream`，事件经
-//!   `agent://event` 推送。`references` 是 `@` 引用的工作区路径，会拼进本轮 prompt。
+//! - command `agent_send { text, references }`：发起**当前前台会话**的一轮 `run_stream`，
+//!   事件经 `agent://event` 推送并带来源会话名。`references` 是 `@` 引用的工作区路径，
+//!   会拼进本轮 prompt。
 //! - command `agent_cancel`：预留（`StopReason::Cancelled` 尚未产生，见 `Agent.md` 缺口 9）。
 //! - command `agent_model_name`：页脚 / 选择器展示当前模型名。
 //! - command `agent_list_models`：列出可选模型（`ModelCatalog`）。
 //! - command `agent_set_model`：热切换模型（`Agent::set_model`，不重建 Agent）。
 //! - command `agent_search_files { query }`：`@` 引用的工作区文件检索（应用层，不经 SDK）。
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use futures::StreamExt;
 use serde::Serialize;
-use shirley_agent_sdk::{Agent, Message};
+use shirley_agent_sdk::Message;
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
-use super::wire::AgentEventWire;
-use crate::bootstrap::Bootstrap;
+use crate::interface::session::SessionManager;
+use super::wire::{AgentEventWire, SessionSnapshotWire};
+use crate::bootstrap::AgentFactory;
 use crate::models::ModelCatalog;
 use crate::session::{SessionCatalog, SessionEntry};
 
@@ -28,19 +31,21 @@ const EVENT_NAME: &str = "agent://event";
 
 /// Tauri 管理的运行时状态。
 ///
-/// `Agent` 放在 `Option` 里：一轮运行期间把它 `take` 出去移入后台任务，
-/// 结束后放回——与 TUI 的 `take_agent` / `restore_agent` 同款手法，
-/// 避免同一 `Agent` 被并发驱动。
+/// 多会话编排收在 [`SessionManager`] 里（`docs/multi-session.md` 决策 4）：
+/// 每个会话自持一个独立 `Agent`，`active` 指向前台。一轮运行期间把**该会话**的
+/// `Agent` `take` 出去移入后台任务，结束后放回——同一会话不会并发驱动，
+/// 不同会话可并行（与 TUI 共用同一套 `SessionManager` 语义）。
 struct DesktopState {
-    agent: Arc<Mutex<Option<Agent>>>,
+    sessions: Arc<Mutex<SessionManager>>,
     model_catalog: Arc<dyn ModelCatalog>,
-    /// 会话目录（`/session` 切换 / 重命名 / 删除用）——与 TUI **共用同一个实现**，
+    /// 会话目录（新建 / 重命名 / 删除用）——与 TUI **共用同一个实现**，
     /// 因此两边读的是同一份 `<root>/.shirley/sessions` 数据。
     session_catalog: Arc<dyn SessionCatalog>,
-    /// 当前会话名（切换 / 新建后更新；供前端展示与"当前会话"打标）。
-    current_session: Arc<Mutex<Option<String>>>,
     /// 工作区根目录：`@` 文件检索用（应用层 `workspace_search`，不碰 SDK）。
     working_dir: PathBuf,
+    /// 每个会话的事件 pump 任务句柄（订阅该会话 `broadcast` → 转线格式 → emit）。
+    /// 前端 `agent_subscribe` 时插入，`agent_unsubscribe` / 切走时 abort 并移除。
+    pumps: Arc<Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
 }
 
 /// 前端消费的模型条目（与 `web/src/lib/bridge.ts` 的 `ModelEntry` 对齐）。
@@ -137,51 +142,139 @@ fn compose_prompt(text: &str, references: &[String]) -> String {
 #[tauri::command]
 async fn agent_send(
     state: State<'_, DesktopState>,
-    app: AppHandle,
     text: String,
     references: Option<Vec<String>>,
+    session: Option<String>,
 ) -> Result<(), String> {
-    let slot = state.agent.clone();
-    let mut agent = slot
-        .lock()
-        .await
-        .take()
-        .ok_or_else(|| "agent 正在运行中".to_owned())?;
-
+    // 目标会话：显式传入则用它，否则回落到前台会话。**按会话名**取 Agent，
+    // 不依赖 `active` 指针——后台会话运行时前台可能已切走（修串会话 bug）。
+    let session_name = {
+        let guard = state.sessions.lock().await;
+        match session {
+            Some(name) => name,
+            None => guard
+                .active_name()
+                .map(str::to_owned)
+                .ok_or_else(|| "当前会话尚未落盘".to_owned())?,
+        }
+    };
     let prompt = compose_prompt(&text, references.as_deref().unwrap_or(&[]));
 
+    // 发起本轮：取走该会话的 `Agent`，并把**用户消息**乐观记入其视图条目。
+    // 必须记：`Session::apply_event` 有意忽略 `MessageAdded(User)`（用户消息由驱动方
+    // 记录，与 TUI 的 `App::submit` 对称），不记则 `Session.items` 永不含用户消息，
+    // 切走再切回按快照重建时用户消息就丢了。记的是**人类可读原文**（`text`），
+    // 不是拼了引用头的 `prompt`。
+    let mut agent = {
+        let mut guard = state.sessions.lock().await;
+        guard
+            .begin_turn(&session_name, text.clone())
+            .ok_or_else(|| "agent 正在运行中".to_owned())?
+    };
+
+    // `SessionManager` 作为任务执行者：跑 `run_stream`，把每个事件喂回**该会话**
+    // （累加 + 扇出给订阅者）。前端经 pump（`agent_subscribe`）消费扇出。
+    let sessions = state.sessions.clone();
     tauri::async_runtime::spawn(async move {
         {
+            // `stream` 借用了 `agent`，用块把它圈住，出了块再 move `agent` 放回。
             let mut stream = agent.run_stream(&prompt);
             while let Some(event) = stream.next().await {
-                let wire = match event {
-                    Ok(event) => AgentEventWire::from_event(event),
-                    Err(error) => AgentEventWire::Error {
-                        message: error.to_string(),
-                    },
+                let update = match event {
+                    Ok(event) => Ok(event),
+                    Err(error) => Err(error.to_string()),
                 };
-                let _ = app.emit(EVENT_NAME, wire);
+                sessions.lock().await.apply_event(&session_name, update);
             }
         }
-        // 无论成败都把 Agent 放回，供下一轮复用。
-        *slot.lock().await = Some(agent);
+        // 无论成败都把 Agent 放回该会话，供下一轮复用。
+        sessions.lock().await.restore_agent(&session_name, agent);
     });
 
+    Ok(())
+}
+
+/// 订阅一个会话：返回其**视图快照**（供前端重建 transcript），并起一个 per-session
+/// pump 把该会话后续事件转成线格式 emit 给 webview。
+///
+/// 幂等：重复订阅会先停掉旧 pump 再起新的。切到某会话时调它，切走时调
+/// `agent_unsubscribe`。
+#[tauri::command]
+async fn agent_subscribe(
+    state: State<'_, DesktopState>,
+    app: AppHandle,
+    session: String,
+) -> Result<SessionSnapshotWire, String> {
+    // 先停掉该会话已有的 pump（幂等重订阅）。
+    if let Some(handle) = state.pumps.lock().await.remove(&session) {
+        handle.abort();
+    }
+    // **同一把锁内**先订阅再取快照：`apply_event` 也要拿这把锁，故两者之间不会
+    // 插入任何事件——快照覆盖订阅前、通道覆盖订阅后，既不丢也不重。
+    let (mut rx, items, running) = {
+        let guard = state.sessions.lock().await;
+        let rx = guard
+            .subscribe(&session)
+            .ok_or_else(|| format!("会话不存在：{session}"))?;
+        let items = guard
+            .snapshot(&session)
+            .ok_or_else(|| format!("会话不存在：{session}"))?;
+        let running = guard.is_running(&session);
+        (rx, items, running)
+    };
+
+    let pumps = state.pumps.clone();
+    let pump_session = session.clone();
+    let handle = tauri::async_runtime::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(Ok(event)) => {
+                    let wire = AgentEventWire::from_event(event).with_session(&pump_session);
+                    let _ = app.emit(EVENT_NAME, wire);
+                }
+                Ok(Err(message)) => {
+                    let wire = AgentEventWire::Error {
+                        session: Some(pump_session.clone()),
+                        message,
+                    };
+                    let _ = app.emit(EVENT_NAME, wire);
+                }
+                // 订阅者落后于扇出：跳过落后的事件，前端靠下次订阅快照重对齐。
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                // 所有发送者已丢弃（应用关停）。
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+        // 通道关闭：自我清理（若已被替换，同名新 pump 会被误删——但仅在关停时发生）。
+        pumps.lock().await.remove(&pump_session);
+    });
+    let snapshot = SessionSnapshotWire::new(session.clone(), items, running);
+    state.pumps.lock().await.insert(session, handle);
+
+    Ok(snapshot)
+}
+
+/// 停掉一个会话的 pump（切走时调用）。不存在的会话静默成功（幂等）。
+#[tauri::command]
+async fn agent_unsubscribe(state: State<'_, DesktopState>, session: String) -> Result<(), String> {
+    if let Some(handle) = state.pumps.lock().await.remove(&session) {
+        handle.abort();
+    }
     Ok(())
 }
 
 #[tauri::command]
 async fn agent_model_name(state: State<'_, DesktopState>) -> Result<String, String> {
     Ok(state
-        .agent
+        .sessions
         .lock()
         .await
-        .as_ref()
+        .active_agent()
         .map(|agent| agent.model_config().model.clone())
         .unwrap_or_default())
 }
 
-/// 列出可选模型（模型目录由 `Bootstrap` 注入）。
+/// 列出可选模型（模型目录由 `AgentFactory` 注入）。
 #[tauri::command]
 async fn agent_list_models(state: State<'_, DesktopState>) -> Result<Vec<ModelEntryWire>, String> {
     let entries = state.model_catalog.list().await;
@@ -198,8 +291,10 @@ async fn agent_list_models(state: State<'_, DesktopState>) -> Result<Vec<ModelEn
 /// 热切换模型：不重建 Agent，只换 `ModelConfig::model`（与 TUI 的 `/model` 同语义）。
 #[tauri::command]
 async fn agent_set_model(state: State<'_, DesktopState>, model: String) -> Result<(), String> {
-    let mut guard = state.agent.lock().await;
-    let agent = guard.as_mut().ok_or_else(|| "agent 正在运行中".to_owned())?;
+    let mut guard = state.sessions.lock().await;
+    let agent = guard
+        .active_agent_mut()
+        .ok_or_else(|| "agent 正在运行中".to_owned())?;
     agent.set_model(model);
     Ok(())
 }
@@ -247,54 +342,58 @@ async fn agent_list_sessions(
 /// 当前会话名（供前端展示 / 打标）。
 #[tauri::command]
 async fn agent_current_session(state: State<'_, DesktopState>) -> Result<Option<String>, String> {
-    Ok(state.current_session.lock().await.clone())
+    Ok(state
+        .sessions
+        .lock()
+        .await
+        .active_name()
+        .map(str::to_owned))
 }
 
 /// 新建会话并可命名（`title` 为空 = 匿名，回落到首条用户消息 / 名字）。
 ///
-/// 新建后立即 `switch_session` 切过去——与 TUI 选择器「＋ 新建会话」同语义。
+/// 经 `SessionManager` 惰性新建并切过去——与 TUI 选择器「＋ 新建会话」同语义。
 #[tauri::command]
 async fn agent_new_session(
     state: State<'_, DesktopState>,
     title: Option<String>,
 ) -> Result<SessionEntryWire, String> {
+    // 目录扫描 / 建目录是同步 IO，移到阻塞线程池。
     let catalog = state.session_catalog.clone();
-    let (entry, store) = tauri::async_runtime::spawn_blocking(move || {
-        // 惰性新建：此刻不落盘，切过去发首条消息才真正建文件。
-        catalog.create_lazy(title.as_deref())
+    let title_for_list = title.clone();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        // 预先探一次目录（保证惰性新建前目录已就绪）；真正的建名在 manager 里。
+        let _ = catalog.list();
+        title_for_list
     })
-    .await
-    .map_err(|error| error.to_string())?
-    .map_err(|error| error.to_string())?;
+    .await;
 
-    {
-        let mut guard = state.agent.lock().await;
-        let agent = guard.as_mut().ok_or_else(|| "agent 正在运行中".to_owned())?;
-        agent.switch_session(store).map_err(|error| error.to_string())?;
-    }
-    *state.current_session.lock().await = Some(entry.name.clone());
-    Ok(entry.into())
+    let name = state
+        .sessions
+        .lock()
+        .await
+        .create_new(title.as_deref())?;
+    // 回读目录条目以拿到 label / preview（惰性新建时大多为空）。
+    let entry = SessionEntryWire {
+        name: name.clone(),
+        label: name.clone(),
+        preview: String::new(),
+        modified_ms: 0,
+        turns: 0,
+    };
+    Ok(entry)
 }
 
-/// 切换到指定会话（`Agent::switch_session`，与 TUI 同一接缝）。
+/// 切换到指定会话：经 `SessionManager` 挪 `active` 指针（与 TUI 同一接缝）。
+///
+/// 已加载会话 → 直接复用其就绪 `Agent`（不重建，保住后台上下文）；
+/// 未加载 → 从目录 `open` 日志、经工厂恢复工作集后切前台。
 #[tauri::command]
 async fn agent_switch_session(
     state: State<'_, DesktopState>,
     name: String,
 ) -> Result<(), String> {
-    let catalog = state.session_catalog.clone();
-    let open_name = name.clone();
-    let store = tauri::async_runtime::spawn_blocking(move || catalog.open(&open_name))
-        .await
-        .map_err(|error| error.to_string())?
-        .map_err(|error| error.to_string())?;
-
-    {
-        let mut guard = state.agent.lock().await;
-        let agent = guard.as_mut().ok_or_else(|| "agent 正在运行中".to_owned())?;
-        agent.switch_session(store).map_err(|error| error.to_string())?;
-    }
-    *state.current_session.lock().await = Some(name);
+    state.sessions.lock().await.switch_to(&name)?;
     Ok(())
 }
 
@@ -319,8 +418,9 @@ async fn agent_delete_session(
     name: String,
 ) -> Result<(), String> {
     {
-        let guard = state.agent.lock().await;
-        if guard.is_none() {
+        // 运行中拒绝：避免删掉正在写入的日志。
+        let guard = state.sessions.lock().await;
+        if guard.is_running(&name) {
             return Err("agent 正在运行中".to_owned());
         }
     }
@@ -330,11 +430,6 @@ async fn agent_delete_session(
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-    // 删掉的若是当前会话，清空当前标记（前端据此重置视图）。
-    let mut current = state.current_session.lock().await;
-    if current.as_deref() == Some(name.as_str()) {
-        *current = None;
-    }
     Ok(())
 }
 
@@ -343,8 +438,10 @@ async fn agent_delete_session(
 async fn agent_load_history(
     state: State<'_, DesktopState>,
 ) -> Result<Vec<HistoryMessageWire>, String> {
-    let guard = state.agent.lock().await;
-    let agent = guard.as_ref().ok_or_else(|| "agent 正在运行中".to_owned())?;
+    let guard = state.sessions.lock().await;
+    let agent = guard
+        .active_agent()
+        .ok_or_else(|| "agent 正在运行中".to_owned())?;
     Ok(history_from_messages(agent.messages()))
 }
 
@@ -352,31 +449,41 @@ async fn agent_load_history(
 #[tauri::command]
 fn agent_cancel() {}
 
-pub fn run(bootstrap: Bootstrap) -> std::io::Result<()> {
-    let Bootstrap {
+pub fn run(factory: AgentFactory) -> std::io::Result<()> {
+    // 启动时惰性开一份空会话（此刻只定名、不落盘，发首条消息才建文件），
+    // 与 TUI 的启动 UX 一致。
+    let session_catalog = factory.session_catalog.clone();
+    let model_catalog = factory.model_catalog.clone();
+    let working_dir = factory.working_dir.clone();
+    let (entry, store) = session_catalog
+        .create_lazy(None)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    let agent = factory
+        .build_agent(store)
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
+    eprintln!("[desktop] 会话：{}", entry.name);
+
+    let sessions = SessionManager::with_factory(
         agent,
-        model_catalog,
-        session_catalog,
-        current_session,
-        working_dir,
-        ..
-    } = bootstrap;
-    if let Some(name) = &current_session {
-        eprintln!("[desktop] 会话：{name}");
-    }
+        Some(entry.name),
+        session_catalog.clone(),
+        Arc::new(factory),
+    );
 
     let state = DesktopState {
-        agent: Arc::new(Mutex::new(Some(agent))),
+        sessions: Arc::new(Mutex::new(sessions)),
         model_catalog,
         session_catalog,
-        current_session: Arc::new(Mutex::new(current_session)),
         working_dir,
+        pumps: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tauri::Builder::default()
         .manage(state)
         .invoke_handler(tauri::generate_handler![
             agent_send,
+            agent_subscribe,
+            agent_unsubscribe,
             agent_cancel,
             agent_model_name,
             agent_list_models,

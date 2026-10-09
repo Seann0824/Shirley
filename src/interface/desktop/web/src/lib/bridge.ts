@@ -1,14 +1,19 @@
 // SDK 接入桥：Tauri command/event <-> AgentEventWire。
 //
-// 设计原则（见 docs/desktop-interface.md）：前端不重新实现 agent，
-// 只消费 Rust 侧 run_stream() 产出的 AgentEvent（经 to_wire 映射）。
+// 设计原则（见 docs/desktop-interface.md、docs/multi-session.md）：前端不重新实现
+// agent，只消费 Rust 侧 run_stream() 产出的 AgentEvent（经 to_wire 映射）。
 //
-// M2 之前，Rust 侧 command 尚未落地，这里提供可切换的 mock 实现，
-// 让 UI 能在纯浏览器 `npm run dev` 下独立跑起来（不依赖 Tauri 壳）。
+// 多会话：事件按会话打标（`AgentEventWire.session`）。前端对**每个会话**开一份订阅
+// （`openSession`）：先拿该会话的视图快照重建 transcript，再叠加后续事件；切走时
+// `unsubscribe` 退订。这样后台会话运行的事件也能路由到它的视图，不串台。
 
-import type { AgentEventWire } from "@/types/wire";
+import type { AgentEventWire, SessionSnapshot } from "@/types/wire";
 
-export type StreamHandle = { cancel: () => void };
+/** 一个会话的订阅句柄：快照 + 退订。 */
+export type SessionSubscription = {
+  snapshot: SessionSnapshot;
+  unsubscribe: () => void;
+};
 
 /** 一个可选模型（与 Rust 侧 `ModelEntryWire` 对齐）。 */
 export type ModelEntry = {
@@ -46,16 +51,21 @@ export type HistoryMessage = {
 
 export type AgentBridge = {
   /**
-   * 发送一条用户消息，返回事件流订阅句柄。
+   * 向指定会话发起一轮。事件经该会话的订阅（`openSession`）推回，不再由 send 直接回调。
    *
-   * `references` 是 `@` 引用的工作区路径；Rust 侧会把它们拼进这一轮的 prompt，
-   * 与消息正文一起交给 Agent（引用不是 Agent 的对外契约，只是这一轮输入的一部分）。
+   * `references` 是 `@` 引用的工作区路径；Rust 侧会把它们拼进这一轮的 prompt。
    */
-  send: (
-    text: string,
-    references: string[],
+  send: (session: string, text: string, references: string[]) => Promise<void>;
+  /** 请求取消指定会话的当前轮。 */
+  cancel: (session: string) => Promise<void>;
+  /**
+   * 订阅一个会话：返回视图快照（重建 transcript）+ 退订句柄。之后该会话的事件都会
+   * 经 `onEvent` 推回（含后台会话——`session` 字段标明来源）。
+   */
+  openSession: (
+    session: string,
     onEvent: (event: AgentEventWire) => void,
-  ) => Promise<StreamHandle>;
+  ) => Promise<SessionSubscription>;
   /** 当前会话的模型名，用于页脚展示。 */
   modelName: () => Promise<string>;
   /** 列出可选模型（模型目录由 Rust 侧 `ModelCatalog` 提供）。 */
@@ -86,21 +96,29 @@ const isTauri =
 async function createTauriBridge(): Promise<AgentBridge> {
   const { invoke } = await import("@tauri-apps/api/core");
   const { listen } = await import("@tauri-apps/api/event");
-  // 事件监听器**只注册一次**：Rust 侧同一时刻只跑一轮（`agent_send` 有
-  // busy 门），所以只需要一个可切换的 handler。若每轮都 `listen` 一个新
-  // 监听器，旧的不会注销，新事件的 delta 会被旧闭包重复消费、追加进旧消息。
-  let handler: ((event: AgentEventWire) => void) | null = null;
+  // 每个会话一个 handler，按事件里的 `session` 路由。`listen` 只注册一次——
+  // 若每轮都注册新监听器，旧的不会注销、事件会被重复消费（曾经的 bug）。
+  const handlers = new Map<string, (event: AgentEventWire) => void>();
   await listen<AgentEventWire>("agent://event", (event) => {
-    handler?.(event.payload);
+    const wire = event.payload;
+    if (wire.session == null) return;
+    handlers.get(wire.session)?.(wire);
   });
   return {
-    async send(text, references, onEvent) {
-      handler = onEvent;
-      await invoke("agent_send", { text, references });
+    async send(session, text, references) {
+      await invoke("agent_send", { text, references, session });
+    },
+    async cancel(session) {
+      await invoke("agent_cancel", { session });
+    },
+    async openSession(session, onEvent) {
+      handlers.set(session, onEvent);
+      const snapshot = await invoke<SessionSnapshot>("agent_subscribe", { session });
       return {
-        cancel: () => {
-          handler = null;
-          void invoke("agent_cancel");
+        snapshot,
+        unsubscribe: () => {
+          handlers.delete(session);
+          void invoke("agent_unsubscribe", { session });
         },
       };
     },
@@ -141,25 +159,39 @@ async function createTauriBridge(): Promise<AgentBridge> {
 }
 
 function createMockBridge(): AgentBridge {
+  const handlers = new Map<string, (event: AgentEventWire) => void>();
+  const cancelled = new Set<string>();
   return {
-    async send(text, references, onEvent) {
-      let cancelled = false;
+    async send(session, text, references) {
+      cancelled.delete(session);
       const emit = (event: AgentEventWire) => {
-        if (!cancelled) onEvent(event);
+        if (!cancelled.has(session)) handlers.get(session)?.({ ...event, session });
       };
       void (async () => {
         if (references.length > 0) {
-          emit({ type: "content_delta", text: `（mock）引用 ${references.join(", ")} · ` });
+          emit({ type: "content_delta", text: `（mock）引用 ${references.join(", ")} · ` } as AgentEventWire);
         }
-        emit({ type: "content_delta", text: "（mock）收到：" });
+        emit({ type: "content_delta", text: "（mock）收到：" } as AgentEventWire);
         for (const ch of text) {
           await new Promise((r) => setTimeout(r, 20));
-          if (cancelled) return;
-          emit({ type: "content_delta", text: ch });
+          if (cancelled.has(session)) return;
+          emit({ type: "content_delta", text: ch } as AgentEventWire);
         }
-        emit({ type: "finished", stop_reason: "completed" });
+        emit({ type: "finished", stop_reason: "completed" } as AgentEventWire);
       })();
-      return { cancel: () => (cancelled = true) };
+    },
+    async cancel(session) {
+      cancelled.add(session);
+    },
+    async openSession(session, onEvent) {
+      handlers.set(session, onEvent);
+      const snapshot: SessionSnapshot = { session, items: [], running: false };
+      return {
+        snapshot,
+        unsubscribe: () => {
+          handlers.delete(session);
+        },
+      };
     },
     async modelName() {
       return "mock-model";
