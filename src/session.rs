@@ -506,6 +506,51 @@ fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
+/// 取会话里的**首条用户消息**正文（供自动标题当输入）。
+///
+/// 遍历顺序即消息顺序；`ContextSummary` / assistant / tool 消息跳过。没有用户
+/// 消息时返回 `None`。正文按字符截断（[`AUTO_TITLE_INPUT_CHARS`]），避免把整段
+/// 长输入喂给标题模型。
+pub fn first_user_message(messages: &[Message]) -> Option<String> {
+    messages.iter().find_map(|message| match message {
+        Message::User { content } => Some(truncate_chars(content, AUTO_TITLE_INPUT_CHARS)),
+        _ => None,
+    })
+}
+
+/// 自动标题的一次性补全提示词：让模型把首条用户消息概括成短标题。
+///
+/// 只输出标题本身——清洗交给 [`sanitize_title`]（模型偶尔会带引号 / 前缀）。
+pub fn title_prompt(first_user_message: &str) -> String {
+    format!(
+        "请阅读用户的第一条消息，用不超过 20 个字符概括这个会话的主题，作为会话标题。\
+只输出标题本身：不要引号、不要标点、不要解释、不要换行。\n\n用户的第一条消息：\n{first_user_message}"
+    )
+}
+
+/// 清洗模型返回的标题：取首个非空行、去掉包裹的引号 / 反引号与首尾空白、
+/// 折叠内部空白、截断到 [`AUTO_TITLE_MAX_CHARS`]。清洗后为空返回 `None`。
+pub fn sanitize_title(raw: &str) -> Option<String> {
+    let line = raw
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?;
+    let trimmed = line
+        .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '“' | '”' | '‘' | '’'))
+        .trim();
+    let collapsed = trimmed.split_whitespace().collect::<Vec<_>>().join(" ");
+    if collapsed.is_empty() {
+        return None;
+    }
+    Some(truncate_chars(&collapsed, AUTO_TITLE_MAX_CHARS))
+}
+
+/// 自动标题的输入截断（字符数）。
+const AUTO_TITLE_INPUT_CHARS: usize = 500;
+/// 自动标题的输出截断（字符数）——与 `summary_of` 的预览长度同量级。
+const AUTO_TITLE_MAX_CHARS: usize = 40;
+
+/// 空会话目录：`App::new` 的默认值，供不关心会话切换的测试与默认构造使用。
 /// 空会话目录：`App::new` 的默认值，供不关心会话切换的测试与默认构造使用。
 ///
 /// 列出为空、打开 / 新建都报错——不落盘、也不产生副作用。
@@ -808,5 +853,55 @@ mod tests {
         let catalog = EmptySessionCatalog;
         assert!(catalog.rename("a", "b").is_err());
         assert!(catalog.delete("a").is_err());
+    }
+
+    #[test]
+    fn first_user_message_skips_non_user_and_truncates() {
+        let messages = vec![
+            Message::Assistant {
+                content: Some("hi".into()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+            },
+            Message::User {
+                content: "修复登录页的样式问题".into(),
+            },
+            Message::User {
+                content: "第二条".into(),
+            },
+        ];
+        assert_eq!(
+            first_user_message(&messages).as_deref(),
+            Some("修复登录页的样式问题")
+        );
+        // 无用户消息 → None。
+        assert!(first_user_message(&[Message::Assistant {
+            content: Some("x".into()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+        }])
+        .is_none());
+        // 超长输入按字符截断并带省略号。
+        let long = "字".repeat(AUTO_TITLE_INPUT_CHARS + 50);
+        let got = first_user_message(&[Message::User { content: long }]).unwrap();
+        assert!(got.ends_with('…'));
+        assert_eq!(got.chars().count(), AUTO_TITLE_INPUT_CHARS + 1);
+    }
+
+    #[test]
+    fn sanitize_title_strips_quotes_and_whitespace() {
+        assert_eq!(sanitize_title("  “修复登录页样式”  ").as_deref(), Some("修复登录页样式"));
+        assert_eq!(sanitize_title("`fix login`").as_deref(), Some("fix login"));
+        // 取首个非空行。
+        assert_eq!(sanitize_title("\n\n标题一行\n第二行").as_deref(), Some("标题一行"));
+        // 折叠内部空白。
+        assert_eq!(sanitize_title("a   b\tc").as_deref(), Some("a b c"));
+        // 清洗后为空 → None。
+        assert_eq!(sanitize_title("   \n  \n"), None);
+        assert_eq!(sanitize_title("\"\""), None);
+        // 超长截断。
+        let long = "字".repeat(AUTO_TITLE_MAX_CHARS + 10);
+        let got = sanitize_title(&long).unwrap();
+        assert!(got.ends_with('…'));
     }
 }

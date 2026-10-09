@@ -27,7 +27,7 @@ export function SessionSelector({
   /** 当前会话名（无则 null）。 */
   current: string | null;
   onSelect: (name: string) => void;
-  onNew: (title: string | null) => void;
+  onNew: () => void;
   onRename: (name: string, title: string) => void;
   onDelete: (name: string) => void;
   className?: string;
@@ -35,9 +35,6 @@ export function SessionSelector({
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState<SessionEntry[]>([]);
   const [loading, setLoading] = useState(false);
-  // 新建行：点击「新建会话」后变成标题输入框（空标题 = 匿名）。
-  const [creating, setCreating] = useState(false);
-  const [newTitle, setNewTitle] = useState("");
   // 正在重命名的会话名与草稿值。
   const [editing, setEditing] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
@@ -59,8 +56,6 @@ export function SessionSelector({
 
   const close = () => {
     setOpen(false);
-    setCreating(false);
-    setNewTitle("");
     setEditing(null);
     setConfirmingDelete(null);
   };
@@ -94,12 +89,6 @@ export function SessionSelector({
 
   const currentLabel = entries.find((entry) => entry.name === current)?.label ?? current;
 
-  const submitNew = () => {
-    const title = newTitle.trim();
-    onNew(title || null);
-    close();
-  };
-
   const submitRename = (name: string) => {
     const title = editValue.trim();
     if (title) onRename(name, title);
@@ -124,37 +113,19 @@ export function SessionSelector({
         <div
           className="absolute left-0 top-[calc(100%+0.5rem)] z-30 w-80 overflow-hidden rounded-card border border-line bg-surface shadow-lg"
         >
-          {creating ? (
-            <div className="flex items-center gap-2 p-1.5">
-              <input
-                autoFocus
-                value={newTitle}
-                placeholder="会话标题（可留空）"
-                className="min-w-0 flex-1 rounded-control bg-inset px-2 py-1.5 text-body-sm text-ink outline-none placeholder:text-muted"
-                onChange={(event) => setNewTitle(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter") submitNew();
-                  if (event.key === "Escape") {
-                    event.stopPropagation();
-                    setCreating(false);
-                    setNewTitle("");
-                  }
-                }}
-              />
-              <Button type="button" size="sm" onClick={submitNew}>
-                新建
-              </Button>
-            </div>
-          ) : (
-            <button
-              type="button"
-              className="flex w-full items-center gap-2 px-3 py-2 text-left text-body-sm text-ink transition-colors hover:bg-quiet"
-              onClick={() => setCreating(true)}
-            >
-              <Plus className="size-3.5 shrink-0 text-muted" />
-              <span>新建会话</span>
-            </button>
-          )}
+          <button
+            type="button"
+            className="flex w-full items-center gap-2 px-3 py-2 text-left text-body-sm text-ink transition-colors hover:bg-quiet"
+            onClick={() => {
+              // 直接开一个空会话并聚焦输入框——不再要求先输名。名字在首条消息后
+              // 由 AI 自动生成（用户想改再手动重命名）。
+              onNew();
+              close();
+            }}
+          >
+            <Plus className="size-3.5 shrink-0 text-muted" />
+            <span>新建会话</span>
+          </button>
 
           <Separator />
 

@@ -364,7 +364,7 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String
 | `agent_search_files { query }` | `@` 引用的工作区文件检索（应用层 `workspace_search`，不碰 SDK） |
 | `agent_list_sessions` | 列出全部会话（转发 `SessionCatalog::list`，按最近修改降序） |
 | `agent_current_session` | 当前会话名（无则 `null`） |
-| `agent_new_session { title? }` | 新建会话（可命名）并切换过去（`SessionManager::create_new`） |
+| `agent_new_session { title? }` | 新建会话（`title` 省略即匿名，名字稍后由 AI 自动生成）并切换过去（`SessionManager::create_new`） |
 | `agent_switch_session { name }` | 切换到指定会话（`SessionManager::switch_to`，与 TUI 同一编排器） |
 | `agent_rename_session { name, title }` | 重命名会话（只改标题 sidecar，不改标识 / 内容） |
 | `agent_delete_session { name }` | 删除会话（连同日志与标题） |
@@ -375,7 +375,9 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String
 
 > **模型切换选择器**：放在发送按钮旁边（`AiChatComposer` 的 `trailingAction` 槽位，`ModelSelector.tsx`）。目录与切换都走 Rust 侧（`agent_list_models` / `agent_set_model`），前端不持有模型状态——与 TUI 的 `/model` 同语义，只是从「浮层面板」变成「发送栏内联下拉」。
 
-> **会话管理选择器**（`SessionSelector.tsx`，放在顶栏标题旁）：参照 Codex 的 `/resume` picker，提供列出 / 切换 / 新建（可命名）/ 重命名（内联编辑）/ 删除（两次点击确认）。会话目录与全部操作都走 Rust 侧 `SessionCatalog`——**与 TUI 共用同一个实现、同一份 `<root>/.shirley/sessions` 数据**（见 `docs/session.md` 八.决策 7）。切换 / 新建 / 删除经 `SessionManager`（每个会话各持独立 `Agent`，运行中只拒绝该会话）。**前端按会话订阅事件**：切到某会话即 `agent_subscribe`（拿 `SessionSnapshot` 重建 transcript）+ 订阅其事件流；切走 `agent_unsubscribe`。后台会话照常运行，事件按 `AgentEventWire.session` 路由到各自视图，不串台。
+> **会话管理选择器**（`SessionSelector.tsx`，放在顶栏标题旁）：参照 Codex 的 `/resume` picker，提供列出 / 切换 / 新建 / 重命名（内联编辑）/ 删除（两次点击确认）。**点「新建会话」不再要求先输名**——直接开一个空会话并聚焦输入框（聚焦用户意图而非管理逻辑）；会话名在**首条消息发出后由 AI 自动生成**（见下），用户想改再走重命名。会话目录与全部操作都走 Rust 侧 `SessionCatalog`——**与 TUI 共用同一个实现、同一份 `<root>/.shirley/sessions` 数据**（见 `docs/session.md` 八.决策 7）。切换 / 新建 / 删除经 `SessionManager`（每个会话各持独立 `Agent`，运行中只拒绝该会话）。**前端按会话订阅事件**：切到某会话即 `agent_subscribe`（拿 `SessionSnapshot` 重建 transcript）+ 订阅其事件流；切走 `agent_unsubscribe`。后台会话照常运行，事件按 `AgentEventWire.session` 路由到各自视图，不串台。
+
+> **会话自动命名**：新建会话的名字最初是时间戳占位（`fresh_name()`，见 `docs/session.md`）。首轮 `run_stream` 结束后，`agent_send` 的任务在 `restore_agent` 之前调 `auto_title_session(&agent, &catalog, &name)`：若该会话**还没有自定义标题**（目录里 `label == name`，即从未命名 / 重命名过），就用其**首条用户消息**（`session::first_user_message`）经一次无工具、非流式的补全（SDK `Agent::complete`）生成短标题，清洗（`session::sanitize_title`）后写入 `<name>.title` sidecar。任何一步失败都静默忽略、留待下轮再试；用户手动改过名后 `label != name`，自动命名不再覆盖。**这就是 `Agent::complete` 的用途**——一个"用一次模型调用做点小事"的通用原语，不碰 `Agent` 的会话状态（`&self` 可调）。
 
 > **注意**：`AgentEvent` 目前是 `Debug + Clone`（`Clone` 是每会话 `broadcast` 通道复用事件所需），**未派生 `Serialize`**。桥接层需要一个 `to_wire` 把 `AgentEvent` / `Message` 映射成前端 DTO（不直接给 SDK 加 `Serialize`，保持 SDK 契约小、协议差异收敛在边界——与 `docs/README.md` 原则一一致）。已落地为 `src/interface/desktop/wire.rs`。
 >
@@ -406,7 +408,7 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String
 **M3 · 补齐会话与指令**
 - [x] 模型切换选择器（放在发送按钮旁，`ModelSelector.tsx` + `agent_list_models` / `agent_set_model`）
 - [x] `@` 引用：工作区文件/目录的提及浮层 + chip 展示（见 4.3；`agent_search_files` + `file-mentions/`）
-- [x] 会话管理：列表 / 切换 / 新建（可命名）/ 重命名 / 删除（`SessionSelector.tsx` + `SessionCatalog`，与 TUI 共用数据）
+- [x] 会话管理：列表 / 切换 / 新建（点开即空会话、AI 自动命名）/ 重命名 / 删除（`SessionSelector.tsx` + `SessionCatalog`，与 TUI 共用数据）
 - [ ] `/login` `/session` 等指令的 desktop 呈现
 - [ ] 思考显示 / 工具参数展开 / 滚动等交互对齐 TUI
 

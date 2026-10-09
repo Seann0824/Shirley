@@ -16,7 +16,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use serde::Serialize;
-use shirley_agent_sdk::Message;
+use shirley_agent_sdk::{Agent, Message};
 use tauri::{AppHandle, Emitter, State};
 use tokio::sync::Mutex;
 
@@ -24,7 +24,9 @@ use crate::interface::session::SessionManager;
 use super::wire::{AgentEventWire, SessionSnapshotWire};
 use crate::bootstrap::AgentFactory;
 use crate::models::ModelCatalog;
-use crate::session::{SessionCatalog, SessionEntry};
+use crate::session::{
+    SessionCatalog, SessionEntry, first_user_message, sanitize_title, title_prompt,
+};
 
 /// webview 侧监听的统一事件名。
 const EVENT_NAME: &str = "agent://event";
@@ -175,6 +177,8 @@ async fn agent_send(
     // `SessionManager` 作为任务执行者：跑 `run_stream`，把每个事件喂回**该会话**
     // （累加 + 扇出给订阅者）。前端经 pump（`agent_subscribe`）消费扇出。
     let sessions = state.sessions.clone();
+    // 自动命名需要目录句柄（写标题 sidecar），克隆一份进任务。
+    let title_catalog = state.session_catalog.clone();
     tauri::async_runtime::spawn(async move {
         {
             // `stream` 借用了 `agent`，用块把它圈住，出了块再 move `agent` 放回。
@@ -187,11 +191,63 @@ async fn agent_send(
                 sessions.lock().await.apply_event(&session_name, update);
             }
         }
+        // 会话自动命名：首轮结束后，若该会话还没有自定义标题，就用首条用户消息
+        // 让模型生成一个短标题写进 sidecar。失败 / 已有标题都静默跳过（下轮再试）。
+        // 必须在 `restore_agent` 之前——此刻 `agent` 还在本地，可只读调 `complete`。
+        auto_title_session(&agent, &title_catalog, &session_name).await;
         // 无论成败都把 Agent 放回该会话，供下一轮复用。
         sessions.lock().await.restore_agent(&session_name, agent);
     });
 
     Ok(())
+}
+
+/// 首轮结束后为会话自动生成标题（AI 命名）。
+///
+/// 触发条件：该会话**还没有自定义标题**（目录里 `label == name`，即从未被命名 /
+/// 重命名过）。用户手动改过名后 `label != name`，这里就不再覆盖——"自动"只做一次，
+/// 尊重用户意图。
+///
+/// 标题取自该会话的**首条用户消息**（[`first_user_message`]），经一次无工具、
+/// 非流式的补全（[`Agent::complete`]）生成，再用 [`sanitize_title`] 清洗后经
+/// `SessionCatalog::rename` 写入 `<name>.title` sidecar。
+///
+/// 任何一步失败都**静默忽略**：命名是锦上添花，不该让一次聊天失败，也留待下一轮
+/// 再试（尚未命名的会话每轮都会走到这里）。
+async fn auto_title_session(agent: &Agent, catalog: &Arc<dyn SessionCatalog>, name: &str) {
+    // 目录扫描是同步 IO，移到阻塞线程池。
+    let probe_catalog = catalog.clone();
+    let probe_name = name.to_owned();
+    let already_named = tauri::async_runtime::spawn_blocking(move || {
+        probe_catalog
+            .list()
+            .ok()
+            .and_then(|entries| entries.into_iter().find(|entry| entry.name == probe_name))
+            .map(|entry| entry.label != entry.name)
+            .unwrap_or(false)
+    })
+    .await
+    .unwrap_or(false);
+    if already_named {
+        return;
+    }
+
+    let Some(first) = first_user_message(agent.messages()) else {
+        return;
+    };
+    let Ok(raw) = agent.complete(&title_prompt(&first)).await else {
+        return;
+    };
+    let Some(title) = sanitize_title(&raw) else {
+        return;
+    };
+
+    let write_catalog = catalog.clone();
+    let write_name = name.to_owned();
+    let _ = tauri::async_runtime::spawn_blocking(move || {
+        write_catalog.rename(&write_name, &title)
+    })
+    .await;
 }
 
 /// 订阅一个会话：返回其**视图快照**（供前端重建 transcript），并起一个 per-session

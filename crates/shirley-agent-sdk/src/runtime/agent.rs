@@ -260,6 +260,53 @@ impl Agent {
         ))
     }
 
+    /// 一次性补全：对单条 prompt 跑**一次无工具、非流式**的模型请求，返回助手正文。
+    ///
+    /// 这是给应用层「用一次模型调用做点小事」准备的通用原语（例如为新建会话自动
+    /// 生成标题）。它**不碰** `self.messages` / 会话日志 / 召回库 / 任务账本——纯
+    /// 只读地复用当前 `model_config`，因此可以在持有 `&self` 时调用，不会污染会话。
+    ///
+    /// 与 [`Agent::run`] 的区别：不驱动 ReAct 循环、不发工具、不落库；`stream` /
+    /// `thinking` 被就地关掉（一次性补全要的是短文本，流式与推理无意义）。
+    /// 取 `Assistant` 的正文（`content`）；若模型只回了推理内容（`reasoning_content`）
+    /// 则回退取它；两者皆空返回空串。
+    pub async fn complete(&self, prompt: &str) -> Result<String, AgentError> {
+        let client = reqwest::Client::new();
+        // 克隆一份配置并关掉流式 / 推理：只借模型名与端点，不改动 `self` 的���置。
+        let mut config = self.model_config.clone();
+        config.stream = false;
+        config.thinking = false;
+
+        let messages = vec![message::Message::User {
+            content: prompt.into(),
+        }];
+        let tools: Vec<&tool::ToolDefinition> = Vec::new();
+        let request = ModelRequest {
+            messages: &messages,
+            tools: &tools,
+        };
+
+        let mut stream = adapter::invoke(&client, &config, request).await;
+        while let Some(event) = stream.next().await {
+            if let adapter::AdapterEvent::Finished(response) = event.map_err(AgentError::Adapter)? {
+                return Ok(match response.message {
+                    message::Message::Assistant {
+                        content,
+                        reasoning_content,
+                        ..
+                    } => content
+                        .filter(|text| !text.trim().is_empty())
+                        .or(reasoning_content)
+                        .unwrap_or_default(),
+                    _ => String::new(),
+                });
+            }
+        }
+        Err(AgentError::Other(
+            "completion stream ended without a result".into(),
+        ))
+    }
+
     pub fn run_stream<'a>(
         &'a mut self,
         task: &'a str,

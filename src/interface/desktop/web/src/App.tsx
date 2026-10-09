@@ -148,19 +148,19 @@ export function App() {
     [openSession],
   );
 
-  const newSession = useCallback(
-    async (title: string | null) => {
-      try {
-        setUiError("");
-        const bridge = await agentBridge();
-        const entry = await bridge.newSession(title);
-        await openSession(entry.name);
-      } catch (e) {
-        setUiError(e instanceof Error ? e.message : String(e));
-      }
-    },
-    [openSession],
-  );
+  const newSession = useCallback(async () => {
+    try {
+      setUiError("");
+      const bridge = await agentBridge();
+      // 不带标题：名字在首条消息后由 AI 自动生成，用户想改再手动重命名。
+      const entry = await bridge.newSession(null);
+      await openSession(entry.name);
+      // 直接聚焦输入框——新建会话的意图是"马上开始聊"，而不是先做管理。
+      editorRef.current?.focus();
+    } catch (e) {
+      setUiError(e instanceof Error ? e.message : String(e));
+    }
+  }, [openSession]);
 
   const renameSession = useCallback(async (name: string, title: string) => {
     try {
@@ -280,7 +280,7 @@ export function App() {
         <SessionSelector
           current={sessionName}
           onSelect={(name) => void switchSession(name)}
-          onNew={(title) => void newSession(title)}
+          onNew={() => void newSession()}
           onRename={(name, title) => void renameSession(name, title)}
           onDelete={(name) => void deleteSession(name)}
         />
