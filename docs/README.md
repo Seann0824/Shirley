@@ -26,6 +26,7 @@
 | `plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 | P0 |
 | `web-search.md` | 联网搜索工具 `web_search`：Anthropic-compatible Messages API / 归一化 / 配置（**已实现**） | P1 |
 | `desktop-interface.md` | 桌面界面：Tauri 2 + React 迁移 shiwen 聊天 UI / 共享 LCA / 剥离 shiwen 定制逻辑（**M0–M2 已落地**） | P1 |
+| `apply-patch.md` | 文件补丁工具 `apply_patch`：Codex 风格上下文补丁 / 原子落盘 / 自包含编辑栈（undo·redo）观测与回滚（**设计提案**） | P1 |
 
 
 ---

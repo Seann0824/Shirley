@@ -29,6 +29,7 @@ import {
 const TOOL_LABELS: Record<string, string> = {
   bash: "执行命令",
   read_file: "读取文件",
+  apply_patch: "修改文件",
   web_search: "搜索互联网",
   recall: "召回历史",
   todo: "更新任务",
@@ -50,6 +51,33 @@ function StatusIcon({ status }: { status: ToolStatus }) {
   if (status === "error") return <AlertCircle className="text-danger-ink" aria-hidden="true" />;
   if (status === "rejected") return <XCircle aria-hidden="true" />;
   return <CheckCircle2 aria-hidden="true" />;
+}
+
+// apply_patch 的输入是一大段补丁文本；把它按 diff 着色展示，让用户一眼看清
+// 改了哪个文件、增删了哪些行。其它工具的 input 走通用参数展示，不在此处处理。
+function PatchDetail({ execution }: { execution: AiToolExecution }) {
+  const raw = execution.input?.patch;
+  if (typeof raw !== "string" || raw.trim() === "") return null;
+  const lines = raw.split("\n");
+  return (
+    <div className="border-t px-4 py-3 md:px-5">
+      <pre className="max-h-80 overflow-auto rounded-control bg-inset px-3 py-2 font-utility text-caption leading-relaxed">
+        {lines.map((line, index) => (
+          <div
+            key={index}
+            className={cn(
+              "whitespace-pre",
+              line.startsWith("+") && "text-success-ink",
+              line.startsWith("-") && "text-danger-ink",
+              (line.startsWith("***") || line.startsWith("@@")) && "font-semibold text-muted",
+            )}
+          >
+            {line || " "}
+          </div>
+        ))}
+      </pre>
+    </div>
+  );
 }
 
 function ToolErrorDetail({
@@ -153,6 +181,7 @@ export function AiToolExecutionCard({
       aria-label={`${TOOL_LABELS[execution.tool_name] || execution.tool_name}执行结果`}
     >
       {header}
+      {execution.tool_name === "apply_patch" && <PatchDetail execution={execution} />}
       {failed && errorKind && <ToolErrorDetail execution={execution} errorKind={errorKind} />}
       {pending && (
         <>

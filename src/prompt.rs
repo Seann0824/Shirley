@@ -35,6 +35,32 @@ Treat terminal output as part of the limited model context. Avoid commands that 
 Before taking any action, first reply with visible text content. When you receive a user message, start your turn with a short plain-text reply that answers or acknowledges it and states what you are about to do, and only then investigate or call tools. Never jump straight into tool calls with no leading content message.
 
 For any multi-step task, first break it down with the `todo` tool: set the goal and the step checklist before you act, keep exactly one step in progress, and record what each step found (conclusions, locations, decisions, open questions) so you never redo work. The ledger survives context compaction.
+
+Edit files ONLY with the `apply_patch` tool, never with shell redirection, `sed -i`, `tee`, `>>`, or any other write-through-shell command:
+- `apply_patch` is the single editing path; `bash` is for running / inspecting, not for changing files.
+- Read the target file with `read_file` first, then craft the patch against its real content.
+- Keep about 3 lines of context before and after each change so the match is unique.
+- Patches are atomic: if any hunk fails to match, nothing is written. On failure you get an error with the expected context; fix the patch and retry, never fall back to shell writes.
+
+`apply_patch` patch format (paths are relative to the workspace root):
+```
+*** Begin Patch
+*** Update File: src/foo.rs
+@@
+ context line kept as-is
+-old line
++new line
+*** Add File: src/new.rs
++first line
+*** Delete File: src/old.rs
+*** Update File: src/rename_me.rs
+*** Move to: src/renamed.rs
+*** End Patch
+```
+- One patch may touch many files: repeat `*** Update File:` / `*** Add File:` / `*** Delete File:` blocks between `*** Begin Patch` and `*** End Patch`.
+- Update hunks are located by content, not line numbers: a `@@` anchor line (optionally with a nearby class/function name), then lines prefixed with a space (context), `-` (remove), or `+` (add).
+- To overwrite a file's entire content, use `*** Delete File:` immediately followed by `*** Add File:` for the same path.
+- Only plain text is supported: binary files and non-UTF-8 content are rejected, never lossily converted.
 ";
 
 /// 解析 coding agent 的工作区根目录。
@@ -148,6 +174,35 @@ mod tests {
         assert!(
             text.contains("Never jump straight into tool calls"),
             "应禁止直接开工具调用: {text}"
+        );
+    }
+
+    #[test]
+    fn render_requires_apply_patch_for_edits() {
+        // 改文件必须走 apply_patch，且不得用 shell 重定向绕过。
+        // 这条断言防止以后改提示词时把这段指令弄丢。
+        let dir = tempfile_dir("render_apply_patch");
+        let text = render(&dir);
+        assert!(
+            text.contains("Edit files ONLY with the `apply_patch` tool"),
+            "应要求用 apply_patch 编辑: {text}"
+        );
+        assert!(
+            text.contains("never with shell redirection"),
+            "应禁止 shell 重定向写文件: {text}"
+        );
+        // 正式介绍工具格式，防止模型不知道 `*** Begin Patch` 怎么写。
+        assert!(
+            text.contains("`apply_patch` patch format"),
+            "应介绍补丁格式: {text}"
+        );
+        assert!(
+            text.contains("*** Begin Patch"),
+            "应给出 Begin Patch 标记: {text}"
+        );
+        assert!(
+            text.contains("*** Move to:"),
+            "应介绍重命名块: {text}"
         );
     }
 

@@ -1,8 +1,8 @@
-use std::path::PathBuf;
-
 use shirley_agent_sdk::workspace::{WorkSpace, WorkspaceError};
 use shirley_agent_sdk::{ToolError, tool};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
+
+use crate::tools::util::{BINARY_SNIFF_BYTES, clip_to_budget, is_secret_file, workspace_root};
 
 /// 默认读取行数。模型不指定时用这个值，避免"顺手读整个文件"。
 const DEFAULT_LINE_COUNT: usize = 200;
@@ -13,50 +13,6 @@ const MAX_LINE_COUNT: usize = 2000;
 /// 单次输出字节上限。行数达标但内容过长（如超长压缩文件、单行巨大）时，
 /// 由这一层兜底截断，保证上下文占用可控。
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
-
-/// 二进制探测窗口：开头这么多字节里出现 NUL 就当成二进制文件拒绝。
-const BINARY_SNIFF_BYTES: usize = 8 * 1024;
-
-/// 工作区根目录：优先读环境变量 `SHIRLEY_WORKSPACE`，否则退回当前目录。
-/// 与 `bash` 工具保持同一口径，避免两处漂移。
-fn workspace_root() -> Option<PathBuf> {
-    std::env::var("SHIRLEY_WORKSPACE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-}
-
-/// 疑似密钥文件：默认拒绝，避免把 `.env` / 私钥读进上下文再发给模型
-/// （见 `docs/security.md` 第三节）。
-fn is_secret_file(name: &str) -> bool {
-    let name = name.to_ascii_lowercase();
-    name == ".env"
-        || name.starts_with(".env.")
-        || name.ends_with(".pem")
-        || name.ends_with(".key")
-        || name == ".netrc"
-        || name == "credentials"
-        || name.starts_with("id_rsa")
-        || name.starts_with("id_dsa")
-        || name.starts_with("id_ecdsa")
-        || name.starts_with("id_ed25519")
-}
-
-/// 按字符边界把 `text` 截到不超过 `budget` 字节。
-fn clip_to_budget(text: &str, budget: usize) -> &str {
-    if text.len() <= budget {
-        return text;
-    }
-    let mut end = 0;
-    for (index, ch) in text.char_indices() {
-        if index + ch.len_utf8() > budget {
-            break;
-        }
-        end = index + ch.len_utf8();
-    }
-    &text[..end]
-}
 
 /// 按行读取工作区内的文本文件，返回带行号的片段。
 ///
@@ -235,10 +191,8 @@ pub async fn read_file(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    // 测试会改动进程级的工作区环境变量，串行执行避免相互干扰。
-    // 用 tokio 的 Mutex：guard 允许跨 await 持有，std 的会被 clippy 拦下。
-    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+    use crate::tools::util::WorkspaceGuard;
+    use std::path::PathBuf;
 
     /// 建一个唯一的临时工作区目录。
     fn temp_workspace(tag: &str) -> PathBuf {
@@ -254,11 +208,10 @@ mod tests {
 
     #[tokio::test]
     async fn reads_lines_with_line_numbers() {
-        let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("basic");
         std::fs::write(dir.join("a.txt"), "first\nsecond\nthird\n").unwrap();
         // SAFETY: 测试内串行改环境变量，不与其他线程并发。
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
+        let _guard = WorkspaceGuard::set(&dir).await;
 
         let out = read_file("a.txt".into(), None, None).await.unwrap();
 
@@ -270,11 +223,10 @@ mod tests {
 
     #[tokio::test]
     async fn supports_start_line_and_continuation() {
-        let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("range");
         let body: String = (1..=10).map(|n| format!("line{n}\n")).collect();
         std::fs::write(dir.join("b.txt"), body).unwrap();
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
+        let _guard = WorkspaceGuard::set(&dir).await;
 
         let out = read_file("b.txt".into(), Some(3), Some(2)).await.unwrap();
 
@@ -287,9 +239,8 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_outside_workspace() {
-        let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("escape");
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
+        let _guard = WorkspaceGuard::set(&dir).await;
 
         let err = read_file("../etc/passwd".into(), None, None)
             .await
@@ -304,9 +255,8 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_absolute_path() {
-        let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("absolute");
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
+        let _guard = WorkspaceGuard::set(&dir).await;
 
         let err = read_file("/etc/hosts".into(), None, None).await.unwrap_err();
         assert!(
@@ -318,10 +268,9 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_secret_file() {
-        let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("secret");
         std::fs::write(dir.join(".env"), "LOCAL_API_KEY=leak").unwrap();
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
+        let _guard = WorkspaceGuard::set(&dir).await;
 
         let err = read_file(".env".into(), None, None).await.unwrap_err();
         assert!(err.to_string().contains("密钥"), "应拒绝密钥文件: {err}");
@@ -330,10 +279,9 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_binary_file() {
-        let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("binary");
         std::fs::write(dir.join("bin"), [0u8, 1, 2, 3, 0, 255]).unwrap();
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
+        let _guard = WorkspaceGuard::set(&dir).await;
 
         let err = read_file("bin".into(), None, None).await.unwrap_err();
         assert!(err.to_string().contains("二进制"), "应拒绝二进制: {err}");
@@ -342,10 +290,9 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_directory() {
-        let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("dir");
         std::fs::create_dir(dir.join("sub")).unwrap();
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
+        let _guard = WorkspaceGuard::set(&dir).await;
 
         let err = read_file("sub".into(), None, None).await.unwrap_err();
         assert!(err.to_string().contains("目录"), "应引导用 ls: {err}");
@@ -354,12 +301,11 @@ mod tests {
 
     #[tokio::test]
     async fn caps_output_bytes() {
-        let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("bytes");
         // 一行就超过字节上限，必须被截断而不是整段塞进上下文。
         let big = "a".repeat(MAX_OUTPUT_BYTES * 2);
         std::fs::write(dir.join("big.txt"), big).unwrap();
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
+        let _guard = WorkspaceGuard::set(&dir).await;
 
         let out = read_file("big.txt".into(), None, None).await.unwrap();
         assert!(out.contains("已截断"), "应提示截断: 长度 {}", out.len());
@@ -375,10 +321,9 @@ mod tests {
     async fn registers_and_invokes_through_tool_manager() {
         use shirley_agent_sdk::{ToolCall, ToolManager};
 
-        let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("manager");
         std::fs::write(dir.join("m.txt"), "alpha\nbeta\n").unwrap();
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
+        let _guard = WorkspaceGuard::set(&dir).await;
 
         // 走宏生成的 `tool()`，验证注册 + 参数反序列化 + 调用的完整链路。
         let mut manager = ToolManager::new();
@@ -412,13 +357,12 @@ mod tests {
 
     #[tokio::test]
     async fn caps_line_count() {
-        let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("lines");
         let body: String = (1..=MAX_LINE_COUNT + 50)
             .map(|n| format!("l{n}\n"))
             .collect();
         std::fs::write(dir.join("many.txt"), body).unwrap();
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
+        let _guard = WorkspaceGuard::set(&dir).await;
 
         // 显式要求远超上限的行数，也只能读到上限。
         let out = read_file("many.txt".into(), None, Some(MAX_LINE_COUNT * 2))
