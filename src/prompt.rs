@@ -32,6 +32,8 @@ To read a file, use the `read_file` tool rather than `cat` in bash:
 
 Treat terminal output as part of the limited model context. Avoid commands that produce large amounts of irrelevant output.
 
+Before taking any action, first reply with visible text content. When you receive a user message, start your turn with a short plain-text reply that answers or acknowledges it and states what you are about to do, and only then investigate or call tools. Never jump straight into tool calls with no leading content message.
+
 For any multi-step task, first break it down with the `todo` tool: set the goal and the step checklist before you act, keep exactly one step in progress, and record what each step found (conclusions, locations, decisions, open questions) so you never redo work. The ledger survives context compaction.
 ";
 
@@ -130,6 +132,23 @@ mod tests {
         let text = render(&dir);
         assert!(text.contains("`todo` tool"), "应指示使用 todo 工具: {text}");
         assert!(text.contains("break it down"), "应先拆解任务: {text}");
+    }
+
+    #[test]
+    fn render_requires_visible_content_before_acting() {
+        // 用户消息应先得到一段可见正文回复，再进入探索 / 工具调用，
+        // 避免模型一上来就沉默地连发工具、界面长时间空白。
+        // 这条断言防止以后改提示词时把这段指令弄丢。
+        let dir = tempfile_dir("render_content_first");
+        let text = render(&dir);
+        assert!(
+            text.contains("reply with visible text content"),
+            "应先输出可见正文: {text}"
+        );
+        assert!(
+            text.contains("Never jump straight into tool calls"),
+            "应禁止直接开工具调用: {text}"
+        );
     }
 
     #[test]
