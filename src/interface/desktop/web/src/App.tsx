@@ -5,30 +5,36 @@ import {
 } from "@/components/ai/AiConversationTranscript";
 import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { AssistantMessage } from "@/components/AssistantMessage";
-import { codePointLength } from "@/components/ai/AiMessageTimeline";
 import { ModelSelector } from "@/components/ai/ModelSelector";
-import { FileChips } from "@/lib/file-mentions/FileChips";
+import { InlineReferences } from "@/lib/file-mentions/FileChips";
 import { FileMentionPopover } from "@/lib/file-mentions/FileMentionPopover";
-import { useFileMentions } from "@/lib/file-mentions/useFileMentions";
+import {
+  MentionEditor,
+  type MentionEditorHandle,
+} from "@/lib/file-mentions/MentionEditor";
+import { useFileMentionSearch } from "@/lib/file-mentions/useFileMentionSearch";
+import { stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
 import { agentBridge, type StreamHandle } from "@/lib/bridge";
-import type { AiToolExecution } from "@/types/ai";
+import type { AiSegment, AiToolExecution } from "@/types/ai";
 
 let messageSeq = 0;
 const nextId = () => `m${++messageSeq}`;
 
 export function App() {
   const [messages, setMessages] = useState<AiTranscriptMessage[]>([]);
-  // 每个 assistant 轮次的「思考文本 + 工具执行」按 assistant 消息 id 分组；
-  // 放 state 才能触发重渲染（直接改 ref 数组不会重渲染——曾踩过）。
-  const [turnData, setTurnData] = useState<Record<string, AssistantTurnData>>({});
+  // 每个 assistant 轮次按事件发生顺序切成的线性段落流（思考/正文/工具组交错），
+  // 对标 TUI 的 items 数组。放 state 才能触发重渲染（直接改 ref 数组不会重渲染——曾踩过）。
+  const [turnSegments, setTurnSegments] = useState<Record<string, AiSegment[]>>({});
   const [input, setInput] = useState("");
+  const [references, setReferences] = useState<FileReference[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [model, setModel] = useState("");
   const handleRef = useRef<StreamHandle | null>(null);
 
-  const mentions = useFileMentions(input, setInput);
+  const mentionSearch = useFileMentionSearch();
+  const editorRef = useRef<MentionEditorHandle>(null);
 
   useEffect(() => {
     void agentBridge()
@@ -36,80 +42,97 @@ export function App() {
   }, []);
 
   const send = useCallback(async () => {
-    // 浮层打开时，回车先确认当前高亮的引用，而不是发送。
-    if (mentions.popoverOpen && mentions.confirmSelection()) return;
-    const text = input.trim();
-    if (!text || busy) return;
-    const references = mentions.references;
+    // 发给模型 / 判空的正文要剥掉占位符（占位符不是用户文字）；但**回显用的
+    // content 必须保留占位符**——`InlineReferences` 正是按占位符位置把 chip 落回
+    // 正文的，剥掉就一个 tag 都渲染不出来（曾经的 bug）。
+    const plain = stripTokens(input).trim();
+    if (!plain || busy) return;
+    const display = input.trim();
+    const refs = references;
     setInput("");
-    mentions.clearReferences();
+    setReferences([]);
     setError("");
     setBusy(true);
 
     const assistantId = nextId();
     setMessages((prev) => [
       ...prev,
-      { id: nextId(), role: "user", content: text, status: "complete", references },
+      { id: nextId(), role: "user", content: display, status: "complete", references: refs },
       { id: assistantId, role: "assistant", content: "", status: "streaming" },
     ]);
-    setTurnData((prev) => ({ ...prev, [assistantId]: { reasoning: "", executions: [] } }));
+    setTurnSegments((prev) => ({ ...prev, [assistantId]: [] }));
 
     const patchMessage = (patch: (m: AiTranscriptMessage) => AiTranscriptMessage) => {
       setMessages((prev) => prev.map((m) => (m.id === assistantId ? patch(m) : m)));
     };
-    const patchTurn = (patch: (turn: AssistantTurnData) => AssistantTurnData) => {
-      setTurnData((prev) => ({
-        ...prev,
-        [assistantId]: patch(prev[assistantId] ?? { reasoning: "", executions: [] }),
-      }));
+    // 线性追加/合并段落。合并规则对标 TUI `append_streaming_delta`：连续同类型
+    // 的增量并进同一段，类型一换就新开一段——于是渲染顺序天然是
+    // 思考 → 正文 → 工具 → 正文 → 思考 → 工具 ……，而不是按内容偏移归并。
+    const appendSegment = (segment: AiSegment) => {
+      setTurnSegments((prev) => {
+        const segments = prev[assistantId] ?? [];
+        const last = segments.at(-1);
+        if (segment.kind === "content" && last?.kind === "content") {
+          return { ...prev, [assistantId]: [...segments.slice(0, -1), { ...last, text: last.text + segment.text }] };
+        }
+        if (segment.kind === "reasoning" && last?.kind === "reasoning") {
+          return { ...prev, [assistantId]: [...segments.slice(0, -1), { ...last, text: last.text + segment.text }] };
+        }
+        if (segment.kind === "tools" && last?.kind === "tools") {
+          return { ...prev, [assistantId]: [...segments.slice(0, -1), { ...last, executions: [...last.executions, ...segment.executions] }] };
+        }
+        return { ...prev, [assistantId]: [...segments, segment] };
+      });
     };
-    // 本轮正文的同步累加器：工具事件要靠它算 content_offset（流式 offset =
-    // 该工具调用发生时正文已累积的码点数），而 setMessages 是异步的、读不到即时值。
-    let assistantContent = "";
 
     const bridge = await agentBridge();
     handleRef.current = await bridge.send(
-      text,
-      references.map((reference) => reference.path),
+      plain,
+      refs.map((reference) => reference.path),
       (event) => {
         switch (event.type) {
           case "content_delta":
-            assistantContent += event.text;
+            appendSegment({ kind: "content", text: event.text });
             patchMessage((m) => ({ ...m, content: m.content + event.text }));
             break;
           case "reasoning_delta":
-            patchTurn((turn) => ({ ...turn, reasoning: turn.reasoning + event.text }));
+            appendSegment({ kind: "reasoning", text: event.text });
             break;
           case "tool_started":
-            patchTurn((turn) => ({
-              ...turn,
+            appendSegment({
+              kind: "tools",
               executions: [
-                ...turn.executions,
                 {
                   id: event.call_id,
                   call_id: event.call_id,
                   tool_name: event.name,
                   status: "running",
                   summary: "",
-                  // 记录调用发生点：与正文交错渲染（对标 TUI 的线性消息流）。
-                  content_offset: codePointLength(assistantContent),
                   input: safeParseArgs(event.arguments),
                 },
               ],
-            }));
+            });
             break;
           case "tool_finished":
-            patchTurn((turn) => ({
-              ...turn,
-              executions: turn.executions.map((tool) =>
-                tool.call_id === event.call_id
+            // 只改已有工具段的对应执行项（不新开段）。
+            setTurnSegments((prev) => ({
+              ...prev,
+              [assistantId]: (prev[assistantId] ?? []).map((segment) =>
+                segment.kind === "tools"
                   ? {
-                      ...tool,
-                      status: event.ok ? "complete" : "error",
-                      summary: event.output.slice(0, 200),
-                      error: event.ok ? null : event.output,
+                      ...segment,
+                      executions: segment.executions.map((tool) =>
+                        tool.call_id === event.call_id
+                          ? {
+                              ...tool,
+                              status: event.ok ? "complete" : "error",
+                              summary: event.output.slice(0, 200),
+                              error: event.ok ? null : event.output,
+                            }
+                          : tool,
+                      ),
                     }
-                  : tool,
+                  : segment,
               ),
             }));
             break;
@@ -129,7 +152,7 @@ export function App() {
         }
       },
     );
-  }, [busy, input, mentions]);
+  }, [busy, input, references]);
 
   const stop = useCallback(() => {
     handleRef.current?.cancel();
@@ -169,14 +192,10 @@ export function App() {
               <AssistantMessage
                 content={message.content}
                 streaming={message.status === "streaming"}
-                reasoning={turnData[String(message.id)]?.reasoning ?? ""}
-                executions={turnData[String(message.id)]?.executions ?? []}
+                segments={turnSegments[String(message.id)] ?? []}
               />
             ) : (
-              <div className="flex min-w-0 flex-col gap-1.5">
-                <FileChips references={message.references ?? []} />
-                {message.content && <span>{message.content}</span>}
-              </div>
+              <InlineReferences content={message.content} references={message.references ?? []} />
             )
           }
         />
@@ -186,54 +205,56 @@ export function App() {
           </p>
         )}
         <div className="relative shrink-0 px-3 pb-3">
-          {mentions.popoverOpen && (
+          {mentionSearch.popoverOpen && (
             <div className="absolute inset-x-3 bottom-full z-30 mb-1">
               <FileMentionPopover
-                open={mentions.popoverOpen}
-                query={mentions.query}
-                results={mentions.results}
-                loading={mentions.loading}
-                error={mentions.error}
-                selectedIndex={mentions.selectedIndex}
-                onSelect={mentions.selectResult}
-                onQueryChange={mentions.setQuery}
-                onKeyDown={mentions.handleKeyDown}
-                onRetry={() => mentions.setQuery(mentions.query)}
+                open={mentionSearch.popoverOpen}
+                query={mentionSearch.query}
+                results={mentionSearch.results}
+                loading={mentionSearch.loading}
+                error={mentionSearch.error}
+                selectedIndex={mentionSearch.selectedIndex}
+                onSelect={(result) => editorRef.current?.insertReference(result)}
+                onRetry={mentionSearch.retry}
+                showSearch={false}
               />
             </div>
           )}
           <AiChatComposer
             id="shirley-composer"
             label="发送消息"
-            value={input}
+            value={stripTokens(input)}
             placeholder="给 Shirley 发消息…（输入 @ 引用文件）"
             busy={busy}
-            textareaRef={mentions.textareaRef}
-            textareaOnKeyDown={mentions.handleKeyDown}
-            onValueChange={mentions.handleValueChange}
+            onValueChange={() => {}}
             onSend={() => void send()}
             onStop={stop}
             trailingAction={
               <ModelSelector current={model} onSelect={(value) => void switchModel(value)} />
             }
-          >
-            <FileChips
-              references={mentions.references}
-              onRemove={mentions.removeReference}
-              className="px-2 pt-2"
-            />
-          </AiChatComposer>
+            inputSlot={
+              <MentionEditor
+                ref={editorRef}
+                id="shirley-composer"
+                label="发送消息"
+                value={input}
+                references={references}
+                placeholder="给 Shirley 发消息…（输入 @ 引用文件）"
+                autoFocus
+                search={mentionSearch}
+                onChange={(text, refs) => {
+                  setInput(text);
+                  setReferences(refs);
+                }}
+                onSubmit={() => void send()}
+              />
+            }
+          />
         </div>
       </section>
     </div>
   );
 }
-
-/** 一个 assistant 轮次的展示数据：思考文本 + 工具执行（按调用点带 content_offset）。 */
-type AssistantTurnData = {
-  reasoning: string;
-  executions: AiToolExecution[];
-};
 
 function safeParseArgs(args: string): Record<string, unknown> | undefined {
   try {

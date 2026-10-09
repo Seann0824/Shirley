@@ -46,6 +46,13 @@
   }
 }
 
+/* @ 引用富输入框：空时用 data-placeholder 显示占位文案（contenteditable 无原生 placeholder） */
+[data-mention-editor][data-empty="true"]::before {
+  content: attr(data-placeholder);
+  color: var(--color-muted);
+  pointer-events: none;
+}
+
 /* Streamdown 代码块滚动条：与 ScrollArea 保持一致 */
 [data-ai-markdown] [data-streamdown="code-block-body"] {
   overscroll-behavior-x: contain;

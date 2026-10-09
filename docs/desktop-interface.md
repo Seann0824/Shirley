@@ -125,16 +125,49 @@ Shirley 里真实存在的可引用对象只有**工作区里的文件与目录*
 
 | shiwen 源 | Shirley 落点 | 变化 |
 | --- | --- | --- |
-| `lib/entity-mentions/useEntityMentions.ts` | `web/src/lib/file-mentions/useFileMentions.ts` | 对象换成 `FileReference`；检索走 Rust 侧 `agent_search_files`（本地文件系统），不再分页 / cursor |
-| `lib/entity-mentions/EntityChips.tsx` | `web/src/lib/file-mentions/FileChips.tsx` | 图标收敛为 文件 / 目录；去掉 material OCR / 删除资料 |
-| `lib/entity-mentions/EntityMentionPopover.tsx` | `web/src/lib/file-mentions/FileMentionPopover.tsx` | 去掉分组（article/space/…）、OCR 徽标、分页「加载更多」；只留搜索框 + 结果列表 + 键盘选择 |
+| `lib/entity-mentions/useEntityMentions.ts` | `web/src/lib/file-mentions/useFileMentionSearch.ts` | 对象换成 `FileReference`；检索走 Rust 侧 `agent_search_files`（本地文件系统），不再分页 / cursor；**只保留无头搜索控制器**（浮层状态 + 异步检索），输入区 DOM 归编辑区管 |
+| `lib/entity-mentions/EntityChips.tsx` | `web/src/lib/file-mentions/FileChips.tsx` | 图标收敛为 文件 / 目录；去掉 material OCR / 删除资料；`FileChip`（单个，可内联）+ `InlineReferences`（正文按占位符与引用交错） |
+| `lib/entity-mentions/EntityMentionPopover.tsx` | `web/src/lib/file-mentions/FileMentionPopover.tsx` | 去掉分组（article/space/…）、OCR 徽标、分页「加载更多」；只留结果列表 + 键盘选择（搜索框由编辑区承载，`showSearch=false`） |
 | `lib/entity-mentions/entityLoader.ts` | Rust `src/workspace_search.rs` + `agent_search_files` | 检索落到应用层（工作区遍历 + 关键词排序），不经 SDK |
 
-- **引用如何进模型**：`@` 只作用于界面——选中后把 `@query` 从正文抹掉、生成 chip，发送时
+- **引用如何进模型**：`@` 只作用于界面——选中后在光标处插入一个内联 chip，发送时
   由 `shell.rs::compose_prompt` 把引用路径拼进**这一轮**的 prompt。**引用不是 Agent 的对外
   契约**：`Message` / `AgentEvent` 都不动，SDK 未因此新增任何对外类型（见第八节验收第 4 条）。
 - **检索边界**：只在工作区根下遍历，跳过 `.git` / `node_modules` / `target` / `dist` 等，
   条目数设上限；这与 `read_file` 工具的工作区约束同源，但**在应用层实现**，不碰 SDK。
+
+#### 4.3.0 内联混排：`contenteditable` 富输入（**已落地**）
+
+初版把引用做成「正文外的 `references` 数组 + 输入框顶部的 `FileChips` 块」：chip 与文字
+**分属两层**，视觉上永远堆在正文上方，无法「文字 + tag 同行」。根因是输入控件是 `<textarea>`——
+它只能渲染纯文本，**无法承载内联节点**。修复即把输入区换成 `contenteditable` 富输入：
+
+- **正文 = 一条带占位符的字符串**。编辑区里 chip 是 `contenteditable=false` 的内联 `<span>`；
+  序列化时写成 `U+FFFC`（OBJECT REPLACEMENT CHARACTER）占位符。于是「文字 + 引用」仍是一条
+  有序字符串：**第 N 个占位符 ↔ `references[N]`**。发送前用 `stripTokens` 剥掉占位符，
+  引用仍走既有 `references` 数组（Rust `compose_prompt` 一行没改）。
+- **编辑期不重渲染 DOM**（否则光标必丢）。React 只渲染编辑区根 `<div>`，内部内容由
+  `MentionEditor` 命令式维护；普通输入交给浏览器原生编辑，`onInput` 只做序列化上报。
+  仅在**结构变化**（插入 / 删除 chip、外部重置 / 清空）时 `rebuild` 整段 DOM，并用
+  `pendingCaret` 恢复光标。
+- **键盘整块删 chip**：命中 chip 占位符的退格 / 前向删除，手写删除该 chip 节点 +
+  对应 `references[i]` + 重建（否则浏览器删的是字符、引用数组会错位）。
+- **`contenteditable=false` 的光标死角（已修）**：chip 是不可编辑的内联节点，浏览器既
+  不把光标放进「chip 与相邻文字之间」，方向键也跨不过它，点击落点也不可靠。三处补齐：
+  ① 方向键跨 chip 边界时手动 `setCaretAt`（普通文字仍走原生）；② 点击 chip 按落点左/右
+  半区把光标吸附到 chip 前 / 后；③ 退格 / 前向删除在占位符处整块删。统一用
+  「序列化文本偏移 ↔ DOM 位置」（`caretOffset` / `setCaretAt` / `chipOffset`）换算。
+- **用原生 `beforeinput`，不用 React 的 `onBeforeInput`（已修）**：React 18 的
+  `onBeforeInput` 是 `textInput`/`keypress` 合成的旧接口，`nativeEvent.inputType` **恒为
+  `undefined`**——原先基于它的删除 / 换行分支全是死代码（这正是「删除失灵」的根因）。
+  改为在编辑区根节点上 `addEventListener("beforeinput")`：只有原生事件能拿到 `inputType`
+  且 `preventDefault` 能阻止默认编辑。
+- **发送后回显**：用户消息的 `content` 保留占位符，渲染时走 `InlineReferences` 按占位符与
+  `message.references` 交错，chip 落回它在正文里的原始位置——不再堆顶部。
+- **实现落点**：`web/src/lib/file-mentions/` 下 `editor-dom.ts`（序列化 / 光标 / 重建 DOM）、
+  `MentionEditor.tsx`（富输入）、`useFileMentionSearch.ts`（无头检索）、`FileChips.tsx`
+  （`FileChip` / `InlineReferences`）。`AiChatComposer` 新增 `inputSlot`，传入时替换内置 textarea。
+  `src/App.tsx` 用 `input` + `references` 两个 state 接线，`send()` 判空用 `stripTokens`。
 
 ### 4.3.1 markdown 渲染对齐（**已修**）
 
@@ -164,7 +197,7 @@ shiwen 的 `AiConversationSurface` 把**转写区 + 输入框**一起包在
 `AiToolActivityDisclosure` 折叠区，渲染成一行「查看处理过程 · N 项」。Shirley 没有 entity / 审批渲染，
 所以执行项都归入折叠区，连续的工具调用被收成一行，而不是每个调用铺一张卡。
 `AiToolActivityDisclosure` 内部仍按 `content_offset` 排序、并对连续失败做聚合（`toolErrorUtils`）。
-**折叠区的落点见 4.3.4**：不再全部堆在正文顶部，而是按调用点与正文交错。
+**折叠区的落点见 4.3.4**：不再全部堆在正文顶部，而是作为线性段落流中的一段，按事件顺序与正文/思考交错。
 
 ### 4.3.3 markdown 渲染对标 TUI（**已落地**）
 
@@ -206,35 +239,43 @@ shiwen 的 `AiConversationSurface` 把**转写区 + 输入框**一起包在
 > 不依赖 `twMerge` 的先后顺序。改 `AiMarkdown.tsx` 的 `BASE_COMPONENTS` 时记得：
 > 组件层字号会被这里的 CSS 再盖一次，两者要一起看。
 
-### 4.3.4 工具调用按位置交错 + 思考折叠（**已落地**）
+### 4.3.4 一轮回复按事件顺序线性渲染 + 思考折叠（**已落地**）
 
-对标 TUI 的**线性消息流**。TUI（`app.rs`）把一轮回复拆成有序的 `Item`：
-「🧠 思考」块 → 正文 → 工具组（`Item::Tools`），按发生顺序排列，而不是把工具都堆在一处。
-desktop 原先相反：`AssistantMessage.tsx` 把该轮**所有** `executions` 合成**一个**
-`AiToolActivityDisclosure`，挂在 `contentOffset = executions[0]?.content_offset` 上——而
-`content_offset` 根本没被填充（恒 `undefined` → 0），于是**所有工具调用都堆在正文顶部**；
-`reasoning_delta` 更是被 `App.tsx` 直接 `break` 丢弃。两处都修了：
+对标 TUI 的**线性消息流**。TUI（`app.rs`）把一轮回复拆成有序的 `Item`：思考块 → 正文 →
+工具组（`Item::Tools`），**按事件发生顺序**排列，可以出现「思考 → 正文 → 工具 → 正文 →
+思考 → 工具」这种交错。desktop 原先相反：`AssistantMessage.tsx` 把该轮**所有** `executions`
+合成**一个** `AiToolActivityDisclosure`，挂在 `contentOffset = executions[0]?.content_offset`
+上——而 `content_offset` 根本没被填充（恒 `undefined` → 0），于是**所有工具调用都堆在正文
+顶部**；`reasoning_delta` 更是被 `App.tsx` 直接 `break` 丢弃。
 
-**① 工具按调用点与正文交错。** `AiMessageTimeline` 本就按 `contentOffset` 把 items 与正文
-切片交错——只是上游没喂对数据。现在 `App.tsx` 用**同步累加器** `assistantContent` 记录本轮
-已累积的正文，在 `tool_started` 时把 `content_offset = 码点长度(assistantContent)` 写进执行项
-（`AiToolExecution.content_offset` 字段本来就有，只是没人填）。`AssistantMessage.tsx` 再按
-`content_offset` 把 `executions` **分组**，每组生成一个 `AiToolActivityDisclosure` item——同一
-调用点的连续工具收进同一折叠区，不同调用点则各自落到正文对应位置。于是渲染顺序变成
-「正文片段 → 工具折叠区 → 正文片段 → …」，与 TUI 一致。
+> **走过的弯路**：第一次修只是给 `tool_started` 补上 `content_offset`（正文码点偏移），
+> 让 `AiMessageTimeline` ���偏移把工具插进正文。但用户实测仍「所有工具堆在一处」——
+> 因为一轮里多个 `tool_started` 是**连续**发生的，它们的 offset 相同，于是又归并到同一
+> 折叠区；而且「思考块 / 工具块本身是流中的独立段落」这件事，**偏移模型根本表达不了**。
+> 结论：不要用「正文偏移」去定位工具，而要把一轮回复直接切成**线性段落数组**。
 
-> offset 口径必须统一：`AiMessageTimeline` 用 `Array.from(content)` 按**码点**切分，所以
-> `App.tsx` 算 offset 也用码点（导出的 `codePointLength`），否则 emoji / 代理对会错位。
-> 累加器用闭包局部变量而非读 `messages` state，是因为 `setState` 异步、事件回调里读不到即时值。
+**最终模型：线性 segments（对标 TUI 的 items 数组）。** `types/ai.ts` 定义
+`AiSegment = { kind:"content"; text } | { kind:"reasoning"; text } | { kind:"tools"; executions }`。
 
-**② 思考用折叠区展示。** `reasoning_delta` 不再丢弃，累积进 `turnData[id].reasoning`；
-`AssistantMessage` 在**正文之上**（`contentOffset: 0`）生成一个 `ReasoningDisclosure`——
-`@/ui/collapsible` + `Brain`/`ChevronDown` 图标，收起时一行「思考过程」（流式中显示「正在思考」），
-展开显示完整思考文本（`border-l-2` 竖线 + muted 色，呼应 TUI 的暗色斜体思考块）。默认**收起**，
-不喧宾夺主。
+- **`App.tsx`** 持有 `turnSegments: Record<assistantId, AiSegment[]>`。每个事件到达时
+  `appendSegment`：**连续同类型的增量并进同一段，类型一换就新开一段**（对标 TUI
+  `append_streaming_delta`）。于是数组顺序天然是事件顺序：
+  `reasoning_delta` → reasoning 段、`content_delta` → content 段、`tool_started` → tools 段。
+  `tool_finished` 只**原地更新**已有 tools 段里的对应执行项（不新开段）。
+- **`AssistantMessage.tsx`** 拿到 `segments` 后**按数组顺序**渲染，`gap-3` 分隔：
+  `content` → `AiMarkdown`；`reasoning` → `ReasoningDisclosure`（折叠区）；`tools` →
+  `AiToolActivityDisclosure`（折叠区）。`streaming` 只标给**最后一段**（正在增长的那段）。
 
-**状态归并**：`App.tsx` 把原 `toolRuns: Record<id, AiToolExecution[]>` 换成
-`turnData: Record<id, { reasoning, executions }>`，一次 assistant 轮次的思考与工具同源管理。
+**思考折叠区**：`@/ui/collapsible` + `Brain`/`ChevronDown` 图标，收起时一行「思考过程」
+（流式中显示「正在思考」），展开显示完整思考文本（`border-l-2` 竖线 + muted 色，呼应 TUI 的
+暗色斜体思考块）。默认**收起**，不喧宾夺主。
+
+**连续工具收集**仍保留（见 4.3.2）：同一 tools 段内的执行项收进一个
+`AiToolActivityDisclosure`，渲染成一行「查看处理过程 · N 项」。
+
+> 旧的偏移模型 `AiMessageTimeline` 现已无引用（`App.tsx` / `AssistantMessage.tsx` 都不再用），
+> 保留文件未删（Vite tree-shake 掉，不影响 bundle）。它若将来还要用，需先把 `content_offset`
+> 真正填对——但线性 segment 模型已经能覆盖「交错」需求，`AiMessageTimeline` 大概率不再需要。
 
 ### 4.4 要保留的（用户真正喜欢的「聊天交互和 UI」）
 

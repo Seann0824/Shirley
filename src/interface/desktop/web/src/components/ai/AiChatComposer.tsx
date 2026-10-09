@@ -21,6 +21,11 @@ type AiChatComposerProps = Omit<ComponentPropsWithoutRef<"form">, "children" | "
   leadingAction?: ReactNode;
   /** 放在发送按钮左侧、与之同一行的操作（如模型切换选择器）。 */
   trailingAction?: ReactNode;
+  /**
+   * 自定义输入控件，替换内置 `<textarea>`（如带内联 `@` 引用 chip 的富输入）。
+   * 传入时 `value` / `textareaRef` / `textareaOnKeyDown` 等 textarea 专属 props 由调用方自理。
+   */
+  inputSlot?: ReactNode;
   children?: ReactNode;
   sendLabel?: string;
   onValueChange: (value: string) => void;
@@ -44,6 +49,7 @@ export function AiChatComposer({
   textareaOnKeyDown,
   leadingAction,
   trailingAction,
+  inputSlot,
   children,
   sendLabel = "发送消息",
   onValueChange,
@@ -64,39 +70,44 @@ export function AiChatComposer({
         event.preventDefault();
         if (unavailable || !value.trim()) return;
         onSend();
+        // 发送后把焦点还给输入控件（内置 textarea 或 inputSlot 里的富输入）。
         event.currentTarget
-          .querySelector<HTMLTextAreaElement>("textarea")
+          .querySelector<HTMLElement>("textarea, [contenteditable='true'], input")
           ?.focus({ preventScroll: true });
       }}
     >
       {children}
       <div className="order-3 min-w-0">
-        <label className="sr-only" htmlFor={id}>
-          {label}
-        </label>
-        <Textarea
-          ref={textareaRef}
-          id={id}
-          autoFocus={autoFocus}
-          value={value}
-          rows={rows}
-          maxLength={maxLength}
-          enterKeyHint="enter"
-          className={cn(
-            "max-h-40 min-h-12 resize-none overflow-y-auto rounded-none border-0 bg-transparent p-2 [field-sizing:content] hover:bg-transparent focus:border-transparent focus:bg-transparent focus:ring-0",
-            textareaClassName,
-          )}
-          placeholder={placeholder}
-          disabled={disabled}
-          onChange={(event) => onValueChange(event.target.value)}
-          onKeyDown={(event) => {
-            if (textareaOnKeyDown?.(event)) return;
-            if (shouldSendChatOnEnter(event) && value.trim() && !unavailable) {
-              event.preventDefault();
-              onSend();
-            }
-          }}
-        />
+        {inputSlot ?? (
+          <>
+            <label className="sr-only" htmlFor={id}>
+              {label}
+            </label>
+            <Textarea
+              ref={textareaRef}
+              id={id}
+              autoFocus={autoFocus}
+              value={value}
+              rows={rows}
+              maxLength={maxLength}
+              enterKeyHint="enter"
+              className={cn(
+                "max-h-40 min-h-12 resize-none overflow-y-auto rounded-none border-0 bg-transparent p-2 [field-sizing:content] hover:bg-transparent focus:border-transparent focus:bg-transparent focus:ring-0",
+                textareaClassName,
+              )}
+              placeholder={placeholder}
+              disabled={disabled}
+              onChange={(event) => onValueChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (textareaOnKeyDown?.(event)) return;
+                if (shouldSendChatOnEnter(event) && value.trim() && !unavailable) {
+                  event.preventDefault();
+                  onSend();
+                }
+              }}
+            />
+          </>
+        )}
       </div>
       <div className="order-4 mt-1 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1">{leadingAction}</div>

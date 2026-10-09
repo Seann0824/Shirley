@@ -20,6 +20,7 @@ export function FileMentionPopover({
   onQueryChange,
   onKeyDown,
   onRetry,
+  showSearch = true,
 }: {
   open: boolean;
   query: string;
@@ -28,9 +29,11 @@ export function FileMentionPopover({
   error: string | null;
   selectedIndex: number;
   onSelect: (result: FileReference) => void;
-  onQueryChange: (query: string) => void;
+  onQueryChange?: (query: string) => void;
   onKeyDown?: (event: React.KeyboardEvent<HTMLInputElement>) => boolean;
   onRetry: () => void;
+  /** 是否渲染自带的搜索框。富输入框内联引用时 query 由编辑区承载，这里传 false。 */
+  showSearch?: boolean;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -57,22 +60,24 @@ export function FileMentionPopover({
       className="z-50 w-full min-w-0 overflow-hidden rounded-card border border-line bg-surface shadow-lg"
       data-file-mention-popover
     >
-      <div className="flex items-center gap-2 border-b border-line px-3 py-2">
-        <Search className="size-3.5 shrink-0 text-muted" />
-        <input
-          type="text"
-          value={query}
-          onChange={(event) => onQueryChange(event.target.value)}
-          placeholder="搜索工作区文件…"
-          className="w-full bg-transparent text-body-sm text-ink outline-none placeholder:text-muted"
-          aria-label="搜索要引用的文件"
-          onKeyDown={(event) => {
-            if (event.key === "Enter") event.preventDefault();
-            event.stopPropagation();
-            onKeyDown?.(event);
-          }}
-        />
-      </div>
+      {showSearch && (
+        <div className="flex items-center gap-2 border-b border-line px-3 py-2">
+          <Search className="size-3.5 shrink-0 text-muted" />
+          <input
+            type="text"
+            value={query}
+            onChange={(event) => onQueryChange?.(event.target.value)}
+            placeholder="搜索工作区文件…"
+            className="w-full bg-transparent text-body-sm text-ink outline-none placeholder:text-muted"
+            aria-label="搜索要引用的文件"
+            onKeyDown={(event) => {
+              if (event.key === "Enter") event.preventDefault();
+              event.stopPropagation();
+              onKeyDown?.(event);
+            }}
+          />
+        </div>
+      )}
       <ScrollArea
         type="auto"
         viewportRef={viewportRef}
@@ -115,6 +120,7 @@ export function FileMentionPopover({
                   type="button"
                   role="option"
                   aria-selected={isSelected}
+                  onMouseDown={(event) => event.preventDefault()}
                   onClick={() => onSelect(item)}
                   title={item.path}
                   className={cn(
