@@ -44,12 +44,17 @@ session 有旧尾巴、messages 是真相，挂载后追加就分叉，下次冷
 
 ---
 
-**二、SDK 对外契约**
+**二、应用层契约**（**已演进：契约从 SDK 移出**）
+
+> 多会话重构后，会话持久化**完全归应用层**：`SessionStore` / `SessionError` 与
+> 具体实现同住在 `src/session.rs`，SDK 不再持有任何会话概念（`Agent` 无 `session`
+> 字段、无恢复 / 落库 / 截尾逻辑，只发 `MessageAdded` 事件）。下面这节记录契约
+> 的**形态**（内容不变，归属改为应用层），历史归属见第七节。
 
 **2.1 `SessionStore` trait**
 
 ```rust
-// crates/shirley-agent-sdk/src/session/mod.rs
+// src/session.rs（应用层）
 pub trait SessionStore: Send + Sync {
     /// 追加一条消息到日志尾部。压缩产生的 ContextSummary 也走这里。
     fn append(&self, message: &Message) -> Result<(), SessionError>;
@@ -70,93 +75,67 @@ pub trait SessionStore: Send + Sync {
 - **接口收 `&Message`，不收 `&[Message]`，更不收 raw JSON。**
   存的是 SDK 语义类型，换协议（OpenAI / Anthropic）不动存储层；
   单条追加天然对齐"一轮一轮落库"。
-- **同步签名。** `Agent::new` 是同步的，恢复发生在构造时，同步接口让
-  `Agent::new` 不必变异步。存储后端若是异步驱动，由应用层内部消化
-  （同步驱动如 `rusqlite` 最省事）。**契约同步，实现自由。**
-- **`SessionError` 留在 `session` 模块**，实现 `SdkError`，
-  经 `#[from]` 收进 `AgentError`（沿用 `error.rs` 的统一契约）。
+- **同步签名。** 会话的恢复 / 截尾发生在同步路径上（`SessionManager` 切换 /
+  `App::submit` 回溯），同步接口让调用方不必变异步。存储后端若是异步驱动，由实现
+  内部消化（同步驱动如 `rusqlite` 最省事）。**契约同步，实现自由。**
+- **`SessionError` 留在 `src/session.rs`**（与实现同住），`thiserror` 定义，
+  展示格式 `[前缀]: 详情`（`Io` / `Backend` 两个变体）。应用层不再经 `#[from]`
+  收进 `AgentError`——它已不跨 SDK 边界。
 
 **2.2 错误处理**
 
-`append` 失败 = **中断本轮**，不降级继续。理由：持久化失败还继续跑，
-等于假装有存档，比直接报错更危险。`SessionError` 的 `ErrorKind` 默认 `Internal`
-（存储 I/O 错误不可重试；若将来区分出可重试的瞬时故障，再细化 kind）。
+`append` 失败 = **暴露为错误**，不降级继续。理由：持久化失败还继续跑，
+等于假装有存档，比直接报错更危险。应用层由 `Session::persist_message` 把失败记成
+错误条目（UI 可见），但不因此中断整轮对话。
 
 **2.3 对外暴露**
 
-`lib.rs` 新增：`SessionStore`、`SessionError`。
-`InMemoryStore` 视用途决定是否公开（给测试与"不落盘但走同一路径"的兜底）。
+应用层内部类型，不属 SDK 门面。SDK `lib.rs` **不再导出** `SessionStore` /
+`SessionError` / `InMemoryStore`。
 
 ---
 
-**三、`Agent` 接线**
+**三、应用层接线**（**已演进：SDK 不再持有会话**）
 
-**3.1 新增字段与 builder 参数**
+**3.1 落库挂点：事件驱动**
 
-```rust
-pub struct Agent {
-    // ...现有字段...
-    session: Option<Arc<dyn SessionStore>>,
-}
-
-// builder 新增（可选，不传 = 纯内存，行为与现状完全一致）
-#[builder(default)] session: Option<Arc<dyn SessionStore>>,
-```
-
-`Option` 是关键：**不传 session 时，现有所有行为不变**（不落盘、不恢复），
-保证这个改动对既有调用方零影响。
-
-**3.2 构造时恢复（`Agent::new` 内）**
-
-```
-if messages 非空:
-    self.messages = messages
-    session.truncate(messages.len()) 后按需 append?  ← 见下"重置语义"
-else if let Some(store) = session:
-    let log = store.load()?
-    let log = strip_system(&log)                  // system 不入日志；防御性剔除
-    self.messages = rebuild_working_set(log)      // [最后一条 ContextSummary 起]
-```
-
-- `rebuild_working_set` **复用现有 `active_messages()` 的规则**（找最后一条
-  `ContextSummary`，只保留它之后的）——恢复和工作集切分是同一套规则，不重复实现。
-
-**"重置语义"的确切含义**：`messages` 非空时，session 必须被对齐到 `messages`。
-最简实现是 `truncate(messages.len())`；但若 session 内容与 messages 可能完全不同
-（不是前缀关系），则应用层应清空重写。**契约上只保证"构造后 session 镜像 messages"，
-具体由应用层实现决定**。SDK 不假设 session 里原有内容与 messages 有前缀关系。
-
-**3.3 写入时机**
+SDK 的 `run_stream` 对每条入 `self.messages` 的消息都 `yield MessageAdded`
+（user / assistant / tool / summary；system 不发），但**不落库**。应用层在
+`Session::apply_event` 收到 `MessageAdded` 时 `store.append`——TUI 与 desktop
+共用这一条路径（`App::apply_event` → `Session::apply_event`）。
 
 | 事件 | 动作 |
 | --- | --- |
-| `run_stream` push user message | `session.append(user)` |
-| 模型返回 assistant message | `session.append(assistant)` |
-| 每个 tool message | `session.append(tool)` |
-| 压缩成功、`self.messages` 重建 | `session.append(new_summary)` |
-| `rewind_last_user_turn` | `session.truncate(新长度)` |
+| `MessageAdded(user)` | `store.append(user)`（视图条目由驱动方 `begin_turn` / `submit` 记） |
+| `MessageAdded(assistant)` | `store.append(assistant)` + 更新视图 |
+| `MessageAdded(tool)` | `store.append(tool)` + 更新视图 |
+| `MessageAdded(summary)` | `store.append(summary)` + 更新视图 |
+| `Session::rewind_last_user_turn` | 回退 `Agent` 内存 + `store.truncate(去 system 长度)` |
 
 **压缩那条要点**：压缩是**追加一条 summary**，不是重写日志。
 日志形如 `[原始… 旧summary 更原始… 新summary]` 全都留着，
 恢复时 `active_messages` 自然只认最后一条 summary。**与 append-only 自洽。**
 
-**风险点（`Agent.md` 记过的真实 panic）**：`start_index` 那个
-`range start index 10 out of range`。恢复 + 追加 + 压缩三者都动 `self.messages`。
-**所有对 `self.messages` 的变更必须收敛成"带 session 同步的私有方法"**，
-不让写入点散落——否则下次重建 `messages` 时 `start_index` 又失效。
+**3.2 恢复：load 后 build**
 
-**3.4 `rewind` 清理**
+会话持久化在应用层，恢复不再发生在 `Agent::new` 内。`SessionManager` 切换 /
+新建时先 `store.load()` 拿回全量日志，再 `factory.build_agent(log)` 起 `Agent`
+（`Agent::new` 会把 system 现生成置顶）。日志不含 system，故恢复出的工作集必然与
+冷启动一致；`build_agent(Vec::new())` = 全新会话。
+
+**3.3 `rewind` 清理**
 
 ```rust
-// 删除：允许任意位置回退，超出"只截尾"语义
-pub fn rewind(&mut self, len: usize);
+// SDK 侧只回退内存并返回原文（不再截日志）
+pub fn rewind_last_user_turn(&mut self) -> Option<String>;
 
-// 保留并增强：回退最后一轮 user，同步截 session
+// 应用层 Session 包一层：回退 Agent 内存 + store.truncate
 pub fn rewind_last_user_turn(&mut self) -> Option<String>;
 ```
 
-删掉 `rewind(len)` 后，**"日志怎么截"只剩一个入口**，不会有两个方法各自截日志、
-语义打架。
+日志截尾由应用层 `Session::rewind_last_user_turn` 补上——它调 SDK 的
+`Agent::rewind_last_user_turn` 拿到回退后的 `agent.messages()` 长度（减去置顶的
+system），再 `store.truncate`。"日志怎么截"仍只有一个入口。
 
 ---
 
@@ -167,12 +146,15 @@ pub fn rewind_last_user_turn(&mut self) -> Option<String>;
 ```mermaid
 graph LR
     U["用户输入"] --> A["Agent::run_stream"]
-    A --> P["push user<br/>+ session.append"]
+    A --> P["push user<br/>yield MessageAdded(user)"]
     P --> M["调模型"]
-    M --> R["assistant 消息<br/>+ session.append"]
-    R --> T["tool 消息<br/>+ session.append"]
+    M --> R["assistant 消息<br/>yield MessageAdded"]
+    R --> T["tool 消息<br/>yield MessageAdded"]
     T --> M
     R -->|无 tool_calls| F["Finished"]
+    P -.-> AP["应用层 Session::apply_event<br/>store.append"]
+    R -.-> AP
+    T -.-> AP
 ```
 
 **4.2 压缩（追加 summary，不重写）**
@@ -183,15 +165,16 @@ graph TD
     S --> CLR["strip_tool_outputs"]
     CLR --> LLM["调模型生成摘要"]
     LLM --> RB["self.messages 重建<br/>system + 新summary + 保留"]
-    RB --> AP["session.append(新summary)"]
+    RB --> EV["yield MessageAdded(summary)"]
+    EV --> AP["应用层 Session::apply_event<br/>store.append"]
 ```
 
 **4.3 恢复（一个数据源，一个视图）**
 
 ```mermaid
 graph TD
-    L["session.load() 全量日志"] --> SYS["剔除 system（防御）"]
-    SYS --> WS["工作集视图<br/>最后一条 summary 起"]
+    L["SessionManager：store.load() 全量日志"] --> F["factory.build_agent(log)"]
+    F --> WS["Agent::new<br/>工作集视图<br/>最后一条 summary 起"]
     WS --> MSG["self.messages"]
     MSG --> SYSG["system_message() 现生成置顶"]
 ```
@@ -218,9 +201,10 @@ graph TD
    `Agent.md`。与压缩重建同一套规则。
 2. **日志只追加，唯一例外是 rewind 截尾。** 不存在中间空洞。
 3. **`ContextSummary` 是日志里的一等消息**，压缩只追加不重写。
-4. **构造后 session 镜像 messages**；`messages` 空则从 session 恢复，
-   非空则重置 session。二者只能有一个是真相。
-7. **`self.messages` 的每次变更都同步 session**，写入收敛到私有方法。
+4. **恢复 = 应用层先 `load` 再 `build_agent(log)`**；日志不含 system，
+   恢复出的工作集必然与冷启动一致。`Agent` 不再持有会话，也没有"重置 session"语义。
+7. **落库由应用层事件驱动**（`MessageAdded` → `append`），SDK 不落库；
+   `Session` 是唯一持有 `store` 的容器，写入点不散落。
 
 ---
 
@@ -230,25 +214,34 @@ graph TD
   本文档补充：压缩后的 summary 要进日志，否则恢复时工作集缺一截。
 - **`roadmap.md`**：把"会话持久化与恢复"从 P2 提升的依据——它是长任务的地基
   （`plan.md`：模型挂了不敢关窗口），且是 rewind 突破"压缩后不可回溯"的前提。
-- **`architecture.md`**：表格里"会话持久化 | `runtime` + 应用层 | `Agent` 不落盘 | 未做"
-  一行更新为：`session` 模块（trait）+ 应用层（实现）。
+- **`architecture.md`**：表格里"会话持久化"一行更新为：应用层 `session.rs`
+  （`SessionStore` 契约 + `JsonlSessionStore` 实现）+ `SessionManager` 编排；
+  SDK 不再持有会话。
 
 ---
 
-**七、落地顺序（均已落地）**
+**七、落地顺序（均已落地；契约已从 SDK 移出）**
 
-1. ~~**`session` 模块**：`SessionStore` + `SessionError` + `InMemoryStore`~~
-   ——已落地（`crates/shirley-agent-sdk/src/session/mod.rs`，对外经 `lib.rs` 导出）。
-2. ~~**`Agent` 接线**：字段 + builder + 构造时"messages 空则 load" + 各写入点收敛~~
-   ——已落地（`record()` 统一"push + append"；压缩走 `session.append(summary)`；
-   `build()` 因此返回 `Result`，调用方用 `?` / `unwrap`）。
-3. ~~**`rewind` 清理**：删 `rewind(len)`，`rewind_last_user_turn` 同步截 session~~
-   ——已落地（只留 `rewind_last_user_turn`；`session_len_for` 换算掉置顶的 system）。
+> 最初 `SessionStore` 契约落在 SDK（`crates/shirley-agent-sdk/src/session/mod.rs`），
+> `Agent` 持有 `session` 字段并在构造 / 写入 / rewind 时同步。多会话重构后，会话被
+> **整体抽离到应用层**：SDK 删除 `session` 模块 / 字段 / `SessionError` 变体，
+> `rewind_last_user_turn` 只回退内存并返回 `Option<String>`；契约与实现同住
+> `src/session.rs`，落库改由应用层事件驱动。
 
-**应用层后端**：`src/session.rs` 的 `JsonlSessionStore` 是第一个真实
+1. ~~**`SessionStore` + `SessionError`**~~ ——已落地，**归属 `src/session.rs`**
+   （`thiserror` 定义，`Io` / `Backend` 两变体）；SDK 不再导出。
+2. ~~**落库接线**~~ ——已落地：SDK 只 `yield MessageAdded`；应用层
+   `Session::apply_event` 收到即 `store.append`（TUI / desktop 共用路径）。
+3. ~~**恢复接线**~~ ——已落地：`SessionManager` 先 `store.load()` 再
+   `factory.build_agent(log)`；`Agent::new` 只把 system 现生成置顶。
+4. ~~**`rewind` 清理**~~ ——已落地：SDK 只留 `rewind_last_user_turn`（返回
+   `Option<String>`）；应用层 `Session::rewind_last_user_turn` 包一层，
+   按回退后的 `agent.messages()` 长度（减 system）`store.truncate`。
+
+**应用层后端**：`src/session.rs` 的 `JsonlSessionStore` 是真实
 `SessionStore` 实现——每行一条 `Message` 落成 JSONL。
-`main.rs` 把它包成 `Arc<dyn SessionStore>` 经 `.session(...)` 挂给 `Agent`，
-会话因此**跨进程重启可见**（恢复在 `Agent::new` 内自动发生）。
+`Session` 持有 `Arc<dyn SessionStore>`，会话因此**跨进程重启可见**
+（恢复在 `SessionManager` 切换 / 新建时发生）。
 `truncate` 先写临时文件再原子替换、重开追加句柄；内部 `rewrite_locked`
 必须在已持锁下调用，否则非重入锁死锁。
 
@@ -278,8 +271,9 @@ graph TD
 > **本决策已被 `docs/multi-session.md` 取代**。多会话并行落地（P1）后，
 > `Agent::switch_session(Arc<dyn SessionStore>)` 已**从 SDK 移除**——"哪个会话活跃"
 > 是应用层编排，由 `SessionManager` 的 `active` 指针承担。每个 `Agent` 对应一份
-> 固定日志源，不再有"切换当前会话"这个动作。SDK 只保留 `SessionStore` 契约与
-> `Agent::new` 的"从日志恢复工作集"逻辑（持久化是合法的 SDK 能力）。
+> 固定日志源，不再有"切换当前会话"这个动作。**进一步（本轮）：`SessionStore`
+> 契约本身也已移出 SDK**——SDK 不再持有会话概念，恢复改由应用层 `store.load()`
+> 后 `build_agent(log)` 完成，落库改由应用层事件驱动（见第二 / 三节）。
 > 下面这段是**单会话时代的过渡语义**，保留作历史记录；当前实现见
 > `src/interface/session.rs` 的 `SessionManager::switch_to`。
 
@@ -312,7 +306,7 @@ mtime，列表据此降序）与 `turns`（用户轮数）——对齐 Codex res
 显示），**不创建文件**；只有真正发消息（`SessionStore::append` 首次被调用）才
 物化——按已定的名字落盘 JSONL（并写标题 sidecar）。这样"打开应用但没聊"不会在
 列表里留下空会话文件。实现落在 `LazySessionStore`：它就是一个普通
-`SessionStore`（`Agent` 照常持有、发送路径零改动），差别只是 `append` 首次触发
+`SessionStore`（由应用层 `Session` 持有、落库路径零改动），差别只是 `append` 首次触发
 物化、物化前 `load` / `truncate` 视为空日志 / 空操作。TUI 的「＋ 新建会话」与
 desktop 的 `agent_new_session` 同走 `create_lazy`，语义一致。
 

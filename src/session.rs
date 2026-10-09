@@ -1,19 +1,61 @@
-//! 应用侧的会话存储实现（`docs/session.md`）。
+//! 应用侧的会话存储（`docs/session.md`）。
 //!
-//! SDK 只定契约（`shirley_agent_sdk::SessionStore`），**具体落盘技术在这里决定**。
-//! 当前选 **JSONL**——每行一条序列化的 `Message`，追加即 `write`，读回即逐行
-//! `serde_json::from_str`。选它的理由：零依赖、可读、可手工调试，且天然是
-//! append-only 的"日志"形状，与 `docs/session.md` 一.决策 4 完全对齐。
+//! 会话持久化**完全属于应用层**：契约（[`SessionStore`] / [`SessionError`]）与
+//! 实现都在这里，SDK 不再持有任何会话概念。当前落盘选 **JSONL**——每行一条序列化
+//! 的 `Message`，追加即 `write`，读回即逐行 `serde_json::from_str`。选它的理由：
+//! 零依赖、可读、可手工调试，且天然是 append-only 的"日志"形状，与
+//! `docs/session.md` 一.决策 4 完全对齐。
 //!
 //! 落盘的是**原始 Message 全量日志**：不含 system（恢复时现生成）。
 //! `ContextSummary` 是日志里的一等消息，压缩时也走 `append`。
+//!
+//! 落库时机由应用层驱动：`Session::apply_event` 收到 SDK 的 `MessageAdded` 事件即
+//! 调 [`SessionStore::append`]（SDK 只发事件、不落库）。
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use shirley_agent_sdk::{Message, SessionError, SessionStore};
+use shirley_agent_sdk::Message;
+
+/// 会话日志的存储抽象。
+///
+/// 三个方法对应三种操作，**恰好是会话写入的全部语义**：追加（正常轮次 + 压缩）、
+/// 读回（恢复）、截尾（rewind）。故意没有 `delete` / `update` / `search`——用不到。
+///
+/// **签名是同步的**：`SessionManager` 的恢复 / 截尾发生在同步路径上，同步接口让
+/// 调用方不必变异步。存储后端若是异步驱动，由实现内部消化。契约同步，实现自由。
+pub trait SessionStore: Send + Sync {
+    /// 追加一条消息到日志尾部。压缩产生的 `ContextSummary` 也走这里。
+    fn append(&self, message: &Message) -> Result<(), SessionError>;
+
+    /// 读取全量日志（只读、顺序）。
+    fn load(&self) -> Result<Vec<Message>, SessionError>;
+
+    /// 截断到前 `len` 条（rewind 用；只截尾，不产生中间空洞）。
+    ///
+    /// `len` 不小于当前长度时不做任何事（幂等，避免越界）。
+    fn truncate(&self, len: usize) -> Result<(), SessionError>;
+}
+
+/// 会话存储失败。
+///
+/// 展示格式统一为 `[前缀]: 详情`，与 SDK 各层错误（`AdapterError` / `ToolError` /
+/// `SandboxError` / `WorkspaceError`）一致；前缀留在变体旁。
+///
+/// 持久化失败当前一律**当作错误**（`docs/session.md` 二.2）：持久化失败还继续跑，
+/// 等于假装有存档，比直接报错更危险。
+#[derive(Debug, thiserror::Error)]
+pub enum SessionError {
+    /// 底层存储 I/O 失败（写盘、读盘、序列化等）。
+    #[error("[session storage failure]: {0}")]
+    Io(#[from] std::io::Error),
+
+    /// 存储后端本身报告的错误（例如 SQL 失败），带自由文本详情。
+    #[error("[session storage error]: {0}")]
+    Backend(String),
+}
 
 /// JSONL 会话日志：每行一条 `Message`。
 ///
@@ -118,7 +160,7 @@ impl SessionStore for JsonlSessionStore {
 /// 动机：Codex 的 UX——打开应用时并不产生一个空会话文件，只有真正发消息
 /// （产生交互）才建会话。这样会话列表不会被一堆"点了没聊"的空文件塞满。
 ///
-/// 语义上它就是一个 [`SessionStore`]：`Agent` 照常持有它，发送路径无需感知
+/// 语义上它就是一个 [`SessionStore`]：`Session` 照常持有它，发送路径无需感知
 /// "延迟创建"这回事。区别只有两点：
 /// - 名字在**构造时**就确定（供 UI 页脚 / 当前会话标记用），但**文件不建**；
 /// - 首次 `append` 时才**惰性物化**：按已定的名字落盘 JSONL（并写标题 sidecar）。

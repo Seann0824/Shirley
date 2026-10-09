@@ -22,7 +22,7 @@ use tokio::sync::broadcast;
 
 use super::app::{ChatMessage, Item, Role, ToolCallView};
 use crate::bootstrap::AgentFactory;
-use crate::session::SessionCatalog;
+use crate::session::{SessionCatalog, SessionStore};
 
 /// 事件扇出通道容量。运行中订阅者若落后超过此数会 `Lagged`，由订阅方（desktop
 /// pump）跳过、靠重发快照重对齐（见 `docs/multi-session.md`）。
@@ -68,11 +68,23 @@ pub struct Session {
     /// 该会话是否正在跑一轮（`Agent` 被移入后台任务）。与 `agent.is_none()` 同义，
     /// 单独记一份是为了让状态转移显式。
     pub running: bool,
+    /// 该会话的持久化存储（`None` = 不落盘，供测试）。
+    ///
+    /// 落库由 [`Session::apply_event`] 事件驱动：收到 SDK 的 `MessageAdded` 即
+    /// `append`。会话持久化完全在应用层，SDK 不再持有会话日志。
+    store: Option<Arc<dyn SessionStore>>,
 }
 
 impl Session {
     /// 用现成的 `Agent` 起一个会话。
-    pub fn new(agent: Agent, name: Option<String>) -> Self {
+    ///
+    /// `store` 是该会话的持久化存储（`None` = 不落盘）；落库走
+    /// [`Session::apply_event`] 的事件驱动路径。
+    pub fn new(
+        agent: Agent,
+        name: Option<String>,
+        store: Option<Arc<dyn SessionStore>>,
+    ) -> Self {
         Self {
             name,
             agent: Some(agent),
@@ -92,6 +104,7 @@ impl Session {
             interrupt_requested: false,
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
             running: false,
+            store,
         }
     }
 
@@ -111,12 +124,17 @@ impl Session {
     /// 这里，界面只读结果。`Err` 分支是运行期错误文案（渲染成错误条目）。
     pub fn apply_event(&mut self, event: Result<AgentEvent, String>) {
         match event {
-            Ok(AgentEvent::MessageAdded(Message::User { .. })) => {}
             Ok(AgentEvent::MessageAdded(message)) => {
-                if matches!(&message, Message::Assistant { .. }) {
-                    self.finish_streaming_deltas();
+                // 事件驱动落库：SDK 只发事件，落盘由应用层负责（system 不入日志）。
+                self.persist_message(&message);
+                // 用户消息的视图条目由驱动方在发起一轮时记入（见 `begin_turn`），
+                // 这里只补 assistant / tool / summary 的视图。
+                if !matches!(&message, Message::User { .. }) {
+                    if matches!(&message, Message::Assistant { .. }) {
+                        self.finish_streaming_deltas();
+                    }
+                    self.add_message(message);
                 }
-                self.add_message(message);
             }
             Ok(AgentEvent::ContentDelta(delta)) => self.append_streaming_delta(delta, false),
             Ok(AgentEvent::ReasoningDelta(delta)) => self.append_streaming_delta(delta, true),
@@ -287,6 +305,41 @@ impl Session {
         self.push_message(Role::Error, error, false);
     }
 
+    /// 把一条消息追加到会话日志（事件驱动落库）。
+    ///
+    /// 落盘失败记入错误条目但不阻断本轮：`docs/session.md` 二.2 把持久化失败
+    /// 当作错误暴露，但 UI 不该因此中断整轮对话。
+    fn persist_message(&mut self, message: &Message) {
+        let Some(store) = self.store.clone() else {
+            return;
+        };
+        if let Err(error) = store.append(message) {
+            self.add_error(format!("会话落盘失败：{error}"));
+        }
+    }
+
+    /// 回退最后一条用户消息：内存（`Agent`）与磁盘日志一起回退。
+    ///
+    /// SDK 的 `Agent::rewind_last_user_turn` 只回退内存并返回原文；日志截尾
+    /// 由应用层据此补上（SDK 不持有会话日志）。日志不含 system，故换算长度时
+    /// 减去置顶的那条。
+    pub fn rewind_last_user_turn(&mut self) -> Option<String> {
+        let agent = self.agent.as_mut()?;
+        let content = agent.rewind_last_user_turn()?;
+        let has_system = matches!(agent.messages().first(), Some(Message::System { .. }));
+        let log_len = agent
+            .messages()
+            .len()
+            .saturating_sub(usize::from(has_system));
+        let store = self.store.clone();
+        if let Some(store) = store
+            && let Err(error) = store.truncate(log_len)
+        {
+            self.add_error(format!("会话日志截尾失败：{error}"));
+        }
+        Some(content)
+    }
+
     fn record_usage(&mut self, usage: Usage) {
         self.total_usage = self.total_usage + usage;
         self.last_usage = Some(usage);
@@ -367,9 +420,14 @@ pub struct SessionManager {
 
 impl SessionManager {
     /// 用一份现成 `Agent` 起一个只含单会话的 manager（无工厂，不能新建/切换）。
-    pub fn single(agent: Agent, name: Option<String>, catalog: Arc<dyn SessionCatalog>) -> Self {
+    pub fn single(
+        agent: Agent,
+        name: Option<String>,
+        catalog: Arc<dyn SessionCatalog>,
+        store: Option<Arc<dyn SessionStore>>,
+    ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name));
+        sessions.insert(0, Session::new(agent, name, store));
         Self {
             sessions,
             active: 0,
@@ -385,9 +443,10 @@ impl SessionManager {
         name: Option<String>,
         catalog: Arc<dyn SessionCatalog>,
         factory: Arc<AgentFactory>,
+        store: Option<Arc<dyn SessionStore>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name));
+        sessions.insert(0, Session::new(agent, name, store));
         Self {
             sessions,
             active: 0,
@@ -430,10 +489,15 @@ impl SessionManager {
     }
 
     /// 插入一个现成 `Agent` 的会话，返回其 key（不改变前台指针）。
-    fn insert(&mut self, agent: Agent, name: Option<String>) -> u64 {
+    fn insert(
+        &mut self,
+        agent: Agent,
+        name: Option<String>,
+        store: Option<Arc<dyn SessionStore>>,
+    ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.sessions.insert(id, Session::new(agent, name));
+        self.sessions.insert(id, Session::new(agent, name, store));
         id
     }
 
@@ -455,10 +519,12 @@ impl SessionManager {
             .catalog
             .open(name)
             .map_err(|error| error.to_string())?;
+        // 会话持久化在应用层：先 load 日志，再交给工厂起 `Agent`（system 现生成置顶）。
+        let log = store.load().map_err(|error| error.to_string())?;
         let agent = factory
-            .build_agent(store)
+            .build_agent(log)
             .map_err(|error| error.to_string())?;
-        let id = self.insert(agent, Some(name.to_owned()));
+        let id = self.insert(agent, Some(name.to_owned()), Some(store));
         // 从磁盘恢复的会话：用其历史重建视图条目，快照 / 渲染才有内容。
         if let Some(session) = self.sessions.get_mut(&id) {
             session.rebuild_items_from_agent();
@@ -479,10 +545,12 @@ impl SessionManager {
             .catalog
             .create_lazy(title)
             .map_err(|error| error.to_string())?;
+        // 惰性会话此刻为空：load 得空工作集，首条消息落盘时才物化文件。
+        let log = store.load().map_err(|error| error.to_string())?;
         let agent = factory
-            .build_agent(store)
+            .build_agent(log)
             .map_err(|error| error.to_string())?;
-        let id = self.insert(agent, Some(entry.name.clone()));
+        let id = self.insert(agent, Some(entry.name.clone()), Some(store));
         self.active = id;
         Ok(entry.name)
     }
@@ -594,6 +662,7 @@ mod tests {
             test_agent(),
             Some("s".into()),
             Arc::new(EmptySessionCatalog),
+            None,
         )
     }
 

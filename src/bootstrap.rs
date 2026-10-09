@@ -17,7 +17,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use shirley_agent_sdk::{Agent, AgentError, ModelConfig, SessionStore, SystemPrompt, ToolManager};
+use shirley_agent_sdk::{Agent, AgentError, Message, ModelConfig, SystemPrompt, ToolManager};
 
 use crate::models::{self, ModelCatalog};
 use crate::prompt;
@@ -102,13 +102,15 @@ impl AgentFactory {
         })
     }
 
-    /// 按会话日志造一个独立 `Agent`（`docs/multi-session.md` 决策 5）。
+    /// 按**已恢复的消息工作集**造一个独立 `Agent`（`docs/multi-session.md` 决策 5）。
     ///
-    /// 模型配置 / 系统提示词 / 工具定义由工厂复用（`clone`），`todo` /
-    /// 会话日志在 `Agent::new` 内部按实例隔离——因此不同会话的 `Agent` 互不共享
-    /// 可变状态，可真正并行。恢复语义（从日志重建工作集 + 现生成 system 置顶）
-    /// 复用 `Agent::new` 的既有路径，切换出来的工作集必然与冷启动恢复一致。
-    pub fn build_agent(&self, session: Arc<dyn SessionStore>) -> Result<Agent, AgentError> {
+    /// 会话持久化已上移应用层：调用方先 `SessionStore::load()` 拿回历史，再交给这里
+    /// 起 `Agent`（空 `Vec` = 全新会话）。`Agent::new` 会把 system 现生成置顶——
+    /// 日志里不含 system，故恢复出的工作集必然与冷启动一致。
+    ///
+    /// 模型配置 / 系统提示词 / 工具定义由工厂复用（`clone`），`todo` 在
+    /// `Agent::new` 内部按实例隔离——因此不同会话的 `Agent` 互不共享可变状态，可真正并行。
+    pub fn build_agent(&self, messages: Vec<Message>) -> Result<Agent, AgentError> {
         // `ToolManager` 非 `Clone`，每次造 `Agent` 都新建一份并重新注册工具：
         // 工具定义稳定（prefix 缓存友好），`on_register` 钩子（如 web_search 的
         // 凭据注入）各自执行一次——状态本就按工具实例隔离，可接受（决策 5）。
@@ -118,7 +120,7 @@ impl AgentFactory {
             .working_dir(self.working_dir.clone())
             .compression_instruction(COMPRESSION_INSTRUCTION)
             .tools(assemble_tools())
-            .session(session)
+            .messages(messages)
             .build()
     }
 

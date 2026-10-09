@@ -6,7 +6,6 @@ use crate::adapter;
 use crate::adapter::ModelRequest;
 use crate::message;
 use crate::todo::{self, TodoStore};
-use crate::session::SessionStore;
 use crate::token;
 use crate::tool;
 use futures::StreamExt;
@@ -38,11 +37,6 @@ pub struct Agent {
     /// 距上次调用 `todo` 工具已过多少轮（每轮 = 一次含工具调用的 assistant 回合）。
     /// 达 [`todo::TODO_NAG_AFTER_ROUNDS`] 且账本为空时注入 nag 提醒。
     rounds_since_todo: usize,
-    /// 会话日志（`docs/session.md`）：`None` 表示不落盘（行为与现状一致）。
-    ///
-    /// 持久化的是**原始 Message 全量日志**；召回库由它派生，不单独落盘。
-    /// system 提示词不入日志——恢复时由 [`Agent::system_message`] 现生成。
-    session: Option<Arc<dyn SessionStore>>,
 }
 
 #[bon::bon]
@@ -55,20 +49,10 @@ impl Agent {
         #[builder(default)] mut messages: Vec<message::Message>,
         #[builder(default = tool::ToolManager::new())] mut tools: tool::ToolManager,
         #[builder(into)] compression_instruction: Option<String>,
-        #[builder(into)] session: Option<Arc<dyn SessionStore>>,
     ) -> Result<Self, AgentError> {
         // 任务账本是压缩的配套能力：账本跨压缩存活，模型用 `todo` 工具自己维护。
         let todo = Arc::new(TodoStore::new());
         let _ = tools.register(todo::TodoTool::new(todo.clone()));
-
-        // 恢复语义（`docs/session.md` 三.2）：`messages` 与 `session` 二者只有一个真相源。
-        //   - `messages` 非空 → 以它为准（真相在调用方传入的消息里）；
-        //   - `messages` 为空且有 `session` → 从日志恢复工作集。
-        if messages.is_empty()
-            && let Some(store) = &session
-        {
-            Self::restore_from_session(&mut messages, store)?;
-        }
 
         // 构造时就按工作目录解析一次，把 System 消息置顶（空提示词则不置顶）。
         // 恢复出的历史里不含 system，这里现生成——与压缩重建同一套规则。
@@ -90,29 +74,7 @@ impl Agent {
             token_counter: token::HeuristicCounter::new(),
             todo,
             rounds_since_todo: 0,
-            session,
         })
-    }
-
-    /// 从会话日志恢复工作集（`docs/session.md` 三.2）。
-    ///
-    /// `Agent::new`（messages 为空时）用它重建工作集；多会话切换由应用层
-    /// 为新会话重新 `build_agent`，走的正是这条恢复路径，因此切换出来的工作集
-    /// 与冷启动恢复必然一致。
-    ///
-    /// 不置顶 system：调用方负责用 [`Agent::system_message`] 现生成。
-    fn restore_from_session(
-        messages: &mut Vec<message::Message>,
-        store: &Arc<dyn SessionStore>,
-    ) -> Result<(), AgentError> {
-        let log = store.load()?;
-        // 防御：日志不含 system，若混入则剔除（system 现生成）。
-        let log: Vec<_> = log
-            .into_iter()
-            .filter(|m| !matches!(m, message::Message::System { .. }))
-            .collect();
-        *messages = log;
-        Ok(())
     }
 
     /// 重新生成系统提示词消息。压缩重建后由它把 system 置顶。
@@ -131,35 +93,6 @@ impl Agent {
         }
     }
 
-    /// 记录一条消息：同时写入内存工作集与（若挂载了）会话日志。
-    ///
-    /// 所有对消息表的追加都走这里，保证日志与内存不分叉（`docs/session.md` 五.7）。
-    /// system 不入日志——它由 [`Agent::system_message`] 现生成，恢复时重放，不持久化。
-    ///
-    /// 刻意做成"只借字段"的关联函数而非 `&mut self` 方法：`run_stream` 里
-    /// `tools` 持有 `&self.tools` 的借用跨越请求，`&mut self` 会与之冲突。
-    fn record(
-        messages: &mut Vec<message::Message>,
-        session: &Option<Arc<dyn SessionStore>>,
-        message: message::Message,
-    ) -> Result<(), AgentError> {
-        if !matches!(message, message::Message::System { .. })
-            && let Some(store) = session
-        {
-            store.append(&message)?;
-        }
-        messages.push(message);
-        Ok(())
-    }
-
-    /// 会话日志当前长度（不含 system 的话需减去置顶的那条）。
-    ///
-    /// rewind 时用它把日志截到与内存一致的长度：日志里不含 system，
-    /// 而内存首条是 system，所以日志长度 = 内存长度 - (是否置顶 system)。
-    fn session_len_for(&self, messages_len: usize) -> usize {
-        let has_system = matches!(self.messages.first(), Some(message::Message::System { .. }));
-        messages_len.saturating_sub(usize::from(has_system))
-    }
     /// 当前模型配置（只读）。
     ///
     /// 应用层用它展示"现在用的是哪个模型"，以及切换时保留其余配置。
@@ -209,25 +142,19 @@ impl Agent {
     /// assistant / tool 链，让会话回到该轮开始前的状态。没有用户消息时返回 `None`。
     ///
     /// **只作用于最后一条用户消息**（`docs/session.md` 一.决策 4）：这样回溯
-    /// 永远只是 tail truncation，日志同步截尾即可，不会产生中间空洞。
-    /// 若挂载了会话日志，同步截断到相同长度（日志不含 system，需换算）。
-    pub fn rewind_last_user_turn(&mut self) -> Result<Option<String>, AgentError> {
-        let Some(index) = self
+    /// 永远只是 tail truncation，不会产生中间空洞。持久化由应用层据
+    /// [`Agent::messages`] 的长度自行截尾（SDK 不持有会话日志）。
+    pub fn rewind_last_user_turn(&mut self) -> Option<String> {
+        let index = self
             .messages
             .iter()
-            .rposition(|m| matches!(m, message::Message::User { .. }))
-        else {
-            return Ok(None);
-        };
+            .rposition(|m| matches!(m, message::Message::User { .. }))?;
         let content = match &self.messages[index] {
             message::Message::User { content } => content.clone(),
             _ => unreachable!("rposition guarantees a User message"),
         };
-        if let Some(store) = &self.session {
-            store.truncate(self.session_len_for(index))?;
-        }
         self.messages.truncate(index);
-        Ok(Some(content))
+        Some(content)
     }
 
     pub async fn run(&mut self, task: &str) -> Result<RunResult, AgentError> {
@@ -313,7 +240,7 @@ impl Agent {
             let user_message = message::Message::User {
                 content: task.into(),
             };
-            Self::record(&mut self.messages, &self.session, user_message.clone())?;
+            self.messages.push(user_message.clone());
             yield AgentEvent::MessageAdded(user_message);
 
             loop {
@@ -360,7 +287,7 @@ impl Agent {
                             yield AgentEvent::Usage(response.usage);
 
                             let response_message = response.message;
-                            Self::record(&mut self.messages, &self.session, response_message.clone())?;
+                            self.messages.push(response_message.clone());
                             yield AgentEvent::MessageAdded(response_message.clone());
                             let mut todo_called = false;
                             let tool_messages = match &response_message {
@@ -409,7 +336,7 @@ impl Agent {
                                             tool_call_id: call.id.clone(),
                                             content: Some(content),
                                         };
-                                        Self::record(&mut self.messages, &self.session, tool_message.clone())?;
+                                        self.messages.push(tool_message.clone());
                                         yield AgentEvent::MessageAdded(tool_message.clone());
                                         tool_messages.push(tool_message);
                                     }
@@ -604,12 +531,8 @@ impl Agent {
                     if let Some(system) = self.system_message() {
                         next.insert(0, system);
                     }
-                    // 压缩是**追加**一条摘要，不重写日志（`docs/session.md` 一.决策 4）：
-                    // 日志里 [原始… 旧summary 更原始… 新summary] 全留着，
-                    // 恢复时 active_messages 只认最后一条 summary。
-                    if let Some(store) = &self.session {
-                        store.append(&summary_message)?;
-                    }
+                    // 压缩把 self.messages 整体重建为 [system?, 新摘要, task, remain]。
+                    // 应用层据 `MessageAdded(summary)` 事件自行落库（SDK 不持有会话日志）。
                     self.messages = next;
                     self.compression_pending = false;
 

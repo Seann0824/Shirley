@@ -514,8 +514,13 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
     let (entry, store) = session_catalog
         .create_lazy(None)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
+    // 会话持久化在应用层：load 得空工作集交给工厂起 `Agent`，store 一并交给
+    // `SessionManager`——落库由其事件驱动路径完成。
+    let log = store
+        .load()
+        .map_err(|error| std::io::Error::other(error.to_string()))?;
     let agent = factory
-        .build_agent(store)
+        .build_agent(log)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     eprintln!("[desktop] 会话：{}", entry.name);
 
@@ -524,6 +529,7 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
         Some(entry.name),
         session_catalog.clone(),
         Arc::new(factory),
+        Some(store),
     );
 
     let state = DesktopState {

@@ -15,7 +15,6 @@ The [Shirley](https://github.com/Seann0824/Shirley) TUI coding agent is built on
 - **Task ledger** — a `todo` tool lets the model maintain its own progress state, injected every turn so it survives compaction
 - **Sandbox & workspace** — a unified process-execution abstraction (with timeouts and degradation reporting) and workspace path confinement
 - **Unified error contract** — `ErrorKind` / `SdkError`; retry decisions are based on the kind, never on message text
-- **Session persistence** — a `SessionStore` trait supporting restore and rewind
 
 ## Installation
 
@@ -129,7 +128,6 @@ while let Some(event) = stream.next().await {
 | `Tool` / `ToolError` | The tool trait and its error type (tool authors only return `ToolError`) |
 | `Usage` | Token accounting; distinguishes "reported zero" from "not reported" (`Option<u64>`) |
 | `SystemPrompt` | The system prompt: a fixed string, or a function that generates one from runtime context |
-| `SessionStore` | Session persistence trait (`append` / `load` / `truncate`) |
 | `sandbox` | `Sandbox` / `SandboxSpec` / `ProcessBackend` — process execution and isolation abstraction |
 | `workspace` | `WorkSpace::resolve` — confines paths to the workspace root |
 

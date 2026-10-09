@@ -203,7 +203,10 @@ impl App {
         catalog: Arc<dyn ModelCatalog>,
         session_catalog: Arc<dyn SessionCatalog>,
     ) -> Self {
-        Self::with_manager(SessionManager::single(agent, None, session_catalog), catalog)
+        Self::with_manager(
+            SessionManager::single(agent, None, session_catalog, None),
+            catalog,
+        )
     }
 
     /// 用已装配好的多会话编排器构造（TUI / desktop 走这里）。
@@ -490,9 +493,8 @@ impl App {
         // Agent 侧回退最后一条用户消息（及其后的 assistant/tool 链），界面侧截到
         // 该条之前；随后本轮的 `push_message` 会把编辑后的内容作为新一条补上。
         if let Some(ui_index) = self.rewind_target.take() {
-            if let Some(agent) = self.agent.as_mut() {
-                let _ = agent.rewind_last_user_turn();
-            }
+            // 内存（Agent）与磁盘日志一起回退到该用户消息之前（`Session` 内完成）。
+            self.rewind_last_user_turn();
             self.items.truncate(ui_index);
             self.streaming_delta_start = None;
             self.message_cache = None;
@@ -577,9 +579,7 @@ impl App {
             self.interrupt_requested = false;
             // Agent 侧：丢掉本轮用户消息及其后可能已完成的 assistant/tool 链。
             // 会话日志同步截尾（`docs/session.md` 一.决策 4），失败则记录但不阻断收尾。
-            if let Some(agent) = self.agent.as_mut()
-                && let Ok(Some(prompt)) = agent.rewind_last_user_turn()
-            {
+            if let Some(prompt) = self.rewind_last_user_turn() {
                 self.turn_prompt = Some(prompt);
             }
             // 界面侧：回退到本轮开始前（清掉半截流式回复）。

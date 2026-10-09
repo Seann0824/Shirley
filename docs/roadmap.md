@@ -38,7 +38,7 @@
 - 记忆系统（"蒸馏验证"入库）
 - 任务规划与进度跟踪
 - ~~多协议（Responses / Anthropic）真正落地~~ ——已落地（三协议 `ChatCompletions` / `Responses` / `AnthropicMessages` 均含流式；Anthropic 见 `docs/anthropic-messages-api.md`）
-- ~~会话持久化与恢复~~ ——已落地（`session` 模块 + `docs/session.md`；SDK 定 `SessionStore` 契约，应用层 `JsonlSessionStore`）
+- ~~会话持久化与恢复~~ ——已落地（`docs/session.md`；**`SessionStore` 契约与实现均在应用层 `src/session.rs`**，SDK 不再持有会话，落库由应用层事件驱动）
 
 **三、依赖关系**
 

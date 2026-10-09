@@ -1,5 +1,4 @@
 use crate::adapter;
-use crate::session;
 use crate::tool;
 
 /// SDK 对外暴露的顶层错误。
@@ -20,9 +19,6 @@ pub enum AgentError {
 
     #[error(transparent)]
     Workspace(#[from] crate::workspace::WorkspaceError),
-
-    #[error(transparent)]
-    Session(#[from] session::SessionError),
 
     #[error("[compression failed]: {0}")]
     Compression(String),
@@ -45,8 +41,6 @@ impl crate::error::SdkError for AgentError {
             // 沙盒不可用 / 不支持该约束 —— 换配置才有意义，重试无用。
             Self::Sandbox(_) => ErrorKind::Unsupported,
             Self::Workspace(_) => ErrorKind::BadRequest,
-            // 会话存储失败（恢复 / 落盘）：存储 I/O 问题，当前不可重试。
-            Self::Session(e) => e.kind(),
             // 压缩失败会中断整轮任务，但重试同一份上下文通常不会变好。
             Self::Compression(_) => ErrorKind::Internal,
             Self::Other(_) => ErrorKind::Internal,

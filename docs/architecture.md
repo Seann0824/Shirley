@@ -215,7 +215,7 @@ sequenceDiagram
 | 重试 / 超时 | `adapter` + `runtime` | `request_timeout` 未接线 | 未做 |
 | 记忆系统 | 新增模块 + `runtime` | 无 | 未做 |
 | 任务规划 | 新增模块 + `runtime` | 无 | 未做 |
-| 会话持久化 | `runtime` + `session` + 应用层 | `session` 模块（`SessionStore` 契约）+ 应用层 `JsonlSessionStore` | 已实现（JSONL 后端） |
+| 会话持久化 | 应用层 `session.rs` + `interface/session.rs` | `SessionStore` 契约（`src/session.rs`）+ `JsonlSessionStore` + `SessionManager` 编排；SDK 不持有会话 | 已实现（JSONL 后端） |
 
 **九、功能与架构节点的依赖图**
 

@@ -29,7 +29,7 @@
 > 以及决策 2 的"每会话一条通道"）。
 > 应用层 `src/interface/session.rs` 已有 `SessionManager` + `Session`（每会话自持
 > 独立 `Agent`）；`src/bootstrap.rs` 已从 `Bootstrap`（产单个 `Agent`）改为
-> `AgentFactory`（`build_agent(store)` 工厂）；SDK 侧 `Agent::switch_session` 已移除，
+> `AgentFactory`（`build_agent(messages)` 工厂）；SDK 侧 `Agent::switch_session` 已移除，
 > TUI 与 desktop 均改为经 `SessionManager.active` 指针切换。
 > **每会话一条通道已落地**：`Session` 自持 `events: broadcast::Sender<Result<AgentEvent, String>>`
 > （决策 2 路线甲，用 `broadcast` 而非 `mpsc`——desktop 允许"重连订阅"，
@@ -64,8 +64,8 @@
 
 - `Agent` 可独立构造、无全局态、`Send`；
 - `todo` 按实例隔离（`Agent::new` 内 `Arc::new`），并行不串；
-- `trait SessionStore: Send + Sync`，`JsonlSessionStore` 内部 `Mutex<File>`，
-  单实例 `append` / `load` / `truncate` 互斥；
+- `trait SessionStore: Send + Sync`（**现已归应用层 `src/session.rs`**），
+  `JsonlSessionStore` 内部 `Mutex<File>`，单实例 `append` / `load` / `truncate` 互斥；
 - `ToolManager` / `ToolContext` 随 `Agent` 构造，`ToolContext` 是
   `Arc<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>`，`Tool: Send + Sync`。
 
@@ -156,7 +156,7 @@ SessionManager                          // 应用层，全局唯一
 ├── sessions: HashMap<SessionId, Session>
 ├── active: SessionId                   // 前台是谁（纯 UI 指针，不重建 Agent）
 ├── catalog: Arc<dyn SessionCatalog>    // 会话从哪来（已存在）
-├── build_agent: fn(&Arc<dyn SessionStore>) -> Agent   // 工厂（决策 5）
+├── build_agent: fn(Vec<Message>) -> Agent   // 工厂（决策 5；先 load 再建 Agent）
 └── max_parallel / 待运行队列            // 调度（决策 7 / 8）
 
 Session                                 // 一个会话 = 一个运行时容器
@@ -213,7 +213,7 @@ Session                                 // 一个会话 = 一个运行时容器
 
 原 `Bootstrap::assemble` 只产单个 `Agent`（`src/bootstrap.rs`）；现已改名
 `AgentFactory::assemble`，产物是**工厂 + 共享 `session_catalog`**，多会话
-**按会话造多个 `Agent`**。`build_agent(session_store) -> Agent` 工厂
+**按会话造多个 `Agent`**。`build_agent(messages) -> Agent` 工厂
 复用同一份 `ModelConfig` / 工具注册 / 系统提示词 / 工作目录 / 压缩指令：
 
 - `assemble` 返回 **工厂 + 共享的 `session_catalog`**（现在 `session_catalog` 已是
@@ -256,7 +256,7 @@ SessionCatalog.list()  ──►  [SessionEntry...]  （目录扫描，同步）
         ├─ 新建 / 打开 ──►  Arc<dyn SessionStore>
         │                        │
         │                        ▼
-        │            Bootstrap::build_agent(store) ──►  Agent
+        │            store.load() ──► Bootstrap::build_agent(messages) ──►  Agent
         │                        │
         │                        ▼
         │            Session { id, agent, items, ... }  ──►  sessions: HashMap
@@ -312,10 +312,13 @@ SessionCatalog.list()  ──►  [SessionEntry...]  （目录扫描，同步）
 
 **边界要划清（避免误伤）**：
 
-- **保留在 SDK**：`SessionStore` 契约、`Agent.session: Option<Arc<dyn SessionStore>>`
-  字段、以及"从日志恢复工作集"的恢复逻辑——**持久化是合法的 SDK 能力**，
-  `Agent` 需要知道自己往哪份日志写。
-- **移出 SDK**：只有 `switch_session` 一个方法。它表达的是"**换掉当前会话**"，
+- **当时保留在 SDK**：`SessionStore` 契约、`Agent.session: Option<Arc<dyn SessionStore>>`
+  字段、以及"从日志恢复工作集"的恢复逻辑——当时判断"持久化是合法的 SDK 能力"。
+  **后续（`docs/session.md` 决策 2 的进一步演进）**：这一层也被移出 SDK——
+  会话持久化整体归应用层，`Agent` 不再持有 `session` 字段，只 `yield MessageAdded`；
+  恢复改由应用层 `store.load()` 后 `build_agent(log)` 完成，落库由应用层事件驱动。
+- **移出 SDK**：`switch_session` 方法 + 本轮进一步移出的 `SessionStore` 契约 /
+  `session` 字段 / 恢复 / 落库 / 截尾。`switch_session` 表达的是"**换掉当前会话**"，
   而"当前会话"在 SDK 里根本不存在——每个 `Agent` 对应一份固定日志源，
   切换由 `SessionManager.active` 指针完成（见决策 4）。
 
@@ -328,8 +331,8 @@ SessionCatalog.list()  ──►  [SessionEntry...]  （目录扫描，同步）
   改为**由 `SessionManager` 切 `active` 指针**——每个 `Session` 已持有各自就绪的
   `Agent`，切换**不重建 `Agent`**（重建会丢失该会话正在后台跑的上下文，
   也违背"多 `Agent` 隔离"）；
-- 恢复语义（`restore_from_session` + `system_message` 置顶）**原样复用**——
-  它现在是 `build_agent` 工厂内部的事，不再是"切换"的动作。
+- 恢复语义（**应用层 `store.load()` → `build_agent(log)`** + `system_message` 置顶）
+  **原样复用**——它现在是 `build_agent` 工厂调用方的事，不再是"切换"的动作。
 
 ---
 
@@ -353,7 +356,8 @@ SessionCatalog.list()  ──►  [SessionEntry...]  （目录扫描，同步）
 
 1. **P1 · 应用层状态模型重构**（工作量主体）：`SessionManager`（`Session` +
    `HashMap` + `active` 指针）；**每个 `Session` 自持一条事件通道**（决策 2）。
-2. **P1 · `Bootstrap::build_agent` 工厂**（决策 5）——让多 `Agent` 可被造出来。
+2. **P1 · `AgentFactory::build_agent` 工厂**（决策 5）——让多 `Agent` 可被造出来；
+   会话恢复由调用方先 `store.load()` 再 `build_agent(log)`。
 3. **P2 · 并行调度 + 上限**（决策 7 / 8）：每会话 spawn、排队、运行态展示。
 4. **P2 · SDK 取消接缝**（决策 3）——做 P2 时几乎必然需要。
 5. **P3 · 从 SDK 移除 `switch_session`**（决策 9）：删方法 + 单测，应用层
