@@ -41,6 +41,8 @@ export type SessionEntry = {
   modified_ms: number;
   /** 用户轮数。 */
   turns: number;
+  /** 该会话当前是否在跑一轮（后台活跃）——列表据此显示 loading 转圈。 */
+  running: boolean;
 };
 
 /** 恢复会话时回放的一条历史消息（与 Rust 侧 `HistoryMessageWire` 对齐）。 */
@@ -232,6 +234,7 @@ function createMockBridge(): AgentBridge {
         preview: "",
         modified_ms: Date.now(),
         turns: 0,
+        running: false,
       };
       mockSessionList.push(entry);
       mockCurrentName = name;
@@ -264,6 +267,7 @@ let mockSessionList: SessionEntry[] = [
     preview: "把 TS 后端迁到 Rust",
     modified_ms: Date.now() - 60_000,
     turns: 3,
+    running: false,
   },
   {
     name: "mock-2",
@@ -271,6 +275,7 @@ let mockSessionList: SessionEntry[] = [
     preview: "写一个 bash 工具",
     modified_ms: Date.now() - 3_600_000,
     turns: 1,
+    running: false,
   },
 ];
 function mockSessions(): SessionEntry[] {

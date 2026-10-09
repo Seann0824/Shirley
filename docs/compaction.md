@@ -310,7 +310,27 @@ self.messages = [system（Agent 重新生成）] + [新 ContextSummary] + messag
 | 压缩指令文案 | `src/main.rs` | 删"下一步"，加"忠实保留用户指令""不得推演" |
 | 压缩重试 + 降级 | `runtime/mod.rs` | 见 5.4 |
 | `AgentEvent::CompressionFailed` | `runtime/mod.rs` | 新增事件，UI 消费 |
-| `retain_ratio` builder 参数 | `runtime/mod.rs` | 默认 0.20，与 `compression_instruction` 同级 |
+| `CompressionConfig`（策略配置） | `runtime/compaction.rs` | `trigger_ratio`（默认 0.80）/ `retain_ratio`（默认 0.20）/ `template`（默认 `COMPACTION_TEMPLATE`），经 `Agent` builder 的 `compression_config` 传入 |
+
+---
+
+**六之补：压缩策略配置（已落地）**
+
+压缩的"何时压、保留多少、摘要长什么样"从硬编码变成可调项，由 SDK 的
+[`CompressionConfig`]（`runtime/compaction.rs`）承载：
+
+| 字段 | 默认 | 含义 |
+| --- | --- | --- |
+| `trigger_ratio` | `0.80` | 本轮 `(input + output)` 达 `context_window * trigger_ratio` 时触发压缩 |
+| `retain_ratio` | `0.20` | 压缩后保留尾部（最近对话）的 token 预算比例 |
+| `template` | `COMPACTION_TEMPLATE` | 摘要输出模板，**追加**在 `compression_instruction` 之后 |
+
+- SDK 只提供**策略参数**；领域相关的取舍（该保留哪些事实）仍在
+  `Agent` 的 `compression_instruction`（应用层传入）。
+- 应用层通过 `[compression]` 表（`src/settings.rs`）覆盖：
+  `trigger_ratio` / `retain_ratio` / `template`，缺省即沿用 SDK 默认。
+- 非法 `trigger_ratio` / `retain_ratio` 在 `CompressionSettings::to_sdk()` 里
+  被**夹回默认**（不阻断启动）：压缩是后台能力，配错不该让程序起不来。
 
 ---
 

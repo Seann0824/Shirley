@@ -6,6 +6,7 @@ mod models;
 mod prompt;
 mod session;
 mod settings;
+mod todo;
 mod tools;
 mod workspace_search;
 

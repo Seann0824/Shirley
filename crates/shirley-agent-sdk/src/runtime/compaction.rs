@@ -4,6 +4,42 @@ use crate::token;
 /// 保留尾部的预算口径：上下文窗口的 20%（`docs/compaction.md` 4.1）。
 pub(super) const RETAIN_RATIO: f64 = 0.20;
 
+/// 触发压缩的阈值：本轮 (input + output) 达到 `context_window * 0.80` 时，
+/// 下一轮请求前先压缩（`docs/compaction.md` 4.1）。
+pub(super) const DEFAULT_TRIGGER_RATIO: f64 = 0.80;
+
+/// 压缩策略配置：把"何时压、保留多少、摘要长什么样"从硬编码变成可调项。
+///
+/// 默认值即当前 SDK 的内置策略（[`CompressionConfig::default`]）。应用层可按需
+/// 覆盖——例如把触发阈值调低（更早压缩、更省 token）或替换摘要模板（换语言 /
+/// 换关注点）。`compression_instruction`（领域相关的取舍）仍在 `Agent` 上单独传入，
+/// 本配置只管**策略参数**，不含业务取舍。
+#[derive(Debug, Clone, PartialEq)]
+pub struct CompressionConfig {
+    /// 触发阈值（占上下文窗口的比例，0 < r <= 1）。默认 `0.80`。
+    ///
+    /// 本轮用量 `(input_tokens + output_tokens)` 达到 `context_window * trigger_ratio`
+    /// 时，在下一轮请求前压缩。
+    pub trigger_ratio: f64,
+    /// 保留尾部的预算口径（占上下文窗口的比例，0 < r < 1）。默认 `0.20`。
+    ///
+    /// 压缩后保留的尾部（最近对话）按 `context_window * retain_ratio` 估算 token 预算。
+    pub retain_ratio: f64,
+    /// 摘要输出模板，**追加**在调用方的 `compression_instruction` 之后。默认
+    /// [`COMPACTION_TEMPLATE`]（结构化 XML + 禁止推演"下一步"）。
+    pub template: String,
+}
+
+impl Default for CompressionConfig {
+    fn default() -> Self {
+        Self {
+            trigger_ratio: DEFAULT_TRIGGER_RATIO,
+            retain_ratio: RETAIN_RATIO,
+            template: COMPACTION_TEMPLATE.to_string(),
+        }
+    }
+}
+
 /// 压缩摘要的输出模板与硬性规则（`docs/compaction.md` 5.3）。
 ///
 /// [`super::agent::Agent::compress_context`] 在构造压缩请求时，会把它**追加**到调用方

@@ -4,9 +4,13 @@
 的配套能力：压缩解决了"上下文装不下"，而 todo 解决的是
 **"压缩后模型忘了自己做到哪、于是重新探索"**这个正反馈回路。
 
-**范围声明**：本轮只做内存实现，持久化层留空。账本是 SDK 内部
-能力，应用层无感——在 `Agent::new` 里自动注册工具、自动注入，
-应用层一行不用改。
+**范围声明**：本轮只做内存实现，持久化层留空。
+
+**归属修正（后续决策）**：账本**已从 SDK 移到应用层**（`src/todo.rs`）。
+"记什么、怎么催、注入什么文案"是 coding agent 这个产品的取舍，不是通用基础
+能力。SDK 只保留一个与业务无关的通用接缝——[`ContextProvider`]：`Agent` 组装
+每轮请求时调它，把返回文本作为一条 system **追加在末尾**。账本只是该接缝的
+一个应用层实现（`TodoContextProvider`）。
 
 ---
 
@@ -161,11 +165,13 @@ struct TaskState {
 
 | 文件 | 职责 |
 | --- | --- |
-| `crates/shirley-agent-sdk/src/todo/mod.rs` | `TodoStore` / `TodoUpdate` / `TodoStep` / `TodoTool` / `TASK_STATE_HEADER` / 单测 |
-| `crates/shirley-agent-sdk/src/runtime/agent.rs` | 持有 `Arc<TodoStore>`、注册工具、`active_messages()` 末尾注入 |
+| `src/todo.rs`（**应用层**） | `TodoStore` / `TodoStatus` / `TodoUpdate` / `TodoStep` / `TodoTool` / `TodoContextProvider` / `TASK_STATE_HEADER` / `TODO_NAG_REMINDER` / 单测 |
+| `src/bootstrap.rs`（应用层） | `build_agent` 每个 `Agent` 新建一份 `Arc<TodoStore>`，注册 `TodoTool` 并作为 `context_provider` 注入 `TodoContextProvider`（两者共享同一 `Arc`） |
+| `crates/shirley-agent-sdk/src/runtime/context.rs`（SDK） | 通用接缝 `ContextProvider`（`context() -> Option<String>`）；`agent.rs` 在 `active_messages()` 末尾调用它 |
+| `crates/shirley-agent-sdk/src/runtime/agent.rs`（SDK） | 持有 `Option<Arc<dyn ContextProvider>>`、`active_messages()` 末尾注入返回文本 |
 
-对外只 re-export `TASK_STATE_HEADER` / `TodoStep` / `TodoStore` / `TodoTool` / `TodoUpdate`
-（`lib.rs`），供测试与上层观测。
+**不再对外导出**：`TodoStore` / `TodoTool` 等已随模块移出 SDK（`lib.rs` 不再 re-export）。
+SDK 只导出通用接缝 `ContextProvider`。
 
 ---
 

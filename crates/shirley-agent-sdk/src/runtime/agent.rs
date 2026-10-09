@@ -1,11 +1,11 @@
-use super::compaction::{COMPACTION_TEMPLATE, CutPlan, RETAIN_RATIO, plan_cut};
+use super::compaction::{CompressionConfig, CutPlan, plan_cut};
+use super::context::ContextProvider;
 use super::error::AgentError;
 use super::event::{AgentEvent, RunResult, StopReason};
 use super::prompt::{SystemPrompt, SystemPromptContext};
 use crate::adapter;
 use crate::adapter::ModelRequest;
 use crate::message;
-use crate::todo::{self, TodoStore};
 use crate::token;
 use crate::tool;
 use futures::StreamExt;
@@ -29,14 +29,14 @@ pub struct Agent {
     tools: tool::ToolManager,
     compression_instruction: Option<String>,
     compression_pending: bool,
+    /// 压缩策略（触发阈值 / 保留比例 / 摘要模板）。默认即 SDK 内置策略。
+    compression_config: CompressionConfig,
+    /// 每轮请求末尾的附加上下文提供者（应用层可选注入，例如任务账本）。
+    /// 返回的文本作为一条 system 消息追加在本轮请求末尾——不进 `self.messages`、
+    /// 跨压缩存活、且不动前缀（见 [`super::context`]）。
+    context_provider: Option<Arc<dyn ContextProvider>>,
     // L1 估算 + L2 校准状态（见 `token` 模块）
     token_counter: token::HeuristicCounter,
-    /// 任务账本（`todo` 模块）：模型自己维护、跨上下文压缩存活的任务状态。
-    /// SDK 内部能力，应用层无感；`todo` 工具持有同一 `Arc` 的另一份引用。
-    todo: Arc<TodoStore>,
-    /// 距上次调用 `todo` 工具已过多少轮（每轮 = 一次含工具调用的 assistant 回合）。
-    /// 达 [`todo::TODO_NAG_AFTER_ROUNDS`] 且账本为空时注入 nag 提醒。
-    rounds_since_todo: usize,
 }
 
 #[bon::bon]
@@ -47,13 +47,11 @@ impl Agent {
         #[builder(default, into)] system_prompt: SystemPrompt,
         #[builder(into)] working_dir: Option<PathBuf>,
         #[builder(default)] mut messages: Vec<message::Message>,
-        #[builder(default = tool::ToolManager::new())] mut tools: tool::ToolManager,
+        #[builder(default = tool::ToolManager::new())] tools: tool::ToolManager,
         #[builder(into)] compression_instruction: Option<String>,
+        #[builder(default)] compression_config: CompressionConfig,
+        context_provider: Option<Arc<dyn ContextProvider>>,
     ) -> Result<Self, AgentError> {
-        // 任务账本是压缩的配套能力：账本跨压缩存活，模型用 `todo` 工具自己维护。
-        let todo = Arc::new(TodoStore::new());
-        let _ = tools.register(todo::TodoTool::new(todo.clone()));
-
         // 构造时就按工作目录解析一次，把 System 消息置顶（空提示词则不置顶）。
         // 恢复出的历史里不含 system，这里现生成——与压缩重建同一套规则。
         let resolved = system_prompt.resolve(&SystemPromptContext {
@@ -71,9 +69,9 @@ impl Agent {
             tools,
             compression_instruction,
             compression_pending: false,
+            compression_config,
+            context_provider,
             token_counter: token::HeuristicCounter::new(),
-            todo,
-            rounds_since_todo: 0,
         })
     }
 
@@ -136,25 +134,24 @@ impl Agent {
         &self.messages
     }
 
-    /// 回溯到最后一轮用户消息之前，返回被丢弃的用户输入（供上层编辑 / 退回输入框）。
+    /// 把对话历史尾截断到前 `len` 条，返回截断后的长度。
     ///
-    /// 用于"打断"与"编辑重发"：回退掉这一轮的用户消息及其后可能已完成的
-    /// assistant / tool 链，让会话回到该轮开始前的状态。没有用户消息时返回 `None`。
-    ///
-    /// **只作用于最后一条用户消息**（`docs/session.md` 一.决策 4）：这样回溯
-    /// 永远只是 tail truncation，不会产生中间空洞。持久化由应用层据
-    /// [`Agent::messages`] 的长度自行截尾（SDK 不持有会话日志）。
-    pub fn rewind_last_user_turn(&mut self) -> Option<String> {
-        let index = self
+    /// 这是回溯 / 打断的**原子能力**：SDK 只负责"把工作集变短"并维护内部不变量
+    /// （不越过置顶 system、越界自动钳制），**"截到哪"是业务判定**——例如"回退最后
+    /// 一轮用户消息"由上层按 [`Agent::messages`] 自行定位后调用（`docs/session.md`
+    /// 一.决策 4：只截尾，不产生中间空洞）。持久化由应用层据截断后的长度自行截尾
+    /// （SDK 不持有会话日志）。
+    pub fn truncate_messages(&mut self, len: usize) -> usize {
+        // 置顶 system 是构造 / 压缩重建维护的不变量，不允许被截掉：以开头连续
+        // 的 system 条数为下界。`clamp` 同时兜住 `len` 越界（超长则原样）。
+        let floor = self
             .messages
             .iter()
-            .rposition(|m| matches!(m, message::Message::User { .. }))?;
-        let content = match &self.messages[index] {
-            message::Message::User { content } => content.clone(),
-            _ => unreachable!("rposition guarantees a User message"),
-        };
-        self.messages.truncate(index);
-        Some(content)
+            .take_while(|m| matches!(m, message::Message::System { .. }))
+            .count();
+        let len = len.clamp(floor, self.messages.len());
+        self.messages.truncate(len);
+        self.messages.len()
     }
 
     pub async fn run(&mut self, task: &str) -> Result<RunResult, AgentError> {
@@ -223,8 +220,6 @@ impl Agent {
         Box::pin(async_stream::try_stream! {
             let client = reqwest::Client::new();
             let mut total_usage = message::Usage::default();
-            // 新一轮任务开始：账本催促计数归零（上一轮的漂移提醒不跨轮）。
-            self.rounds_since_todo = 0;
             if self.compression_pending {
                 yield AgentEvent::CompressionStarted;
                 let (usage, summary) = self.compress_context(&client).await?;
@@ -289,15 +284,11 @@ impl Agent {
                             let response_message = response.message;
                             self.messages.push(response_message.clone());
                             yield AgentEvent::MessageAdded(response_message.clone());
-                            let mut todo_called = false;
                             let tool_messages = match &response_message {
                                 message::Message::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
                                     let mut tasks = futures::stream::FuturesUnordered::new();
 
                                     for call in tool_calls {
-                                        if call.name == "todo" {
-                                            todo_called = true;
-                                        }
                                         yield AgentEvent::ToolStarted {
                                             call_id: call.id.clone(),
                                             name: call.name.clone(),
@@ -345,13 +336,6 @@ impl Agent {
                                 }
                                 _ => vec![],
                             };
-                            // nag 计数：本轮调了 `todo` 就归零，否则累计。
-                            // 只在真的执行了工具（非收尾轮）时累计。
-                            if todo_called {
-                                self.rounds_since_todo = 0;
-                            } else if !tool_messages.is_empty() {
-                                self.rounds_since_todo = self.rounds_since_todo.saturating_add(1);
-                            }
                             is_finished = tool_messages.is_empty();
 
                             if is_finished {
@@ -383,7 +367,7 @@ impl Agent {
     /// 未配置窗口（或配成 0）时返回 `None`，表示**不做压缩**。
     fn retain_budget(&self) -> Option<u64> {
         let window = self.model_config.context_window_tokens.filter(|&w| w > 0)?;
-        Some(((window as f64) * RETAIN_RATIO).round() as u64)
+        Some(((window as f64) * self.compression_config.retain_ratio).round() as u64)
     }
 
     /// 计算压缩切点，并提取用户最新提出的问题。
@@ -410,12 +394,16 @@ impl Agent {
         {
             return false;
         }
-        // 下一次请求会携带本轮输出；用整数比较避免浮点精度和溢出。
+        // 下一次请求会携带本轮输出。用整数比较避免浮点精度和溢出：
+        // 阈值 = limit * trigger_ratio，转成 (used / limit >= ratio) 的整数判定。
         let used = usage.input_tokens.saturating_add(usage.output_tokens);
-        if (used as u128) * 100 >= (limit as u128) * 80 {
-            return true;
+        let ratio = self.compression_config.trigger_ratio;
+        if !(ratio > 0.0 && ratio <= 1.0) {
+            return false;
         }
-        false
+        // 放大 10000 倍做定点比较：0.80 → 8000，避免 f64 精度问题。
+        let scaled = (ratio * 10_000.0).round() as u128;
+        (used as u128) * 10_000 >= (limit as u128) * scaled
     }
 
     fn active_messages(&self) -> Vec<message::Message> {
@@ -436,25 +424,18 @@ impl Agent {
                 active
             }
         };
-        // 任务账本（`todo` 模块）作为一条 system 消息**追加在末尾**注入。
+        // 附加上下文（应用层注入，例如任务账本）作为一条 system 消息**追加在末尾**。
         //
         // 位置选末尾的理由：
-        //   - 账本不进 `self.messages`，压缩碰不到它，跨压缩存活；
-        //   - 追加在尾部不动前面的前缀，账本内容稳定时前缀缓存照常命中
+        //   - 它不进 `self.messages`，压缩碰不到它，跨压缩存活；
+        //   - 追加在尾部不动前面的前缀，内容稳定时前缀缓存照常命中
         //     （Responses 适配器把 system 原位保留，正是为了这一点）；
-        //   - 账本只在模型调用 `todo` 时变化，届时前缀才失效——这是"必须每轮
-        //     可见"的固有代价，无法避免，只能把变化点压到最小。
-        if let Some(ledger) = self.todo.render() {
-            active.push(message::Message::System {
-                content: format!("{}\n\n{ledger}", todo::TASK_STATE_HEADER),
-            });
-        } else if self.rounds_since_todo >= todo::TODO_NAG_AFTER_ROUNDS {
-            // 冷启动护栏：账本为空且连续多轮未建，注入一条明确的催促——
-            // 空账本没有 header 可注入，模型开局缺的就是这条触发指令。
-            // 追加在末尾，与账本注入同位，不动前缀。
-            active.push(message::Message::System {
-                content: todo::TODO_NAG_REMINDER.to_string(),
-            });
+        //   - 内容只在提供者决定变化时才变，变化点被压到最小。
+        if let Some(provider) = &self.context_provider
+            && let Some(text) = provider.context()
+            && !text.trim().is_empty()
+        {
+            active.push(message::Message::System { content: text });
         }
         active
     }
@@ -497,8 +478,8 @@ impl Agent {
             .clone()
             .ok_or_else(|| AgentError::Compression("compression instruction is not configured".into()))?;
         // 调用方给领域相关的取舍，SDK 追加结构模板（`docs/compaction.md` 5.3）：
-        // 摘要始终是 XML 块，且禁止推演"下一步"。
-        let content = format!("{instruction}\n\n{COMPACTION_TEMPLATE}");
+        // 摘要始终是 XML 块，且禁止推演"下一步"。模板可由 `compression_config` 覆盖。
+        let content = format!("{instruction}\n\n{}", self.compression_config.template);
         messages.push(message::Message::System { content });
 
         let model_request = ModelRequest {
@@ -572,9 +553,24 @@ fn strip_tool_outputs(messages: &mut [message::Message]) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::todo::TodoUpdate;
 
-    fn agent() -> Agent {
+    /// 测试用提供者：返回固定文本。
+    struct FixedProvider(&'static str);
+    impl ContextProvider for FixedProvider {
+        fn context(&self) -> Option<String> {
+            Some(self.0.to_string())
+        }
+    }
+
+    /// 测试用提供者：始终不注入。
+    struct EmptyProvider;
+    impl ContextProvider for EmptyProvider {
+        fn context(&self) -> Option<String> {
+            None
+        }
+    }
+
+    fn agent_with(provider: Option<Arc<dyn ContextProvider>>) -> Agent {
         let config = adapter::ModelConfig::builder()
             .protocol(adapter::ModelProtocol::ChatCompletions)
             .base_url("http://localhost")
@@ -583,52 +579,50 @@ mod tests {
         Agent::builder()
             .model_config(config)
             .system_prompt("你是 Shirley")
+            .maybe_context_provider(provider)
             .build()
             .unwrap()
     }
 
-    /// 空账��不注入任何东西（避免每轮多出一条无意义的 system）。
+    /// 没有提供者时不注入任何东西（避免每轮多出一条无意义的 system）。
     #[test]
-    fn empty_ledger_is_not_injected() {
-        let agent = agent();
+    fn no_provider_injects_nothing() {
+        let agent = agent_with(None);
         let active = agent.active_messages();
         assert_eq!(active.len(), 1, "只有置顶 system");
         assert!(matches!(active[0], message::Message::System { .. }));
     }
 
-    /// 账本作为**最后一条** system 注入，且不进入 `self.messages`
+    /// 提供者返回 `None` 时也不注入。
+    #[test]
+    fn provider_returning_none_injects_nothing() {
+        let agent = agent_with(Some(Arc::new(EmptyProvider)));
+        let active = agent.active_messages();
+        assert_eq!(active.len(), 1, "只有置顶 system");
+    }
+
+    /// 附加上下文作为**最后一条** system 注入，且不进入 `self.messages`
     /// （因此压缩重建 `self.messages` 时碰不到它）。
     #[test]
-    fn ledger_is_appended_and_not_persisted() {
-        let agent = agent();
-        agent.todo.apply(TodoUpdate {
-            goal: Some("实现 todo 工具".into()),
-            steps: Some(vec![crate::todo::TodoStep {
-                text: "接运行时".into(),
-                status: crate::todo::TodoStatus::Pending,
-            }]),
-            ..Default::default()
-        });
+    fn context_is_appended_and_not_persisted() {
+        let agent = agent_with(Some(Arc::new(FixedProvider("注入的任务账本"))));
 
-        // 账本不在工作集里——压缩 / rewind 都动不到它。
+        // 附加上下文不在工作集里——压缩 / rewind 都动不到它。
         assert!(
             !agent
                 .messages
                 .iter()
-                .any(|m| matches!(m, message::Message::System { content } if content.contains("<task_state>"))),
-            "账本不应写入 self.messages"
+                .any(|m| matches!(m, message::Message::System { content } if content.contains("任务账本"))),
+            "附加上下文不应写入 self.messages"
         );
 
         let active = agent.active_messages();
         let last = active.last().expect("至少有一条");
         let message::Message::System { content } = last else {
-            panic!("末条应是注入的 system 账本");
+            panic!("末条应是注入的 system");
         };
-        assert!(content.contains(todo::TASK_STATE_HEADER));
-        assert!(content.contains("<goal>实现 todo 工具</goal>"));
-        assert!(content.contains("- [ ] 接运行时"));
+        assert_eq!(content, "注入的任务账本");
         // 置顶的原始 system 仍在最前。
         assert!(matches!(&active[0], message::Message::System { content } if content == "你是 Shirley"));
     }
-
 }

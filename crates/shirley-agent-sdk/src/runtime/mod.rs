@@ -10,12 +10,14 @@
 
 mod agent;
 mod compaction;
+mod context;
 mod error;
 mod event;
 mod prompt;
 
 pub use agent::Agent;
-pub use compaction::{CompactParts, CutPlan, plan_cut};
+pub use compaction::{CompactParts, CompressionConfig, CutPlan, plan_cut};
+pub use context::ContextProvider;
 pub use error::AgentError;
 pub use event::{AgentEvent, RunResult, StopReason};
 pub use prompt::{SystemPrompt, SystemPromptContext};

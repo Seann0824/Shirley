@@ -17,12 +17,15 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use shirley_agent_sdk::{Agent, AgentError, Message, ModelConfig, SystemPrompt, ToolManager};
+use shirley_agent_sdk::{
+    Agent, AgentError, CompressionConfig, Message, ModelConfig, SystemPrompt, ToolManager,
+};
 
 use crate::models::{self, ModelCatalog};
 use crate::prompt;
 use crate::session::{self, SessionCatalog};
 use crate::settings::Settings;
+use crate::todo::{TodoContextProvider, TodoStore, TodoTool};
 use crate::tools;
 
 /// 压缩指令：所有会话共用（不随会话变化）。
@@ -41,6 +44,8 @@ pub struct AgentFactory {
     model_config: ModelConfig,
     /// 系统提示词（函数形式：每次解析读当前工作目录与项目 `Agent.md`）。
     system_prompt: SystemPrompt,
+    /// 压缩策略（触发阈值 / 保留比例 / 摘要模板）。来自配置，所有会话共用。
+    compression_config: CompressionConfig,
     /// 工作目录（工作区根）。桌面界面用它做 `@` 文件检索（`workspace_search`）；
     /// TUI-only 构建下没人读，故放行 dead_code。
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
@@ -85,6 +90,9 @@ impl AgentFactory {
             .build();
         model_config.context_window_tokens = Some(settings.context_window_tokens);
 
+        // 压缩策略：配置里没写就沿用 SDK 默认（`CompressionConfig::default`）。
+        let compression_config = settings.compression.to_sdk();
+
         // 会话持久化：多会话布局 `<root>/.shirley/sessions/<name>.jsonl`。
         let file_catalog = session::FileSessionCatalog::new(&working_dir);
         file_catalog
@@ -95,6 +103,7 @@ impl AgentFactory {
         Ok(Self {
             model_config,
             system_prompt: prompt::build(working_dir.clone()),
+            compression_config,
             working_dir: working_dir.clone(),
             model_catalog,
             session_catalog,
@@ -108,18 +117,28 @@ impl AgentFactory {
     /// 起 `Agent`（空 `Vec` = 全新会话）。`Agent::new` 会把 system 现生成置顶——
     /// 日志里不含 system，故恢复出的工作集必然与冷启动一致。
     ///
-    /// 模型配置 / 系统提示词 / 工具定义由工厂复用（`clone`），`todo` 在
-    /// `Agent::new` 内部按实例隔离——因此不同会话的 `Agent` 互不共享可变状态，可真正并行。
+    /// 模型配置 / 系统提示词 / 压缩策略由工厂复用（`clone`）；`ToolManager` 与任务
+    /// 账本按实例新建——因此不同会话的 `Agent` 互不共享可变状态，可真正并行。
     pub fn build_agent(&self, messages: Vec<Message>) -> Result<Agent, AgentError> {
+        // 任务账本（应用层能力）：每个 `Agent` 一份 `TodoStore`，同时交给
+        // `todo` 工具（写）与 `TodoContextProvider`（每轮末尾注入，跨压缩存活）。
+        // 两者共享同一 `Arc`，账本状态随会话隔离。
+        let todo_store = Arc::new(TodoStore::new());
+
         // `ToolManager` 非 `Clone`，每次造 `Agent` 都新建一份并重新注册工具：
         // 工具定义稳定（prefix 缓存友好），`on_register` 钩子（如 web_search 的
         // 凭据注入）各自执行一次——状态本就按工具实例隔离，可接受（决策 5）。
+        let mut tool_manager = assemble_tools();
+        let _ = tool_manager.register(TodoTool::new(todo_store.clone()));
+
         Agent::builder()
             .model_config(self.model_config.clone())
             .system_prompt(self.system_prompt.clone())
             .working_dir(self.working_dir.clone())
             .compression_instruction(COMPRESSION_INSTRUCTION)
-            .tools(assemble_tools())
+            .compression_config(self.compression_config.clone())
+            .context_provider(Arc::new(TodoContextProvider::new(todo_store)) as Arc<dyn shirley_agent_sdk::ContextProvider>)
+            .tools(tool_manager)
             .messages(messages)
             .build()
     }
@@ -136,4 +155,89 @@ fn assemble_tools() -> ToolManager {
         eprintln!("[web_search] 未启用：{error}");
     }
     tool_manager
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::interface::session::SessionManager;
+    use crate::models::StaticCatalog;
+    use crate::session::FileSessionCatalog;
+    use shirley_agent_sdk::ModelProtocol;
+
+    fn test_agent() -> Agent {
+        let config = ModelConfig::builder()
+            .protocol(ModelProtocol::ChatCompletions)
+            .base_url("http://localhost")
+            .model("test")
+            .build();
+        Agent::builder().model_config(config).build().unwrap()
+    }
+
+    fn factory(root: PathBuf) -> AgentFactory {
+        AgentFactory {
+            model_config: ModelConfig::builder()
+                .protocol(ModelProtocol::ChatCompletions)
+                .base_url("http://localhost")
+                .model("test")
+                .build(),
+            system_prompt: SystemPrompt::from("test"),
+            compression_config: CompressionConfig::default(),
+            working_dir: root.clone(),
+            model_catalog: Arc::new(StaticCatalog::builtin()) as Arc<dyn ModelCatalog>,
+            session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
+            needs_login: false,
+        }
+    }
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("shirley_bootstrap_{tag}_{}", std::process::id()))
+    }
+
+    /// 回归：删除**当前**会话后，前台指针必须落到一份新的空会话，而不是悬在被删会话上。
+    ///
+    /// 此前 `agent_delete_session` 只删磁盘、不动 `SessionManager`，`active` 仍指向被删
+    /// 会话，`agent_current_session` 继续返回旧名，前端又把它打开——界面因此卡在被删会话。
+    #[test]
+    fn deleting_active_session_switches_to_fresh_empty_session() {
+        let root = tmp_root("del_active");
+        let catalog: Arc<dyn SessionCatalog> = Arc::new(FileSessionCatalog::new(&root));
+        let mut manager = SessionManager::with_factory(
+            test_agent(),
+            Some("s".into()),
+            catalog,
+            Arc::new(factory(root.clone())),
+            None,
+        );
+        assert_eq!(manager.active_name(), Some("s"));
+
+        manager.delete_session("s").unwrap();
+
+        let active = manager.active_name().map(str::to_owned);
+        assert_ne!(active.as_deref(), Some("s"), "前台不应再停在被删会话上");
+        assert!(active.is_some(), "删掉前台会话后应补一份空会话");
+        assert!(manager.active_agent().is_some(), "新空会话应已就绪");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 运行中的会话不得被删除（避免删掉正在写入的日志）。
+    #[test]
+    fn deleting_running_session_is_rejected() {
+        let root = tmp_root("del_running");
+        let catalog: Arc<dyn SessionCatalog> = Arc::new(FileSessionCatalog::new(&root));
+        let mut manager = SessionManager::with_factory(
+            test_agent(),
+            Some("s".into()),
+            catalog,
+            Arc::new(factory(root.clone())),
+            None,
+        );
+        assert!(manager.begin_turn("s", "hello".into()).is_some());
+
+        assert!(manager.delete_session("s").is_err(), "运行中会话应拒绝删除");
+        assert_eq!(manager.active_name(), Some("s"), "拒绝后前台不应改变");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

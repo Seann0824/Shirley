@@ -77,6 +77,9 @@ struct SessionEntryWire {
     preview: String,
     modified_ms: u64,
     turns: usize,
+    /// 该会话当前是否在跑一轮（后台活跃）——列表据此显示 loading 转圈。
+    /// 由 [`agent_list_sessions`] 从 `SessionManager` 内存态合并（磁盘目录不知道运行态）。
+    running: bool,
 }
 
 impl From<SessionEntry> for SessionEntryWire {
@@ -87,6 +90,8 @@ impl From<SessionEntry> for SessionEntryWire {
             preview: entry.preview,
             modified_ms: entry.modified_ms,
             turns: entry.turns,
+            // 目录层不感知运行态，默认 `false`；真正的运行态由 command 合并。
+            running: false,
         }
     }
 }
@@ -392,7 +397,18 @@ async fn agent_list_sessions(
         .await
         .map_err(|error| error.to_string())?
         .map_err(|error| error.to_string())?;
-    Ok(entries.into_iter().map(SessionEntryWire::from).collect())
+    // 目录扫描只给磁盘元数据；**运行态在 `SessionManager` 内存里**，在这里合并——
+    // 否则后台活跃的会话在列表里看不出「正在跑」（前端据此转圈）。
+    let sessions = state.sessions.lock().await;
+    Ok(entries
+        .into_iter()
+        .map(|entry| {
+            let running = sessions.is_running(&entry.name);
+            let mut wire = SessionEntryWire::from(entry);
+            wire.running = running;
+            wire
+        })
+        .collect())
 }
 
 /// 当前会话名（供前端展示 / 打标）。
@@ -436,6 +452,8 @@ async fn agent_new_session(
         preview: String::new(),
         modified_ms: 0,
         turns: 0,
+        // 刚建的空会话尚未运行。
+        running: false,
     };
     Ok(entry)
 }
@@ -468,18 +486,16 @@ async fn agent_rename_session(
 }
 
 /// 删除会话（连同日志与标题）。运行中拒绝，避免删掉正在写入的日志。
+///
+/// 先经 `SessionManager::delete_session` 做**内存编排**：移出该会话；若删掉的正是前台
+/// 会话，则补一份惰性空会话并切过去（否则 `active` 会悬空，`currentSession` 仍回被删
+/// 的名字）。磁盘删除随后交给 `SessionCatalog`。
 #[tauri::command]
 async fn agent_delete_session(
     state: State<'_, DesktopState>,
     name: String,
 ) -> Result<(), String> {
-    {
-        // 运行中拒绝：避免删掉正在写入的日志。
-        let guard = state.sessions.lock().await;
-        if guard.is_running(&name) {
-            return Err("agent 正在运行中".to_owned());
-        }
-    }
+    state.sessions.lock().await.delete_session(&name)?;
     let catalog = state.session_catalog.clone();
     let delete_name = name.clone();
     tauri::async_runtime::spawn_blocking(move || catalog.delete(&delete_name))

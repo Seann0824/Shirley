@@ -1,4 +1,4 @@
-import { Pencil, Plus, Trash2 } from "lucide-react";
+import { Loader2, Pencil, Plus, Trash2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/ui/button";
 import { ScrollArea } from "@/ui/scroll-area";
@@ -42,17 +42,21 @@ export function SessionSelector({
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
-  const refresh = async () => {
-    setLoading(true);
+  // `silent` = 轮询刷新：不切 `loading`，避免每次轮询把列表闪成「加载中…」。
+  const load = async (silent: boolean) => {
+    if (!silent) setLoading(true);
     try {
       const { agentBridge } = await import("@/lib/bridge");
       setEntries(await (await agentBridge()).listSessions());
     } catch {
-      setEntries([]);
+      // 静默轮询失败时保留上一次结果，别把列表清空。
+      if (!silent) setEntries([]);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   };
+
+  const refresh = () => load(false);
 
   const close = () => {
     setOpen(false);
@@ -75,6 +79,15 @@ export function SessionSelector({
       document.removeEventListener("pointerdown", onPointerDown);
       document.removeEventListener("keydown", onKeyDown);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open]);
+
+  // 面板打开时轮询：后台会话的 `running` 变化（跑完 / 开跑）只活在 Rust 内存，
+  // 未订阅的前端收不到事件，故靠轮询让 loading 转圈及时出现 / 消失。
+  useEffect(() => {
+    if (!open) return;
+    const timer = window.setInterval(() => void load(true), 1500);
+    return () => window.clearInterval(timer);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open]);
 
@@ -174,13 +187,23 @@ export function SessionSelector({
                             if (!active) onSelect(entry.name);
                           }}
                         >
-                          <span
-                            className={cn(
-                              "block truncate text-body-sm text-ink",
-                              active && "font-medium",
+                          <span className="flex items-center gap-1.5">
+                            {/* 后台活跃 / 任务进行中：转圈提示（运行态来自 Rust 侧
+                                `SessionManager`，经 `agent_list_sessions` 的 `running` 透出）。 */}
+                            {entry.running && (
+                              <Loader2
+                                className="size-3.5 shrink-0 animate-spin text-accent"
+                                aria-label="运行中"
+                              />
                             )}
-                          >
-                            {entry.label}
+                            <span
+                              className={cn(
+                                "truncate text-body-sm text-ink",
+                                active && "font-medium",
+                              )}
+                            >
+                              {entry.label}
+                            </span>
                           </span>
                           <span className="mt-0.5 block truncate text-caption text-muted">
                             {entry.preview || "（空会话）"} · {entry.turns} 轮 ·{" "}

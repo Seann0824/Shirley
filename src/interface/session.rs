@@ -320,17 +320,24 @@ impl Session {
 
     /// 回退最后一条用户消息：内存（`Agent`）与磁盘日志一起回退。
     ///
-    /// SDK 的 `Agent::rewind_last_user_turn` 只回退内存并返回原文；日志截尾
-    /// 由应用层据此补上（SDK 不持有会话日志）。日志不含 system，故换算长度时
-    /// 减去置顶的那条。
+    /// "回退最后一轮"是**会话 / UI 业务语义**（谁定义"一轮"、是否连带丢弃其后的
+    /// assistant / tool 链），故判定放在应用层；SDK 只提供原子能力
+    /// [`Agent::truncate_messages`]（尾截断 + 维护不变量）。日志不含 system，
+    /// 故换算长度时减去置顶的那条。
     pub fn rewind_last_user_turn(&mut self) -> Option<String> {
         let agent = self.agent.as_mut()?;
-        let content = agent.rewind_last_user_turn()?;
-        let has_system = matches!(agent.messages().first(), Some(Message::System { .. }));
-        let log_len = agent
+        let index = agent
             .messages()
-            .len()
-            .saturating_sub(usize::from(has_system));
+            .iter()
+            .rposition(|m| matches!(m, Message::User { .. }))?;
+        let content = match &agent.messages()[index] {
+            Message::User { content } => content.clone(),
+            _ => unreachable!("rposition guarantees a User message"),
+        };
+        // 截到该用户消息之前（丢弃这一轮 user 及其后的 assistant / tool 链）。
+        let new_len = agent.truncate_messages(index);
+        let has_system = matches!(agent.messages().first(), Some(Message::System { .. }));
+        let log_len = new_len.saturating_sub(usize::from(has_system));
         let store = self.store.clone();
         if let Some(store) = store
             && let Err(error) = store.truncate(log_len)
@@ -553,6 +560,36 @@ impl SessionManager {
         let id = self.insert(agent, Some(entry.name.clone()), Some(store));
         self.active = id;
         Ok(entry.name)
+    }
+
+    /// 删除一个会话（内存侧）。运行中拒绝（避免删掉正在写入的日志）。
+    ///
+    /// **磁盘删除由调用方负责**（`SessionCatalog::delete`）——本方法只负责内存编排：
+    /// 从 `sessions` 移除该会话；若删掉的正是前台会话，则**新建一份惰性空会话并切过去**
+    /// （与启动时同一 UX：此刻只定名、不落盘，发首条消息才建文件）。这样删掉当前会话后
+    /// 前台指针不会悬空，`active_name()` 也不会再返回已删的名字。
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    pub fn delete_session(&mut self, name: &str) -> Result<(), String> {
+        let id = self
+            .id_of_name(name)
+            .ok_or_else(|| format!("会话不存在：{name}"))?;
+        if self
+            .sessions
+            .get(&id)
+            .map(|session| session.running)
+            .unwrap_or(false)
+        {
+            return Err("agent 正在运行中".to_owned());
+        }
+        let was_active = id == self.active;
+        if was_active {
+            // 删的是前台会话：**先**补一份空会话并切过去（`create_new` 会把 `active`
+            // 挪到新会话），再移除旧的——顺序反了的话，一旦 `create_new` 失败就会
+            // 留下悬空的 `active`（后续 `active()` 直接 panic）。
+            self.create_new(None)?;
+        }
+        self.sessions.remove(&id);
+        Ok(())
     }
 
     // ---- 按会话名的运行时访问（desktop 的 Tauri command 驱动；TUI 走 Deref 访问 active）----

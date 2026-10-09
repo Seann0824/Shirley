@@ -110,7 +110,7 @@ SDK 的 `run_stream` 对每条入 `self.messages` 的消息都 `yield MessageAdd
 | `MessageAdded(assistant)` | `store.append(assistant)` + 更新视图 |
 | `MessageAdded(tool)` | `store.append(tool)` + 更新视图 |
 | `MessageAdded(summary)` | `store.append(summary)` + 更新视图 |
-| `Session::rewind_last_user_turn` | 回退 `Agent` 内存 + `store.truncate(去 system 长度)` |
+| `Session::rewind_last_user_turn` | 应用层定位最后一条 user → `Agent::truncate_messages`（原子尾截断）+ `store.truncate(去 system 长度)` |
 
 **压缩那条要点**：压缩是**追加一条 summary**，不是重写日志。
 日志形如 `[原始… 旧summary 更原始… 新summary]` 全都留着，
@@ -123,19 +123,24 @@ SDK 的 `run_stream` 对每条入 `self.messages` 的消息都 `yield MessageAdd
 （`Agent::new` 会把 system 现生成置顶）。日志不含 system，故恢复出的工作集必然与
 冷启动一致；`build_agent(Vec::new())` = 全新会话。
 
-**3.3 `rewind` 清理**
+**3.3 `rewind` 清理：原子能力在 SDK，业务判定在应用层**
+
+"回退最后一轮用户消息"是**会话 / UI 业务语义**（谁定义"一轮"、是否连带丢弃其后的
+assistant / tool 链），不该长在 SDK 上。SDK 只提供**原子能力**：
 
 ```rust
-// SDK 侧只回退内存并返回原文（不再截日志）
-pub fn rewind_last_user_turn(&mut self) -> Option<String>;
+// SDK：把工作集尾截断到前 len 条，返回新长度。
+// 维护内部不变量——不越过置顶 system、len 越界自动钳制。
+pub fn truncate_messages(&mut self, len: usize) -> usize;
 
-// 应用层 Session 包一层：回退 Agent 内存 + store.truncate
+// 应用层 Session：定位业务目标 + 回退内存 + 截日志
 pub fn rewind_last_user_turn(&mut self) -> Option<String>;
 ```
 
-日志截尾由应用层 `Session::rewind_last_user_turn` 补上——它调 SDK 的
-`Agent::rewind_last_user_turn` 拿到回退后的 `agent.messages()` 长度（减去置顶的
-system），再 `store.truncate`。"日志怎么截"仍只有一个入口。
+应用层 `Session::rewind_last_user_turn` 自己 `rposition(User)` 找到最后一条用户消息、
+取出原文、调 `Agent::truncate_messages(index)` 回退内存，再据回退后的
+`agent.messages()` 长度（减去置顶 system）`store.truncate`。**SDK 不再有
+`rewind_last_user_turn`**——它只提供"变短"这个原子操作，"截到哪"由上层算。
 
 ---
 
@@ -225,7 +230,7 @@ graph TD
 > 最初 `SessionStore` 契约落在 SDK（`crates/shirley-agent-sdk/src/session/mod.rs`），
 > `Agent` 持有 `session` 字段并在构造 / 写入 / rewind 时同步。多会话重构后，会话被
 > **整体抽离到应用层**：SDK 删除 `session` 模块 / 字段 / `SessionError` 变体，
-> `rewind_last_user_turn` 只回退内存并返回 `Option<String>`；契约与实现同住
+> 原子能力 `truncate_messages` 只回退内存并返回新长度；业务方法 `Session::rewind_last_user_turn` 与契约同住
 > `src/session.rs`，落库改由应用层事件驱动。
 
 1. ~~**`SessionStore` + `SessionError`**~~ ——已落地，**归属 `src/session.rs`**
@@ -234,9 +239,10 @@ graph TD
    `Session::apply_event` 收到即 `store.append`（TUI / desktop 共用路径）。
 3. ~~**恢复接线**~~ ——已落地：`SessionManager` 先 `store.load()` 再
    `factory.build_agent(log)`；`Agent::new` 只把 system 现生成置顶。
-4. ~~**`rewind` 清理**~~ ——已落地：SDK 只留 `rewind_last_user_turn`（返回
-   `Option<String>`）；应用层 `Session::rewind_last_user_turn` 包一层，
-   按回退后的 `agent.messages()` 长度（减 system）`store.truncate`。
+4. ~~**`rewind` 清理**~~ ——已落地：SDK 只留原子能力 `truncate_messages(len)`
+   （尾截断 + 维护不变量，返回新长度）；应用层 `Session::rewind_last_user_turn`
+   自己做业务判定（定位最后一条 user、取原文），再按回退后的 `agent.messages()`
+   长度（减 system）`store.truncate`。
 
 **应用层后端**：`src/session.rs` 的 `JsonlSessionStore` 是真实
 `SessionStore` 实现——每行一条 `Message` 落成 JSONL。

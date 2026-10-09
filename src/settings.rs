@@ -27,7 +27,7 @@
 
 use std::path::{Path, PathBuf};
 
-use shirley_agent_sdk::ModelProtocol;
+use shirley_agent_sdk::{CompressionConfig, ModelProtocol};
 use serde::{Deserialize, Serialize};
 
 /// 全局配置相对 `config_dir` 的位置。
@@ -49,6 +49,58 @@ const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 104858 >> 1;
 #[serde(default, deny_unknown_fields)]
 pub struct FileSettings {
     pub provider: ProviderSettings,
+    /// 上下文压缩策略（配置文件里的 `[compression]` 表）。
+    pub compression: CompressionSettings,
+}
+
+/// 压缩策略配置（配置文件里的 `[compression]` 表）。
+///
+/// 全 `Option`：`None` 表示"这层没管这个键"，合并时让位给更低优先级 / 内置默认。
+/// 默认值即 SDK 的 [`CompressionConfig::default`]（触发 `0.80` / 保留 `0.20` /
+/// 内置摘要模板）。改这里只影响**何时压、保留多少、摘要长什么样**；领域相关的
+/// 取舍仍在 `Agent` 的 `compression_instruction`（`bootstrap.rs`）。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct CompressionSettings {
+    /// 触发阈值（占上下文窗口比例，`0 < r <= 1`）。默认 `0.80`。
+    pub trigger_ratio: Option<f64>,
+    /// 保留尾部的预算口径（占上下文窗口比例，`0 < r < 1`）。默认 `0.20`。
+    pub retain_ratio: Option<f64>,
+    /// 摘要输出模板（追加在 `compression_instruction` 之后）。默认 SDK 模板。
+    pub template: Option<String>,
+}
+
+impl CompressionSettings {
+    /// 合并成 SDK 的 [`CompressionConfig`]：`None` 落回 SDK 默认值。
+    ///
+    /// 非法值（`trigger_ratio` 越界）在这里**夹到合法区间**而不是报错：
+    /// 压缩是后台能力，配错不该阻断启动；夹紧后退化成默认行为。
+    pub fn to_sdk(&self) -> CompressionConfig {
+        let mut config = CompressionConfig::default();
+        if let Some(ratio) = self.trigger_ratio.filter(|r| *r > 0.0 && *r <= 1.0) {
+            config.trigger_ratio = ratio;
+        }
+        if let Some(ratio) = self.retain_ratio.filter(|r| *r > 0.0 && *r < 1.0) {
+            config.retain_ratio = ratio;
+        }
+        if let Some(template) = self.template.as_ref().filter(|t| !t.trim().is_empty()) {
+            config.template = template.clone();
+        }
+        config
+    }
+
+    /// 逐层覆盖：高优先级的 `Some` 压过低优先级。
+    fn merge_into(&mut self, over: CompressionSettings) {
+        if over.trigger_ratio.is_some() {
+            self.trigger_ratio = over.trigger_ratio;
+        }
+        if over.retain_ratio.is_some() {
+            self.retain_ratio = over.retain_ratio;
+        }
+        if over.template.is_some() {
+            self.template = over.template;
+        }
+    }
 }
 
 /// 模型服务连接配置（配置文件里的 `[provider]` 表）。
@@ -116,7 +168,9 @@ impl FileSettings {
 }
 
 /// 合并后的最终配置。字段都已落定，`main.rs` 直接消费。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// 不派生 `Eq`：`compression.trigger_ratio` 是 `f64`，只有 `PartialEq`。
+#[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub protocol: ModelProtocol,
     pub base_url: String,
@@ -124,6 +178,8 @@ pub struct Settings {
     pub models_url: Option<String>,
     pub model: String,
     pub context_window_tokens: u64,
+    /// 压缩策略（已落定，可直接 `to_sdk()` 交给 `Agent`）。
+    pub compression: CompressionSettings,
 }
 
 /// 配置装载错误。
@@ -160,11 +216,18 @@ impl Settings {
 
         // 低优先级在前，逐层覆盖。文件层取其 `[provider]` 表，env 层本就是一个表。
         let merged = merge_all([
-            global.map(|s| s.provider),
-            workspace.map(|s| s.provider),
+            global.as_ref().map(|s| s.provider.clone()),
+            workspace.as_ref().map(|s| s.provider.clone()),
             Some(env_layer),
         ]);
-        Self::finalize(merged)
+
+        // 压缩策略同样逐层覆盖（env 层没有对应键，仅文件两层）。
+        let mut compression = CompressionSettings::default();
+        for layer in [&global, &workspace].into_iter().flatten() {
+            compression.merge_into(layer.compression.clone());
+        }
+
+        Self::finalize(merged, compression)
     }
 
     /// 便捷入口：使用真实的 `config_dir` 与进程环境变量。
@@ -187,7 +250,10 @@ impl Settings {
     /// 缺 `base_url` **不再报错**：那会阻断启动。此时 `base_url` 为空串，
     /// [`Settings::is_configured`] 返回 `false`，应用层据此在 TUI 里引导用户
     /// 走 `/login` 完成配置（见 `main.rs`）。
-    fn finalize(merged: ProviderSettings) -> Result<Self, SettingsError> {
+    fn finalize(
+        merged: ProviderSettings,
+        compression: CompressionSettings,
+    ) -> Result<Self, SettingsError> {
         let base_url = merged
             .base_url
             .filter(|v| !v.trim().is_empty())
@@ -220,6 +286,7 @@ impl Settings {
             models_url: merged.models_url.filter(|v| !v.trim().is_empty()),
             model,
             context_window_tokens,
+            compression,
         })
     }
 }

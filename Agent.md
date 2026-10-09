@@ -34,7 +34,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | `docs/adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 |
 | `docs/responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件（**已实现**） |
 | `docs/anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / 流式分片聚合 / usage 语义（**已实现**） |
-| `docs/todo.md` | 任务账本 `todo`：模型自维护、跨压缩存活的任务状态 / 每轮末尾注入（**已实现**） |
+| `docs/todo.md` | 任务账本 `todo`：模型自维护、跨压缩存活的任务状态 / 每轮末尾注入（**已实现**；账本在应用层 `src/todo.rs`，SDK 只留通用接缝 `ContextProvider`） |
 | `docs/testing.md` | SDK 单测策略、缓存命中率基准 |
 | `docs/plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 |
 | `docs/tool-lifecycle.md` | 工具生命周期：`ToolContext` 归 `ToolManager` / `on_register`（created）/ `on_unregister`（destroy）/ `unregister`（**已实现**） |
@@ -73,7 +73,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 - `tool`（宏）、`ToolManager`、`Tool`、`ToolDefinition`、`ToolError`、`ToolContext`
 - `sandbox`（`Sandbox` / `SandboxSpec` / `SandboxOutput` / `SandboxBackend` / `ProcessBackend` / `SandboxError` / `NetworkPolicy` / `Capabilities`）
 - `workspace`（`WorkSpace` / `WorkspaceError`）
-- `todo`（`TodoStore` / `TodoTool` / `TodoUpdate` / `TodoStep` / `TASK_STATE_HEADER`）——压缩的配套任务账本
+- `ContextProvider`——**每轮请求末尾附加上下文**的通用接缝（应用层用它注入任务账本等；SDK 不内置具体内容）
 - `token`（`TokenCounter` / `HeuristicCounter` / `count_text` / `count_message` / `count_messages`）——token 记账
 
 真正的私有模块只有 `message` / `adapter` / `runtime`（以及 `tool` 的内部实现）——它们不直接 `pub mod`，只通过上面的 `pub use` re-export 必要类型。改动这些模块时要留意不要破坏对外契约。
@@ -189,14 +189,15 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
 这是整个项目的心脏。按职责拆成几个子模块，`mod.rs` 只负责接线与再导出：
 
 - `agent.rs`：`Agent` 本体（构造、`run` / `run_stream` 主循环、压缩调度）
-- `compaction.rs`：压缩切点与重建（`RETAIN_RATIO` / `CutPlan` / `CompactParts` / `plan_cut` / `background_len`）
+- `compaction.rs`：压缩切点与重建（`CompressionConfig` / `CutPlan` / `CompactParts` / `plan_cut` / `background_len`）
+- `context.rs`：每轮请求末尾的附加上下文接缝（`ContextProvider`）
 - `event.rs`：对外事件与运行结果（`AgentEvent` / `RunResult` / `StopReason`）
 - `error.rs`：顶层错误收敛（`AgentError` + `SdkError`）
 - `prompt.rs`：系统提示词（`SystemPrompt` / `SystemPromptContext`）
 
 `CompactParts` 的契约测试移到了 `crates/shirley-agent-sdk/tests/runtime_compaction.rs`（集成测试，只依赖公开 API）。
 
-- `Agent::new` 是 `bon` builder：`model_config` / `system_prompt` / `working_dir` / `messages` / `tools` / `compression_instruction`。**SDK 不持有会话**：无 `session` 字段，落库 / 恢复全归应用层（见 `docs/session.md`）
+- `Agent::new` 是 `bon` builder：`model_config` / `system_prompt` / `working_dir` / `messages` / `tools` / `compression_instruction` / `compression_config` / `context_provider`。**SDK 不持有会话**：无 `session` 字段，落库 / 恢复全归应用层（见 `docs/session.md`）。**SDK 也不内置任务账本**（已移到应用层）——它只提供 `context_provider` 接缝
 - `system_prompt` 类型是 `SystemPrompt`（不是 `String`）：既接受固定字符串（`From<String>` / `From<&str>`），也接受**函数** `Fn(&SystemPromptContext) -> String`。函数形式让提示词按运行时上下文动态生成——`SystemPromptContext` 目前携带 `working_dir`。`working_dir` 是独立 builder 参数，构造时会用它解析一次提示词
 - `run()` 是 `run_stream()` 的薄封装，只等最后一个 `Finished`
 - 运行参数热切换接缝（应用层指令落地用，均不重建 `Agent`）：`set_model(model)` 只换模型名；`set_provider(base_url, api_key)` 换端点与密钥（与前者对称，`/login` 用）；`unregister_tool(name)` 运行期注销工具（触发其 `on_unregister`，与 `ToolManager::register` 对称）。这几条是 SDK 为应用层指令新增的接缝，模型配置的其余字段原样保留。**`switch_session` 已从 SDK 移除**（多会话重构，`docs/multi-session.md` 决策 9），**`SessionStore` 契约与 `session` 字段也已移出 SDK**（`docs/session.md`）——"哪个会话活跃"是应用层编排，SDK 不再有"当前会话"这个概念，也不持有会话日志；每个 `Agent` 对应一份固定工作集，切换由应用层 `SessionManager.active` 指针完成，落库由应用层事件驱动
@@ -207,10 +208,11 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
 
 **上下文压缩**（这块最容易改坏）：
 
-- `should_schedule_compression` 在 `(input + output) * 100 >= limit * 80` 时置 `compression_pending`，用整数比较避免浮点精度问题
+- `should_schedule_compression` 在本轮 `(input + output) >= limit * trigger_ratio`（默认 `0.80`）时置 `compression_pending`，用放大 10000 倍的定点整数比较避免浮点精度问题
 - `active_messages()` 找到**最后一个** `ContextSummary`，只保留开头的 system 消息 + 从 summary 开始的消息
 - `compress_context()` 把压缩指令作为 system 追加，要求模型输出纯文本摘要，非空且无 tool_calls 才算成功，否则报 `CompressionError`
-- 摘要内容有**结构契约**：`compaction.rs` 的 `COMPACTION_TEMPLATE` 定义了 XML 块（`current_goal` / `hard_constraints` / `decisions` / `progress` / `open_questions` / `compacted_range`），`compress_context` 会把它追加到调用方的 `compression_instruction` 之后。模板**不含** `next_step`、并显式禁止推演——修的就是"压缩器编造用户没提过的下一步"（`docs/compaction.md` 5.3）
+- 摘要内容有**结构契约**：`COMPACTION_TEMPLATE` 定义了 XML 块（`current_goal` / `hard_constraints` / `decisions` / `progress` / `open_questions` / `compacted_range`），`compress_context` 会把它追加到调用方的 `compression_instruction` 之后。模板**不含** `next_step`、并显式禁止推演——修的就是"压缩器编造用户没提过的下一步"（`docs/compaction.md` 5.3）。**模板可配置**：`CompressionConfig.template`（默认即 `COMPACTION_TEMPLATE`），应用层经 `[compression]` 表覆盖
+- **压缩策略可配置**：`CompressionConfig { trigger_ratio, retain_ratio, template }`（默认 `0.80` / `0.20` / `COMPACTION_TEMPLATE`），经 `Agent` builder 的 `compression_config` 传入；`retain_budget` 与 `should_schedule_compression` 都读它。SDK 只管策略参数，领域取舍仍在 `compression_instruction`（见 `docs/compaction.md` 六之补）
 - 压缩成功后用 `CompactParts::rebuild` 重建 `self.messages`：**系统提示词不保留、不复制**——它由 `Agent` 单独持有（`system_prompt` 字段），每次重建都 `system_message()` 重新生成一条再置顶（函数形式的提示词会被**重新解析**，因此工作目录 / 项目指南的最新状态会反映进来）。`rebuild` 只返回 `[新 ContextSummary] + current_task + remain`
 - 压缩失败会中断整个 stream，UI 侧会显示成错误
 
@@ -271,15 +273,21 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
 
 ---
 
-**5. 任务账本（todo）** — `crates/shirley-agent-sdk/src/todo/`（`docs/todo.md`）
+**5. 任务账本（todo）** — `src/todo.rs`（**应用层**，`docs/todo.md`）
 
 压缩的配套能力：压缩把对话压成摘要后，模型容易忘记自己做到哪。todo 记录
-"我做到哪了"。定位：**compaction 的自然配套，SDK 内部能力，应用层无感**——
-在 `Agent::new` 里自动注册工具、自动注入。
+"我做到哪了"。
+
+**归属修正**：账本**已从 SDK 移到应用层**。"记什么、怎么催、注入什么文案"是
+coding agent 这个产品的取舍，不是通用基础能力。SDK 只保留一个与业务无关的通用
+接缝——`ContextProvider`（`runtime/context.rs`）：`Agent` 组装每轮请求时调它，
+把返回文本作为一条 system **追加在末尾**。账本只是该接缝的一个应用层实现。
 
 | 文件 | 职责 |
 | --- | --- |
-| `mod.rs` | `TodoStore`（`Arc<Mutex<TaskState>>`）+ `TodoUpdate` / `TodoStep`（补丁入参）+ `TodoTool`（手写 `Tool`，持有 `Arc<TodoStore>`）+ `TASK_STATE_HEADER` + 单测 |
+| `src/todo.rs`（应用层） | `TodoStore`（`Arc<Mutex<TaskState>>`）+ `TodoStatus` + `TodoUpdate` / `TodoStep`（补丁入参）+ `TodoTool`（手写 `Tool`，持有 `Arc<TodoStore>`）+ `TodoContextProvider`（`impl ContextProvider`）+ `TASK_STATE_HEADER` / `TODO_NAG_REMINDER` + 单测 |
+| `src/bootstrap.rs`（应用层） | `build_agent` 每个 `Agent` 新建一份 `Arc<TodoStore>`，注册 `TodoTool` 并作为 `context_provider` 注入 `TodoContextProvider`（两者共享同一 `Arc`） |
+| `runtime/context.rs`（SDK） | 通用接缝 `ContextProvider`；`agent.rs` 在 `active_messages()` 末尾调用它 |
 
 核心设计（`docs/todo.md` 二、三个核心决策）：
 
@@ -287,9 +295,10 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
 - **不进 `self.messages`，每轮作为 system 追加在末尾注入**：账本单独持有，压缩碰不到它，天然跨压缩存活；注入位置选**末尾**是因为追加不动前面的前缀，账本稳定时前缀缓存照常命中（`responses-api.md` 里"system 原位保留"正是为这个）。代价是模型每次调 `todo` 会让"账本那条 system 之后"的前缀失效——这是"每轮可见"的固有代价，用"放末尾 + 只写变化"压到最小。三个适配器都能处理任意位置 system（ChatCompletions 原样输出 / Responses 原位保留 / Anthropic 摘到顶层 `system`）。
 - **补丁语义**：`goal` 设置替换、`steps` **整体替换**（清单短，每轮重发全量天然自纠）、`add_findings` / `add_open_questions` **追加**、`clear` 重置；未提供的字段保持原样。
 - **渲染成 XML**（`<task_state>` / `<goal>` / `<steps>` / `<findings>` / `<open_questions>`）：空账本不注入；`&` / `<` / `>` 转义；`MAX_RENDER_CHARS = 4000` 超限截断并显式标注（防账本自己垄断上下文）。
-- **切换会话清空**：会话切换由应用层 `SessionManager` 完成（每个会话自持独立 `Agent`），旧会话的任务账本随其 `Agent` 一并搁置，**天然不残留**——无需（也再无）`Agent::switch_session` 里的显式清空。
+- **nag 冷启动护栏**：空账本连续多轮未建时注入 `TODO_NAG_REMINDER`（`TODO_NAG_AFTER_ROUNDS = 3`）——空账本没有 header 可注入，模型开局缺一条明确触发指令。计数由 `TodoContextProvider` 的 `AtomicUsize` 维护（不再由 runtime 计）。
+- **切换会话清空**：会话切换由应用层 `SessionManager` 完成（每个会话自持独立 `Agent` + 独立 `TodoStore`），旧会话的任务账本随其 `Agent` 一并搁置，**天然不残留**。
 
-实现位置：`todo/mod.rs`（数据 + 工具 + 单测）、`runtime/agent.rs`（持有 `Arc<TodoStore>`、注册、`active_messages()` 末尾注入）。对外 re-export `TASK_STATE_HEADER` / `TodoStep` / `TodoStore` / `TodoTool` / `TodoUpdate`。已知缺口见 `docs/todo.md` 第七节（无持久化 / 无自动清理 / 注入即失前缀缓存 / 模型可能不用）。
+已知缺口见 `docs/todo.md` 第七节（无持久化 / 无自动清理 / 注入即失前缀缓存 / 模型可能不用）。
 
 ---
 
@@ -335,7 +344,7 @@ cargo test -p shirley-agent-sdk    # 只跑 SDK 测试
 cargo clippy --all-targets         # 静态检查
 ```
 
-测试分布（应用层约 95 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`read.rs` 10 个、`session.rs` 10 个、`models.rs` 4 个、`web_search.rs` 11 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`tool_lifecycle.rs` 5 个、`tool_context.rs` 5 个、`runtime_compaction.rs` 20 个、`system_prompt_contract.rs` 4 个（`session_contract.rs` 已随 session 抽离删除）。
+测试分布（应用层约 102 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`read.rs` 10 个、`session.rs` 10 个、`models.rs` 4 个、`web_search.rs` 11 个、`todo.rs` 7 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`tool_lifecycle.rs` 5 个、`tool_context.rs` 5 个、`runtime_compaction.rs` 20 个、`system_prompt_contract.rs` 4 个（`session_contract.rs` 已随 session 抽离删除）。
 
 ---
 
@@ -345,13 +354,13 @@ cargo clippy --all-targets         # 静态检查
 
 - 完整 ReAct 循环（含流式）：`ChatCompletions` / `Responses` / `AnthropicMessages` 三协议均已适配
 - 工具注册、参数 schema 生成、并发工具调用
-- 上下文自动压缩（80% 阈值触发）
+- 上下文自动压缩（默认 80% 阈值触发，阈值 / 保留比例 / 摘要模板均可配置）
 - usage 统计 + 缓存命中率（区分"未上报"）
 - 能跑的 TUI：流式增量渲染、思考显示、工具参数展开、输入历史、滚动、压缩状态提示
 - 进程沙盒框架（spec / 后端抽象 / degraded 上报 / 超时）
 - 工作区路径越界校验
 - 统一错误契约（`ErrorKind` / `SdkError`）
-- 任务账本：`todo` 工具（模型自维护）+ 每轮末尾注入（跨压缩存活），`Agent::new` 自动注册；多会话下账本随各会话独立 `Agent` 天然隔离
+- 任务账本（**应用层**）：`todo` 工具（模型自维护）+ `TodoContextProvider` 每轮末尾注入（跨压缩存活），由 `bootstrap::build_agent` 每会话注册并接线；多会话下账本随各会话独立 `Agent` / `TodoStore` 天然隔离。SDK 只提供通用接缝 `ContextProvider`
 
 **明确没做的**：
 

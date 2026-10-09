@@ -148,7 +148,7 @@ pub struct App {
     /// `/rewind` 已确认的回溯点：被编辑消息的 UI `items` 下标。
     ///
     /// 回溯只作用于**最后一条用户消息**（`docs/session.md` 一.决策 4），
-    /// 因此只需记 UI 下标；Agent 侧回退由 `rewind_last_user_turn` 确定性完成。
+    /// 因此只需记 UI 下标；Agent 侧回退由 `Session::rewind_last_user_turn` 确定性完成。
     /// 下次提交前先回退到这里，再作为全新一轮发送。
     rewind_target: Option<usize>,
     /// 输入框提示语覆盖：指令打开的编辑态（如回溯编辑）用它说明"Enter 重发 / Esc 取消"。
