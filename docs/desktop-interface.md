@@ -162,9 +162,79 @@ shiwen 的 `AiConversationSurface` 把**转写区 + 输入框**一起包在
 「连续工具调用收集到一起」：shiwen 的 `FreeChatAssistantMessage` 只把**用户可见**的执行项
 （`pending` / 审批中 / 带 `entity_url` 的完成项）单独成卡，其余**全部**塞进一个
 `AiToolActivityDisclosure` 折叠区，渲染成一行「查看处理过程 · N 项」。Shirley 没有 entity / 审批渲染，
-所以**所有**执行项都归入折叠区（`AssistantMessage.tsx`：`executions` 非空就生成单个
-`tool-activity` item），连续的工具调用被收成一行，而不是每个调用铺一张卡。
+所以执行项都归入折叠区，连续的工具调用被收成一行，而不是每个调用铺一张卡。
 `AiToolActivityDisclosure` 内部仍按 `content_offset` 排序、并对连续失败做聚合（`toolErrorUtils`）。
+**折叠区的落点见 4.3.4**：不再全部堆在正文顶部，而是按调用点与正文交错。
+
+### 4.3.3 markdown 渲染对标 TUI（**已落地**）
+
+4.3.1 补 `@source` 只解决了「utility 类没被编进产物」——streamdown 的默认样式本身
+仍偏「营销页」气质（`text-3xl` 标题、`bg-muted` 行内代码、`my-4`/`space-y-4` 大间距），
+而且它依赖一组 **shadcn 式 token**，Shirley 的 `tokens.css` 并不完整。所以
+「desktop markdown 不如 TUI 优雅」是**两层问题**，4.3.1 只修了第一层。本小节修第二层：
+**不再追求与 shiwen 逐像素一致，而是直接对标 TUI（`src/interface/markdown.rs`）的排版与配色**。
+
+三个具体 bug（都已修）：
+
+1. **`--color-sidebar` 未定义**。streamdown 把代码块 / 表格外层容器画成 `bg-sidebar` +
+   `border-sidebar`，Shirley 的 `tokens.css` 没有这一项 → 这些类解析为空，容器**没底色、没边框**。
+   修复：`tokens.css` 补 `--color-sidebar`（light `#f1f1ee` / dark `#20201e`，取 inset 同系）。
+2. **`bg-muted` 语义冲突**。Shirley 把 `--color-muted` 当**文本灰**（`#676763`），
+   而 streamdown 拿 `bg-muted` 当**浅色底**（行内代码、表头）→ 变成「深灰底 + 深色字」，对比度极差。
+   修复：在 `index.css` 里把行内代码改回浅色 inset 底 + 细边框（`[data-streamdown="inline-code"]`），
+   表头底色同理。
+3. **标题被 `twMerge` 放大**。`AiMarkdown.tsx` 的 `h1/h2/h3` 覆写用
+   `cn("... text-title-sm ...", className)`，streamdown 传入的 `text-3xl`/`text-2xl` 在**后**，
+   `twMerge` 后置者胜出 → 标题过大。修复：不靠 `twMerge` 斗优先级，直接在
+   `index.css` 用 `[data-streamdown^="heading-"]` 逐级收敛字号（H1 1.25rem → H4+ 0.8125rem），
+   并把 H4–H6 降为 muted 色。
+
+其余对齐（写在 `web/src/styles/index.css` 的 `[data-ai-markdown]` 作用域内，**不影响应用其它 UI**）：
+
+| 元素 | TUI（`markdown.rs`） | desktop 覆盖 |
+| --- | --- | --- |
+| 块间距 | 块间约一行 | `[data-ai-markdown] > * > * + *` 统一 `0.75rem`（清掉 `my-4`/`mt-6`） |
+| 行内代码 | 黄色前景 | 浅色 inset 底 + 细边框，同号字 |
+| 代码块 | 边框 + 语言标签 + 暗色 | 外层 `sidebar` 底 + `line` 边框；body 用 `canvas` 底 |
+| 引用块 | `│` 竖线 + 斜体 + 暗色 | `border-left: 2px line-strong` + italic + muted |
+| 表格 | `│` / `─┼─` 网格 | 表头 `inset` 底、单元格 `line` 边框 |
+| 链接 | 蓝色下划线 | `--color-link` + underline |
+| 分割线 | `─` 暗色 | `line` 色、`0.75rem` 上下距 |
+
+> 这些规则**未放进 Tailwind layer**（写在 `@layer utilities` 之后），因此能稳定压过
+> streamdown 编进 utilities 层的默认类——这是「用 CSS 覆盖第三方组件默认样式」的常规做法，
+> 不依赖 `twMerge` 的先后顺序。改 `AiMarkdown.tsx` 的 `BASE_COMPONENTS` 时记得：
+> 组件层字号会被这里的 CSS 再盖一次，两者要一起看。
+
+### 4.3.4 工具调用按位置交错 + 思考折叠（**已落地**）
+
+对标 TUI 的**线性消息流**。TUI（`app.rs`）把一轮回复拆成有序的 `Item`：
+「🧠 思考」块 → 正文 → 工具组（`Item::Tools`），按发生顺序排列，而不是把工具都堆在一处。
+desktop 原先相反：`AssistantMessage.tsx` 把该轮**所有** `executions` 合成**一个**
+`AiToolActivityDisclosure`，挂在 `contentOffset = executions[0]?.content_offset` 上——而
+`content_offset` 根本没被填充（恒 `undefined` → 0），于是**所有工具调用都堆在正文顶部**；
+`reasoning_delta` 更是被 `App.tsx` 直接 `break` 丢弃。两处都修了：
+
+**① 工具按调用点与正文交错。** `AiMessageTimeline` 本就按 `contentOffset` 把 items 与正文
+切片交错——只是上游没喂对数据。现在 `App.tsx` 用**同步累加器** `assistantContent` 记录本轮
+已累积的正文，在 `tool_started` 时把 `content_offset = 码点长度(assistantContent)` 写进执行项
+（`AiToolExecution.content_offset` 字段本来就有，只是没人填）。`AssistantMessage.tsx` 再按
+`content_offset` 把 `executions` **分组**，每组生成一个 `AiToolActivityDisclosure` item——同一
+调用点的连续工具收进同一折叠区，不同调用点则各自落到正文对应位置。于是渲染顺序变成
+「正文片段 → 工具折叠区 → 正文片段 → …」，与 TUI 一致。
+
+> offset 口径必须统一：`AiMessageTimeline` 用 `Array.from(content)` 按**码点**切分，所以
+> `App.tsx` 算 offset 也用码点（导出的 `codePointLength`），否则 emoji / 代理对会错位。
+> 累加器用闭包局部变量而非读 `messages` state，是因为 `setState` 异步、事件回调里读不到即时值。
+
+**② 思考用折叠区展示。** `reasoning_delta` 不再丢弃，累积进 `turnData[id].reasoning`；
+`AssistantMessage` 在**正文之上**（`contentOffset: 0`）生成一个 `ReasoningDisclosure`——
+`@/ui/collapsible` + `Brain`/`ChevronDown` 图标，收起时一行「思考过程」（流式中显示「正在思考」），
+展开显示完整思考文本（`border-l-2` 竖线 + muted 色，呼应 TUI 的暗色斜体思考块）。默认**收起**，
+不喧宾夺主。
+
+**状态归并**：`App.tsx` 把原 `toolRuns: Record<id, AiToolExecution[]>` 换成
+`turnData: Record<id, { reasoning, executions }>`，一次 assistant 轮次的思考与工具同源管理。
 
 ### 4.4 要保留的（用户真正喜欢的「聊天交互和 UI」）
 

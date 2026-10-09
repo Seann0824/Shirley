@@ -31,6 +31,8 @@ To read a file, use the `read_file` tool rather than `cat` in bash:
 - Reserve `cat` for small files whose full contents are genuinely needed.
 
 Treat terminal output as part of the limited model context. Avoid commands that produce large amounts of irrelevant output.
+
+For any multi-step task, first break it down with the `todo` tool: set the goal and the step checklist before you act, keep exactly one step in progress, and record what each step found (conclusions, locations, decisions, open questions) so you never redo work. The ledger survives context compaction.
 ";
 
 /// 解析 coding agent 的工作区根目录。
@@ -118,6 +120,16 @@ mod tests {
             text.contains(&dir.display().to_string()),
             "应包含工作目录: {text}"
         );
+    }
+
+    #[test]
+    fn render_instructs_todo_ledger_usage() {
+        // 多步任务应先拆解、并用 todo 账本记录每步状态与结论。
+        // 这条断言防止以后改提示词时把这段指令弄丢。
+        let dir = tempfile_dir("render_todo");
+        let text = render(&dir);
+        assert!(text.contains("`todo` tool"), "应指示使用 todo 工具: {text}");
+        assert!(text.contains("break it down"), "应先拆解任务: {text}");
     }
 
     #[test]

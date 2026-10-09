@@ -24,6 +24,13 @@ use std::sync::{Arc, Mutex};
 /// 与 `recall` 的注入截断同一思路）。
 const MAX_RENDER_CHARS: usize = 4000;
 
+/// 连续多少轮没更新账本就注入 nag 提醒。
+///
+/// 取 3 与开源实现（learn-claude-code）一致：太早会打断正常节奏，
+/// 太晚则漂移已经发生。这是"漂移提醒"的阈值；账本为空时的冷启动护栏
+/// 由 `runtime` 另行判断（见 `Agent::active_messages`）。
+pub const TODO_NAG_AFTER_ROUNDS: usize = 3;
+
 /// 任务账本的内存存储。
 ///
 /// 与 [`crate::recall::RecallStore`] 同款：`Arc` 共享（runtime 与 `todo` 工具各持一份），
@@ -40,10 +47,23 @@ struct TaskState {
     open_questions: Vec<String>,
 }
 
+/// 一步的完成状态（对齐 Claude Code `TodoWrite` 的三态）。
+///
+/// `InProgress` 是"防漂移"的锚点：同一时刻至多一步处于此态，逼模型
+/// 做完一件再开下一件，而不是并行铺开、最后全都没收尾。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TodoStatus {
+    #[default]
+    Pending,
+    InProgress,
+    Completed,
+}
+
 #[derive(Debug, Clone)]
 struct Step {
     text: String,
-    done: bool,
+    status: TodoStatus,
 }
 
 /// 账本更新指令（`todo` 工具的入参）。
@@ -72,8 +92,9 @@ pub struct TodoUpdate {
 #[serde(deny_unknown_fields)]
 pub struct TodoStep {
     pub text: String,
+    /// 缺省视为 `pending`。三态见 [`TodoStatus`]；同一时刻至多一步 `in_progress`。
     #[serde(default)]
-    pub done: bool,
+    pub status: TodoStatus,
 }
 
 impl TodoStore {
@@ -90,11 +111,36 @@ impl TodoStore {
         *state = TaskState::default();
     }
 
+    /// 账本是否为空（四个字段全空）。用于 nag 判断：空账本意味着模型
+    /// 还没建立任务状态，需要一条"该建账本了"的提醒。
+    pub fn is_empty(&self) -> bool {
+        let state = self.inner.lock().expect("todo lock poisoned");
+        state.goal.is_none()
+            && state.steps.is_empty()
+            && state.findings.is_empty()
+            && state.open_questions.is_empty()
+    }
+
     /// 应用一次更新，返回更新后的账本渲染文本（空账本返回 `None`）。
     ///
     /// 返回值同时用作 `todo` 工具的调用结果——让模型看到写入后的完整状态，
     /// 确认更新生效、并据此续接。
-    pub fn apply(&self, update: TodoUpdate) -> Option<String> {
+    ///
+    /// 校验失败（同一时刻超过一步 `in_progress`）返回 `Err`，且**不产生任何
+    /// 副作用**——校验先于写入，避免半更新的脏账本。
+    pub fn apply(&self, update: TodoUpdate) -> Result<Option<String>, ToolError> {
+        // 先校验，失败即返回，账本保持原样。
+        if let Some(steps) = &update.steps {
+            let in_progress = steps
+                .iter()
+                .filter(|step| step.status == TodoStatus::InProgress)
+                .count();
+            if in_progress > 1 {
+                return Err(ToolError::ArgumentsError(
+                    "at most one step may be in_progress at a time".into(),
+                ));
+            }
+        }
         {
             let mut state = self.inner.lock().expect("todo lock poisoned");
             if update.clear == Some(true) {
@@ -109,7 +155,7 @@ impl TodoStore {
                     .into_iter()
                     .map(|step| Step {
                         text: step.text,
-                        done: step.done,
+                        status: step.status,
                     })
                     .collect();
             }
@@ -124,7 +170,7 @@ impl TodoStore {
                     .extend(questions.into_iter().filter(|q| !q.trim().is_empty()));
             }
         }
-        self.render()
+        Ok(self.render())
     }
 
     /// 把账本渲染成注入文本；空账本返回 `None`（不注入空内容）。
@@ -139,7 +185,11 @@ impl TodoStore {
         if !state.steps.is_empty() {
             body.push_str("<steps>\n");
             for step in &state.steps {
-                let mark = if step.done { "[x]" } else { "[ ]" };
+                let mark = match step.status {
+                    TodoStatus::Pending => "[ ]",
+                    TodoStatus::InProgress => "[>]",
+                    TodoStatus::Completed => "[x]",
+                };
                 body.push_str(&format!("- {} {}\n", mark, escape(&step.text)));
             }
             body.push_str("</steps>\n");
@@ -182,6 +232,16 @@ impl Default for TodoStore {
 pub const TASK_STATE_HEADER: &str = "Your maintained task ledger (persists across context compaction). \
 Update it with the `todo` tool. Do not repeat work already recorded as done.";
 
+/// 模型连续多轮没更新账本时注入的催促提醒（nag）。
+///
+/// 与 `TASK_STATE_HEADER` 分开：这条只在**空账本**或**久未更新**时出现，
+/// 是"冷启动护栏"——账本为空时没有 header 可注入，模型开局缺一条明确的
+/// 触发指令，靠它补上（见 `docs/todo.md`）。
+pub const TODO_NAG_REMINDER: &str = "<reminder>You have gone several rounds without updating your task \
+ledger. If this is a multi-step task, call the `todo` tool now: set the goal and the step \
+checklist, mark the current step in_progress, and record what you have learned so far. Keep the \
+ledger current as you work.</reminder>";
+
 /// XML 文本转义：防止模型写入的 `<` / `&` 破坏标签结构。
 fn escape(input: &str) -> String {
     input
@@ -205,11 +265,14 @@ impl TodoTool {
             store,
             definition: ToolDefinition {
                 name: "todo".into(),
-                description: "Maintain your own task ledger. Record the goal, the step checklist, \
-                    findings (facts you have learned: file contents, command results, decisions) and \
-                    open questions. The ledger is injected into every request and survives context \
-                    compaction, so keeping it current prevents you from repeating work that was already \
-                    done. Update it whenever you finish a step or learn something worth keeping."
+                description: "Maintain your own task ledger. For any multi-step task, break the \
+                    work down and record it here BEFORE acting: set the goal and the step checklist. \
+                    Mark exactly one step in_progress at a time as you work, mark it completed when \
+                    done, and append findings (facts you have learned: file contents, command results, \
+                    decisions) and open questions. The ledger is injected into every request and \
+                    survives context compaction, so keeping it current prevents you from repeating \
+                    work that was already done. Update it whenever you finish a step or learn \
+                    something worth keeping."
                     .into(),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -220,12 +283,17 @@ impl TodoTool {
                         },
                         "steps": {
                             "type": "array",
-                            "description": "Replace the full step checklist.",
+                            "description": "Replace the full step checklist. Keep at most one step in_progress.",
                             "items": {
                                 "type": "object",
                                 "properties": {
-                                    "text": { "type": "string" },
-                                    "done": { "type": "boolean", "default": false }
+                                    "text": { "type": "string", "description": "What this step does." },
+                                    "status": {
+                                        "type": "string",
+                                        "enum": ["pending", "in_progress", "completed"],
+                                        "default": "pending",
+                                        "description": "Step state. At most one step may be in_progress at a time."
+                                    }
                                 },
                                 "required": ["text"],
                                 "additionalProperties": false
@@ -265,7 +333,7 @@ impl Tool for TodoTool {
                 ToolError::ArgumentsError(format!("invalid tool arguments: {error}"))
             })?;
             let rendered = store
-                .apply(update)
+                .apply(update)?
                 .unwrap_or_else(|| "(task ledger is empty)".to_string());
             serde_json::to_value(format!("task ledger updated:\n{rendered}")).map_err(|error| {
                 ToolError::ExecutionError(format!("failed to serialize tool result: {error}"))
@@ -286,14 +354,14 @@ mod tests {
         let out = store.apply(TodoUpdate {
             goal: Some("实现 todo 工具".into()),
             steps: Some(vec![
-                TodoStep { text: "建模块".into(), done: true },
-                TodoStep { text: "接运行时".into(), done: false },
+                TodoStep { text: "建模块".into(), status: TodoStatus::Completed },
+                TodoStep { text: "接运行时".into(), status: TodoStatus::Pending },
             ]),
             add_findings: Some(vec!["压缩会清空工具输出".into()]),
             add_open_questions: None,
             clear: None,
         });
-        let text = out.expect("非空账本应渲染");
+        let text = out.expect("应用应成功").expect("非空账本应渲染");
         assert!(text.contains("<goal>实现 todo 工具</goal>"));
         assert!(text.contains("- [x] 建模块"));
         assert!(text.contains("- [ ] 接运行时"));
@@ -306,9 +374,9 @@ mod tests {
         let store = TodoStore::new();
         store.apply(TodoUpdate {
             goal: Some("g".into()),
-            steps: Some(vec![TodoStep { text: "s1".into(), done: false }]),
+            steps: Some(vec![TodoStep { text: "s1".into(), status: TodoStatus::Pending }]),
             ..Default::default()
-        });
+        }).unwrap();
         // 只追加一条 finding，goal 与 steps 不受影响。
         store.apply(TodoUpdate {
             add_findings: Some(vec!["f1".into()]),
@@ -349,7 +417,7 @@ mod tests {
         let tool = TodoTool::new(store);
         let output = tool
             .invoke(
-                serde_json::json!({ "goal": "目标", "steps": [{ "text": "步骤", "done": true }] }),
+                serde_json::json!({ "goal": "目标", "steps": [{ "text": "步骤", "status": "completed" }] }),
                 crate::tool::ToolContext::new(),
             )
             .await

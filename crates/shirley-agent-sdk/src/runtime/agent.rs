@@ -39,6 +39,9 @@ pub struct Agent {
     /// 任务账本（`todo` 模块）：模型自己维护、跨上下文压缩存活的任务状态。
     /// SDK 内部能力，应用层无感；`todo` 工具持有同一 `Arc` 的另一份引用。
     todo: Arc<TodoStore>,
+    /// 距上次调用 `todo` 工具已过多少轮（每轮 = 一次含工具调用的 assistant 回合）。
+    /// 达 [`todo::TODO_NAG_AFTER_ROUNDS`] 且账本为空时注入 nag 提醒。
+    rounds_since_todo: usize,
     /// 会话日志（`docs/session.md`）：`None` 表示不落盘（行为与现状一致）。
     ///
     /// 持久化的是**原始 Message 全量日志**；召回库由它派生，不单独落盘。
@@ -95,6 +98,7 @@ impl Agent {
             token_counter: token::HeuristicCounter::new(),
             recall,
             todo,
+            rounds_since_todo: 0,
             session,
         })
     }
@@ -143,6 +147,7 @@ impl Agent {
         self.messages.clear();
         self.recall.clear();
         self.todo.clear();
+        self.rounds_since_todo = 0;
         self.compression_pending = false;
         Self::restore_from_session(&mut self.messages, &self.recall, &session)?;
         self.session = Some(session);
@@ -288,6 +293,8 @@ impl Agent {
         Box::pin(async_stream::try_stream! {
             let client = reqwest::Client::new();
             let mut total_usage = message::Usage::default();
+            // 新一轮任务开始：账本催促计数归零（上一轮的漂移提醒不跨轮）。
+            self.rounds_since_todo = 0;
             if self.compression_pending {
                 yield AgentEvent::CompressionStarted;
                 let (usage, summary) = self.compress_context(&client).await?;
@@ -352,11 +359,15 @@ impl Agent {
                             let response_message = response.message;
                             Self::record(&mut self.messages, &self.session, response_message.clone())?;
                             yield AgentEvent::MessageAdded(response_message.clone());
+                            let mut todo_called = false;
                             let tool_messages = match &response_message {
                                 message::Message::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
                                     let mut tasks = futures::stream::FuturesUnordered::new();
 
                                     for call in tool_calls {
+                                        if call.name == "todo" {
+                                            todo_called = true;
+                                        }
                                         yield AgentEvent::ToolStarted {
                                             call_id: call.id.clone(),
                                             name: call.name.clone(),
@@ -404,6 +415,13 @@ impl Agent {
                                 }
                                 _ => vec![],
                             };
+                            // nag 计数：本轮调了 `todo` 就归零，否则累计。
+                            // 只在真的执行了工具（非收尾轮）时累计。
+                            if todo_called {
+                                self.rounds_since_todo = 0;
+                            } else if !tool_messages.is_empty() {
+                                self.rounds_since_todo = self.rounds_since_todo.saturating_add(1);
+                            }
                             is_finished = tool_messages.is_empty();
 
                             if is_finished {
@@ -499,6 +517,13 @@ impl Agent {
         if let Some(ledger) = self.todo.render() {
             active.push(message::Message::System {
                 content: format!("{}\n\n{ledger}", todo::TASK_STATE_HEADER),
+            });
+        } else if self.rounds_since_todo >= todo::TODO_NAG_AFTER_ROUNDS {
+            // 冷启动护栏：账本为空且连续多轮未建，注入一条明确的催促——
+            // 空账本没有 header 可注入，模型开局缺的就是这条触发指令。
+            // 追加在末尾，与账本注入同位，不动前缀。
+            active.push(message::Message::System {
+                content: todo::TODO_NAG_REMINDER.to_string(),
             });
         }
         active
@@ -658,7 +683,7 @@ mod tests {
             goal: Some("实现 todo 工具".into()),
             steps: Some(vec![crate::todo::TodoStep {
                 text: "接运行时".into(),
-                done: false,
+                status: crate::todo::TodoStatus::Pending,
             }]),
             ..Default::default()
         });

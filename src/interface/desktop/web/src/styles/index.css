@@ -68,6 +68,121 @@
   background-color: color-mix(in srgb, var(--color-ink) 35%, transparent);
 }
 
+/* ------------------------------------------------------------------ */
+/* Markdown 渲染：对标 TUI（src/interface/markdown.rs）的排版与配色。
+   目标不是「还原 shiwen」，而是让 desktop 的 markdown 像 TUI 一样：
+   层级分明、间距紧凑、代码/引用/表格有清晰边界，且颜色克制。
+   streamdown 默认类（text-3xl 标题、bg-muted 行内代码、my-4/space-y-4
+   的大间距）偏「营销页」气质，这里统一收敛。
+   说明：所有规则都限定在 [data-ai-markdown] 之内，不影响应用其它 UI。 */
+
+/* 顶层块间距：streamdown 在内容外再套一层 `.space-y-4` 容器（块是其
+   直接子元素，即 [data-ai-markdown] 的孙元素），且各块自带 my-4 / mt-6。
+   TUI 的块间距约一行，这里统一压到 0.75rem，长回复更接近终端的紧凑感。 */
+[data-ai-markdown] > * > * {
+  margin-top: 0;
+  margin-bottom: 0;
+  margin-block-start: 0;
+  margin-block-end: 0;
+}
+[data-ai-markdown] > * > * + * {
+  margin-top: 0.75rem;
+  margin-block-start: 0.75rem;
+}
+
+/* 标题：TUI 用「彩色 + 加粗 + 逐级缩小」。这里改为中性墨色 + 字重 +
+   逐级字号，避免 streamdown 的 text-3xl / text-2xl 过大。 */
+[data-ai-markdown] [data-streamdown^="heading-"] {
+  margin: 0;
+  color: var(--color-ink);
+  font-weight: 600;
+  line-height: 1.35;
+}
+[data-ai-markdown] [data-streamdown="heading-1"] { font-size: 1.25rem; }
+[data-ai-markdown] [data-streamdown="heading-2"] { font-size: 1.0625rem; }
+[data-ai-markdown] [data-streamdown="heading-3"] { font-size: 0.9375rem; }
+[data-ai-markdown] [data-streamdown="heading-4"],
+[data-ai-markdown] [data-streamdown="heading-5"],
+[data-ai-markdown] [data-streamdown="heading-6"] {
+  font-size: 0.8125rem;
+  color: var(--color-muted);
+}
+/* 首个块不额外上边距（去掉 streamdown 的 mt-6）。 */
+[data-ai-markdown] > :first-child [data-streamdown^="heading-"] { margin-top: 0; }
+
+/* 段落：与正文同号，行高放宽以利阅读。 */
+[data-ai-markdown] p {
+  margin: 0;
+}
+
+/* 行内代码：streamdown 用 bg-muted（Shirley 的 muted 是深灰文字色），
+   会变成「深灰底 + 深色字」。改用浅色 inset 底 + 细边框，对比度正常。 */
+[data-ai-markdown] [data-streamdown="inline-code"] {
+  padding: 0.1em 0.35em;
+  border: 1px solid var(--color-line);
+  border-radius: 0.3rem;
+  background: var(--color-inset);
+  color: var(--color-ink);
+  font-size: 0.85em;
+}
+
+/* 列表：TUI 用悬挂缩进、行距紧凑。 */
+[data-ai-markdown] [data-streamdown="unordered-list"],
+[data-ai-markdown] [data-streamdown="ordered-list"] {
+  padding-left: 1.25rem;
+}
+[data-ai-markdown] [data-streamdown="list-item"] {
+  padding-top: 0.125rem;
+  padding-bottom: 0.125rem;
+}
+
+/* 引用块：TUI 是「竖线 + 斜体 + 暗色」。streamdown 的左边框用
+   border-muted-foreground/30，这里换成更强的 line-strong 保证可见。 */
+[data-ai-markdown] [data-streamdown="blockquote"] {
+  margin: 0.75rem 0;
+  padding-left: 0.875rem;
+  border-left: 2px solid var(--color-line-strong);
+  color: var(--color-muted);
+  font-style: italic;
+}
+[data-ai-markdown] [data-streamdown="blockquote"] p {
+  margin: 0;
+}
+
+/* 分割线：与 line token 对齐，去掉过大的上下间距。 */
+[data-ai-markdown] [data-streamdown="horizontal-rule"] {
+  margin: 0.75rem 0;
+  border-color: var(--color-line);
+}
+
+/* 链接：TUI 用蓝色下划线。streamdown 默认 text-primary（近黑），
+   改回 link 色，保留下划线。 */
+[data-ai-markdown] [data-streamdown="link"] {
+  color: var(--color-link);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+/* 表格：表头用浅底，单元格边框用 line token，和 TUI 的表格网格一致。 */
+[data-ai-markdown] [data-streamdown="table-header"] {
+  background: var(--color-inset);
+}
+[data-ai-markdown] [data-streamdown="table-header-cell"],
+[data-ai-markdown] [data-streamdown="table-cell"] {
+  border-color: var(--color-line);
+}
+
+/* 代码块：外层容器（含语言标签 / 复制按钮）用 sidebar 底 + 边框，
+   现已定义 --color-sidebar，确保底色与边框都出来。 */
+[data-ai-markdown] [data-streamdown="code-block"] {
+  background: var(--color-sidebar);
+  border-color: var(--color-line);
+}
+[data-ai-markdown] [data-streamdown="code-block-body"] {
+  background: var(--color-canvas);
+  border-color: var(--color-line);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

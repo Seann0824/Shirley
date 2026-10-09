@@ -17,7 +17,13 @@ export function findTurnUserMessage<T extends { role: "user" | "assistant" }>(
   return undefined;
 }
 
-function normalizedOffset(offset: number | null | undefined, contentLength: number) {
+/** 与时间线统一的偏移口径：按**码点**计长（`Array.from` 迭代码点），
+ *  避免 emoji / 代理对被算成 2 个 UTF-16 单元而错位。 */
+export function codePointLength(content: string) {
+  return Array.from(content).length;
+}
+
+export function normalizedOffset(offset: number | null | undefined, contentLength: number) {
   if (typeof offset !== "number" || !Number.isFinite(offset)) return 0;
   return Math.min(Math.max(Math.trunc(offset), 0), contentLength);
 }

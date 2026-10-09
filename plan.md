@@ -218,3 +218,5 @@ Implement context compaction.
 我们就能调用它实现的持久话函数?不管的sqlite还是postgresql还是mysql甚至说jsonl,我理解我们sdk不需要关注具体持久话技术细节
 
 有的文件太大了，AI 一读就触发压缩上下文。
+
+我发现compact 后，AI 总是重新探索，然后又压缩又重新探索。核心的问题是没有记录 todo？之前做的事情在压缩后被忘记了。

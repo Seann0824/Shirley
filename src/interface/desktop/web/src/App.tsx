@@ -5,6 +5,7 @@ import {
 } from "@/components/ai/AiConversationTranscript";
 import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { AssistantMessage } from "@/components/AssistantMessage";
+import { codePointLength } from "@/components/ai/AiMessageTimeline";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { FileChips } from "@/lib/file-mentions/FileChips";
 import { FileMentionPopover } from "@/lib/file-mentions/FileMentionPopover";
@@ -18,9 +19,9 @@ const nextId = () => `m${++messageSeq}`;
 
 export function App() {
   const [messages, setMessages] = useState<AiTranscriptMessage[]>([]);
-  // 工具执行按 assistant 消息 id 分组；放 state 才能触发重渲染
-  // （直接改 ref 数组不会重渲染——曾踩过）。
-  const [toolRuns, setToolRuns] = useState<Record<string, AiToolExecution[]>>({});
+  // 每个 assistant 轮次的「思考文本 + 工具执行」按 assistant 消息 id 分组；
+  // 放 state 才能触发重渲染（直接改 ref 数组不会重渲染——曾踩过）。
+  const [turnData, setTurnData] = useState<Record<string, AssistantTurnData>>({});
   const [input, setInput] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -51,14 +52,20 @@ export function App() {
       { id: nextId(), role: "user", content: text, status: "complete", references },
       { id: assistantId, role: "assistant", content: "", status: "streaming" },
     ]);
-    setToolRuns((prev) => ({ ...prev, [assistantId]: [] }));
+    setTurnData((prev) => ({ ...prev, [assistantId]: { reasoning: "", executions: [] } }));
 
     const patchMessage = (patch: (m: AiTranscriptMessage) => AiTranscriptMessage) => {
       setMessages((prev) => prev.map((m) => (m.id === assistantId ? patch(m) : m)));
     };
-    const patchTools = (patch: (tools: AiToolExecution[]) => AiToolExecution[]) => {
-      setToolRuns((prev) => ({ ...prev, [assistantId]: patch(prev[assistantId] ?? []) }));
+    const patchTurn = (patch: (turn: AssistantTurnData) => AssistantTurnData) => {
+      setTurnData((prev) => ({
+        ...prev,
+        [assistantId]: patch(prev[assistantId] ?? { reasoning: "", executions: [] }),
+      }));
     };
+    // 本轮正文的同步累加器：工具事件要靠它算 content_offset（流式 offset =
+    // 该工具调用发生时正文已累积的码点数），而 setMessages 是异步的、读不到即时值。
+    let assistantContent = "";
 
     const bridge = await agentBridge();
     handleRef.current = await bridge.send(
@@ -67,27 +74,34 @@ export function App() {
       (event) => {
         switch (event.type) {
           case "content_delta":
+            assistantContent += event.text;
             patchMessage((m) => ({ ...m, content: m.content + event.text }));
             break;
           case "reasoning_delta":
-            // 第一期思考流不单独成区，先并入正文之后的处理留待 M3。
+            patchTurn((turn) => ({ ...turn, reasoning: turn.reasoning + event.text }));
             break;
           case "tool_started":
-            patchTools((tools) => [
-              ...tools,
-              {
-                id: event.call_id,
-                call_id: event.call_id,
-                tool_name: event.name,
-                status: "running",
-                summary: "",
-                input: safeParseArgs(event.arguments),
-              },
-            ]);
+            patchTurn((turn) => ({
+              ...turn,
+              executions: [
+                ...turn.executions,
+                {
+                  id: event.call_id,
+                  call_id: event.call_id,
+                  tool_name: event.name,
+                  status: "running",
+                  summary: "",
+                  // 记录调用发生点：与正文交错渲染（对标 TUI 的线性消息流）。
+                  content_offset: codePointLength(assistantContent),
+                  input: safeParseArgs(event.arguments),
+                },
+              ],
+            }));
             break;
           case "tool_finished":
-            patchTools((tools) =>
-              tools.map((tool) =>
+            patchTurn((turn) => ({
+              ...turn,
+              executions: turn.executions.map((tool) =>
                 tool.call_id === event.call_id
                   ? {
                       ...tool,
@@ -97,7 +111,7 @@ export function App() {
                     }
                   : tool,
               ),
-            );
+            }));
             break;
           case "error":
             setError(event.message);
@@ -155,7 +169,8 @@ export function App() {
               <AssistantMessage
                 content={message.content}
                 streaming={message.status === "streaming"}
-                executions={toolRuns[String(message.id)] ?? []}
+                reasoning={turnData[String(message.id)]?.reasoning ?? ""}
+                executions={turnData[String(message.id)]?.executions ?? []}
               />
             ) : (
               <div className="flex min-w-0 flex-col gap-1.5">
@@ -213,6 +228,12 @@ export function App() {
     </div>
   );
 }
+
+/** 一个 assistant 轮次的展示数据：思考文本 + 工具执行（按调用点带 content_offset）。 */
+type AssistantTurnData = {
+  reasoning: string;
+  executions: AiToolExecution[];
+};
 
 function safeParseArgs(args: string): Record<string, unknown> | undefined {
   try {
