@@ -1,47 +1,21 @@
 **Shirley 技术方案 · 会话持久化与恢复**
 
 这份文档把 `plan.md` 里那句"聊到一半 AI 模型挂了，我不敢关闭窗口"落地成方案。
-它承接 `recall.md`：那份文档把召回库的持久化留了空接口，本文档补上——
-但结论是 **recall 不需要自己的持久化层**，它由会话日志派生。
 
 **范围声明**：本轮只定 SDK 侧契约与恢复语义。具体存储后端（SQLite / JSONL / …）
 由应用层实现，SDK 不关心。持久化的是**原始 Message 全量日志**，
-**不持久化 chunk、不持久化 BM25 索引、不持久化 system 提示词**。
+**不持久化 system 提示词**（system 恢复时现生成）。
 
 ---
 
 **一、核心决策（先定调）**
 
-**决策 1：持久化的是原始 Message，不是召回数据。**
+**决策 1：持久化的是原始 Message。**
 
-这是本文档最重要的一条，也是它和 `recall.md` "持久化层留空"那句的关系所在：
+持久化的是**原始 Message 全量日志**：日志就是唯一数据源，恢复时由它重建工作集。
+不存在"日志和别的派生结构对不上"的事务问题——因为只有一份数据。
 
-- `recall.md` 说召回库"将来在 `flush` / `load` 的位置扩展"——方向没错，
-  但**扩展点不在召回库，在会话日志**。
-- recall 的语料（被压缩掉的对话段）**本来就是消息历史的派生视图**，
-  不是独立数据源。持久化原始 Message，恢复时重新派生即可。
-- 因此 **recall 不落盘**：`RecallStore` 不持有 `RecallBackend`，
-  chunk 与 `Bm25Index` 都是内存里的派生结构。
-
-推论：**一个数据源（日志），两个视图（工作集 / 召回语料），天然一致。**
-不存在"日志和召回库对不上"的事务问题——因为只有一份数据。
-
-**决策 2：索引不持久化，恢复时重建。**
-
-`Bm25Index` 是 `Chunk` 的**纯函数**（`add` 是确定性的 tokenize + 计数），
-同样输入必得同样输出。持久化索引：
-
-- 省不掉内存驻留——BM25 查询必须在内存里算（遍历 postings、算 idf、排序）；
-- 省不掉读回 chunk——恢复时总要把原文读回来；
-- 只省下一次**确定性、微秒级**的重建；
-- 却引入"索引与 chunk 两份数据要同步"的一致性负担，且把存储后端
-  绑死成"必须支持倒排查询"（JSONL 直接做不到）。
-
-**结论：落盘的是 chunk 原文（事实），不是索引（派生）。**
-将来要提升检索质量，换的是 `Retriever` 实现（embedding / FTS5），
-不是把 BM25 的倒排结构冻进数据库。`Retriever` trait 已经为这个留了口子。
-
-**决策 3：system 提示词不入日志，恢复时重新生成。**
+**决策 2：system 提示词不入日志，恢复时重新生成。**
 
 `system_prompt` 可能是函数形式，按 `SystemPromptContext`（工作目录）动态解析，
 内容会随 `Agent.md`、工作目录变化。压缩重建时就是这么做的
@@ -142,15 +116,10 @@ else if let Some(store) = session:
     let log = store.load()?
     let log = strip_system(&log)                  // system 不入日志；防御性剔除
     self.messages = rebuild_working_set(log)      // [最后一条 ContextSummary 起]
-    self.recall.index(chunk_messages(&before_last_summary(&log)))
 ```
 
 - `rebuild_working_set` **复用现有 `active_messages()` 的规则**（找最后一条
   `ContextSummary`，只保留它之后的）——恢复和工作集切分是同一套规则，不重复实现。
-- `before_last_summary(&log)`：取最后一条 summary **之前**的原始消息。
-  多次压缩时，更早的 summary 本身是 `ContextSummary`，`chunk.rs` 已规定
-  "ContextSummary 不入库"，所以对这段整体做 `chunk_messages` 会自动跳过它们，
-  召回语料 = 全部被压过的原始对话，完整。
 
 **"重置语义"的确切含义**：`messages` 非空时，session 必须被对齐到 `messages`。
 最简实现是 `truncate(messages.len())`；但若 session 内容与 messages 可能完全不同
@@ -211,22 +180,19 @@ graph LR
 ```mermaid
 graph TD
     C["触发压缩 80%"] --> S["plan_cut 切三段"]
-    S --> IDX["recall.index(chunk_messages(to_compress))"]
-    IDX --> CLR["strip_tool_outputs"]
+    S --> CLR["strip_tool_outputs"]
     CLR --> LLM["调模型生成摘要"]
     LLM --> RB["self.messages 重建<br/>system + 新summary + 保留"]
     RB --> AP["session.append(新summary)"]
 ```
 
-**4.3 恢复（一个数据源，两个视图）**
+**4.3 恢复（一个数据源，一个视图）**
 
 ```mermaid
 graph TD
     L["session.load() 全量日志"] --> SYS["剔除 system（防御）"]
     SYS --> WS["工作集视图<br/>最后一条 summary 起"]
-    SYS --> RC["召回语料视图<br/>summary 之前 → chunk_messages"]
     WS --> MSG["self.messages"]
-    RC --> IDX["RecallStore.index"]
     MSG --> SYSG["system_message() 现生成置顶"]
 ```
 
@@ -241,8 +207,7 @@ graph TD
   └── (无 System)                            ← system 恢复时现生成
 
 内存派生（不落盘）:
-  ├── self.messages   = [system] + [最后summary起]
-  └── RecallStore     = chunk_messages(最后summary之前) + Bm25Index
+  └── self.messages   = [system] + [最后summary起]
 ```
 
 ---
@@ -253,9 +218,7 @@ graph TD
    `Agent.md`。与压缩重建同一套规则。
 2. **日志只追加，唯一例外是 rewind 截尾。** 不存在中间空洞。
 3. **`ContextSummary` 是日志里的一等消息**，压缩只追加不重写。
-4. **recall 完全由日志派生**，不落盘，`RecallStore` 不持 `RecallBackend`。
-5. **索引是 chunk 的纯函数**，恢复时重建，不落盘。
-6. **构造后 session 镜像 messages**；`messages` 空则从 session 恢复，
+4. **构造后 session 镜像 messages**；`messages` 空则从 session 恢复，
    非空则重置 session。二者只能有一个是真相。
 7. **`self.messages` 的每次变更都同步 session**，写入收敛到私有方法。
 
@@ -263,11 +226,8 @@ graph TD
 
 **六、与既有文档的关系**
 
-- **`recall.md`**：那份说"持久化层留空接口"。本文档给出结论——
-  扩展点不在召回库，在会话日志；recall 由日志派生。`Retriever` trait 保持不变，
-  仍是"换检索算法"的扩展点。
-- **`compaction.md`**：压缩的 `<compacted_range>` 钩子、"恢复路径二分"
-  依然成立。本文档补充：压缩后的 summary 要进日志，否则恢复时工作集缺一截。
+- **`compaction.md`**：压缩的 `<compacted_range>` 钩子依然成立。
+  本文档补充：压缩后的 summary 要进日志，否则恢复时工作集缺一截。
 - **`roadmap.md`**：把"会话持久化与恢复"从 P2 提升的依据——它是长任务的地基
   （`plan.md`：模型挂了不敢关窗口），且是 rewind 突破"压缩后不可回溯"的前提。
 - **`architecture.md`**：表格里"会话持久化 | `runtime` + 应用层 | `Agent` 不落盘 | 未做"
@@ -284,8 +244,6 @@ graph TD
    `build()` 因此返回 `Result`，调用方用 `?` / `unwrap`）。
 3. ~~**`rewind` 清理**：删 `rewind(len)`，`rewind_last_user_turn` 同步截 session~~
    ——已落地（只留 `rewind_last_user_turn`；`session_len_for` 换算掉置顶的 system）。
-4. ~~**恢复时 recall 派生**：`chunk_messages` 灌回 `self.recall`~~
-   ——已落地（构造时按最后一条 summary 切分）。
 
 **应用层后端**：`src/session.rs` 的 `JsonlSessionStore` 是第一个真实
 `SessionStore` 实现——每行一条 `Message` 落成 JSONL。
@@ -299,7 +257,6 @@ graph TD
 - 不传 session 时，全部现有测试与行为不变；
 - 传 session、跑若干轮、重启（新建 Agent 复用同一 store），
   `messages` 与重启前一致（system 除外，system 应反映最新上下文）；
-- 压缩后重启，AI 仍能 recall 到压缩前的内容（语料由日志重建）；
 - rewind 后重启，被丢弃的消息**不复活**（日志同步截尾）；
 - 恢复出的 system 是**当前**工作目录 / `Agent.md`，不是旧的。
 
@@ -329,11 +286,8 @@ graph TD
 `Agent::switch_session(Arc<dyn SessionStore>)` 曾是唯一新增的 SDK 对外方法，
 与 `/model` 的 `set_model` 对称：模型配置、系统提示词、工作目录、工具、压缩指令
 **原样保留**，只替换"当前会话"这一件事。语义与 `Agent::new` 的恢复路径**共用同一套规则**
-（`restore_from_session`）：清空内存工作集与召回库 → 从新日志重建 → 按当前上下文
+（`restore_from_session`）：清空内存工作集 → 从新日志重建 → 按当前上下文
 现生成 system 置顶。因此"切换出来的工作集"与"冷启动恢复出来的工作集"必然一致。
-
-配套：`RecallStore::clear()`——切换时必须清空召回库，否则旧会话的 chunk 会污染
-新会话的检索（召回语料是会话的派生视图，换会话即换语料）。
 
 **决策 3：会话目录（`SessionCatalog`）收敛"会话从哪来"，与 `ModelCatalog` 对称。**
 
@@ -408,7 +362,7 @@ listbox），提供新建（可命名）/ 切换 / 重命名（内联编辑）/ 
 
 **验收口径**：
 
-- 切换会话后，工作集与召回语料都只反映新会话；旧会话内容不串入；
+- 切换会话后，工作集只反映新会话；旧会话内容不串入；
 - 切换后后续轮次的 `append` 落到新日志，旧日志不被改动；
 - 切换出的工作集与"直接冷启动到该会话"完全一致（共用恢复规则）；
 - 旧单文件日志在首次启动时被收编，历史不丢；

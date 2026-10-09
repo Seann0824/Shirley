@@ -1,6 +1,6 @@
 # shirley-agent-sdk
 
-A business-agnostic Agent SDK for Rust. It packages the building blocks needed to run an LLM agent — message model, tool system, protocol adapters, a ReAct runtime, context compaction, recall, process sandboxing, and workspace isolation.
+A business-agnostic Agent SDK for Rust. It packages the building blocks needed to run an LLM agent — message model, tool system, protocol adapters, a ReAct runtime, context compaction, a task ledger, process sandboxing, and workspace isolation.
 
 The [Shirley](https://github.com/Seann0824/Shirley) TUI coding agent is built on top of it.
 
@@ -12,7 +12,7 @@ The [Shirley](https://github.com/Seann0824/Shirley) TUI coding agent is built on
 - **Tool system** — a `#[tool]` attribute macro turns a plain async function into a model-callable tool (JSON Schema generated automatically)
 - **Protocol adapters** — a unified `invoke` interface with three wire protocols: ChatCompletions, Responses, and Anthropic Messages (all with streaming)
 - **Context compaction** — history is compacted automatically as the context window fills up; the summary is never shown to the user
-- **Recall** — compacted conversational content goes into a BM25 index the model can query on demand
+- **Task ledger** — a `todo` tool lets the model maintain its own progress state, injected every turn so it survives compaction
 - **Sandbox & workspace** — a unified process-execution abstraction (with timeouts and degradation reporting) and workspace path confinement
 - **Unified error contract** — `ErrorKind` / `SdkError`; retry decisions are based on the kind, never on message text
 - **Session persistence** — a `SessionStore` trait supporting restore and rewind

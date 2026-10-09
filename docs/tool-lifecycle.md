@@ -177,12 +177,12 @@ impl ToolManager {
 
 > **落地结论**：`web_search` 选了**形态 B**（保留 `#[tool]` 函数宏 + 注册钩子写 `ctx`），
 > 而不是形态 A 的手写 `impl Tool`——因为"用户不碰工具细节"是硬约束（见 `docs/tool-macro.md`）。
-> 形态 A 仍适用于 `recall`（它需要 `impl Tool` 来持有 `Arc<RecallStore>`，且是 SDK 内部工具）。
+> 形态 A 仍适用于 `todo`（它需要 `impl Tool` 来持有 `Arc<TodoStore>`，且是 SDK 内部工具）。
 > 下面两条形态都保留，作为"值怎么进钩子"的通用说明。
 
-- **形态 A：工具私有状态 → 工具自己持有（`RecallTool` 的既有先例）**
+- **形态 A：工具私有状态 → 工具自己持有（`TodoTool` 的既有先例）**
 
-  `RecallTool::new(store)` 就是工具直接持有 `Arc<RecallStore>`、无视 `ToolContext`——**这个形态已存在且干净**。`web_search` 适合走这条：
+  `TodoTool::new(store)` 就是工具直接持有 `Arc<TodoStore>`、无视 `ToolContext`——**这个形态已存在且干净**。`web_search` 适合走这条：
 
   ```rust
   pub struct WebSearchTool { state: WebSearchState, definition: ToolDefinition }

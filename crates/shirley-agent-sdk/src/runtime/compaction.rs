@@ -23,7 +23,7 @@ Faithfully restate the instructions and constraints the user explicitly gave, pr
 <decisions>Key decisions already made and the reasons behind them</decisions>
 <progress>Work completed so far and the current state</progress>
 <open_questions>Unresolved problems or open questions</open_questions>
-<compacted_range>The earlier conversation has been compacted; exact details are not in this summary. When needed: file contents and command results can be re-read or re-run; things the user said, agreements, and decisions can be retrieved with the recall tool</compacted_range>"#;
+<compacted_range>The earlier conversation has been compacted; exact details are not in this summary. When needed: file contents and command results can be re-read or re-run</compacted_range>"#;
 
 /// 压缩切点算出的三段内容。
 ///

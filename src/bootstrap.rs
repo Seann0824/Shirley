@@ -11,7 +11,7 @@
 //! 多会话（`docs/multi-session.md` 决策 5）：装配不再是「造一个 `Agent`」，
 //! 而是产出 [`AgentFactory`]——**一个能按会话反复造 `Agent` 的工厂**。
 //! 每个会话各自 [`AgentFactory::build_agent`] 出一个独立 `Agent`（模型配置 /
-//! 工具定义由工厂复用，`recall` / `todo` / 会话日志在 `Agent::new` 内部按实例
+//! 工具定义由工厂复用，`todo` / 会话日志在 `Agent::new` 内部按实例
 //! 隔离），从而支持多会话并行。
 
 use std::path::PathBuf;
@@ -104,7 +104,7 @@ impl AgentFactory {
 
     /// 按会话日志造一个独立 `Agent`（`docs/multi-session.md` 决策 5）。
     ///
-    /// 模型配置 / 系统提示词 / 工具定义由工厂复用（`clone`），`recall` / `todo` /
+    /// 模型配置 / 系统提示词 / 工具定义由工厂复用（`clone`），`todo` /
     /// 会话日志在 `Agent::new` 内部按实例隔离——因此不同会话的 `Agent` 互不共享
     /// 可变状态，可真正并行。恢复语义（从日志重建工作集 + 现生成 system 置顶）
     /// 复用 `Agent::new` 的既有路径，切换出来的工作集必然与冷启动恢复一致。

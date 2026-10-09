@@ -65,7 +65,7 @@ fn is_cjk(code: u32) -> bool {
 
 /// 是否是 CJK **表意**字符（汉字、假名、谚文，不含标点）。
 ///
-/// `pub(crate)`：`recall::tokenize` 复用同一份 Unicode 范围做切词信号，
+/// `pub(crate)`：保留 CJK 单字判定，供计数口径使用，
 /// 但它把标点当分隔符——分类必须只有一处定义，两个用途各自组合，
 /// 避免"改了一处忘了另一处"的漂移。
 pub(crate) fn is_cjk_word_char(code: u32) -> bool {

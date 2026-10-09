@@ -98,7 +98,7 @@ active_messages()            →  开头的 system + 从最后一个 ContextSumm
 
 **论文给出的两条出路**（附录 A 结尾）：① 把 sketch 维护在 LLM 上下文之外（工具/记忆）；
 ② 把 sketch 原始状态放进上下文 + 解码指令。
-→ ①正是我们 recall 的方向，也是 5.5 节把 recall 从"可选"升级为"理论必需"的依据。
+→ ①是我们任务账本（`todo.md`）的方向。
 
 ---
 
@@ -272,14 +272,14 @@ self.messages = [system（Agent 重新生成）] + [新 ContextSummary] + messag
 <decisions>已做的关键决策及原因</decisions>
 <progress>已完成 / 当前状态</progress>
 <open_questions>尚未解决的问题</open_questions>
-<compacted_range>此前对话已压缩，精确细节（文件内容/命令输出/错误/符号列表）不在摘要中，可通过 recall 查询</compacted_range>
+<compacted_range>此前对话已压缩，精确细节（文件内容/命令输出/错误/符号列表）不在摘要中，需要时请重新读取或执行</compacted_range>
 ```
 
 要点：
 
 - **删掉"下一步"**。要不要有 next step 由用户说了算，不由压缩器编。
 - 强调"只提炼已发生的内容，不得推演、不得补充未出现的计划"。
-- `<compacted_range>` 是给召回留的钩子——**理论必需**，因为论文证明精确信息在 `G` 下必然丢失，
+- `<compacted_range>` 提示模型"被压段不再可见、需要时自行重建"——因为论文证明精确信息在 `G` 下必然丢失，
   不是 prompt 能补救的。
 - 摘要用 **system 角色**（当前 `encode_messages` 已把 `ContextSummary` 降级为 system），保持"背景信息"语义。
 
@@ -292,12 +292,6 @@ self.messages = [system（Agent 重新生成）] + [新 ContextSummary] + messag
   保留原消息继续本轮任务。
 - 连续失败 2 次 → 本轮内不再尝试压缩，依赖供应商侧截断并上报 `ContextUsage`。
 - **抑制抖动**：压缩后若摘要本身仍接近阈值，不再立刻重复压缩。
-
-**5.5 recall 的定位**
-
-论文把"精确信息丢失"证明为必然，因此 recall 不是锦上添花，而是压缩方案的一部分。
-但完整 recall 涉及检索/RAG，工作量大。**这一轮先只做结构与模板**，在
-`<compacted_range>` 里留提示占位；recall 作为独立下一步（见第八节）。
 
 ---
 
@@ -335,7 +329,7 @@ self.messages = [system（Agent 重新生成）] + [新 ContextSummary] + messag
 **八、不做的事 / 开放问题**
 
 - **不做程序化 selection 策略**（论文证明 `G` 严格强于 `S`，且最优依赖查询分布）。
-- **不引入向量库 / 外部记忆存储**（与 `roadmap.md` 第五节一致），recall 的检索方案单独设计。
+- **不引入向量库 / 外部记忆存储**（与 `roadmap.md` 第五节一致）。
 - **不做 adaptive adversary 下的最优性**（论文本身是 open problem）。
 - **多次压缩的质量衰减**（论文 open problem）：我们只能做到"不叠摘要 + 分层冻结"，无法给保证。
 - **L3 精确计数不实现**：只留 `TokenCounter` trait 接口，等有明确需求（如供应商提供 `/count_tokens`）再落地。

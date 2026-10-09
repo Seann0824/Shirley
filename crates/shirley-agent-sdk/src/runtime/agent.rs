@@ -5,7 +5,6 @@ use super::prompt::{SystemPrompt, SystemPromptContext};
 use crate::adapter;
 use crate::adapter::ModelRequest;
 use crate::message;
-use crate::recall::{self, RecallStore};
 use crate::todo::{self, TodoStore};
 use crate::session::SessionStore;
 use crate::token;
@@ -33,9 +32,6 @@ pub struct Agent {
     compression_pending: bool,
     // L1 估算 + L2 校准状态（见 `token` 模块）
     token_counter: token::HeuristicCounter,
-    /// 召回存储（`docs/recall.md`）：被压缩掉对话段的内存存档 + BM25 检索。
-    /// SDK 内部能力，应用层无感；recall 工具持有同一 `Arc` 的另一份引用。
-    recall: Arc<RecallStore>,
     /// 任务账本（`todo` 模块）：模型自己维护、跨上下文压缩存活的任务状态。
     /// SDK 内部能力，应用层无感；`todo` 工具持有同一 `Arc` 的另一份引用。
     todo: Arc<TodoStore>,
@@ -61,21 +57,17 @@ impl Agent {
         #[builder(into)] compression_instruction: Option<String>,
         #[builder(into)] session: Option<Arc<dyn SessionStore>>,
     ) -> Result<Self, AgentError> {
-        // 召回是 compaction 的自然配套（`docs/recall.md` 决策 2）：存储与工具共享 Arc，
-        // recall 工具在此自动注册进 ToolManager，应用层完全无感。
-        let recall = Arc::new(RecallStore::new());
-        let _ = tools.register(recall::RecallTool::new(recall.clone()));
         // 任务账本是压缩的配套能力：账本跨压缩存活，模型用 `todo` 工具自己维护。
         let todo = Arc::new(TodoStore::new());
         let _ = tools.register(todo::TodoTool::new(todo.clone()));
 
         // 恢复语义（`docs/session.md` 三.2）：`messages` 与 `session` 二者只有一个真相源。
         //   - `messages` 非空 → 以它为准（真相在调用方传入的消息里）；
-        //   - `messages` 为空且有 `session` → 从日志恢复工作集与召回语料。
+        //   - `messages` 为空且有 `session` → 从日志恢复工作集。
         if messages.is_empty()
             && let Some(store) = &session
         {
-            Self::restore_from_session(&mut messages, &recall, store)?;
+            Self::restore_from_session(&mut messages, store)?;
         }
 
         // 构造时就按工作目录解析一次，把 System 消息置顶（空提示词则不置顶）。
@@ -96,14 +88,13 @@ impl Agent {
             compression_instruction,
             compression_pending: false,
             token_counter: token::HeuristicCounter::new(),
-            recall,
             todo,
             rounds_since_todo: 0,
             session,
         })
     }
 
-    /// 从会话日志恢复工作集与召回语料（`docs/session.md` 三.2）。
+    /// 从会话日志恢复工作集（`docs/session.md` 三.2）。
     ///
     /// `Agent::new`（messages 为空时）用它重建工作集；多会话切换由应用层
     /// 为新会话重新 `build_agent`，走的正是这条恢复路径，因此切换出来的工作集
@@ -112,7 +103,6 @@ impl Agent {
     /// 不置顶 system：调用方负责用 [`Agent::system_message`] 现生成。
     fn restore_from_session(
         messages: &mut Vec<message::Message>,
-        recall: &RecallStore,
         store: &Arc<dyn SessionStore>,
     ) -> Result<(), AgentError> {
         let log = store.load()?;
@@ -121,14 +111,6 @@ impl Agent {
             .into_iter()
             .filter(|m| !matches!(m, message::Message::System { .. }))
             .collect();
-        // 召回语料 = 最后一条 summary 之前的原始消息（更早的 summary 不入库，
-        // 由 `chunk_messages` 自动跳过）——`docs/session.md` 三.2。
-        if let Some(last_summary) = log
-            .iter()
-            .rposition(|m| matches!(m, message::Message::ContextSummary { .. }))
-        {
-            recall.index(recall::chunk_messages(&log[..last_summary]));
-        }
         *messages = log;
         Ok(())
     }
@@ -572,13 +554,9 @@ impl Agent {
         };
         let mut parts = plan.split(&self.messages);
 
-        // 1.5 召回入库 + 工具输出清空（`docs/recall.md` 四 / 五）：
-        //     - 对话类消息（User / Assistant 文本）分块后送进召回库，原文无损保存；
-        //     - 工具输出统一替换为占位标记——AI 走"重建"路径（重新执行获取当前状态）。
-        //       这是 v0 有意的技术债：不可重建的调用（一次性快照）重跑拿不到当时结果。
-        //     注意先入库再清空：recall.index 需要 Tool 的原始 content 做索引视图。
-        self.recall
-            .index(recall::chunk_messages(&parts.to_compress));
+        // 1.5 工具输出清空：工具输出统一替换为占位标记——AI 走"重建"路径
+        //     （重新执行获取当前状态）。这是 v0 有意的技术债：不可重建的调用
+        //     （一次性快照）重跑拿不到当时结果。
         strip_tool_outputs(&mut parts.to_compress);
 
         // 2. 构造压缩请求：待压缩段 + 本轮任务 + 压缩指令。
@@ -652,7 +630,7 @@ impl Agent {
     }
 }
 
-/// 工具结果统一清空为占位标记（`docs/recall.md` 第五节）。
+/// 工具结果统一清空为占位标记（压缩时节省上下文）。
 ///
 /// **不能留空字符串**——模型会把空 content 误读为"执行成功但无输出"，
 /// 占位标记才是"结果被省略、可重新执行获取"的显式信号。

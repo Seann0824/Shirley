@@ -1,6 +1,6 @@
 //! 任务账本（todo）：模型自己维护、跨上下文压缩存活的任务状态。
 //!
-//! 定位：compaction 的配套能力，**SDK 内部持有，应用层无感**——与 [`crate::recall`] 同级。
+//! 定位：compaction 的配套能力，**SDK 内部持有，应用层无感**。
 //!
 //! **为什么需要它**：压缩会清空工具输出、把对话压成有损摘要，模型因此丢失
 //! "我做到哪了、已经知道什么"，于是重新探索、再压缩，形成正反馈回路
@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 /// 账本渲染成注入文本时的字符上限。
 ///
 /// 账本本身也会占上下文，超限截断并显式标注（防它自己垄断上下文，
-/// 与 `recall` 的注入截断同一思路）。
+/// 与注入截断同一思路）。
 const MAX_RENDER_CHARS: usize = 4000;
 
 /// 连续多少轮没更新账本就注入 nag 提醒。
@@ -33,7 +33,7 @@ pub const TODO_NAG_AFTER_ROUNDS: usize = 3;
 
 /// 任务账本的内存存储。
 ///
-/// 与 [`crate::recall::RecallStore`] 同款：`Arc` 共享（runtime 与 `todo` 工具各持一份），
+/// `Arc` 共享（runtime 与 `todo` 工具各持一份），
 /// 内部可变性走 `Mutex`。持久化留空（进程结束即失，与会话日志无关）。
 pub struct TodoStore {
     inner: Mutex<TaskState>,
@@ -253,7 +253,7 @@ fn escape(input: &str) -> String {
 
 /// `todo` 工具：模型维护自己任务账本的唯一入口。
 ///
-/// 手写实现 `Tool`（与 `RecallTool` 同款）：状态（`Arc<TodoStore>`）由工具自己持有，
+/// 手写实现 `Tool`：状态（`Arc<TodoStore>`）由工具自己持有，
 /// 与 runtime 共享同一份 `Arc`，构造时绑定比走 `ToolContext` 注入更直接。
 pub struct TodoTool {
     store: Arc<TodoStore>,

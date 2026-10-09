@@ -46,8 +46,8 @@
 
 - `Agent::run_stream(&'a mut self, ...) -> Stream + Send + 'a` **借用** `self`，
   单个 `Agent` 在类型层面就无法被并发驱动（借用检查器强制）。
-- `recall` / `todo` 都在 `Agent::new` 内部 `Arc::new(...)`，**每个 `Agent` 各一份**——
-  多 `Agent` 并行时召回库 / 任务账本天然隔离，不会串会话。
+- `todo` 在 `Agent::new` 内部 `Arc::new(...)`，**每个 `Agent` 各一份**——
+  多 `Agent` 并行时任务账本天然隔离，不会串会话。
 - 全仓无全局可变状态（`static` / `OnceLock` / `thread_local` 只命中测试锁）。
 
 所以"多会话并行"的正确形态是**每会话一个 `Agent`**，而不是克隆或分时复用。
@@ -63,7 +63,7 @@
 **已经就绪的**：
 
 - `Agent` 可独立构造、无全局态、`Send`；
-- `recall` / `todo` 按实例隔离（`Agent::new` 内 `Arc::new`），并行不串；
+- `todo` 按实例隔离（`Agent::new` 内 `Arc::new`），并行不串；
 - `trait SessionStore: Send + Sync`，`JsonlSessionStore` 内部 `Mutex<File>`，
   单实例 `append` / `load` / `truncate` 互斥；
 - `ToolManager` / `ToolContext` 随 `Agent` 构造，`ToolContext` 是
@@ -307,7 +307,7 @@ SessionCatalog.list()  ──►  [SessionEntry...]  （目录扫描，同步）
 
 **为什么当初会有它**：它是单会话时代的产物——那时一个 `Agent` 只服务一个会话，
 `/session` 要"换会话"最省事的做法就是给 `Agent` 换一份日志源（清空 `messages` /
-`recall` / `todo` → 从新日志恢复 → system 置顶）。它把"应用层的编排动作"
+`todo` → 从新日志恢复 → system 置顶）。它把"应用层的编排动作"
 （切换）错放进了 SDK，因为当时没有 `SessionManager` 承载编排。
 
 **边界要划清（避免误伤）**：
@@ -336,7 +336,7 @@ SessionCatalog.list()  ──►  [SessionEntry...]  （目录扫描，同步）
 **八、边界与不变量**
 
 - **同一会话同一时刻只有一个活动 `Agent`**（决策 1）。这是并行安全的前提：
-  `recall` / `todo` / 会话日志都按会话隔离，不存在跨会话共享的可变状态。
+  `todo` / 会话日志都按会话隔离，不存在跨会话共享的可变状态。
 - **`AgentEvent` 变体语义不变**。多会话不需要给事件加来源标识（决策 2 用
   `Session` 自持通道解决）；将来若确需追加字段，遵守"字段追加、旧消费方
   用 `..` 忽略"的既有约定（`ToolStarted` / `ToolFinished` 当初就是这么加的）。
@@ -374,7 +374,7 @@ SessionCatalog.list()  ──►  [SessionEntry...]  （目录扫描，同步）
 - 同一会话在运行中再次提交被拒绝（不并发驱动同一 `Agent`），错误文案与现状一致；
 - 关闭某个后台会话 / 切换活动指针，不影响其它会话的运行；
 - 超过最大并行数时新任务排队而非失败；
-- 不同会话并行时，各自的召回库 / 任务账本 / 会话日志**互不污染**；
+- 不同会话并行时，各自的任务账本 / 会话日志**互不污染**；
 - （若做决策 3）取消能精确作用于指定会话，其余会话不受影响，
   `StopReason::Cancelled` 被真实产生。
 

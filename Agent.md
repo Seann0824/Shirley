@@ -73,7 +73,6 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 - `tool`（宏）、`ToolManager`、`Tool`、`ToolDefinition`、`ToolError`、`ToolContext`
 - `sandbox`（`Sandbox` / `SandboxSpec` / `SandboxOutput` / `SandboxBackend` / `ProcessBackend` / `SandboxError` / `NetworkPolicy` / `Capabilities`）
 - `workspace`（`WorkSpace` / `WorkspaceError`）
-- `recall`（`Retriever` / `RecallStore` / `RecallTool` / `Chunk` / `ScoredChunk` / `chunk_messages`）——压缩的配套召回库
 - `todo`（`TodoStore` / `TodoTool` / `TodoUpdate` / `TodoStep` / `TASK_STATE_HEADER`）——压缩的配套任务账本
 - `session`（`SessionStore` / `SessionError` / `InMemoryStore`）——会话持久化契约
 - `token`（`TokenCounter` / `HeuristicCounter` / `count_text` / `count_message` / `count_messages`）——token 记账
@@ -223,7 +222,7 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
 - `src/main.rs`：读 `.env`（`dotenvy`），按 `--desktop` / `SHIRLEY_INTERFACE=desktop` 选 `Mode::Tui` / `Mode::Desktop`，然后交给 `bootstrap::AgentFactory::assemble` 装配。**装配逻辑已从 `main.rs` 抽到 `src/bootstrap.rs`**——`AgentFactory` 是 TUI 与桌面界面共享的 LCA（另一个 LCA 是 SDK 的 `Agent`），两个界面拿同一份装配产物、只是渲染方式不同。`AgentFactory::assemble` 做这些事：经 `settings::Settings::load_default()` 装载配置（**不再散读 env**，见下条），构造 `ModelConfig`（`stream(true)` / `thinking(true)` / `reasoning_effort("low")`），算出 `needs_login = !settings.is_configured()`（缺配置不阻断启动），并把模型配置 / 系统提示词 / 工作目录 / 会话目录（`src/session.rs` 的 `FileSessionCatalog`，多会话布局 `.shirley/sessions/<name>.jsonl`）连同该标志交给 `interface::run`。**工厂的产物是"能造 `Agent` 的能力"而非单个 `Agent`**（决策 5）：`build_agent(store)` 每次造一个匿名 `Agent`（工具按需重建，见下）——多会话就多造几个。启动时**惰性开一份空会话**（而非恢复最近修改的旧会话）：此刻只定会话名、**不落盘**，发首条消息才真正建文件（`create_lazy`，Codex 的 UX）；旧的单文件 `.shirley/session.jsonl` 会被 `adopt_legacy` 收编（会话持久化，见 `docs/session.md`）。工作目录由 `prompt::workspace_root()` 决定（`SHIRLEY_WORKSPACE` 优先，否则当前目录）——它**刻意不属于 `settings`**（是"在哪个项目跑"的会话级信息，不是"用户是谁"的配置）
 - `src/settings.rs`：**配置装载（方案 A）**。把"配置从哪来"与"怎么用"解耦，纯应用层、不碰 SDK。优先级 `内置默认 < 全局 config.toml < 工作区 .shirley/config.toml < 环境变量`。配置文件为 TOML，`[provider]` 表含 `protocol` / `base_url` / `api_key` / `models_url` / `model` / `context_window_tokens`（全 `Option`，`deny_unknown_fields`）。全局路径 `<config_dir>/shirley/config.toml`，工作区路径 `<root>/.shirley/config.toml`。环境变量层（`LOCAL_*`）放在**最后**以兼容既有 `.env` 习惯——老用户零改动。`Settings::load` 的环境读取用注入闭包（测试不打全局 env），`load_default` 才用真实 `config_dir` + 进程环境。缺 `base_url` **不再报错、不阻断启动**：`finalize` 落成空串，`Settings::is_configured()` 返回 `false`，应用层据此在 TUI 里自动进入 `/login` 引导用户补齐（见下条）。**也可写**：`save_provider(path, provider)` 先读后改再写（只覆盖传入字段、不动其它键、自动建目录、写完 chmod 600 收紧权限），是 `/login` 的落盘入口
 - `src/prompt.rs`：应用侧系统提示词构造。`build(working_dir)` 返回一个 `SystemPrompt` 函数，每次解析时读取当前工作目录与工作区里的 `Agent.md`，拼成"角色 + 工作区根 + 项目指南"。工作目录明确告诉模型（`plan.md`：AI 不知道工作区就会从根目录乱找），`Agent.md` 提供项目怎么跑、代码怎么组织
-- `src/session.rs`：应用侧会话存储与**会话目录**（`docs/session.md`）。`JsonlSessionStore` 把**原始 Message 全量日志**逐行落成 JSONL，实现 SDK 的 `SessionStore`（`append` / `load` / `truncate`，同步签名）。**不含 system**（恢复时现生成）、不含 chunk / BM25 索引（召回库由日志派生）。`truncate` 先写临时文件再原子替换、并重开追加句柄（注意：内部 `rewrite_locked` 需在已持锁下调用，否则非重入锁会死锁）。多会话（`/session`）：`SessionCatalog` trait（`list` / `open` / `create` / `create_named` / `create_lazy` / `rename` / `delete`，与 `ModelCatalog` 对称；后四者带默认实现，不支持元数据的后端免改）+ `FileSessionCatalog`（一份会话 = `.shirley/sessions/<name>.jsonl`，目录扫描即列出，`adopt_legacy` 收编旧单文件）+ `SessionEntry { name, label, preview, modified_ms, turns }`（`preview` 取首条用户消息前 40 字，`modified_ms` = 文件 mtime 用于降序，`turns` = 用户轮数）+ `EmptySessionCatalog`（`App::new` 兜底）。**标题持久化为 sidecar `<name>.title`**（纯文本，不污染只存 Message 的 JSONL）；`rename` **只改标题、不改文件名 / 内容**（Codex `/rename` 语义，回避已打开句柄指向旧 inode 的问题），`delete` 删日志并 best-effort 删 sidecar。**惰性新建**：`create_lazy` 返回 `LazySessionStore`——构造时定名但**不落盘**，首次 `append`（首条消息）才物化（落 JSONL + 写标题 sidecar）；物化前 `load` / `truncate` 视为空 / 空操作。这样"打开应用没聊"不留空会话文件
+- `src/session.rs`：应用侧会话存储与**会话目录**（`docs/session.md`）。`JsonlSessionStore` 把**原始 Message 全量日志**逐行落成 JSONL，实现 SDK 的 `SessionStore`（`append` / `load` / `truncate`，同步签名）。**不含 system**（恢复时现生成）。`truncate` 先写临时文件再原子替换、并重开追加句柄（注意：内部 `rewrite_locked` 需在已持锁下调用，否则非重入锁会死锁）。多会话（`/session`）：`SessionCatalog` trait（`list` / `open` / `create` / `create_named` / `create_lazy` / `rename` / `delete`，与 `ModelCatalog` 对称；后四者带默认实现，不支持元数据的后端免改）+ `FileSessionCatalog`（一份会话 = `.shirley/sessions/<name>.jsonl`，目录扫描即列出，`adopt_legacy` 收编旧单文件）+ `SessionEntry { name, label, preview, modified_ms, turns }`（`preview` 取首条用户消息前 40 字，`modified_ms` = 文件 mtime 用于降序，`turns` = 用户轮数）+ `EmptySessionCatalog`（`App::new` 兜底）。**标题持久化为 sidecar `<name>.title`**（纯文本，不污染只存 Message 的 JSONL）；`rename` **只改标题、不改文件名 / 内容**（Codex `/rename` 语义，回避已打开句柄指向旧 inode 的问题），`delete` 删日志并 best-effort 删 sidecar。**惰性新建**：`create_lazy` 返回 `LazySessionStore`——构造时定名但**不落盘**，首次 `append`（首条消息）才物化（落 JSONL + 写标题 sidecar）；物化前 `load` / `truncate` 视为空 / 空操作。这样"打开应用没聊"不留空会话文件
 - `src/interface/selection.rs`：**鼠标选区**（`docs` 无独立文档）。左键按下记锚点、拖动延伸、松开即把选中文本写入系统剪贴板（`arboard`）——**全程只用鼠标，不需按复制键**。选区用屏幕单元格坐标表示，`highlight` 给缓冲区叠反色（渲染在一切之上），`text` 按符号显示宽度前进提取文本（跳过宽字符的续格，避免 CJK 之间插入假空格）。`Tui::draw` 在有选区时留存当帧缓冲区快照，松开左键时据此提取
 - `src/interface/tui.rs`：主循环用 `tokio::select!`，把**前台会话**的 `Agent` 通过 `SessionManager::take_agent(name)`（按会话名）移出去、`tokio::spawn` 到独立任务里跑，结果通过 `mpsc` 通道回传，完成后 `restore_agent(name, agent)` 放回来——每个会话各持一个 `Agent`，后台会话的上下文不因前台切换而丢。**直接消费 `AgentEvent`**（不再有 `AgentUpdate` 中间类型）。收到事件后统一走 `App::apply_event`（薄包装：转发到 `sessions.active_mut().apply_event` 并失效 `message_cache`）——**累加逻辑收敛到 `Session`，TUI 与 desktop 共享同一条事件处理路径**，UI 只读结果
 - `src/interface/app.rs`：纯状态机，`Item::Message` / `Item::Tools` 两种条目；`Role` 有 User / Assistant / Summary / Error；usage、context 用量、输入历史（上/下键回放）都缓存在这里；`toggle_thinking` / `toggle_tool_args` 控制展示
@@ -273,42 +272,23 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
 
 ---
 
-**5. 召回** — `crates/shirley-agent-sdk/src/recall/`（`docs/recall.md`）
+**5. 任务账本（todo）** — `crates/shirley-agent-sdk/src/todo/`（`docs/todo.md`）
 
-压缩丢失信息的退路。定位：**compaction 的自然配套，SDK 内部能力，应用层无感**。
-
-| 文件 | 职责 |
-| --- | --- |
-| `mod.rs` | 门面：`Retriever` trait（可扩展点，BM25 现在实现、embedding 以后加）+ `RecallStore`（内存存储，持久化留空）+ `RecallTool`（手写 `Tool`，因为要持有 `Arc<RecallStore>`） |
-| `tokenize.rs` | 分词：CJK 按字 / ASCII 按词。Unicode 范围与 `token` 模块**共享** `token::is_cjk_word_char`（唯一一处定义），但口径不同——记账含 CJK 标点（占体积），切词不含（标点是分隔符，入词元会污染打分） |
-| `bm25.rs` | 倒排索引 + 经典 BM25 打分。`k1=1.2` / `b=0.5`（低于经典 0.75，缓解 chunk 长度差异极端的失真） |
-| `chunk.rs` | 分块：**只有对话性内容入库**——`UserChunk`（一条 User）独立成块；无 `tool_calls` 的 `Assistant` 正文成块。带 `tool_calls` 的 `Assistant` 与全部 `Tool` 结果**不入库**（走重建路径，决策 1）。`reasoning_content` 也不入索引视图（过程性思维会污染 IDF） |
-
-核心设计（`docs/recall.md` 一、两个核心决策）：
-
-- **重建与召回二分，由 AI 判断**："能不能重建"不是工具属性是调用属性（`cat x` vs `git commit`），AI 看到具体调用后自己决定。工具类消息**不入召回库**；对话类（User / Assistant 文本）入库。
-- **索引自动，检索 AI 触发**：`compress_context` 把被压段里的对话性内容分块入库；recall 作为工具自动注册进 `ToolManager`（`Agent::new` 里做的，应用层一行没改），AI 生成 query 自己决定何时调。不做每轮自动检索。
-- **召回无损**：chunk 原文保存，返回原文 + 相关度元信息，**绝不二次摘要**（单条超 4000 字符时截断并显式标注，是防垄断的兜底，不是摘要）。
-- **工具输出统一清空**：压缩时 Tool.content 替换为占位标记（`[工具结果已省略以节省上下文；如仍需要，请重新执行调用获取当前状态]`），AI 走重建路径。这是 v0 有意的技术债（见下）。
-- `<compacted_range>` 模板措辞已更新：重建路径（重新读取/执行）与召回路径（recall 工具）显式分立——这是 AI"感知到自己忘了"的钩子。
-
-**5.1 任务账本（todo）** — `crates/shirley-agent-sdk/src/todo/`（`docs/todo.md`）
-
-压缩的第三个配套能力：recall 找回"用户说过什么"，todo 记录"我做到哪了"。定位：
-**compaction 的自然配套，SDK 内部能力，应用层无感**——与 recall 一样在 `Agent::new`
-里自动注册工具、自动注入。
+压缩的配套能力：压缩把对话压成摘要后，模型容易忘记自己做到哪。todo 记录
+"我做到哪了"。定位：**compaction 的自然配套，SDK 内部能力，应用层无感**——
+在 `Agent::new` 里自动注册工具、自动注入。
 
 | 文件 | 职责 |
 | --- | --- |
-| `mod.rs` | `TodoStore`（`Arc<Mutex<TaskState>>`，与 `RecallStore` 同款）+ `TodoUpdate` / `TodoStep`（补丁入参）+ `TodoTool`（手写 `Tool`，持有 `Arc<TodoStore>`）+ `TASK_STATE_HEADER` + 单测 |
+| `mod.rs` | `TodoStore`（`Arc<Mutex<TaskState>>`）+ `TodoUpdate` / `TodoStep`（补丁入参）+ `TodoTool`（手写 `Tool`，持有 `Arc<TodoStore>`）+ `TASK_STATE_HEADER` + 单测 |
 
 核心设计（`docs/todo.md` 二、三个核心决策）：
 
-- **模型写，不做程序化推断**：暴露 `todo` 工具，模型自己决定何时更新（与 recall"检索 AI 触发"同一哲学——状态判断发生在 AI 层最准）。
+- **模型写，不做程序化推断**：暴露 `todo` 工具，模型自己决定何时更新（状态判断发生在 AI 层最准）。
 - **不进 `self.messages`，每轮作为 system 追加在末尾注入**：账本单独持有，压缩碰不到它，天然跨压缩存活；注入位置选**末尾**是因为追加不动前面的前缀，账本稳定时前缀缓存照常命中（`responses-api.md` 里"system 原位保留"正是为这个）。代价是模型每次调 `todo` 会让"账本那条 system 之后"的前缀失效——这是"每轮可见"的固有代价，用"放末尾 + 只写变化"压到最小。三个适配器都能处理任意位置 system（ChatCompletions 原样输出 / Responses 原位保留 / Anthropic 摘到顶层 `system`）。
 - **补丁语义**：`goal` 设置替换、`steps` **整体替换**（清单短，每轮重发全量天然自纠）、`add_findings` / `add_open_questions` **追加**、`clear` 重置；未提供的字段保持原样。
 - **渲染成 XML**（`<task_state>` / `<goal>` / `<steps>` / `<findings>` / `<open_questions>`）：空账本不注入；`&` / `<` / `>` 转义；`MAX_RENDER_CHARS = 4000` 超限截断并显式标注（防账本自己垄断上下文）。
-- **切换会话清空**：会话切换由应用层 `SessionManager` 完成（每个会话自持独立 `Agent`），旧会话的召回库 / 任务账本随其 `Agent` 一并搁置，**天然不残留**——无需（也再无）`Agent::switch_session` 里的显式清空。
+- **切换会话清空**：会话切换由应用层 `SessionManager` 完成（每个会话自持独立 `Agent`），旧会话的任务账本随其 `Agent` 一并搁置，**天然不残留**——无需（也再无）`Agent::switch_session` 里的显式清空。
 
 实现位置：`todo/mod.rs`（数据 + 工具 + 单测）、`runtime/agent.rs`（持有 `Arc<TodoStore>`、注册、`active_messages()` 末尾注入）。对外 re-export `TASK_STATE_HEADER` / `TodoStep` / `TodoStore` / `TodoTool` / `TodoUpdate`。已知缺口见 `docs/todo.md` 第七节（无持久化 / 无自动清理 / 注入即失前缀缓存 / 模型可能不用）。
 
@@ -356,7 +336,7 @@ cargo test -p shirley-agent-sdk    # 只跑 SDK 测试
 cargo clippy --all-targets         # 静态检查
 ```
 
-测试分布（应用层约 95 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`read.rs` 10 个、`session.rs` 10 个、`models.rs` 4 个、`web_search.rs` 11 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`session_contract.rs` 7 个、`recall_contract.rs` 5 个、`tool_lifecycle.rs` 5 个、`tool_context.rs` 5 个、`runtime_compaction.rs` 20 个、`system_prompt_contract.rs` 4 个。
+测试分布（应用层约 95 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`read.rs` 10 个、`session.rs` 10 个、`models.rs` 4 个、`web_search.rs` 11 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`session_contract.rs` 7 个、`tool_lifecycle.rs` 5 个、`tool_context.rs` 5 个、`runtime_compaction.rs` 20 个、`system_prompt_contract.rs` 4 个。
 
 ---
 
@@ -372,7 +352,6 @@ cargo clippy --all-targets         # 静态检查
 - 进程沙盒框架（spec / 后端抽象 / degraded 上报 / 超时）
 - 工作区路径越界校验
 - 统一错误契约（`ErrorKind` / `SdkError`）
-- 召回：压缩段入库 + BM25 检索 + recall 工具（AI 主动触发）
 - 任务账本：`todo` 工具（模型自维护）+ 每轮末尾注入（跨压缩存活），`Agent::new` 自动注册；多会话下账本随各会话独立 `Agent` 天然隔离
 
 **明确没做的**：
@@ -387,7 +366,7 @@ cargo clippy --all-targets         # 静态检查
 8. ~~未接线配置~~：`temperature` / `max_output_tokens` / `tool_choice` 已接线，并新增 `extra_body` 逃生口（见 `docs/sdk-gaps.md` gap-4）
 9. **未使用的 `StopReason`**：`MaxStepsReached` / `Cancelled` 定义了但不会产生（没有 max_steps 和取消机制）
 10. **压缩重试**：压缩失败直接中断，`plan.md` 提到"压缩失败重试有时能成功"
-11. **recall 的技术债**（`docs/recall.md` 第八节）：无持久化（进程结束即失）；BM25 只做词面匹配（同义改写召回不了，embedding 混合召回未做，`fuse.rs`/RRF 留接口）；中文无分词器（单字切，有噪声）；工具结果统一清空丢弃了不可重建的调用（一次性快照重跑拿不到当时结果，等工具能力细分后回填 per-call 判定）。**（曾经的坑已修：初版误把工具类消息也入库 + 漏了防递归，导致召回内容雪球式膨胀——见 `docs/recall.md` 2.2 注）**
+
 
 **顺手能修的**：
 
@@ -403,7 +382,7 @@ cargo clippy --all-targets         # 静态检查
 
 1. **别破坏 prefix 稳定性**。工具定义排序、消息顺序、system prompt 位置，任何变动都会影响缓存命中率。UI 状态栏会显示这个数字，改完自己看一眼。
 2. **`Option<u64>` 的语义是有意的**。"未上报"和"0"必须区分，别为了图省事用 `unwrap_or(0)`。
-3. **压缩是不可逆的**。`ContextSummary` 一旦写入，之前的消息在 `active_messages()` 里就不参与请求了，但原始消息仍留在 `self.messages` 里（注：压缩会把 `self.messages` **整体重建**变短，原始消息只存活在召回库里）。改这块要小心 `start_index` 的语义（`RunResult.messages` 是从这里切出来的）——**循环内压缩后必须 `start_index = start_index.min(self.messages.len())` 钳制**，否则切片越界 panic（真实炸过：`range start index 10 out of range for slice of length 6`，被 async_stream 包成 `Other("task panicked...")`）。同理，任何"记录下标 + 中途重建底层容器"的模式都脆弱：`run_stream` 开头那个压缩分支不炸纯属它发生在 `start_index` 记录**之前**的顺序依赖，将来在记录之后插入任何重建 `messages` 的路径都会再踩。
+3. **压缩是不可逆的**。`ContextSummary` 一旦写入，之前的消息在 `active_messages()` 里就不参与请求了，但原始消息仍留在 `self.messages` 里（注：压缩会把 `self.messages` **整体重建**变短，被压掉的原始消息不再回到工作集）。改这块要小心 `start_index` 的语义（`RunResult.messages` 是从这里切出来的）——**循环内压缩后必须 `start_index = start_index.min(self.messages.len())` 钳制**，否则切片越界 panic（真实炸过：`range start index 10 out of range for slice of length 6`，被 async_stream 包成 `Other("task panicked...")`）。同理，任何"记录下标 + 中途重建底层容器"的模式都脆弱：`run_stream` 开头那个压缩分支不炸纯属它发生在 `start_index` 记录**之前**的顺序依赖，将来在记录之后插入任何重建 `messages` 的路径都会再踩。
 4. **对外契约要保持小**。`lib.rs` 的 `pub use` 是 SDK 的门面，加东西之前先问自己：这是基础能力，还是业务逻辑？
 5. **错误分类是稳定的**。`ErrorKind` 给日志/指标/重试决策用，文案可以改，kind 不能随便改；要判断重试只看 `is_retryable`，别 match 字符串。
 6. **边界在沙盒，不在黑名单**。`bash` 的字符串黑名单只是临时兜底，别把它当成安全边界。

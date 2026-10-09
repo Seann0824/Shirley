@@ -180,7 +180,7 @@ fn invoke(&self, input: serde_json::Value) -> ToolFuture<'_>;   // 无上下文
 
 宏展开（`macros/src/tool.rs`）只做 `反序列化参数 → super::#name(args).await`，把函数编译成**纯函数**。工具拿不到 session、状态或任何外部句柄。
 
-有状态工具（`RecallTool` 持 `Arc<RecallStore>`、应用手工 `impl Tool + Arc<Mutex<Session>>`）**只能手写，用不了宏**。
+有状态工具（`TodoTool` 持 `Arc<TodoStore>`、应用手工 `impl Tool + Arc<Mutex<Session>>`）**只能手写，用不了宏**。
 
 **3.2 为什么框架层该管**
 
@@ -242,7 +242,7 @@ Agent::builder().tool_context(ctx)...
 let session = ctx.get::<Mutex<Session>>().expect("session not provided");
 ```
 
-`RecallTool` 等手写实现只需加一个忽略的 `_ctx` 参数。
+`TodoTool` 等手写实现只需加一个忽略的 `_ctx` 参数。
 
 **3.5 方案 B（备选）：泛型 `Agent<T>` / `ToolManager<T>`**
 
@@ -266,7 +266,7 @@ let session = ctx.get::<Mutex<Session>>().expect("session not provided");
 | `definitions()` 返回顺序变 | 行为 | prefix 一次性 miss |
 | `ModelConfig` 加 `tool_choice` / `extra_body` | 加字段（builder 兼容） | 无 |
 | `encode_request` 输出变 | 行为 | 端点请求体 |
-| `Tool::invoke` 加 `ctx` 参数 | **是** | 所有手写 `impl Tool`（含 `RecallTool`、应用手工工具） |
+| `Tool::invoke` 加 `ctx` 参数 | **是** | 所有手写 `impl Tool`（含 `TodoTool`、应用手工工具） |
 | `ToolManager::invoke` 加 `ctx` | **是** | runtime、测试 |
 | 新增 `ToolContext` | 否（新增） | 无 |
 | ~~`Agent` builder 加 `.tool_context()`~~ | —— | **已被移除**，改由 `ToolManager` 持有 `ToolContext`（见 `docs/tool-lifecycle.md`） |

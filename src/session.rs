@@ -5,9 +5,8 @@
 //! `serde_json::from_str`。选它的理由：零依赖、可读、可手工调试，且天然是
 //! append-only 的"日志"形状，与 `docs/session.md` 一.决策 4 完全对齐。
 //!
-//! 落盘的是**原始 Message 全量日志**：不含 system（恢复时现生成），
-//! 不含 chunk / BM25 索引（召回库由日志派生）。`ContextSummary` 是日志里的
-//! 一等消息，压缩时也走 `append`。
+//! 落盘的是**原始 Message 全量日志**：不含 system（恢复时现生成）。
+//! `ContextSummary` 是日志里的一等消息，压缩时也走 `append`。
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};

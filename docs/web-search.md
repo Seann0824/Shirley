@@ -5,7 +5,7 @@
 ## 一、它是什么
 
 从拾文（`shiwen-open-source`）迁移过来的 DeepSeek 原生联网搜索能力，作为 Shirley 的
-**第五个工具**（`bash` / `read_file` / `recall` / `web_search`）注册进 `ToolManager`。
+**第四个工具**（`bash` / `read_file` / `todo` / `web_search`）注册进 `ToolManager`。
 
 关键点：它**不走主模型的 chat-completions 路由**，而是对 DeepSeek 的
 **Anthropic-compatible Messages API**（`POST {base_url}/messages`）单独发一次有界的

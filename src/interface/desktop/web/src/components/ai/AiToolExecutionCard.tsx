@@ -30,7 +30,6 @@ const TOOL_LABELS: Record<string, string> = {
   bash: "执行命令",
   read_file: "读取文件",
   web_search: "搜索互联网",
-  recall: "召回历史",
   todo: "更新任务",
 };
 

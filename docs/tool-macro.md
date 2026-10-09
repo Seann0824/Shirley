@@ -20,7 +20,7 @@ pub fn tool() -> impl ::shirley_agent_sdk::Tool + 'static {
 }
 ```
 
-有状态工具无法用它表达：`recall` 手写 `impl Tool`（持有 `Arc<RecallStore>`），
+有状态工具无法用它表达：`todo` 手写 `impl Tool`（持有 `Arc<TodoStore>`），
 `web_search` 走 `ToolContext` 注入（工具本身仍无状态，但需要"注册时注入依赖"）。
 
 用户问题：**宏该细化还是新增？有没有更好的表达方式？** 用户的硬约束是：
@@ -54,7 +54,7 @@ pub fn tool() -> impl ::shirley_agent_sdk::Tool + 'static {
 
 对无状态工具，两件事绑一起没问题。对有状态工具：
 
-- #1 **仍然有价值**（手写 `impl Tool` 时，`ToolDefinition` 的 schema JSON 是最烦的样板——`recall` 手写了几十行 `serde_json::json!`）；
+- #1 **仍然有价值**（手写 `impl Tool` 时，`ToolDefinition` 的 schema JSON 是最烦的样板——`todo` 手写了几十行 `serde_json::json!`）；
 - #2 **强制无状态**（`GenerateTool` 的字段形状写死）。
 
 ---
@@ -63,7 +63,7 @@ pub fn tool() -> impl ::shirley_agent_sdk::Tool + 'static {
 
 **方案 A：宏完全不动，有状态工具手写 `impl Tool`**
 
-`recall` 已是此形态。
+`todo` 已是此形态。
 
 - **优点**：宏零改动；无新概念。
 - **缺点**：`definition` 的 schema JSON 要手写；**背叛"用户不碰工具细节"**——用户被迫写
@@ -152,7 +152,7 @@ fn on_register(&mut self, ctx: &mut ::shirley_agent_sdk::ToolContext) -> Result<
 | lifecycle | 由 `on_register` / `on_unregister` 属性接线；不写即空实现 |
 | 适用 | 所有工具（`bash` / `read_file` / `web_search`） |
 
-只有一个宏。`recall` 因需持有 `Arc<RecallStore>` 且属 SDK 内部，仍手写 `impl Tool`——
+只有一个宏。`todo` 因需持有 `Arc<TodoStore>` 且属 SDK 内部，仍手写 `impl Tool`——
 它是唯一例外，不是范式。
 
 ---
@@ -176,7 +176,7 @@ fn on_register(&mut self, ctx: &mut ::shirley_agent_sdk::ToolContext) -> Result<
 | `Tool` trait | 两个钩子为默认空方法 | 否 |
 | `ToolManager` | 持有 `ToolContext` + `unregister` | 否 |
 | `web_search` | 迁到 `#[tool]` + 注册钩子 | 否 |
-| `recall` | 不变（唯一手写 `impl Tool` 的内部工具） | 否 |
+| `todo` | 不变（唯一手写 `impl Tool` 的内部工具） | 否 |
 | 文档 | 本文件 + `docs/tool-lifecycle.md` + `docs/web-search.md` + `Agent.md` | 否 |
 
 ---
