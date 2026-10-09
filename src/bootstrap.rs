@@ -63,7 +63,6 @@ impl Bootstrap {
         let mut tool_manager = ToolManager::new();
         let _ = tool_manager.register(tools::bash_tool::tool());
         let _ = tool_manager.register(tools::read_file_tool::tool());
-        let _ = tool_manager.register(tools::apply_patch_tool::tool());
         if let Err(error) = tool_manager.register(tools::web_search_tool::tool()) {
             eprintln!("[web_search] 未启用：{error}");
         }

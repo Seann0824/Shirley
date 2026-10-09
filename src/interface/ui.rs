@@ -691,13 +691,7 @@ fn append_tools(
 
     for call in &group.calls {
         // 默认一行：🔧 名称 + 关键参数摘要，超宽截断。
-        // apply_patch 的参数是一大段多行补丁，直接压成一行会灌屏——单独抽成
-        // 「目标文件 + 各文件 ±行数」的紧凑摘要。
-        let summary = if call.name == "apply_patch" {
-            summarize_patch_arguments(&call.arguments)
-        } else {
-            summarize_arguments(&call.arguments)
-        };
+        let summary = summarize_arguments(&call.arguments);
         let mut line = vec![Span::styled(format!("🔧 {}", call.name), name_style)];
         if !summary.is_empty() {
             line.push(Span::styled(format!(" {summary}"), dim));
@@ -760,60 +754,6 @@ fn summarize_arguments(arguments: &str) -> String {
         .map(|(key, value)| format!("{key}={}", compact_value(value)))
         .collect::<Vec<_>>()
         .join(" ")
-}
-
-/// `apply_patch` 参数的紧凑摘要：从补丁文本里抽出目标文件与各文件 ±行数。
-///
-/// 参数形如 `{"patch": "*** Begin Patch\n*** Update File: ...\n*** End Patch"}`，
-/// 直接把整段补丁压成一行会灌屏。这里按块类型（Update / Add / Delete / Move to）
-/// 归并出「文件 + ±行数」清单；解析失败则退回通用摘要，绝不隐藏信息。
-fn summarize_patch_arguments(arguments: &str) -> String {
-    let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        return summarize_arguments(arguments);
-    };
-    let Some(patch) = value.get("patch").and_then(|value| value.as_str()) else {
-        return summarize_arguments(arguments);
-    };
-
-    let mut parts: Vec<String> = Vec::new();
-    // 当前块的（标签, 新增行数, 删除行数）。
-    let mut current: Option<(String, usize, usize)> = None;
-    let flush = |parts: &mut Vec<String>, current: &mut Option<(String, usize, usize)>| {
-        if let Some((label, added, removed)) = current.take() {
-            parts.push(format!("{label} +{added} -{removed}"));
-        }
-    };
-
-    for raw in patch.lines() {
-        let line = raw.trim_end();
-        if let Some(path) = line.strip_prefix("*** Update File: ") {
-            flush(&mut parts, &mut current);
-            current = Some((path.trim().to_string(), 0, 0));
-        } else if let Some(path) = line.strip_prefix("*** Add File: ") {
-            flush(&mut parts, &mut current);
-            current = Some((format!("{}（新增）", path.trim()), 0, 0));
-        } else if let Some(path) = line.strip_prefix("*** Delete File: ") {
-            flush(&mut parts, &mut current);
-            current = Some((format!("{}（删除）", path.trim()), 0, 0));
-        } else if let Some(path) = line.strip_prefix("*** Move to: ") {
-            if let Some((label, _, _)) = current.as_mut() {
-                *label = format!("{label} → {}", path.trim());
-            }
-        } else if let Some((_, added, removed)) = current.as_mut() {
-            if line.starts_with('+') {
-                *added += 1;
-            } else if line.starts_with('-') {
-                *removed += 1;
-            }
-        }
-    }
-    flush(&mut parts, &mut current);
-
-    if parts.is_empty() {
-        // 补丁里没有任何块（多半是模型写坏了），退回通用摘要好过空白。
-        return summarize_arguments(arguments);
-    }
-    parts.join(" · ")
 }
 
 /// 单个值的紧凑可读表示：字符串去引号，标量直接显示，复合类型压成 JSON。
@@ -1018,26 +958,6 @@ mod tests {
     fn summarize_falls_back_to_raw_on_invalid_json() {
         assert_eq!(summarize_arguments("not json"), "not json");
         assert_eq!(summarize_arguments(""), "");
-    }
-
-    #[test]
-    fn summarize_patch_extracts_files_and_line_deltas() {
-        // apply_patch 的参数是一大段多行补丁，摘要应是「文件 + ±行数」而非整段灌屏。
-        let patch = "*** Begin Patch\n*** Update File: src/a.rs\n@@\n-old\n+new\n+extra\n*** Add File: src/b.rs\n+hi\n*** Delete File: src/c.rs\n*** End Patch";
-        let args = serde_json::json!({ "patch": patch }).to_string();
-        let summary = summarize_patch_arguments(&args);
-        assert!(summary.contains("src/a.rs +2 -1"), "应含更新文件的行数: {summary}");
-        assert!(summary.contains("src/b.rs（新增）"), "应标注新增文件: {summary}");
-        assert!(summary.contains("src/c.rs（删除）"), "应标注删除文件: {summary}");
-        assert!(!summary.contains("Begin Patch"), "不应把整段补丁塞进摘要: {summary}");
-    }
-
-    #[test]
-    fn summarize_patch_falls_back_on_bad_input() {
-        assert_eq!(summarize_patch_arguments("not json"), "not json");
-        // 没有可识别块时退回通用摘要。
-        let args = serde_json::json!({ "patch": "no blocks here" }).to_string();
-        assert!(summarize_patch_arguments(&args).contains("patch="));
     }
 
     #[test]

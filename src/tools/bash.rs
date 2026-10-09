@@ -1,14 +1,24 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use shirley_agent_sdk::sandbox::{Sandbox, SandboxOutput, SandboxSpec, backend::ProcessBackend};
 use shirley_agent_sdk::tool;
 
-use crate::tools::util::workspace_root;
-
 // 静态拒绝列表：在真正的权限层（PermissionPolicy，见 docs/security.md 第五节）落地前的临时兜底。
 // 注意：字符串匹配可被绕过（/bin/rm、r''m、base64 | bash），
 // 真正的边界在沙盒后端，不在这个列表里。
 const BLACKLIST: [&str; 3] = ["rm", "shutdown", "reboot"];
+
+/// 工作区根目录：优先读环境变量 `SHIRLEY_WORKSPACE`，否则退回当前目录。
+///
+/// 沙盒会把它作为 cwd，并（在真实后端里）据此限制文件系统可见范围。
+fn workspace_root() -> Option<PathBuf> {
+    std::env::var("SHIRLEY_WORKSPACE")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_dir().ok())
+}
 
 /// 把沙盒结果渲染成模型可读的文本。
 ///
@@ -103,26 +113,19 @@ pub async fn bash(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tools::util::ENV_LOCK;
-
-    // bash 用 `workspace_root()` 决定沙盒 cwd；而 read / apply_patch 的测试会临时改
-    // 进程级 `SHIRLEY_WORKSPACE`。两边共用同一把锁串行化，避免读到别的测试的临时目录
-    // （曾因临时目录被删、cwd 失效而偶发失败）。
-    async fn bash_locked(command: &str, timeout: Option<u64>) -> Result<String, shirley_agent_sdk::ToolError> {
-        let _guard = ENV_LOCK.lock().await;
-        bash(command.to_string(), timeout).await
-    }
 
     #[tokio::test]
     async fn runs_simple_command() {
-        let out = bash_locked("echo hello", Some(10)).await.unwrap();
+        let out = bash("echo hello".to_string(), Some(10)).await.unwrap();
         assert!(out.contains("hello"), "输出应包含 hello，实际: {out}");
     }
 
     #[tokio::test]
     async fn surfaces_stderr_and_exit_code() {
         // 失败命令必须把 stderr 与退出码带回来，模型才能自我纠正。
-        let out = bash_locked("echo boom >&2; exit 3", Some(10)).await.unwrap();
+        let out = bash("echo boom >&2; exit 3".to_string(), Some(10))
+            .await
+            .unwrap();
         assert!(out.contains("boom"), "应包含 stderr: {out}");
         assert!(out.contains("[exit code] 3"), "应包含退出码: {out}");
     }
@@ -130,25 +133,25 @@ mod tests {
     #[tokio::test]
     async fn reports_sandbox_degradation() {
         // 当前是 ProcessBackend，隔离未生效，必须诚实上报降级。
-        let out = bash_locked("true", Some(10)).await.unwrap();
+        let out = bash("true".to_string(), Some(10)).await.unwrap();
         assert!(out.contains("[沙盒降级]"), "应上报降级: {out}");
     }
 
     #[tokio::test]
     async fn rejects_blacklisted_command() {
-        let err = bash_locked("rm -rf /", Some(10)).await.unwrap_err();
+        let err = bash("rm -rf /".to_string(), Some(10)).await.unwrap_err();
         assert!(err.to_string().contains("黑名单"), "应被拦截: {err}");
     }
 
     #[tokio::test]
     async fn enforces_timeout() {
-        let out = bash_locked("sleep 5", Some(1)).await.unwrap();
+        let out = bash("sleep 5".to_string(), Some(1)).await.unwrap();
         assert!(out.contains("[超时]"), "应标记超时: {out}");
     }
 
     #[tokio::test]
     async fn rejects_empty_command() {
-        let err = bash_locked("   ", Some(10)).await.unwrap_err();
+        let err = bash("   ".to_string(), Some(10)).await.unwrap_err();
         assert!(err.to_string().contains("不能为空"), "空命令应报错: {err}");
     }
 }
