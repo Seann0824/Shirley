@@ -260,7 +260,8 @@ async fn agent_new_session(
 ) -> Result<SessionEntryWire, String> {
     let catalog = state.session_catalog.clone();
     let (entry, store) = tauri::async_runtime::spawn_blocking(move || {
-        catalog.create_named(title.as_deref())
+        // 惰性新建：此刻不落盘，切过去发首条消息才真正建文件。
+        catalog.create_lazy(title.as_deref())
     })
     .await
     .map_err(|error| error.to_string())?

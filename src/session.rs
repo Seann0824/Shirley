@@ -114,6 +114,79 @@ impl SessionStore for JsonlSessionStore {
     }
 }
 
+/// 惰性会话日志：**启动时不落盘**，首次 `append`（即首条消息）时才创建文件。
+///
+/// 动机：Codex 的 UX——打开应用时并不产生一个空会话文件，只有真正发消息
+/// （产生交互）才建会话。这样会话列表不会被一堆"点了没聊"的空文件塞满。
+///
+/// 语义上它就是一个 [`SessionStore`]：`Agent` 照常持有它，发送路径无需感知
+/// "延迟创建"这回事。区别只有两点：
+/// - 名字在**构造时**就确定（供 UI 页脚 / 当前会话标记用），但**文件不建**；
+/// - 首次 `append` 时才**惰性物化**：按已定的名字落盘 JSONL（并写标题 sidecar）。
+///
+/// 物化之前，`load` / `truncate` 一律视为空日志（没有文件就没有内容）；
+/// 物化后永久持有内部 [`JsonlSessionStore`]，行为与直接打开一份会话完全一致。
+///
+/// 标题若给出，在物化时落成 sidecar `<name>.title`（与
+/// [`FileSessionCatalog::create_named`] 同语义）。
+pub struct LazySessionStore {
+    catalog: Arc<FileSessionCatalog>,
+    /// 启动时已确定的名字（`list` 在物化前扫不到它，因为没有文件）。
+    name: String,
+    /// 物化后的底层存储（首次 `append` 时创建）。
+    inner: Mutex<Option<Arc<JsonlSessionStore>>>,
+    /// 可选标题（物化时落成 sidecar）。
+    title: Option<String>,
+}
+
+impl LazySessionStore {
+    fn new(catalog: Arc<FileSessionCatalog>, name: String, title: Option<String>) -> Self {
+        Self {
+            catalog,
+            name,
+            inner: Mutex::new(None),
+            title,
+        }
+    }
+
+    /// 物化：按已定的名字落盘空日志、写标题 sidecar，返回底层存储。幂等。
+    fn materialize(&self) -> Result<Arc<JsonlSessionStore>, SessionError> {
+        let mut inner = self.inner.lock().expect("会话锁中毒");
+        if let Some(store) = inner.as_ref() {
+            return Ok(store.clone());
+        }
+        let store = Arc::new(JsonlSessionStore::open(self.catalog.path_for(&self.name))?);
+        if let Some(title) = self.title.as_deref() {
+            self.catalog.write_title(&self.name, title)?;
+        }
+        *inner = Some(store.clone());
+        Ok(store)
+    }
+}
+
+impl SessionStore for LazySessionStore {
+    fn append(&self, message: &Message) -> Result<(), SessionError> {
+        // 首次 append 触发物化；此后直接委托。
+        self.materialize()?.append(message)
+    }
+
+    fn load(&self) -> Result<Vec<Message>, SessionError> {
+        // 物化前 = 空日志（没有文件就没有内容）。
+        match self.inner.lock().expect("会话锁中毒").as_ref() {
+            Some(store) => store.load(),
+            None => Ok(Vec::new()),
+        }
+    }
+
+    fn truncate(&self, len: usize) -> Result<(), SessionError> {
+        match self.inner.lock().expect("会话锁中毒").as_ref() {
+            Some(store) => store.truncate(len),
+            // 物化前没有日志，截尾是空操作（幂等，与契约一致）。
+            None => Ok(()),
+        }
+    }
+}
+
 /// 一个可选会话（`/session` 切换用）。
 ///
 /// `name` 是唯一标识（文件 stem），`label` 给人看（自定义标题优先，否则回落
@@ -157,6 +230,21 @@ pub trait SessionCatalog: Send + Sync {
 
     /// 新建一个空会话，返回它的条目与存储。
     fn create(&self) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError>;
+
+    /// 惰性新建会话：**此刻不落盘**，返回的存储首次 `append` 时才创建文件。
+    ///
+    /// 用于「启动默认空会话」——没发起聊天就不该在会话列表里留一个空文件。
+    /// 返回的 [`SessionEntry`] 此时 `preview` / `turns` 皆空、`name` 为占位
+    /// （物化前的临时名，UI 不应据此查找会话）。
+    ///
+    /// 默认实现退化为 [`SessionCatalog::create`]（立即落盘）——不支持惰性的
+    /// 后端无需改动，只是拿不到"延迟创建"的好处。
+    fn create_lazy(
+        &self,
+        _title: Option<&str>,
+    ) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError> {
+        self.create()
+    }
 
     /// 新建会话并可带标题（`None` = 匿名，UI 回落到首条用户消息 / 名字）。
     ///
@@ -321,6 +409,30 @@ impl SessionCatalog for FileSessionCatalog {
 
     fn create(&self) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError> {
         self.create_named(None)
+    }
+
+    fn create_lazy(
+        &self,
+        title: Option<&str>,
+    ) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError> {
+        // 名字此刻就定（供 UI 显示），文件留到首次 append 才建。
+        let catalog = Arc::new(FileSessionCatalog {
+            dir: self.dir.clone(),
+        });
+        let name = self.fresh_name();
+        let store = Arc::new(LazySessionStore::new(
+            catalog,
+            name.clone(),
+            title.map(str::to_owned),
+        ));
+        let entry = SessionEntry {
+            label: title.unwrap_or(name.as_str()).to_owned(),
+            name,
+            preview: String::new(),
+            modified_ms: 0,
+            turns: 0,
+        };
+        Ok((entry, store))
     }
 
     fn create_named(
@@ -634,6 +746,60 @@ mod tests {
         assert!(catalog.list().unwrap().is_empty());
         // 再删报错（已不存在）。
         assert!(catalog.delete(&entry.name).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_lazy_does_not_touch_disk_until_first_append() {
+        let dir = tmp_dir("lazy");
+        let catalog = FileSessionCatalog::new(&dir);
+        let (entry, store) = catalog.create_lazy(None).unwrap();
+        // 构造后：名字已定，但目录里没有任何文件（不落盘）。
+        assert!(!entry.name.is_empty());
+        assert!(catalog.list().unwrap().is_empty());
+        assert!(!catalog.path_for(&entry.name).exists());
+        // 物化前 load 视为空日志。
+        assert!(store.load().unwrap().is_empty());
+
+        // 首次 append 才真正建文件。
+        store.append(&user("第一条")).unwrap();
+        assert!(catalog.path_for(&entry.name).exists());
+        let listed = catalog.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, entry.name);
+        assert_eq!(listed[0].preview, "第一条");
+        assert_eq!(listed[0].turns, 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_lazy_with_title_writes_sidecar_on_materialize() {
+        let dir = tmp_dir("lazy_title");
+        let catalog = FileSessionCatalog::new(&dir);
+        let (entry, store) = catalog.create_lazy(Some("迁移任务")).unwrap();
+        assert_eq!(entry.label, "迁移任务");
+        // 物化前标题 sidecar 也不存在。
+        assert!(!catalog.title_path_for(&entry.name).exists());
+        store.append(&user("干活")).unwrap();
+        let listed = catalog.list().unwrap();
+        assert_eq!(listed[0].label, "迁移任务");
+        assert_eq!(listed[0].preview, "干活");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn create_lazy_append_truncate_round_trips_after_materialize() {
+        let dir = tmp_dir("lazy_rt");
+        let catalog = FileSessionCatalog::new(&dir);
+        let (entry, store) = catalog.create_lazy(None).unwrap();
+        for c in ["a", "b", "c"] {
+            store.append(&user(c)).unwrap();
+        }
+        // 物化后行为与普通会话一致：截尾 + 继续追加。
+        store.truncate(2).unwrap();
+        store.append(&user("d")).unwrap();
+        let reopened = catalog.open(&entry.name).unwrap();
+        assert_eq!(reopened.load().unwrap().len(), 3);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

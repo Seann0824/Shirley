@@ -330,20 +330,30 @@ graph TD
 **决策 3：会话目录（`SessionCatalog`）收敛"会话从哪来"，与 `ModelCatalog` 对称。**
 
 `src/session.rs` 定义 `SessionCatalog` trait（`list` / `open` / `create` /
-`create_named` / `rename` / `delete`）与本地实现 `FileSessionCatalog`。
+`create_named` / `create_lazy` / `rename` / `delete`）与本地实现 `FileSessionCatalog`。
 `/session` 指令与选择器 UI 只依赖接口，将来若要换成远端 / 数据库后端，UI 不用改。
-后三个方法带默认实现（`create_named` 回落 `create`，`rename` / `delete` 报
-`Backend` 错），因此不支持元数据的后端（如 `EmptySessionCatalog`）无需改动。
+后四个方法带默认实现（`create_named` / `create_lazy` 回落 `create`，`rename` /
+`delete` 报 `Backend` 错），因此不支持元数据的后端（如 `EmptySessionCatalog`）无需改动。
 
 `SessionEntry` 除 `name` / `label` / `preview` 外，还带 `modified_ms`（文件
 mtime，列表据此降序）与 `turns`（用户轮数）——对齐 Codex resume picker 展示的
 时间与轮数。
 
-**决策 4：启动直接开一份新会话，兼容旧单文件日志。**
+**决策 4：启动惰性开一份空会话，兼容旧单文件日志。**
 
-`main.rs` 启动时**直接 `create()` 一份新会话**（而非恢复"最近修改"的旧会话）：
-用户跑 coding agent 的起点应是一段干净的新对话，避免一上来就背上历史会话的
-上下文。历史会话仍在 `.shirley/sessions/` 目录里，需要时用 `/session` 选择器打开。
+`bootstrap::assemble` 启动时**直接 `create_lazy()` 一份新会话**（而非恢复"最近
+修改"的旧会话）：用户跑 coding agent 的起点应是一段干净的新对话，避免一上来就
+背上历史会话的上下文。历史会话仍在 `.shirley/sessions/` 目录里，需要时用
+`/session` 选择器打开。
+
+**"惰性"= 启动不落盘**（Codex 的 UX）：此刻只确定会话名（供页脚 / 当前会话标记
+显示），**不创建文件**；只有真正发消息（`SessionStore::append` 首次被调用）才
+物化——按已定的名字落盘 JSONL（并写标题 sidecar）。这样"打开应用但没聊"不会在
+列表里留下空会话文件。实现落在 `LazySessionStore`：它就是一个普通
+`SessionStore`（`Agent` 照常持有、发送路径零改动），差别只是 `append` 首次触发
+物化、物化前 `load` / `truncate` 视为空日志 / 空操作。TUI 的「＋ 新建会话」与
+desktop 的 `agent_new_session` 同走 `create_lazy`，语义一致。
+
 若发现旧版单文件 `<root>/.shirley/session.jsonl` 且目录尚空，则先把它收编为
 `legacy` 会话（`adopt_legacy`），保证升级不丢历史（收编后新会话照常另开一份）。
 
@@ -351,8 +361,8 @@ mtime，列表据此降序）与 `turns`（用户轮数）——对齐 Codex res
 
 `/session` 打开模态选择器（与 `/model` 同款），列表首项固定是「＋ 新建会话」哨兵
 （`name` 为空串），其余为真实会话，每项第二行显示首条用户消息预览（认得出会话）。
-确认时按哨兵分流到 `create` 或 `open`；确认后重建界面条目（`rebuild_items_from_agent`）
-并重置会话绑定的统计（usage / 上下文占用）。
+确认时按哨兵分流到 `create_lazy`（惰性，见决策 4）或 `open`；确认后重建界面条目
+（`rebuild_items_from_agent`）并重置会话绑定的统计（usage / 上下文占用）。
 
 **决策 6：标题是 sidecar，重命名不动标识、不动内容。**
 
@@ -394,4 +404,6 @@ listbox），提供新建（可命名）/ 切换 / 重命名（内联编辑）/ 
 - 切换后后续轮次的 `append` 落到新日志，旧日志不被改动；
 - 切换出的工作集与"直接冷启动到该会话"完全一致（共用恢复规则）；
 - 旧单文件日志在首次启动时被收编，历史不丢；
+- **启动不落盘**：打开应用但未发消息时，`.shirley/sessions/` 里不出现空会话文件；
+  发出首条消息后会话才出现（TUI / desktop 同）；
 - TUI 与 desktop 看到同一份会话列表；在一边新建 / 重命名 / 删除，另一边刷新即可见。

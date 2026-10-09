@@ -84,10 +84,11 @@ impl Bootstrap {
         file_catalog
             .adopt_legacy()
             .map_err(|error| AgentError::Other(Box::new(error)))?;
-        let (entry, session) =
-            file_catalog
-                .create()
-                .map_err(|error| AgentError::Other(Box::new(error)))?;
+        // 惰性开一份空会话：此刻不落盘，只有真正发消息（首次 append）
+        // 才创建文件——避免"点了没聊"的空会话塞满列表（Codex 的 UX）。
+        let (entry, session) = file_catalog
+            .create_lazy(None)
+            .map_err(|error| AgentError::Other(Box::new(error)))?;
         let current_session = entry.name;
         let session_catalog: Arc<dyn SessionCatalog> = Arc::new(file_catalog);
 

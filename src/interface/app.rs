@@ -1178,7 +1178,8 @@ impl App {
         let catalog = Arc::clone(&self.session_catalog);
 
         let (name, store) = if entry.name == SessionPicker::NEW_NAME {
-            match catalog.create() {
+            // 惰性新建：此刻不落盘，切换后发首条消息才真正建文件。
+            match catalog.create_lazy(None) {
                 Ok((created, store)) => (created.name, store),
                 Err(error) => {
                     self.add_system_message(format!("新建会话失败：{error}"));
