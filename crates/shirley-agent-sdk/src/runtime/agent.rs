@@ -105,9 +105,9 @@ impl Agent {
 
     /// 从会话日志恢复工作集与召回语料（`docs/session.md` 三.2）。
     ///
-    /// `Agent::new`（messages 为空时）与 [`Agent::switch_session`]（切换会话时）
-    /// **共用这一套规则**——恢复与切换必须是同一套语义，否则切换出来的工作集
-    /// 会与冷启动恢复不一致。
+    /// `Agent::new`（messages 为空时）用它重建工作集；多会话切换由应用层
+    /// 为新会话重新 `build_agent`，走的正是这条恢复路径，因此切换出来的工作集
+    /// 与冷启动恢复必然一致。
     ///
     /// 不置顶 system：调用方负责用 [`Agent::system_message`] 现生成。
     fn restore_from_session(
@@ -130,32 +130,6 @@ impl Agent {
             recall.index(recall::chunk_messages(&log[..last_summary]));
         }
         *messages = log;
-        Ok(())
-    }
-
-    /// 切换到另一份会话日志：换掉日志源，并按恢复规则重建工作集与召回语料。
-    ///
-    /// 这是应用层 `/session` 指令落地的唯一 SDK 接缝（与 `/model` 的
-    /// [`Agent::set_model`] 对称）：模型配置、系统提示词、工作目录、工具、
-    /// 压缩指令都**原样保留**，只有「当前会话」这一件事被替换。
-    ///
-    /// 语义与 `Agent::new` 的恢复路径完全一致：清空内存与召回库，从新日志
-    /// 重建工作集（日志不含 system，这里现生成一条置顶）。切换后后续轮次的
-    /// `append` 都落到新日志上。
-    pub fn switch_session(&mut self, session: Arc<dyn SessionStore>) -> Result<(), AgentError> {
-        // 先清干净：旧会话的 messages 与召回语料绝不能残留到新会话里。
-        self.messages.clear();
-        self.recall.clear();
-        self.todo.clear();
-        self.rounds_since_todo = 0;
-        self.compression_pending = false;
-        Self::restore_from_session(&mut self.messages, &self.recall, &session)?;
-        self.session = Some(session);
-        // 日志不含 system——按当前工作目录 / `Agent.md` 现生成一条置顶，
-        // 与压缩重建、冷启动恢复同一套规则（`docs/session.md` 一.决策 3）。
-        if let Some(system) = self.system_message() {
-            self.messages.insert(0, system);
-        }
         Ok(())
     }
 
@@ -233,8 +207,8 @@ impl Agent {
     /// 移除一个已注册的工具（与 [`ToolManager::register`] 对称的运行时接缝）。
     ///
     /// 触发工具的 `on_unregister`（= destroy），用于运行期动态启停工具。
-    /// 名字未注册时返回 `Err`。与 `set_model` / `set_provider` / `switch_session`
-    /// 同风格：不重建 `Agent`。
+    /// 名字未注册时返回 `Err`。与 `set_model` / `set_provider` 同风格：
+    /// 不重建 `Agent`。
     pub fn unregister_tool(&mut self, name: &str) -> Result<(), AgentError> {
         self.tools.unregister(name).map_err(Into::into)
     }
@@ -709,18 +683,4 @@ mod tests {
         assert!(matches!(&active[0], message::Message::System { content } if content == "你是 Shirley"));
     }
 
-    /// 切换会话时账本被清空——旧会话的任务状态不能残留到新会话。
-    #[test]
-    fn switch_session_clears_ledger() {
-        let mut agent = agent();
-        agent.todo.apply(TodoUpdate {
-            goal: Some("旧任务".into()),
-            ..Default::default()
-        });
-        assert!(agent.todo.render().is_some());
-
-        let store: Arc<dyn SessionStore> = Arc::new(crate::session::InMemoryStore::new());
-        agent.switch_session(store).unwrap();
-        assert!(agent.todo.render().is_none(), "切换会话应清空账本");
-    }
 }

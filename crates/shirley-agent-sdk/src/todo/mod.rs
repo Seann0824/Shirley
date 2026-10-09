@@ -104,8 +104,9 @@ impl TodoStore {
         }
     }
 
-    /// 清空账本。切换会话时用（`Agent::switch_session`）——旧会话的任务状态
-    /// 绝不能残留到新会话。与 `index` / `clear` 一样走内部可变性（`&self`）。
+    /// 清空账本。切换会话时由应用层调用——旧会话的任务状态绝不能残留到
+    /// 新会话（新会话走 `build_agent` 重建，账本天然从空开始）。与 `index` /
+    /// `clear` 一样走内部可变性（`&self`）。
     pub fn clear(&self) {
         let mut state = self.inner.lock().expect("todo lock poisoned");
         *state = TaskState::default();

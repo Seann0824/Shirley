@@ -1,7 +1,7 @@
 use crate::message;
 use std::fmt;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct RunResult {
     // 本次调用新增的消息，按照发送顺序排序
     pub messages: Vec<message::Message>,
@@ -18,14 +18,14 @@ impl RunResult {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum StopReason {
     Completed,
     MaxStepsReached,
     Cancelled,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum AgentEvent {
     ContentDelta(String),
     ReasoningDelta(String),

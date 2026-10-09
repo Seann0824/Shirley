@@ -17,7 +17,7 @@ pub enum ModelProtocol {
     AnthropicMessages,
 }
 
-#[derive(bon::Builder)]
+#[derive(bon::Builder, Clone)]
 pub struct ModelConfig {
     pub protocol: ModelProtocol,
     #[builder(into)]

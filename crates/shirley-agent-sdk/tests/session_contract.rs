@@ -12,6 +12,7 @@
 use shirley_agent_sdk::{Agent, InMemoryStore, Message, ModelConfig, ModelProtocol, SessionStore};
 use std::sync::Arc;
 
+// todo: 这个能力应该是 sdk 的一部分到 message 应该提供的方法吧，不应该放在这里我理解。
 fn model_config() -> ModelConfig {
     ModelConfig::builder()
         .protocol(ModelProtocol::ChatCompletions)
@@ -82,7 +83,8 @@ fn restore_regenerates_system_and_strips_it_from_log() {
     // 新生成的 system 不该被写回日志（system 不入日志，恢复时现生成）。
     let log = store.load().unwrap();
     assert!(
-        !log.iter().any(|m| matches!(m, Message::System { content } if content == "当前 system")),
+        !log.iter()
+            .any(|m| matches!(m, Message::System { content } if content == "当前 system")),
         "新 system 不应进入日志: {log:?}"
     );
     // 日志仍保持原样两条（防御性剔除只作用于内存工作集，不重写日志）。
@@ -107,7 +109,11 @@ fn rewind_truncates_messages_and_session() {
     assert_eq!(agent.messages().len(), 3, "应先从日志恢复三条");
 
     let reverted = agent.rewind_last_user_turn().unwrap();
-    assert_eq!(reverted.as_deref(), Some("问题二"), "应返回最后一条用户原文");
+    assert_eq!(
+        reverted.as_deref(),
+        Some("问题二"),
+        "应返回最后一条用户原文"
+    );
     // 内存：问题二被丢弃，剩两条。
     assert_eq!(agent.messages().len(), 2, "回退后剩两条历史");
     // 日志：同步截到相同长度（此处无 system，长度相等）。
@@ -138,58 +144,4 @@ fn without_session_is_pure_memory() {
         .build()
         .unwrap();
     assert_eq!(agent.messages().len(), 1);
-}
-
-/// `switch_session` 换掉日志源，并按恢复规则重建工作集（含现生成 system 置顶）。
-#[test]
-fn switch_session_swaps_workingset_and_log_target() {
-    let store_a: Arc<dyn SessionStore> = Arc::new(InMemoryStore::new());
-    store_a.append(&user("会话A的用户")).unwrap();
-    store_a.append(&assistant("会话A的回复")).unwrap();
-
-    let store_b: Arc<dyn SessionStore> = Arc::new(InMemoryStore::new());
-    store_b.append(&user("会话B的用户")).unwrap();
-
-    // 从 A 恢复。
-    let mut agent = Agent::builder()
-        .model_config(model_config())
-        .system_prompt("当前 system")
-        .session(store_a.clone())
-        .build()
-        .unwrap();
-    assert_eq!(agent.messages().len(), 3, "应为 [system, A用户, A回复]");
-
-    // 切到 B：工作集被整体替换，system 现生成置顶。
-    agent.switch_session(store_b.clone()).unwrap();
-    let messages = agent.messages();
-    assert_eq!(messages.len(), 2, "应为 [新 system, B用户]: {messages:?}");
-    match &messages[0] {
-        Message::System { content } => assert_eq!(content, "当前 system"),
-        other => panic!("首条应为现生成的 system，实际 {other:?}"),
-    }
-    assert!(matches!(&messages[1], Message::User { content } if content == "会话B的用户"));
-
-    // 后续 append 落到新日志（B），旧日志（A）不再被写入。
-    agent.rewind_last_user_turn().unwrap();
-    assert_eq!(store_b.load().unwrap().len(), 0, "截断应作用于新日志 B");
-    assert_eq!(store_a.load().unwrap().len(), 2, "旧日志 A 不应被改动");
-}
-
-/// `switch_session` 到空日志：只剩现生成的 system（若有），旧会话不残留。
-#[test]
-fn switch_session_to_empty_clears_workingset() {
-    let store_a: Arc<dyn SessionStore> = Arc::new(InMemoryStore::new());
-    store_a.append(&user("旧内容")).unwrap();
-    let empty: Arc<dyn SessionStore> = Arc::new(InMemoryStore::new());
-
-    let mut agent = Agent::builder()
-        .model_config(model_config())
-        .session(store_a.clone())
-        .build()
-        .unwrap();
-    assert_eq!(agent.messages().len(), 1);
-
-    agent.switch_session(empty).unwrap();
-    // 无 system_prompt → 空日志恢复出空工作集。
-    assert!(agent.messages().is_empty(), "切到空日志后工作集应为空");
 }
