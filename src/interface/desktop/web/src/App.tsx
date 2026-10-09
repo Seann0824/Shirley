@@ -256,6 +256,15 @@ export function App() {
   return (
     <div className="flex h-screen w-full min-h-0 flex-col bg-canvas">
       <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4">
+        <img
+          src="/brand/shirley-logo.png"
+          alt=""
+          aria-hidden="true"
+          width={28}
+          height={28}
+          className="size-7 shrink-0 object-contain"
+          draggable={false}
+        />
         <span className="font-display text-body-sm text-ink">Shirley</span>
         <SessionSelector
           current={sessionName}
@@ -273,9 +282,22 @@ export function App() {
           conversationKey="main"
           extraContentKey={busy ? "busy" : ""}
           emptyContent={
-            <p className="px-1 py-10 text-center text-body-sm text-muted">
-              开始和 Shirley 对话吧。输入 <kbd className="font-utility">@</kbd> 可引用工作区文件。
-            </p>
+            <div className="flex flex-col items-center gap-4 px-4 py-6 text-center sm:py-10">
+              <img
+                src="/brand/shirley-character.png"
+                alt="《Code Geass》中的夏利·菲内特，橙色长发，身穿阿什弗德学园制服"
+                width={768}
+                height={1152}
+                className="h-[clamp(140px,32vh,280px)] w-auto max-w-full object-contain"
+                draggable={false}
+              />
+              <div className="space-y-2">
+                <h1 className="font-display text-title-sm text-ink">Shirley</h1>
+                <p className="text-body-sm text-muted">
+                  开始和 Shirley 对话吧。输入 <kbd className="font-utility">@</kbd> 可引用工作区文件。
+                </p>
+              </div>
+            </div>
           }
           renderMessageContent={(message) =>
             message.role === "assistant" ? (
