@@ -6,6 +6,7 @@ import {
 import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { AssistantMessage } from "@/components/AssistantMessage";
 import { ModelSelector } from "@/components/ai/ModelSelector";
+import { SessionSelector } from "@/components/ai/SessionSelector";
 import { InlineReferences } from "@/lib/file-mentions/FileChips";
 import { FileMentionPopover } from "@/lib/file-mentions/FileMentionPopover";
 import {
@@ -15,7 +16,7 @@ import {
 import { useFileMentionSearch } from "@/lib/file-mentions/useFileMentionSearch";
 import { stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
-import { agentBridge, type StreamHandle } from "@/lib/bridge";
+import { agentBridge, type HistoryMessage, type StreamHandle } from "@/lib/bridge";
 import type { AiSegment, AiToolExecution } from "@/types/ai";
 
 let messageSeq = 0;
@@ -31,15 +32,97 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [model, setModel] = useState("");
+  const [sessionName, setSessionName] = useState<string | null>(null);
   const handleRef = useRef<StreamHandle | null>(null);
 
   const mentionSearch = useFileMentionSearch();
   const editorRef = useRef<MentionEditorHandle>(null);
 
-  useEffect(() => {
-    void agentBridge()
-      .then((bridge) => bridge.modelName().then(setModel).catch(() => {}));
+  // 用历史消息重建 transcript（切换 / 新建会话后调用）。历史里只有可展示的
+  // User / Assistant 正文，没有流式段落——每条 assistant 建一个正文段落即可。
+  const rebuildFromHistory = useCallback((history: HistoryMessage[]) => {
+    const ids = history.map(() => nextId());
+    setMessages(
+      history.map((message, index) => ({
+        id: ids[index],
+        role: message.role,
+        content: message.content,
+        status: "complete",
+      })),
+    );
+    const segments: Record<string, AiSegment[]> = {};
+    history.forEach((message, index) => {
+      if (message.role === "assistant") {
+        segments[ids[index]] = [{ kind: "content", text: message.content }];
+      }
+    });
+    setTurnSegments(segments);
   }, []);
+
+  const loadHistory = useCallback(async () => {
+    const bridge = await agentBridge();
+    const [name, history] = await Promise.all([bridge.currentSession(), bridge.loadHistory()]);
+    setSessionName(name);
+    rebuildFromHistory(history);
+  }, [rebuildFromHistory]);
+
+  useEffect(() => {
+    void agentBridge().then(async (bridge) => {
+      await bridge.modelName().then(setModel).catch(() => {});
+      await loadHistory().catch(() => {});
+    });
+  }, [loadHistory]);
+
+  const switchSession = useCallback(
+    async (name: string) => {
+      try {
+        setError("");
+        const bridge = await agentBridge();
+        await bridge.switchSession(name);
+        await loadHistory();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [loadHistory],
+  );
+
+  const newSession = useCallback(
+    async (title: string | null) => {
+      try {
+        setError("");
+        const bridge = await agentBridge();
+        await bridge.newSession(title);
+        await loadHistory();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [loadHistory],
+  );
+
+  const renameSession = useCallback(async (name: string, title: string) => {
+    try {
+      setError("");
+      await (await agentBridge()).renameSession(name, title);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }, []);
+
+  const deleteSession = useCallback(
+    async (name: string) => {
+      try {
+        setError("");
+        await (await agentBridge()).deleteSession(name);
+        // 删的若是当前会话，重新加载（后端已把 current 清空）。
+        if (name === sessionName) await loadHistory();
+      } catch (e) {
+        setError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [loadHistory, sessionName],
+  );
 
   const send = useCallback(async () => {
     // 发给模型 / 判空的正文要剥掉占位符（占位符不是用户文字）；但**回显用的
@@ -172,8 +255,15 @@ export function App() {
 
   return (
     <div className="flex h-screen w-full min-h-0 flex-col bg-canvas">
-      <header className="flex h-12 shrink-0 items-center border-b border-line px-4">
+      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4">
         <span className="font-display text-body-sm text-ink">Shirley</span>
+        <SessionSelector
+          current={sessionName}
+          onSelect={(name) => void switchSession(name)}
+          onNew={(title) => void newSession(title)}
+          onRename={(name, title) => void renameSession(name, title)}
+          onDelete={(name) => void deleteSession(name)}
+        />
       </header>
       {/* 固定宽度居中（对齐 shiwen AiConversationSurface 的 max-w-190 = 760px）：
           聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}

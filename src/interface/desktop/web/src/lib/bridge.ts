@@ -24,6 +24,26 @@ export type FileEntry = {
   kind: "file" | "dir";
 };
 
+/** 一个会话（与 Rust 侧 `SessionEntryWire` 对齐）。 */
+export type SessionEntry = {
+  /** 唯一标识（文件 stem），切换 / 重命名 / 删除都按它。 */
+  name: string;
+  /** 展示用标题：自定义标题优先，否则回落 `name`。 */
+  label: string;
+  /** 首条用户消息摘要（空会话为空串）。 */
+  preview: string;
+  /** 最近修改时间（Unix 毫秒，0 = 未知）。 */
+  modified_ms: number;
+  /** 用户轮数。 */
+  turns: number;
+};
+
+/** 恢复会话时回放的一条历史消息（与 Rust 侧 `HistoryMessageWire` 对齐）。 */
+export type HistoryMessage = {
+  role: "user" | "assistant";
+  content: string;
+};
+
 export type AgentBridge = {
   /**
    * 发送一条用户消息，返回事件流订阅句柄。
@@ -44,6 +64,20 @@ export type AgentBridge = {
   setModel: (value: string) => Promise<void>;
   /** 按关键词检索工作区文件（`@` 引用用，纯应用层）。 */
   searchFiles: (query: string) => Promise<FileEntry[]>;
+  /** 列出全部会话（按最近修改降序）。与 TUI 的 `/session` 读同一份目录。 */
+  listSessions: () => Promise<SessionEntry[]>;
+  /** 当前会话名（无则 null）。 */
+  currentSession: () => Promise<string | null>;
+  /** 新建会话并可命名（title 为空 = 匿名），并切换过去。 */
+  newSession: (title: string | null) => Promise<SessionEntry>;
+  /** 切换到指定会话。 */
+  switchSession: (name: string) => Promise<void>;
+  /** 重命名会话：只改标题，不改标识 / 内容。 */
+  renameSession: (name: string, title: string) => Promise<void>;
+  /** 删除会话（连同日志与标题）。 */
+  deleteSession: (name: string) => Promise<void>;
+  /** 回放当前会话历史（切换 / 启动后重建 transcript 用）。 */
+  loadHistory: () => Promise<HistoryMessage[]>;
 };
 
 const isTauri =
@@ -81,6 +115,27 @@ async function createTauriBridge(): Promise<AgentBridge> {
     },
     async searchFiles(query) {
       return invoke<FileEntry[]>("agent_search_files", { query });
+    },
+    async listSessions() {
+      return invoke<SessionEntry[]>("agent_list_sessions");
+    },
+    async currentSession() {
+      return invoke<string | null>("agent_current_session");
+    },
+    async newSession(title) {
+      return invoke<SessionEntry>("agent_new_session", { title });
+    },
+    async switchSession(name) {
+      await invoke("agent_switch_session", { name });
+    },
+    async renameSession(name, title) {
+      await invoke("agent_rename_session", { name, title });
+    },
+    async deleteSession(name) {
+      await invoke("agent_delete_session", { name });
+    },
+    async loadHistory() {
+      return invoke<HistoryMessage[]>("agent_load_history");
     },
   };
 }
@@ -131,7 +186,63 @@ function createMockBridge(): AgentBridge {
       if (!q) return all;
       return all.filter((entry) => entry.path.toLowerCase().includes(q));
     },
+    async listSessions() {
+      return mockSessions().map((s) => ({ ...s }));
+    },
+    async currentSession() {
+      return mockCurrentName;
+    },
+    async newSession(title) {
+      const name = `mock-${++mockSeq}`;
+      const entry: SessionEntry = {
+        name,
+        label: title?.trim() || name,
+        preview: "",
+        modified_ms: Date.now(),
+        turns: 0,
+      };
+      mockSessionList.push(entry);
+      mockCurrentName = name;
+      return { ...entry };
+    },
+    async switchSession(name) {
+      mockCurrentName = name;
+    },
+    async renameSession(name, title) {
+      const entry = mockSessionList.find((s) => s.name === name);
+      if (entry) entry.label = title.trim() || name;
+    },
+    async deleteSession(name) {
+      mockSessionList = mockSessionList.filter((s) => s.name !== name);
+      if (mockCurrentName === name) mockCurrentName = null;
+    },
+    async loadHistory() {
+      return [];
+    },
   };
+}
+
+// mock 会话状态：纯浏览器 `npm run dev` 下让会话 UI 可独立调试。
+let mockSeq = 0;
+let mockCurrentName: string | null = "mock-1";
+let mockSessionList: SessionEntry[] = [
+  {
+    name: "mock-1",
+    label: "迁移任务",
+    preview: "把 TS 后端迁到 Rust",
+    modified_ms: Date.now() - 60_000,
+    turns: 3,
+  },
+  {
+    name: "mock-2",
+    label: "mock-2",
+    preview: "写一个 bash 工具",
+    modified_ms: Date.now() - 3_600_000,
+    turns: 1,
+  },
+];
+function mockSessions(): SessionEntry[] {
+  return [...mockSessionList].sort((a, b) => b.modified_ms - a.modified_ms);
 }
 
 let cached: Promise<AgentBridge> | null = null;

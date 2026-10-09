@@ -329,9 +329,15 @@ graph TD
 
 **决策 3：会话目录（`SessionCatalog`）收敛"会话从哪来"，与 `ModelCatalog` 对称。**
 
-`src/session.rs` 定义 `SessionCatalog` trait（`list` / `open` / `create`）
-与本地实现 `FileSessionCatalog`。`/session` 指令与选择器 UI 只依赖接口，
-将来若要换成远端 / 数据库后端，UI 不用改。
+`src/session.rs` 定义 `SessionCatalog` trait（`list` / `open` / `create` /
+`create_named` / `rename` / `delete`）与本地实现 `FileSessionCatalog`。
+`/session` 指令与选择器 UI 只依赖接口，将来若要换成远端 / 数据库后端，UI 不用改。
+后三个方法带默认实现（`create_named` 回落 `create`，`rename` / `delete` 报
+`Backend` 错），因此不支持元数据的后端（如 `EmptySessionCatalog`）无需改动。
+
+`SessionEntry` 除 `name` / `label` / `preview` 外，还带 `modified_ms`（文件
+mtime，列表据此降序）与 `turns`（用户轮数）——对齐 Codex resume picker 展示的
+时间与轮数。
 
 **决策 4：启动直接开一份新会话，兼容旧单文件日志。**
 
@@ -348,9 +354,44 @@ graph TD
 确认时按哨兵分流到 `create` 或 `open`；确认后重建界面条目（`rebuild_items_from_agent`）
 并重置会话绑定的统计（usage / 上下文占用）。
 
+**决策 6：标题是 sidecar，重命名不动标识、不动内容。**
+
+会话名是时间戳（文件 stem），不可读也不好认；允许给它一个**自定义标题**。
+标题**不写进 JSONL**——日志只存 `Message`（决策 1），塞标题进去会破坏这条不变量；
+而是另存为纯文本 sidecar `<name>.title`（空 / 不存在 = 无标题，回落 `name`）。
+
+`rename(name, title)` **只改标题，不改会话名、不改日志内容**——与 Codex 的
+`/rename` 一致（"不改 transcript"）。顺带回避了"改文件名后已打开的
+`JsonlSessionStore` 句柄仍指向旧 inode"这类麻烦。`delete(name)` 删除日志，
+并 best-effort 删掉标题 sidecar。
+
+**决策 7：desktop 与 TUI 共用同一份会话数据。**
+
+两个界面**共用同一个 `FileSessionCatalog` 实例所描述的目录**
+（`<root>/.shirley/sessions`）——这就是"共用一份数据"的落点：在 catalog 层
+补齐操作，两个界面自动共享。desktop 侧把 `Bootstrap` 里的 `session_catalog`
+（此前 TUI 专用）一并塞进 `DesktopState`，新增 commands：
+
+- `agent_list_sessions` / `agent_current_session`：列出 / 查询当前会话；
+- `agent_new_session(title?)` / `agent_switch_session(name)`：新建（可命名）/
+  切换，均走 `Agent::switch_session`（与 TUI **同一接缝**）；
+- `agent_rename_session(name, title)` / `agent_delete_session(name)`：管理；
+- `agent_load_history`：从 `agent.messages()` 取 User / Assistant 正文
+  （跳 system / tool / context_summary）成 `HistoryMessageWire`，前端据此重建
+  transcript。
+
+会话操作与 `agent_send` **共用 `Arc<Mutex<Option<Agent>>>`**：运行中
+`agent=None`，此时任何会话操作返回"agent 正在运行中"，不会并发驱动同一个
+`Agent`。前端 `SessionSelector` 参照 `ModelSelector` 范式（点击外部 / Esc 关闭、
+listbox），提供新建（可命名）/ 切换 / 重命名（内联编辑）/ 删除（两次点击确认）。
+
+**本期范围**：list / new（可命名）/ switch / rename / delete。
+**不做**：fork / archive / 启动 `--resume`（记为后续）。
+
 **验收口径**：
 
 - 切换会话后，工作集与召回语料都只反映新会话；旧会话内容不串入；
 - 切换后后续轮次的 `append` 落到新日志，旧日志不被改动；
 - 切换出的工作集与"直接冷启动到该会话"完全一致（共用恢复规则）；
-- 旧单文件日志在首次启动时被收编，历史不丢。
+- 旧单文件日志在首次启动时被收编，历史不丢；
+- TUI 与 desktop 看到同一份会话列表；在一边新建 / 重命名 / 删除，另一边刷新即可见。

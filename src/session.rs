@@ -116,13 +116,21 @@ impl SessionStore for JsonlSessionStore {
 
 /// 一个可选会话（`/session` 切换用）。
 ///
-/// `name` 是唯一标识（文件 stem），`label` 给人看，`preview` 是该会话首条
-/// 用户消息的摘要——列表里只显示时间戳的话无法分辨，预览让用户认得出会话。
+/// `name` 是唯一标识（文件 stem），`label` 给人看（自定义标题优先，否则回落
+/// `name`），`preview` 是该会话首条用户消息的摘要——列表里只显示时间戳的话
+/// 无法分辨，预览让用户认得出会话。
+///
+/// `modified_ms` / `turns` 是给 UI 的元信息（Codex 的 resume picker 会展示
+/// 时间与轮数），不参与标识与查找。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEntry {
     pub name: String,
     pub label: String,
     pub preview: String,
+    /// 最近修改时间（Unix 毫秒；0 = 未知）。列表按它降序。
+    pub modified_ms: u64,
+    /// 用户轮数（该会话里 `User` 消息条数）。
+    pub turns: usize,
 }
 
 impl SessionEntry {
@@ -132,11 +140,14 @@ impl SessionEntry {
     }
 }
 
-/// 会话目录（应用层）：列出 / 打开 / 新建会话。
+/// 会话目录（应用层）：列出 / 打开 / 新建 / 重命名 / 删除会话。
 ///
-/// 与 `models::ModelCatalog` 对称——把"当前有哪些会话可选"收敛到接口后面。
-/// 当前实现是本地目录扫描（[`FileSessionCatalog`]），将来若要换成远端 / 数据库，
-/// `/session` 指令与选择器 UI 都不用改。
+/// 与 `models::ModelCatalog` 对称——把"当前有哪些会话可选、怎么管理"收敛到接口
+/// 后面。当前实现是本地目录扫描（[`FileSessionCatalog`]），将来若要换成远端 /
+/// 数据库，指令与选择器 UI 都不用改。
+///
+/// **TUI 与 desktop 共用同一个实现**：两边的会话列表 / 切换 / 重命名 / 删除都
+/// 落在这一层，因此天然共享同一份 `<root>/.shirley/sessions` 数据。
 pub trait SessionCatalog: Send + Sync {
     /// 列出全部会话，**按最近修改时间降序**（最新的在前）。
     fn list(&self) -> Result<Vec<SessionEntry>, SessionError>;
@@ -146,12 +157,39 @@ pub trait SessionCatalog: Send + Sync {
 
     /// 新建一个空会话，返回它的条目与存储。
     fn create(&self) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError>;
+
+    /// 新建会话并可带标题（`None` = 匿名，UI 回落到首条用户消息 / 名字）。
+    ///
+    /// 默认实现忽略标题、退化为 [`SessionCatalog::create`]——不支持标题的后端
+    /// 无需改动。
+    fn create_named(
+        &self,
+        _title: Option<&str>,
+    ) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError> {
+        self.create()
+    }
+
+    /// 重命名会话：**只改标题，不改会话标识 / 内容**（Codex 的 `/rename` 语义，
+    /// 不动 transcript）。
+    ///
+    /// 默认实现报错——不支持元数据的后端（如 [`EmptySessionCatalog`]）无需实现。
+    fn rename(&self, _name: &str, _title: &str) -> Result<(), SessionError> {
+        Err(SessionError::Backend("该会话目录不支持重命名".into()))
+    }
+
+    /// 删除会话（连同其日志与标题）。默认实现报错。
+    fn delete(&self, _name: &str) -> Result<(), SessionError> {
+        Err(SessionError::Backend("该会话目录不支持删除".into()))
+    }
 }
 
 /// 基于本地目录的会话目录：`<root>/.shirley/sessions/<name>.jsonl`。
 ///
 /// 每份会话就是一份独立的 JSONL 日志（沿用 [`JsonlSessionStore`]），
 /// 目录扫描即"列出会话"。名字默认取时间戳，天然有序且无需额外索引。
+///
+/// 标题另存为 sidecar `<name>.title`（纯文本）：日志只存 `Message`
+/// （`docs/session.md` 一.决策 1），把标题塞进消息流会破坏这条不变量。
 pub struct FileSessionCatalog {
     dir: PathBuf,
 }
@@ -166,6 +204,30 @@ impl FileSessionCatalog {
 
     fn path_for(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{name}.jsonl"))
+    }
+
+    /// 标题 sidecar 路径：`<name>.title`（纯文本）。
+    fn title_path_for(&self, name: &str) -> PathBuf {
+        self.dir.join(format!("{name}.title"))
+    }
+
+    /// 读取会话标题（未命名返回 `None`）。
+    fn read_title(&self, name: &str) -> Option<String> {
+        let text = std::fs::read_to_string(self.title_path_for(name)).ok()?;
+        let trimmed = text.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_owned())
+    }
+
+    /// 写入会话标题：空串视为"清空标题"（删除 sidecar），非空则落盘。
+    fn write_title(&self, name: &str, title: &str) -> Result<(), SessionError> {
+        std::fs::create_dir_all(&self.dir)?;
+        let title = title.trim();
+        if title.is_empty() {
+            let _ = std::fs::remove_file(self.title_path_for(name));
+        } else {
+            std::fs::write(self.title_path_for(name), title)?;
+        }
+        Ok(())
     }
 
     /// 打开指定名字的会话；文件不存在时 `JsonlSessionStore::open` 会创建它。
@@ -209,12 +271,11 @@ impl FileSessionCatalog {
         std::fs::rename(&legacy, self.path_for("legacy"))?;
         Ok(())
     }
-
 }
 
 impl SessionCatalog for FileSessionCatalog {
     fn list(&self) -> Result<Vec<SessionEntry>, SessionError> {
-        let mut entries: Vec<(std::time::SystemTime, SessionEntry)> = Vec::new();
+        let mut entries: Vec<(u64, SessionEntry)> = Vec::new();
         let read = match std::fs::read_dir(&self.dir) {
             Ok(read) => read,
             // 目录还不存在 = 还没有任何会话，不是错误。
@@ -230,16 +291,22 @@ impl SessionCatalog for FileSessionCatalog {
             let Some(name) = path.file_stem().and_then(|s| s.to_str()) else {
                 continue;
             };
-            let modified = item
+            let modified_ms = item
                 .metadata()
                 .and_then(|m| m.modified())
-                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                .ok()
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_millis() as u64)
+                .unwrap_or(0);
+            let (preview, turns) = summary_of(&path);
             entries.push((
-                modified,
+                modified_ms,
                 SessionEntry {
                     name: name.to_owned(),
-                    label: name.to_owned(),
-                    preview: preview_of(&path),
+                    label: self.read_title(name).unwrap_or_else(|| name.to_owned()),
+                    preview,
+                    modified_ms,
+                    turns,
                 },
             ));
         }
@@ -253,34 +320,68 @@ impl SessionCatalog for FileSessionCatalog {
     }
 
     fn create(&self) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError> {
+        self.create_named(None)
+    }
+
+    fn create_named(
+        &self,
+        title: Option<&str>,
+    ) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError> {
         let name = self.fresh_name();
         let store = self.open_named(&name)?;
+        if let Some(title) = title {
+            self.write_title(&name, title)?;
+        }
         let entry = SessionEntry {
-            name: name.clone(),
-            label: name,
+            label: self.read_title(&name).unwrap_or_else(|| name.clone()),
+            name,
             preview: String::new(),
+            modified_ms: 0,
+            turns: 0,
         };
         Ok((entry, store))
     }
+
+    fn rename(&self, name: &str, title: &str) -> Result<(), SessionError> {
+        if !self.path_for(name).exists() {
+            return Err(SessionError::Backend(format!("会话不存在：{name}")));
+        }
+        self.write_title(name, title)
+    }
+
+    fn delete(&self, name: &str) -> Result<(), SessionError> {
+        let log = self.path_for(name);
+        if !log.exists() {
+            return Err(SessionError::Backend(format!("会话不存在：{name}")));
+        }
+        std::fs::remove_file(&log)?;
+        // 标题 sidecar 附属于日志：日志没了它也就没意义，一并删除（best-effort）。
+        let _ = std::fs::remove_file(self.title_path_for(name));
+        Ok(())
+    }
 }
 
-/// 读取会话首条用户消息作为预览（截断到 40 个字符）。读不到返回空串。
-fn preview_of(path: &Path) -> String {
+/// 读取会话的预览（首条用户消息，截断 40 字符）与用户轮数。读不到返回 `("", 0)`。
+fn summary_of(path: &Path) -> (String, usize) {
     let Ok(file) = File::open(path) else {
-        return String::new();
+        return (String::new(), 0);
     };
     let reader = BufReader::new(file);
-    // 只扫前若干行，避免为预览读整个大日志。
-    for line in reader.lines().take(50).map_while(Result::ok) {
+    let mut preview = String::new();
+    let mut turns = 0usize;
+    for line in reader.lines().map_while(Result::ok) {
         if line.trim().is_empty() {
             continue;
         }
         if let Ok(Message::User { content }) = serde_json::from_str::<Message>(&line) {
-            let one_line = content.replace('\n', " ");
-            return truncate_chars(&one_line, 40);
+            turns += 1;
+            if preview.is_empty() {
+                let one_line = content.replace('\n', " ");
+                preview = truncate_chars(&one_line, 40);
+            }
         }
     }
-    String::new()
+    (preview, turns)
 }
 
 /// 按字符数截断（中文按字，避免按字节切碎 UTF-8）。
@@ -478,5 +579,68 @@ mod tests {
         assert_eq!(listed[0].name, "legacy");
         assert_eq!(listed[0].preview, "旧对话");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catalog_create_named_sets_title_and_counts_turns() {
+        let dir = tmp_dir("named");
+        let catalog = FileSessionCatalog::new(&dir);
+        let (entry, store) = catalog.create_named(Some("迁移任务")).unwrap();
+        assert_eq!(entry.label, "迁移任务");
+        store.append(&user("第一轮")).unwrap();
+        store.append(&Message::Assistant {
+            content: Some("回复".into()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+        })
+        .unwrap();
+        store.append(&user("第二轮")).unwrap();
+        let listed = catalog.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        // 标题持久化在 sidecar，name 仍是时间戳（不改标识）。
+        assert_eq!(listed[0].label, "迁移任务");
+        assert_eq!(listed[0].name, entry.name);
+        assert_eq!(listed[0].preview, "第一轮");
+        assert_eq!(listed[0].turns, 2);
+        assert!(listed[0].modified_ms > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catalog_rename_changes_label_not_identity_or_content() {
+        let dir = tmp_dir("rename");
+        let catalog = FileSessionCatalog::new(&dir);
+        let (entry, store) = catalog.create().unwrap();
+        store.append(&user("内容")).unwrap();
+        catalog.rename(&entry.name, "新名字").unwrap();
+        let listed = catalog.list().unwrap();
+        assert_eq!(listed[0].label, "新名字");
+        // 标识与内容不变（rename 不动 transcript）。
+        assert_eq!(listed[0].name, entry.name);
+        assert_eq!(listed[0].preview, "内容");
+        // 重开仍读到同样的日志。
+        assert_eq!(catalog.open(&entry.name).unwrap().load().unwrap().len(), 1);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn catalog_delete_removes_log_and_title() {
+        let dir = tmp_dir("delete");
+        let catalog = FileSessionCatalog::new(&dir);
+        let (entry, store) = catalog.create_named(Some("待删")).unwrap();
+        store.append(&user("x")).unwrap();
+        assert_eq!(catalog.list().unwrap().len(), 1);
+        catalog.delete(&entry.name).unwrap();
+        assert!(catalog.list().unwrap().is_empty());
+        // 再删报错（已不存在）。
+        assert!(catalog.delete(&entry.name).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn empty_catalog_rejects_rename_and_delete() {
+        let catalog = EmptySessionCatalog;
+        assert!(catalog.rename("a", "b").is_err());
+        assert!(catalog.delete("a").is_err());
     }
 }

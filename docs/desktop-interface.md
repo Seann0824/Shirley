@@ -353,9 +353,19 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String
 | `agent_model_name` | 当前模型名（页脚 / 选择器展示） |
 | `agent_list_models` | 列出可选模型（转发 `ModelCatalog`） |
 | `agent_set_model { model }` | 热切换模型（`Agent::set_model`，不重建 Agent） |
+| `agent_search_files { query }` | `@` 引用的工作区文件检索（应用层 `workspace_search`，不碰 SDK） |
+| `agent_list_sessions` | 列出全部会话（转发 `SessionCatalog::list`，按最近修改降序） |
+| `agent_current_session` | 当前会话名（无则 `null`） |
+| `agent_new_session { title? }` | 新建会话（可命名���并切换过去（`create_named` + `switch_session`） |
+| `agent_switch_session { name }` | 切换到指定会话（`Agent::switch_session`，与 TUI 同一接缝） |
+| `agent_rename_session { name, title }` | 重命名会话（只改标题 sidecar，不改标识 / 内容） |
+| `agent_delete_session { name }` | 删除会话（连同日志与标题） |
+| `agent_load_history` | 回放当前会话历史（User / Assistant 正文）供前端重建 transcript |
 | `agent_cancel` | 预留（SDK 取消机制未落地，见 `Agent.md` 缺口 9） |
 
 > **模型切换选择器**：放在发送按钮旁边（`AiChatComposer` 的 `trailingAction` 槽位，`ModelSelector.tsx`）。目录与切换都走 Rust 侧（`agent_list_models` / `agent_set_model`），前端不持有模型状态——与 TUI 的 `/model` 同语义，只是从「浮层面板」变成「发送栏内联下拉」。
+
+> **会话管理选择器**（`SessionSelector.tsx`，放在顶栏标题旁）：参照 Codex 的 `/resume` picker，提供列出 / 切换 / 新建（可命名）/ 重命名（内联编辑）/ 删除（两次点击确认）。会话目录与全部操作都走 Rust 侧 `SessionCatalog`——**与 TUI 共用同一个实现、同一份 `<root>/.shirley/sessions` 数据**（见 `docs/session.md` 八.决策 7）。切换 / 新建 / 删除与 `agent_send` 共用 `Arc<Mutex<Option<Agent>>>`：运行中拒绝，不会并发驱动。前端不持有会话状态，切换后调 `agent_load_history` 重建 transcript。
 
 > **注意**：`AgentEvent` 目前是 `Debug`，**未派生 `Serialize`**。桥接层需要一个 `to_wire` 把 `AgentEvent` / `Message` 映射成前端 DTO（不直接给 SDK 加 `Serialize`，保持 SDK 契约小、协议差异收敛在边界——与 `docs/README.md` 原则一一致）。已落地为 `src/interface/desktop/wire.rs`。
 >
@@ -386,7 +396,7 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String
 **M3 · 补齐会话与指令**
 - [x] 模型切换选择器（放在发送按钮旁，`ModelSelector.tsx` + `agent_list_models` / `agent_set_model`）
 - [x] `@` 引用：工作区文件/目录的提及浮层 + chip 展示（见 4.3；`agent_search_files` + `file-mentions/`）
-- [ ] 会话列表 / 切换（`SessionCatalog`）
+- [x] 会话管理：列表 / 切换 / 新建（可命名）/ 重命名 / 删除（`SessionSelector.tsx` + `SessionCatalog`，与 TUI 共用数据）
 - [ ] `/login` `/session` 等指令的 desktop 呈现
 - [ ] 思考显示 / 工具参数展开 / 滚动等交互对齐 TUI
 
@@ -412,4 +422,4 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String
 - ~~**Node 工具链**：引入 npm 会改变仓库性质，需用户明确接受（已问）。~~ → **已确认允许**：用户接受引入 Node/npm/Vite 构建链。
 - **`streamdown` 体量**：需要评估打包体积与离线可用性。
 - **中文字体**：`tokens.css` 依赖 Songti / PingFang 等系统字体，跨平台需兜底。
-- **窗口与 TUI 的会话一致性**：两个界面共享会话目录，需确认「同一时刻只开一个界面」还是允许并存（默认：启动时二选一，不同时开）。
+- ~~**窗口与 TUI 的会话一致性**：两个界面共享会话目录，需确认「同一时刻只开一个界面」还是允许并存。~~ → **已决策：允许并存，不加锁。** 两个界面各自扫描同一份 `<root>/.shirley/sessions`，同一会话被两边同时写入时互相覆盖是**已知且可接受**的行为（无锁、无协调）。

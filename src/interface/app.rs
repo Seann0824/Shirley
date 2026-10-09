@@ -1136,6 +1136,8 @@ impl App {
             name: SessionPicker::NEW_NAME.to_owned(),
             label: "＋ 新建会话".to_owned(),
             preview: String::new(),
+            modified_ms: 0,
+            turns: 0,
         }];
         all.append(&mut entries);
         let selected = current
@@ -1306,6 +1308,8 @@ mod tests {
             name: "20240101-000000".into(),
             label: "20240101-000000".into(),
             preview: "旧对话".into(),
+            modified_ms: 0,
+            turns: 1,
         }]);
         assert!(app.is_session_picker_open());
         // 首项固定是「新建」哨兵。
@@ -1320,8 +1324,8 @@ mod tests {
     fn session_picker_move_does_not_wrap() {
         let mut app = app();
         app.open_session_picker(vec![
-            SessionEntry { name: "a".into(), label: "a".into(), preview: String::new() },
-            SessionEntry { name: "b".into(), label: "b".into(), preview: String::new() },
+            SessionEntry { name: "a".into(), label: "a".into(), preview: String::new(), modified_ms: 0, turns: 0 },
+            SessionEntry { name: "b".into(), label: "b".into(), preview: String::new(), modified_ms: 0, turns: 0 },
         ]);
         // 共 3 项（新建 + a + b）。
         app.session_picker_move(-1);
