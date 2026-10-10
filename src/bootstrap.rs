@@ -24,7 +24,7 @@ use shirley_agent_sdk::{
 
 use crate::memory::{
     self, CurateOutcome, CuratorError, Embedder, EmbeddingConfig, MemoryContextProvider,
-    MemoryRuntime, MemoryStore,
+    MemoryRuntime, MemoryStore, RecallTool,
 };
 use crate::models::{self, ModelCatalog};
 use crate::prompt;
@@ -185,6 +185,9 @@ impl AgentFactory {
         // 凭据注入）各自执行一次——状态本就按工具实例隔离，可接受（决策 5）。
         let mut tool_manager = assemble_tools();
         let _ = tool_manager.register(TodoTool::new(todo_store.clone()));
+        // 主动查记忆工具（只读）：与自动注入共享同一 `MemoryRuntime`。
+        // 记忆写入**不经**任何工具，只由后台 curator 完成（`docs/memory.md` 决策 3）。
+        let _ = tool_manager.register(RecallTool::new(memory.clone()));
 
         // SDK 的 `Agent` 只接受**单个** `context_provider`，而这里要注入两份
         // （任务账本 + 记忆）——用 `CompositeContextProvider` 顺序拼接。
