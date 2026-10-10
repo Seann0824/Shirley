@@ -182,6 +182,11 @@ impl<'a> Tui<'a> {
                             if let Some(prompt) = update::update(&mut self.app, event)
                                 && let Some(agent) = self.app.take_agent()
                             {
+                                // 记忆：把本轮用户输入作为 query，供 provider 在
+                                // 组装请求时做相关检索注入（core.md 常驻 + top-k 相关）。
+                                if let Some(memory) = self.app.memory.as_ref() {
+                                    memory.set_query(prompt.as_str());
+                                }
                                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                                 self.cancel = Some(cancel_tx);
                                 response = Some(tokio::spawn(run_agent(

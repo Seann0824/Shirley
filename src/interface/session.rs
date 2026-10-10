@@ -22,6 +22,7 @@ use tokio::sync::broadcast;
 
 use super::app::{ChatMessage, Item, Role, ToolCallView};
 use crate::bootstrap::AgentFactory;
+use crate::memory::MemoryRuntime;
 use crate::session::{SessionCatalog, SessionStore};
 
 /// 事件扇出通道容量。运行中订阅者若落后超过此数会 `Lagged`，由订阅方（desktop
@@ -73,6 +74,12 @@ pub struct Session {
     /// 落库由 [`Session::apply_event`] 事件驱动：收到 SDK 的 `MessageAdded` 即
     /// `append`。会话持久化完全在应用层，SDK 不再持有会话日志。
     store: Option<Arc<dyn SessionStore>>,
+    /// 该会话的记忆运行时（`None` = 无记忆，供测试 / 无配置场景）。
+    ///
+    /// 每会话一份（`docs/memory.md` §4.2）：query 槽独立，多会话并发互不干扰。
+    /// 驱动方在发起一轮前 `set_query`（按本轮用户输入做相关检索），会话结束
+    /// 交给 curator。
+    pub memory: Option<Arc<MemoryRuntime>>,
 }
 
 impl Session {
@@ -84,6 +91,7 @@ impl Session {
         agent: Agent,
         name: Option<String>,
         store: Option<Arc<dyn SessionStore>>,
+        memory: Option<Arc<MemoryRuntime>>,
     ) -> Self {
         Self {
             name,
@@ -105,6 +113,7 @@ impl Session {
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
             running: false,
             store,
+            memory,
         }
     }
 
@@ -432,9 +441,10 @@ impl SessionManager {
         name: Option<String>,
         catalog: Arc<dyn SessionCatalog>,
         store: Option<Arc<dyn SessionStore>>,
+        memory: Option<Arc<MemoryRuntime>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name, store));
+        sessions.insert(0, Session::new(agent, name, store, memory));
         Self {
             sessions,
             active: 0,
@@ -451,9 +461,10 @@ impl SessionManager {
         catalog: Arc<dyn SessionCatalog>,
         factory: Arc<AgentFactory>,
         store: Option<Arc<dyn SessionStore>>,
+        memory: Option<Arc<MemoryRuntime>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name, store));
+        sessions.insert(0, Session::new(agent, name, store, memory));
         Self {
             sessions,
             active: 0,
@@ -501,10 +512,12 @@ impl SessionManager {
         agent: Agent,
         name: Option<String>,
         store: Option<Arc<dyn SessionStore>>,
+        memory: Option<Arc<MemoryRuntime>>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.sessions.insert(id, Session::new(agent, name, store));
+        self.sessions
+            .insert(id, Session::new(agent, name, store, memory));
         id
     }
 
@@ -514,8 +527,14 @@ impl SessionManager {
     /// 从目录 `open` 日志、经工厂 `build_agent` 恢复工作集后插入再切前台。
     /// 返回该会话名。
     pub fn switch_to(&mut self, name: &str) -> Result<String, String> {
+        // 离开前台即视为该会话"本轮结束"——切走后触发一次增量 curation
+        // （`docs/memory.md` §5.1；旧会话仍留在内存，其 `Agent` 消息可读）。
+        let previous = self.active().name.clone();
         if let Some(id) = self.id_of_name(name) {
             self.active = id;
+            if let Some(previous) = previous.filter(|p| p != name) {
+                self.spawn_curation(&previous);
+            }
             return Ok(name.to_owned());
         }
         let factory = self
@@ -528,15 +547,23 @@ impl SessionManager {
             .map_err(|error| error.to_string())?;
         // 会话持久化在应用层：先 load 日志，再交给工厂起 `Agent`（system 现生成置顶）。
         let log = store.load().map_err(|error| error.to_string())?;
-        let agent = factory
+        let built = factory
             .build_agent(log)
             .map_err(|error| error.to_string())?;
-        let id = self.insert(agent, Some(name.to_owned()), Some(store));
+        let id = self.insert(
+            built.agent,
+            Some(name.to_owned()),
+            Some(store),
+            Some(built.memory),
+        );
         // 从磁盘恢复的会话：用其历史重建视图条目，快照 / 渲染才有内容。
         if let Some(session) = self.sessions.get_mut(&id) {
             session.rebuild_items_from_agent();
         }
         self.active = id;
+        if let Some(previous) = previous.filter(|p| p != name) {
+            self.spawn_curation(&previous);
+        }
         Ok(name.to_owned())
     }
 
@@ -544,6 +571,8 @@ impl SessionManager {
     ///
     /// 惰性：此刻只定名、不落盘，发首条消息才真正建文件（`create_lazy`）。
     pub fn create_new(&mut self, title: Option<&str>) -> Result<String, String> {
+        // 与 `switch_to` 同理：新建并切走 = 旧会话本轮结束，触发一次 curation。
+        let previous = self.active().name.clone();
         let factory = self
             .factory
             .as_ref()
@@ -554,11 +583,19 @@ impl SessionManager {
             .map_err(|error| error.to_string())?;
         // 惰性会话此刻为空：load 得空工作集，首条消息落盘时才物化文件。
         let log = store.load().map_err(|error| error.to_string())?;
-        let agent = factory
+        let built = factory
             .build_agent(log)
             .map_err(|error| error.to_string())?;
-        let id = self.insert(agent, Some(entry.name.clone()), Some(store));
+        let id = self.insert(
+            built.agent,
+            Some(entry.name.clone()),
+            Some(store),
+            Some(built.memory),
+        );
         self.active = id;
+        if let Some(previous) = previous.filter(|p| p != entry.name.as_str()) {
+            self.spawn_curation(&previous);
+        }
         Ok(entry.name)
     }
 
@@ -660,6 +697,49 @@ impl SessionManager {
         }
     }
 
+    /// 会话"结束"时触发一次增量 curation（`docs/memory.md` §5.1）。
+    ///
+    /// V1 的"结束"判定：**离开前台**（切换到别的会话 / 新建会话 / 删掉前台会话）。
+    /// 这是一个**近似**——用户可能只是临时切走又切回（记为已知缺口，docs/memory.md
+    /// §11.4：退出 / 空闲超时等更精确的判定留待后续）。触发是 best-effort：没有
+    /// 记忆、没有消息、不在 tokio 运行时（单测）时静默跳过。
+    ///
+    /// 用 `Handle::try_current()` 守卫：curation 是后台任务，**绝不阻塞**会话切换
+    /// 这条同步路径。失败只记一条 stderr 日志，不影响主流程。
+    fn spawn_curation(&self, name: &str) {
+        let Some(factory) = self.factory.clone() else {
+            return;
+        };
+        let Some(session) = self.session(name) else {
+            return;
+        };
+        if session.memory.is_none() {
+            return;
+        }
+        // 只沉淀"有内容"的会话（用户 + 助手轮次）；空 / 单条不做无谓的模型调用。
+        let messages: Vec<Message> = session.agent.as_ref().map(|a| a.messages().to_vec()).unwrap_or_default();
+        if messages.is_empty() {
+            return;
+        }
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let session_ref = format!("{name}.jsonl");
+        handle.spawn(async move {
+            match factory.curate(&messages, &session_ref).await {
+                Ok(outcome) if !outcome.empty || !outcome.written.is_empty() => {
+                    eprintln!(
+                        "[memory] curated `{session_ref}`: {} written, {} rejected",
+                        outcome.written.len(),
+                        outcome.rejected.len()
+                    );
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("[memory] curation for `{session_ref}` failed: {error}"),
+            }
+        });
+    }
+
     /// 名为 `name` 的**已加载**会话是否正在运行（`Agent` 被移入后台任务）。
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn is_running(&self, name: &str) -> bool {
@@ -699,6 +779,7 @@ mod tests {
             test_agent(),
             Some("s".into()),
             Arc::new(EmptySessionCatalog),
+            None,
             None,
         )
     }

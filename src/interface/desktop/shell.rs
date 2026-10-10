@@ -174,9 +174,17 @@ async fn agent_send(
     // 不是拼了引用头的 `prompt`。
     let mut agent = {
         let mut guard = state.sessions.lock().await;
-        guard
+        let agent = guard
             .begin_turn(&session_name, text.clone())
-            .ok_or_else(|| "agent 正在运行中".to_owned())?
+            .ok_or_else(|| "agent 正在运行中".to_owned())?;
+        // 记忆：把本轮用户输入作为 query，供 provider 组装请求时做相关检索注入。
+        if let Some(memory) = guard
+            .session(&session_name)
+            .and_then(|session| session.memory.clone())
+        {
+            memory.set_query(text.as_str());
+        }
+        agent
     };
 
     // `SessionManager` 作为任务执行者：跑 `run_stream`，把每个事件喂回**该会话**
@@ -535,17 +543,18 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
     let log = store
         .load()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let agent = factory
+    let built = factory
         .build_agent(log)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     eprintln!("[desktop] 会话：{}", entry.name);
 
     let sessions = SessionManager::with_factory(
-        agent,
+        built.agent,
         Some(entry.name),
         session_catalog.clone(),
         Arc::new(factory),
         Some(store),
+        Some(built.memory),
     );
 
     let state = DesktopState {

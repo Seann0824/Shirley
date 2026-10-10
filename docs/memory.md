@@ -10,6 +10,11 @@
 
 **范围声明**：本轮只做方案与最小落地（V1），不上向量库 / 嵌入 / 图数据库。
 
+> **实现状态（V1 已落地）**：`src/memory/`（`format` / `store` / `index` / `provider` /
+> `curator` 五模块，42 个单测全绿）+ 应用层接线（`bootstrap.rs` / `interface/session.rs`
+> / TUI / desktop）。**SDK 未改动**，只复用既有接缝 `ContextProvider`。V1 四条验收
+> 口径见第十节。缺口见第十一节（其中"curator 触发时机"已按下文现状收窄）。
+
 ---
 
 **一、要解决什么**
@@ -357,7 +362,9 @@ src/memory/
 | 文件 | 职责 |
 | --- | --- |
 | `src/memory/`（**应用层**） | 上表五个子模块 |
-| `src/bootstrap.rs`（应用层） | `build_agent` 构造 `MemoryContextProvider` 并作为 `context_provider` 注入（与 `TodoContextProvider` 并列） |
+| `src/bootstrap.rs`（应用层） | `build_agent` 每会话新建一份 `Arc<MemoryRuntime>`，经 `CompositeContextProvider` 把 `TodoContextProvider` 与 `MemoryContextProvider` 拼成**单个** `context_provider` 注入（SDK 的 `Agent` 只收一个 provider，故需此胶水）。返回 `BuiltAgent { agent, memory }`——把 `MemoryRuntime` 句柄带回给驱动方 |
+| `src/interface/session.rs`（应用层） | `Session` 持 `memory: Option<Arc<MemoryRuntime>>`（每会话一份，query 槽独立）；`switch_to` / `create_new` 离开前台时 `spawn_curation`（`Handle::try_current()` 守卫、后台 best-effort） |
+| `src/interface/tui.rs` / `desktop/shell.rs`（应用层） | 发起一轮前 `memory.set_query(本轮用户输入)`——`ContextProvider::context()` 无参，靠这个 query 槽做相关检索 |
 | `crates/shirley-agent-sdk/src/runtime/context.rs`（SDK） | 复用既有通用接缝 `ContextProvider`，**不改** |
 
 - 可选的 `remember` / `recall` 记忆工具走应用层 `Tool`（手写 `impl Tool`），
@@ -370,7 +377,7 @@ src/memory/
 
 | 阶段 | 内容 | 解决 |
 | --- | --- | --- |
-| **V1（稳）** | `core.md` 常驻注入 + `index.md` 关键词检索注入 + 会话结束增量 curator（同模型 + 确定性自检）+ 时间化冲突字段 | 自动附带、异步 curator、冲突不删历史 |
+| **V1（稳）· 已实现** | `core.md` 常驻注入 + `index.md` 关键词检索注入 + 会话结束增量 curator（同模型 + 确定性自检）+ 时间化冲突字段 | 自动附带、异步 curator、冲突不删历史 |
 | **V2** | 定期整理（睡眠学习）+ 回原始证据核查 + 检索升级 BM25 + 可配独立 curator 模型 | 全量去重 / 合并、证据回查、异源审核 |
 | **V3** | 可选 embedding 语义检索、跨工作区记忆、多模态（第 3 章 3.3.7） | 大规模召回、主动服务 |
 
@@ -390,8 +397,10 @@ src/memory/
    复杂证据仍可能误合。
 3. **检索精度**：V1 关键词匹配对同义改写不敏感，召回率有限，靠 `index.md` 摘要
    补偿。
-4. **curator 触发时机**：会话"结束"在 TUI / desktop 的判定尚需明确（退出？
-   空闲超时？切换会话？）。
+4. **curator 触发时机（V1 取近似）**：V1 把"离开前台"（`switch_to` / `create_new`）
+   当作会话结束触发一次 curation——用户只是临时切走又切回也会多触发一次；应用**退出
+   不触发**（运行时可能先关）。更精确的判定（空闲超时 / 显式结束 / 退出前 flush）留待
+   后续。触发为 best-effort：无记忆、无消息、不在 tokio 运行时（单测）时静默跳过。
 5. **隐私**：第 3 章建议 PII 脱敏后再入库，V1 未做（记忆在本地，风险低但存在）。
 6. **注入即失前缀缓存**：与 `todo.md` 同一代价——`core.md` 变化时其后前缀失效，
    用"放末尾 + 稳定内容"压到最小。

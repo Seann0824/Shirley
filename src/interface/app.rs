@@ -204,7 +204,7 @@ impl App {
         session_catalog: Arc<dyn SessionCatalog>,
     ) -> Self {
         Self::with_manager(
-            SessionManager::single(agent, None, session_catalog, None),
+            SessionManager::single(agent, None, session_catalog, None, None),
             catalog,
         )
     }

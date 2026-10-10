@@ -14,13 +14,17 @@
 //! 工具定义由工厂复用，`todo` / 会话日志在 `Agent::new` 内部按实例
 //! 隔离），从而支持多会话并行。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use shirley_agent_sdk::{
-    Agent, AgentError, CompressionConfig, Message, ModelConfig, SystemPrompt, ToolManager,
+    Agent, AgentError, CompressionConfig, ContextProvider, Message, ModelConfig, SystemPrompt,
+    ToolManager,
 };
 
+use crate::memory::{
+    self, CurateOutcome, CuratorError, MemoryContextProvider, MemoryRuntime, MemoryStore,
+};
 use crate::models::{self, ModelCatalog};
 use crate::prompt;
 use crate::session::{self, SessionCatalog};
@@ -56,6 +60,24 @@ pub struct AgentFactory {
     pub session_catalog: Arc<dyn SessionCatalog>,
     /// 缺模型服务配置（缺 `base_url`）：界面据此进入 `/login` 引导。
     pub needs_login: bool,
+    /// 记忆根目录：`[全局, 工作区]`（`docs/memory.md` §3.1）。`roots[0]`（全局）是
+    /// **写入主根**，读时合并（工作区覆盖全局）。所有会话共用同一份目录。
+    memory_roots: Vec<PathBuf>,
+}
+
+/// 全局记忆相对 `config_dir` 的位置（跨项目）。
+const GLOBAL_MEMORY_REL: &str = "shirley/memory";
+/// 工作区记忆相对工作区根的位置（随仓库走）。
+const WORKSPACE_MEMORY_REL: &str = ".shirley/memory";
+
+/// 记忆根目录：`[全局, 工作区]`。拿不到 `config_dir` 时退化为仅工作区。
+fn memory_roots(working_dir: &Path) -> Vec<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(config_dir) = dirs::config_dir() {
+        roots.push(config_dir.join(GLOBAL_MEMORY_REL));
+    }
+    roots.push(working_dir.join(WORKSPACE_MEMORY_REL));
+    roots
 }
 
 impl AgentFactory {
@@ -108,6 +130,7 @@ impl AgentFactory {
             model_catalog,
             session_catalog,
             needs_login,
+            memory_roots: memory_roots(&working_dir),
         })
     }
 
@@ -117,13 +140,22 @@ impl AgentFactory {
     /// 起 `Agent`（空 `Vec` = 全新会话）。`Agent::new` 会把 system 现生成置顶——
     /// 日志里不含 system，故恢复出的工作集必然与冷启动一致。
     ///
-    /// 模型配置 / 系统提示词 / 压缩策略由工厂复用（`clone`）；`ToolManager` 与任务
-    /// 账本按实例新建——因此不同会话的 `Agent` 互不共享可变状态，可真正并行。
-    pub fn build_agent(&self, messages: Vec<Message>) -> Result<Agent, AgentError> {
+    /// 模型配置 / 系统提示词 / 压缩策略由工厂复用（`clone`）；`ToolManager`、任务
+    /// 账本、记忆运行时按实例新建——因此不同会话的 `Agent` 互不共享可变状态，可真正
+    /// 并行。
+    ///
+    /// 返回 [`BuiltAgent`]：`Agent` 之外**额外带回记忆运行时句柄**——因为
+    /// `ContextProvider` 是 trait object，驱动方（TUI / desktop）拿不到具体类型，
+    /// 需要在每轮前经该句柄 `set_query`（`docs/memory.md` §4.2）。
+    pub fn build_agent(&self, messages: Vec<Message>) -> Result<BuiltAgent, AgentError> {
         // 任务账本（应用层能力）：每个 `Agent` 一份 `TodoStore`，同时交给
         // `todo` 工具（写）与 `TodoContextProvider`（每轮末尾注入，跨压缩存活）。
         // 两者共享同一 `Arc`，账本状态随会话隔离。
         let todo_store = Arc::new(TodoStore::new());
+
+        // 记忆（应用层能力）：每个 `Agent` 一份 `MemoryRuntime`（独立 query 槽，
+        // 多会话并发互不干扰），共享同一份 memory 目录（全局 + 工作区）。
+        let memory = Arc::new(MemoryRuntime::new(self.memory_store()));
 
         // `ToolManager` 非 `Clone`，每次造 `Agent` 都新建一份并重新注册工具：
         // 工具定义稳定（prefix 缓存友好），`on_register` 钩子（如 web_search 的
@@ -131,18 +163,86 @@ impl AgentFactory {
         let mut tool_manager = assemble_tools();
         let _ = tool_manager.register(TodoTool::new(todo_store.clone()));
 
-        Agent::builder()
+        // SDK 的 `Agent` 只接受**单个** `context_provider`，而这里要注入两份
+        // （任务账本 + 记忆）——用 `CompositeContextProvider` 顺序拼接。
+        let provider = CompositeContextProvider::new(vec![
+            Arc::new(TodoContextProvider::new(todo_store)) as Arc<dyn ContextProvider>,
+            Arc::new(MemoryContextProvider::new(memory.clone())) as Arc<dyn ContextProvider>,
+        ]);
+
+        let agent = Agent::builder()
             .model_config(self.model_config.clone())
             .system_prompt(self.system_prompt.clone())
             .working_dir(self.working_dir.clone())
             .compression_instruction(COMPRESSION_INSTRUCTION)
             .compression_config(self.compression_config.clone())
-            .context_provider(Arc::new(TodoContextProvider::new(todo_store)) as Arc<dyn shirley_agent_sdk::ContextProvider>)
+            .context_provider(Arc::new(provider) as Arc<dyn ContextProvider>)
             .tools(tool_manager)
             .messages(messages)
-            .build()
+            .build()?;
+        Ok(BuiltAgent { agent, memory })
     }
 
+    /// 本工厂的记忆存储（全局 + 工作区多根，读合并、写落主根）。
+    pub fn memory_store(&self) -> MemoryStore {
+        MemoryStore::with_roots(self.memory_roots.clone())
+    }
+
+    /// 会话结束时触发一次增量 curation（`docs/memory.md` §5.1）。
+    ///
+    /// 用**最小 `Agent`**（仅借模型配置，不带工具 / 系统提示词 / 记忆注入）调
+    /// [`Agent::complete`]——一次性、非流式、不碰任何会话工作集。抽取出的候选经
+    /// 确定性自检后合入，并重建 `index.md`。
+    ///
+    /// 只读环境探测（§5.4）V1 不做，诚实降级为纯轨迹 curation。
+    pub async fn curate(
+        &self,
+        messages: &[Message],
+        session_ref: &str,
+    ) -> Result<CurateOutcome, CuratorError> {
+        let agent = Agent::builder()
+            .model_config(self.model_config.clone())
+            .build()
+            .map_err(|error| CuratorError::Model(error.to_string()))?;
+        let store = self.memory_store();
+        let sessions_dir = self.working_dir.join(".shirley").join("sessions");
+        memory::curate(
+            &agent,
+            &store,
+            messages,
+            session_ref,
+            Some(sessions_dir.as_path()),
+        )
+        .await
+    }
+}
+
+/// [`AgentFactory::build_agent`] 的产物：`Agent` 及其配套的记忆运行时句柄。
+pub struct BuiltAgent {
+    pub agent: Agent,
+    /// 记忆运行时（每会话一份）：驱动方在发起一轮前 `set_query`，会话结束交给 curator。
+    pub memory: Arc<MemoryRuntime>,
+}
+
+/// 把多个 [`ContextProvider`] 拼成一个：按顺序拼接各自 `context()`，全空返回 `None`。
+///
+/// SDK �� `Agent` 只接受单个 `context_provider`，而应用层要同时注入任务账本与记忆
+/// ——这是纯应用层的胶水，不进 SDK。
+pub struct CompositeContextProvider {
+    providers: Vec<Arc<dyn ContextProvider>>,
+}
+
+impl CompositeContextProvider {
+    pub fn new(providers: Vec<Arc<dyn ContextProvider>>) -> Self {
+        Self { providers }
+    }
+}
+
+impl ContextProvider for CompositeContextProvider {
+    fn context(&self) -> Option<String> {
+        let parts: Vec<String> = self.providers.iter().filter_map(|p| p.context()).collect();
+        (!parts.is_empty()).then(|| parts.join("\n\n"))
+    }
 }
 
 /// 造一份注册好全部工具的 `ToolManager`（bash / read_file 总是注册；
@@ -187,6 +287,7 @@ mod tests {
             model_catalog: Arc::new(StaticCatalog::builtin()) as Arc<dyn ModelCatalog>,
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
             needs_login: false,
+            memory_roots: vec![root.join(".shirley/memory")],
         }
     }
 
@@ -208,6 +309,7 @@ mod tests {
             catalog,
             Arc::new(factory(root.clone())),
             None,
+            None,
         );
         assert_eq!(manager.active_name(), Some("s"));
 
@@ -221,6 +323,40 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// 空实现 provider，便于验证 CompositeContextProvider 的拼接 / 短路语义。
+    struct StaticProvider(Option<&'static str>);
+
+    impl ContextProvider for StaticProvider {
+        fn context(&self) -> Option<String> {
+            self.0.map(str::to_owned)
+        }
+    }
+
+    /// 回归：CompositeContextProvider 顺序拼接多个 provider 的 `context()`；
+    /// 全空（或空列表）时返回 `None`，不注入空内容。
+    #[test]
+    fn composite_context_provider_concatenates_and_short_circuits() {
+        let both = CompositeContextProvider::new(vec![
+            Arc::new(StaticProvider(Some("账本"))) as Arc<dyn ContextProvider>,
+            Arc::new(StaticProvider(Some("记忆"))) as Arc<dyn ContextProvider>,
+        ]);
+        assert_eq!(both.context().as_deref(), Some("账本\n\n记忆"));
+
+        // 一方为空：只保留有内容的一侧（不能拼出多余分隔符）。
+        let one = CompositeContextProvider::new(vec![
+            Arc::new(StaticProvider(None)) as Arc<dyn ContextProvider>,
+            Arc::new(StaticProvider(Some("记忆"))) as Arc<dyn ContextProvider>,
+        ]);
+        assert_eq!(one.context().as_deref(), Some("记忆"));
+
+        // 全空 / 空列表：返回 `None`，绝不注入空串。
+        let none = CompositeContextProvider::new(vec![
+            Arc::new(StaticProvider(None)) as Arc<dyn ContextProvider>,
+        ]);
+        assert_eq!(none.context(), None);
+        assert_eq!(CompositeContextProvider::new(vec![]).context(), None);
+    }
+
     /// 运行中的会话不得被删除（避免删掉正在写入的日志）。
     #[test]
     fn deleting_running_session_is_rejected() {
@@ -231,6 +367,7 @@ mod tests {
             Some("s".into()),
             catalog,
             Arc::new(factory(root.clone())),
+            None,
             None,
         );
         assert!(manager.begin_turn("s", "hello".into()).is_some());

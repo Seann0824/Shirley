@@ -31,17 +31,18 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
     let log = store
         .load()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let agent = factory
+    let built = factory
         .build_agent(log)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let model_catalog = factory.model_catalog.clone();
     let needs_login = factory.needs_login;
     let sessions = SessionManager::with_factory(
-        agent,
+        built.agent,
         Some(entry.name),
         session_catalog,
         Arc::new(factory),
         Some(store),
+        Some(built.memory),
     );
 
     let mut terminal = ratatui::init();

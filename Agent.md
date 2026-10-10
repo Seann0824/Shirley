@@ -367,7 +367,7 @@ cargo clippy --all-targets         # 静态检查
 1. ~~**多协议**~~：`ChatCompletions` / `Responses` / `AnthropicMessages` **三协议均已实现**（含流式）。Anthropic 适配见 `docs/anthropic-messages-api.md`（`x-api-key` 头、`tool_result` 在 user 消息里、`input_tokens` 不含缓存需加回 `cache_read`、流式 `input_json_delta` 分片聚合；**协议差异全部收敛在适配层，`Message` 未改动**）
 2. **工具参数中间层**：目前直接生成 OpenAI schema，跨协议复用不了
 3. **真沙盒后端**：只有 `ProcessBackend`（无隔离），`sandbox-exec` / `bwrap` 未接
-4. **记忆系统**：完全没做。`plan.md` 里给了方向——任务结束后不能直接总结入库，要先做"蒸馏验证"判断出最佳路径再沉淀
+4. **记忆系统**：**V1 已落地**（`docs/memory.md`、`src/memory/`）。`core.md` 常驻注入 + `index.md` 关键词检索注入（经 `ContextProvider` 接缝，每轮末尾追加）+ 会话结束增量 curator（同模型 + 确定性自检，`agent.complete` 一次性调用）+ 时间化冲突字段（`supersedes`，冲突不删历史）。**归应用层**（与 `todo.rs` 同款理由），SDK 只提供通用接缝。V2/V3（睡眠学习、BM25/embedding、跨工作区）见 `docs/memory.md` 第十节
 5. **权限控制 / 行为限制**：只有 bash 的硬编码黑名单 + 沙盒，没有通用的权限层（`docs/security.md` 里的 `PermissionPolicy` 还没落地）
 6. **任务规划**：长任务怎么拆解、怎么跟踪进度，还没设计
 7. **`apply_patch` 工具**：还没做（`plan.md` 里提到）

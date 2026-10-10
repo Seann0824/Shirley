@@ -2,6 +2,7 @@ use shirley_agent_sdk::AgentError;
 
 mod bootstrap;
 mod interface;
+mod memory;
 mod models;
 mod prompt;
 mod session;
