@@ -118,6 +118,41 @@ impl Confidence {
     }
 }
 
+/// 记忆归属域——与 [`EntryType`]（语义类型）**正交**的一条轴。
+///
+/// 语义类型回答"这是什么"（情景/语义/程序），归属域回答"属于谁"（个人/项目）。
+/// 归属域由**存储根**承载：`Personal` 落全局根（跨项目、随用户走），
+/// `Project` 落工作区根（随仓库走、每个 workspace 天然隔离）。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Domain {
+    /// 个人记忆：用户画像 / 偏好 / 跨项目事实 → 全局根。
+    ///
+    /// 默认值（`#[default]`）：向后兼容——旧条目无 `domain` 字段 → 视为个人记忆
+    /// （保守，落全局根）。
+    #[default]
+    Personal,
+    /// 项目记忆：特定工作区的事实 / 流程 → 工作区根（每 workspace 隔离）。
+    Project,
+}
+
+impl Domain {
+    fn as_str(self) -> &'static str {
+        match self {
+            Domain::Personal => "personal",
+            Domain::Project => "project",
+        }
+    }
+
+    fn parse(value: &str) -> Result<Self, MemoryError> {
+        match value {
+            "personal" => Ok(Domain::Personal),
+            "project" => Ok(Domain::Project),
+            other => Err(MemoryError::Parse(format!("unknown domain `{other}`"))),
+        }
+    }
+}
+
 /// 一条记忆条目。
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
@@ -125,6 +160,8 @@ pub struct Entry {
     pub id: String,
     /// 分类。
     pub entry_type: EntryType,
+    /// 归属域：个人（全局根）/ 项目（工作区根）。决定条目落哪个存储根。
+    pub domain: Domain,
     /// 主题（供检索 / 归并）。
     pub subject: String,
     /// 写入时间（`YYYY-MM-DD`）。
@@ -155,6 +192,7 @@ impl Entry {
         let (front, body) = split_frontmatter(text)?;
         let mut id = None;
         let mut entry_type = None;
+        let mut domain = Domain::Personal;
         let mut subject = None;
         let mut created_at = None;
         let mut valid_from = None;
@@ -190,6 +228,7 @@ impl Entry {
             match key {
                 "id" => id = Some(value.to_string()),
                 "type" => entry_type = Some(EntryType::parse(value)?),
+                "domain" => domain = Domain::parse(value)?,
                 "subject" => subject = Some(value.to_string()),
                 "created_at" => created_at = Some(value.to_string()),
                 "valid_from" => valid_from = Some(value.to_string()),
@@ -214,6 +253,7 @@ impl Entry {
         Ok(Entry {
             id: require(id, "id")?,
             entry_type: require(entry_type, "type")?,
+            domain,
             subject: require(subject, "subject")?,
             created_at: require(created_at, "created_at")?,
             valid_from,
@@ -233,6 +273,7 @@ impl Entry {
         let mut out = String::from("---\n");
         out.push_str(&format!("id: {}\n", self.id));
         out.push_str(&format!("type: {}\n", self.entry_type.as_str()));
+        out.push_str(&format!("domain: {}\n", self.domain.as_str()));
         out.push_str(&format!("subject: {}\n", self.subject));
         out.push_str(&format!("created_at: {}\n", self.created_at));
         if let Some(valid_from) = &self.valid_from {
@@ -444,6 +485,7 @@ created_at: 2026-05-12
         let entry = Entry {
             id: "fact-x".into(),
             entry_type: EntryType::Fact,
+            domain: Domain::Personal,
             subject: "s".into(),
             created_at: "2026-05-12".into(),
             valid_from: None,

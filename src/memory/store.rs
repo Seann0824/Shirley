@@ -20,7 +20,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use super::format::{Entry, EntryType, MemoryError};
+use super::format::{Domain, Entry, EntryType, MemoryError};
 
 /// 常驻概览文件名。
 pub const CORE_FILE: &str = "core.md";
@@ -64,13 +64,33 @@ impl MemoryStore {
     }
 
     /// 建好全部条目子目录（幂等）。`core.md` / `index.md` 由写入方按需创建。
+    ///
+    /// 写入路径已改用 [`Self::ensure_layout_at`]（按域选根），本方法保留为公开契约 / 测试用。
+    #[allow(dead_code)]
     pub fn ensure_layout(&self) -> Result<(), MemoryError> {
-        let root = self.primary_root();
+        Self::ensure_layout_at(self.primary_root())
+    }
+
+    /// 在指定根建好条目子目录（幂等）。
+    pub fn ensure_layout_at(root: &Path) -> Result<(), MemoryError> {
         std::fs::create_dir_all(root)?;
         for dir in ENTRY_DIRS {
             std::fs::create_dir_all(root.join(dir))?;
         }
         Ok(())
+    }
+
+    /// 按**归属域**选存储根：`Personal` → 全局根（`roots[0]`），`Project` → 工作区根
+    /// （`roots[1]`，即 `<root>/.shirley/memory`）。单根存储（测试）时 `Project` 回退主根。
+    pub fn root_for_domain(&self, domain: Domain) -> &Path {
+        match domain {
+            Domain::Personal => self.primary_root(),
+            Domain::Project => self
+                .roots
+                .get(1)
+                .map(PathBuf::as_path)
+                .unwrap_or_else(|| self.primary_root()),
+        }
     }
 
     /// 读常驻概览 `core.md`（多根合并：工作区内容追加在全局之后）。空 / 缺失返回 `None`。
@@ -93,21 +113,27 @@ impl MemoryStore {
     /// 未来"自动维护 core"使用。
     #[allow(dead_code)]
     pub fn write_core(&self, text: &str) -> Result<(), MemoryError> {
-        self.ensure_layout()?;
-        std::fs::write(self.primary_root().join(CORE_FILE), text)?;
+        self.write_core_at(self.primary_root(), text)
+    }
+
+    /// 写常驻概览到**指定根**（分根重建用）。
+    pub fn write_core_at(&self, root: &Path, text: &str) -> Result<(), MemoryError> {
+        Self::ensure_layout_at(root)?;
+        std::fs::write(root.join(CORE_FILE), text)?;
         Ok(())
     }
 
-    /// 一条条目应落的绝对路径：`<primary>/<dir>/<id>.md`。
+    /// 一条条目应落的绝对路径：`<root_for_domain>/<dir>/<id>.md`。
     pub fn entry_path(&self, entry: &Entry) -> PathBuf {
-        self.primary_root()
+        self.root_for_domain(entry.domain)
             .join(dir_for(entry.entry_type))
             .join(format!("{}.md", entry.id))
     }
 
-    /// 写入一条条目（落主根，`id` 决定文件名）。返回写入路径。
+    /// 写入一条条目（**按 `entry.domain` 选根**，`id` 决定文件名）。返回写入路径。
     pub fn write_entry(&self, entry: &Entry) -> Result<PathBuf, MemoryError> {
-        self.ensure_layout()?;
+        let root = self.root_for_domain(entry.domain);
+        Self::ensure_layout_at(root)?;
         let path = self.entry_path(entry);
         std::fs::write(&path, entry.render())?;
         Ok(path)
@@ -147,6 +173,36 @@ impl MemoryStore {
                     };
                     by_id.insert(entry.id.clone(), (path, entry));
                 }
+            }
+        }
+        Ok(by_id.into_values().collect())
+    }
+
+    /// 只遍历**单个根**的条目（按根重建 `core.md` / `index.md` 用）。按 `id` 升序。
+    ///
+    /// 与 [`Self::list_entries`]（跨根合并、同名覆盖）不同：这里只看给定根，天然把
+    /// 全局（个人）与工作区（项目）分开——分根重建时各投影各的，互不串味。
+    pub fn list_entries_in(&self, root: &Path) -> Result<Vec<(PathBuf, Entry)>, MemoryError> {
+        let mut by_id: BTreeMap<String, (PathBuf, Entry)> = BTreeMap::new();
+        for dir in ENTRY_DIRS {
+            let dir_path = root.join(dir);
+            let read_dir = match std::fs::read_dir(&dir_path) {
+                Ok(entries) => entries,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            for item in read_dir {
+                let path = item?.path();
+                if path.extension().and_then(|ext| ext.to_str()) != Some("md") {
+                    continue;
+                }
+                let Ok(text) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                let Ok(entry) = Entry::parse(&text) else {
+                    continue;
+                };
+                by_id.insert(entry.id.clone(), (path, entry));
             }
         }
         Ok(by_id.into_values().collect())
@@ -199,7 +255,7 @@ fn dir_for(entry_type: EntryType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::format::{Confidence, EntryStatus};
+    use crate::memory::format::{Confidence, Domain, EntryStatus};
 
     fn tmp(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -219,6 +275,7 @@ mod tests {
         Entry {
             id: id.into(),
             entry_type,
+            domain: Domain::Personal,
             subject: "s".into(),
             created_at: "2026-05-10".into(),
             valid_from: None,

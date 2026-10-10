@@ -341,18 +341,22 @@ pub(crate) fn status_label(status: EntryStatus) -> &'static str {
     }
 }
 
-/// 剥掉 `core.md` 的元信息头：开头的 `# Memory Core` 标题、紧随的 `>` 注释行、
-/// 以及它们之间的空行。保留条目正文（`- [type] ...`）。
+/// 剥掉 `core.md` 的元信息头：`# Memory Core` 标题、紧随的 `>` 注释行、以及它们
+/// 之间的空行。保留条目正文（`- [type] ...`）。
+///
+/// **可出现多次**：双根存储下 [`MemoryStore::read_core`] 会把全局根与工作区根各自的
+/// `core.md` 拼在一起，于是会有第二个标题块；这里逐块剥离，只留下条目行。
 fn strip_core_header(core: &str) -> String {
     let mut out = Vec::new();
-    let mut in_header = true;
+    let mut in_header = false;
     for line in core.lines() {
         let trimmed = line.trim();
+        if trimmed == "# Memory Core" {
+            in_header = true; // 进入一个元信息头块（跳过其后的空行与 `>` 注释）
+            continue;
+        }
         if in_header {
-            if trimmed.is_empty()
-                || trimmed == "# Memory Core"
-                || trimmed.starts_with('>')
-            {
+            if trimmed.is_empty() || trimmed.starts_with('>') {
                 continue;
             }
             in_header = false;
@@ -389,8 +393,18 @@ mod tests {
         // 只有头、没有条目 → 空串（不注入空 core）。
         assert_eq!(strip_core_header("# Memory Core\n\n> 由程序维护；勿手改。\n"), "");
     }
+
+    #[test]
+    fn strip_core_header_drops_every_header_block() {
+        // 双根拼接：全局 + 工作区各带一个标题块，两个都要剥掉，只留条目。
+        let raw = "# Memory Core\n\n> 由程序维护；勿手改。\n\n- [fact] 个人事实。\n\n# Memory Core\n\n> 由程序维护；勿手改。\n\n- [fact] 项目事实。\n";
+        let stripped = strip_core_header(raw);
+        assert_eq!(stripped, "- [fact] 个人事实。\n\n- [fact] 项目事实。");
+        assert!(!stripped.contains("# Memory Core"));
+        assert!(!stripped.contains("勿手改"));
+    }
     use super::*;
-    use crate::memory::format::{Confidence, Entry};
+    use crate::memory::format::{Confidence, Domain, Entry};
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -409,6 +423,7 @@ mod tests {
         Entry {
             id: id.into(),
             entry_type,
+            domain: Domain::Personal,
             subject: subject.into(),
             created_at: "2026-05-10".into(),
             valid_from: None,

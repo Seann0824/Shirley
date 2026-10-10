@@ -131,7 +131,7 @@ fn memory_error(error: MemoryError) -> ToolError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::format::{Confidence, Entry, EntryStatus, EntryType};
+    use crate::memory::format::{Confidence, Domain, Entry, EntryStatus, EntryType};
     use crate::memory::store::MemoryStore;
 
     fn tmp(tag: &str) -> std::path::PathBuf {
@@ -151,6 +151,7 @@ mod tests {
         Entry {
             id: id.into(),
             entry_type,
+            domain: Domain::Personal,
             subject: subject.into(),
             created_at: "2026-05-10".into(),
             valid_from: None,

@@ -10,6 +10,7 @@
 //!    纯 BM25**（`docs/memory.md` §10）。
 
 use std::collections::{HashMap, HashSet};
+use std::path::Path;
 
 use super::format::{Entry, IndexLine, MemoryError};
 use super::store::{MemoryStore, INDEX_FILE};
@@ -27,8 +28,7 @@ pub struct Scored {
 }
 
 /// 从一条条目投影出索引行。
-pub fn index_line(store: &MemoryStore, path: &str, entry: &Entry) -> IndexLine {
-    let _ = store;
+pub fn index_line(path: &str, entry: &Entry) -> IndexLine {
     IndexLine {
         id: entry.id.clone(),
         entry_type: entry.entry_type,
@@ -38,12 +38,15 @@ pub fn index_line(store: &MemoryStore, path: &str, entry: &Entry) -> IndexLine {
     }
 }
 
-/// 把全部条目重写成 `index.md`（落主根）。空库写一个带标题的空索引页。
-pub fn write_index(store: &MemoryStore, entries: &[(String, Entry)]) -> Result<(), MemoryError> {
-    store.ensure_layout()?;
+/// 把给定根下的全部条目重写成该根的 `index.md`。空库写一个带标题的空索引页。
+///
+/// **按根写入**：`entries` 应是 `root` 下的条目（路径已相对 `root`），只落 `root`——
+/// 全局（个人）与工作区（项目）各写各的索引，互不串味。
+pub fn write_index(root: &Path, entries: &[(String, Entry)]) -> Result<(), MemoryError> {
+    MemoryStore::ensure_layout_at(root)?;
     let mut lines: Vec<IndexLine> = entries
         .iter()
-        .map(|(path, entry)| index_line(store, path, entry))
+        .map(|(path, entry)| index_line(path, entry))
         .collect();
     // 稳定顺序：时间倒序（新的在前），同日期按 id。
     lines.sort_by(|a, b| b.date.cmp(&a.date).then_with(|| a.id.cmp(&b.id)));
@@ -64,7 +67,7 @@ pub fn write_index(store: &MemoryStore, entries: &[(String, Entry)]) -> Result<(
             ));
         }
     }
-    std::fs::write(store.primary_root().join(INDEX_FILE), text)?;
+    std::fs::write(root.join(INDEX_FILE), text)?;
     Ok(())
 }
 
@@ -366,12 +369,13 @@ fn is_cjk_char(ch: char) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::format::{Confidence, EntryStatus, EntryType};
+    use crate::memory::format::{Confidence, Domain, EntryStatus, EntryType};
 
     fn entry(id: &str, subject: &str, entry_type: EntryType, body: &str) -> Entry {
         Entry {
             id: id.into(),
             entry_type,
+            domain: Domain::Personal,
             subject: subject.into(),
             created_at: "2026-05-10".into(),
             valid_from: None,
@@ -645,9 +649,8 @@ mod tests {
                 .as_nanos()
         ));
         let _ = std::fs::remove_dir_all(&root);
-        let store = MemoryStore::new(&root);
         let entries: Vec<(String, Entry)> = sample();
-        write_index(&store, &entries).unwrap();
+        write_index(&root, &entries).unwrap();
         let text = std::fs::read_to_string(root.join(INDEX_FILE)).unwrap();
         assert!(text.contains("pref-rust-error-style"));
         assert!(text.contains("preferences/rust-error-style.md"));
