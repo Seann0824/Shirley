@@ -91,9 +91,14 @@ agent_event 本质上就是对外暴露的一个 Agent Event SDK 内部对外提
 * 现在UI跑通了，但是我感觉我非常想给这个 Agent 添加上记忆功能，这样我就不用每次问他问题了，但是问题在于说。记忆功能是否会导致污染？什么东西应该进入记忆，我在想这个问题，同时我们还要避免上下文占用过多，只有真正需要上下文的时候才去召回上下文。我觉得我可以参考一个论文，今天看到的说比 memo 的benchmark分数更高
 * 工具设计的论文我可以参考，如何给AI描述一个清楚一个工具：https://arxiv.org/abs/2609.15397?utm_source=chatgpt.com
 * 记忆设计的论文可以参考：https://arxiv.org/abs/2609.11060?utm_source=chatgpt.com
-  - 这个讲的是一次任务结束后，不只是做总结，而是要做蒸馏验证去判断出最佳的路径，然后作为记忆沉淀
-  - 对一次任务的执行的 tracejacy 本质上是对一次环境的探索，但是这并不是一个最佳逻辑，所以任务结束的时候不能直接总结入库，而是要做一个探索行为并验证，才能保证实际的记忆质量。
-    - 在记忆库前加了一层验证逻辑而已
+  - 论文名《Grounding Agent Memory: Environment-Probing Curation for Enterprise Agents》。
+    核心：异步 curator 只能看"已完成轨迹"会保留错误/过度泛化/过时知识，因为一次轨迹只是对
+    环境的单次、局部、可能有错的观察；解法是任务结束后给 curator 一组**只读的环境工具**，
+    按 propose–probe–commit 去核实候选记忆（不改 task agent/记忆表示/写权限，无安全只读面
+    则回退纯轨迹 curation）。
+  - 所以任务结束不能直接总结入库，要先"探测环境并验证"——轨迹不是最佳逻辑，验证过才沉淀，
+    在记忆库前加一层验证逻辑。（论文里还有个不写入的 distiller 做前置压缩，边界是看不到
+    terminal feedback、把 rollout 当 partial evidence 而非 ground truth。）
 
 目前，invkoe 已经统一流和非流的返回接口，非流调用也返回一个 Stream 句柄，不过只返回 AdapterEvent::Finished ，不会返回 ContentDelta 和 ReasoningDelta
 
@@ -270,3 +275,5 @@ User currently prefers working in person rather than fully remote.
 - 记忆冲突了、如何修正呢、是否需要修改历史记忆？我觉得是不需要的，从人脑记忆来说，并不会忘记之前发生过的一些事情。只是说随着时间变化，我们会创造一些新的记忆。并不意味之前的记忆消失了，所以我们每个记忆存储格式是需要时间线的。
 
 emmm，我感觉想的太多了总是想要选择一个很好的方案。但是，好的方案都是在实践中完成的，没有实践谁知道这个方案好不好。我现在就做一个简单的，文档存储记忆，真的遇到问题，在解决问题就好了。
+
+我觉得markdown，看起来很难去检索哎。感觉还是不如向量index，然后原始文本作为 evidence

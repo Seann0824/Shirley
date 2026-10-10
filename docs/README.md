@@ -26,6 +26,7 @@
 | `plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 | P0 |
 | `web-search.md` | 联网搜索工具 `web_search`：Anthropic-compatible Messages API / 归一化 / 配置（**已实现**） | P1 |
 | `desktop-interface.md` | 桌面界面：Tauri 2 + React 迁移 shiwen 聊天 UI / 共享 LCA / 剥离 shiwen 定制逻辑（**M0–M2 已落地**） | P1 |
+| `memory.md` | 记忆系统：纯 markdown + 双层结构（常驻概览自动注入 / 按需细节检索）/ 后台 curator 异步整理 / 冲突靠时间线表达（**方案，未落地**） | P1 |
 
 
 ---
