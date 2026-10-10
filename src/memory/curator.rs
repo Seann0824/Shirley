@@ -372,6 +372,7 @@ pub async fn curate(
     }
 
     rebuild_index(store)?;
+    rebuild_core(store)?;
     Ok(outcome)
 }
 
@@ -383,6 +384,70 @@ pub fn rebuild_index(store: &MemoryStore) -> Result<(), MemoryError> {
         .map(|(path, entry)| (store.relative_path(&path), entry))
         .collect();
     super::index::write_index(store, &entries)
+}
+
+/// `core.md` 常驻层硬上限（字符；≈ 500 token，`docs/memory.md` §4.3）。
+pub const MAX_CORE_CHARS: usize = 2000;
+
+/// 用**活跃条目**确定性重建 `core.md`（常驻层：画像 + 明确偏好 + 活跃项目）。
+///
+/// **不靠 LLM**：常驻层必须小而稳定（前缀缓存友好），由程序按确定规则从条目投影即可，
+/// 不值得为它多一次模型调用、也不该让它随模型心情漂移。规则：
+///
+/// - 只取 `status: active` 的条目（`superseded` / `unconfirmed` 不进常驻层）；
+/// - 顺序固定：`preference` → `fact` → `procedure` → `event`（画像 / 偏好在前）；
+/// - 每条一行 `- [type] <摘要>`，同类型内按时间新→旧、再按 id 稳定；
+/// - 超过 [`MAX_CORE_CHARS`] 截断并显式标注（防常驻层自己膨胀，`docs/memory.md` §4.3）。
+///
+/// 空库时删除旧 `core.md`（避免残留过时画像被继续注入）。
+pub fn rebuild_core(store: &MemoryStore) -> Result<(), MemoryError> {
+    let mut entries: Vec<Entry> = store
+        .list_entries()?
+        .into_iter()
+        .map(|(_, entry)| entry)
+        .filter(|entry| entry.status == EntryStatus::Active)
+        .collect();
+
+    let path = store.primary_root().join(super::store::CORE_FILE);
+    if entries.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+
+    // 固定类型顺序（画像 / 偏好在前，事件在后），组内时间新→旧、再按 id。
+    let rank = |entry_type: EntryType| match entry_type {
+        EntryType::Preference => 0,
+        EntryType::Fact => 1,
+        EntryType::Procedure => 2,
+        EntryType::Event => 3,
+    };
+    entries.sort_by(|a, b| {
+        rank(a.entry_type)
+            .cmp(&rank(b.entry_type))
+            .then_with(|| b.timeline_date().cmp(a.timeline_date()))
+            .then_with(|| a.id.cmp(&b.id))
+    });
+
+    let mut text = String::from("# Memory Core\n\n> 由程序维护（活跃条目投影）；勿手改。\n\n");
+    let mut truncated = false;
+    for entry in &entries {
+        let line = format!(
+            "- [{}] {}\n",
+            super::provider::type_label(entry.entry_type),
+            entry.summary()
+        );
+        if text.chars().count() + line.chars().count() > MAX_CORE_CHARS {
+            truncated = true;
+            break;
+        }
+        text.push_str(&line);
+    }
+    if truncated {
+        text.push_str("\n_(truncated; see index.md for the full list)_\n");
+    }
+
+    store.write_core(&text)?;
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -749,6 +814,7 @@ pub async fn consolidate(
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let outcome = apply_consolidate_ops(store, ops, &existing, &today)?;
     rebuild_index(store)?;
+    rebuild_core(store)?;
     Ok(outcome)
 }
 
@@ -1054,4 +1120,63 @@ mod tests {
         assert!(prompt.contains("永不删除历史"));
     }
 
+
+    // ---- V2.5：core.md 确定性重建 ----------------------------------------
+
+    fn active_entry(id: &str, entry_type: EntryType, date: &str) -> Entry {
+        let mut entry = vet(candidate(id), &HashMap::new(), date, None, None).unwrap();
+        entry.entry_type = entry_type;
+        entry.created_at = date.to_string();
+        entry
+    }
+
+    #[test]
+    fn rebuild_core_projects_active_entries_in_type_order() {
+        let root = tmpdir("core_build");
+        let store = MemoryStore::new(&root);
+        store.write_entry(&active_entry("evt", EntryType::Event, "2026-05-12")).unwrap();
+        store.write_entry(&active_entry("fact", EntryType::Fact, "2026-05-11")).unwrap();
+        store.write_entry(&active_entry("pref", EntryType::Preference, "2026-05-10")).unwrap();
+
+        rebuild_core(&store).unwrap();
+        let core = store.read_core().expect("core 应已生成");
+        // 类型顺序：preference → fact → event（画像 / 偏好在前）。
+        let p = core.find("[preference]").expect("应含偏好");
+        let f = core.find("[fact]").expect("应含事实");
+        let e = core.find("[event]").expect("应含事件");
+        assert!(p < f && f < e, "core 类型顺序应为 preference < fact < event");
+        // 每条一行，含摘要（正文首行）。
+        assert!(core.contains("偏好用 thiserror 定义领域错误。"));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rebuild_core_skips_non_active_entries() {
+        let root = tmpdir("core_skip");
+        let store = MemoryStore::new(&root);
+        store.write_entry(&active_entry("keep", EntryType::Fact, "2026-05-10")).unwrap();
+        let mut gone = active_entry("gone", EntryType::Fact, "2026-05-10");
+        gone.status = EntryStatus::Superseded;
+        store.write_entry(&gone).unwrap();
+
+        rebuild_core(&store).unwrap();
+        let core = store.read_core().unwrap();
+        assert!(core.contains("[fact]"));
+        // superseded 条目不进常驻层（唯一一行应来自 keep）。
+        assert_eq!(core.matches("- [").count(), 1, "只应有 1 条活跃条目进 core");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn rebuild_core_removes_stale_core_when_no_active_entries() {
+        let root = tmpdir("core_clear");
+        let store = MemoryStore::new(&root);
+        store.write_core("用户是 Sean。").unwrap();
+        assert!(store.read_core().is_some());
+
+        // 无活跃条目 → 应删除旧 core.md（避免残留过时画像被继续注入）。
+        rebuild_core(&store).unwrap();
+        assert!(store.read_core().is_none());
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

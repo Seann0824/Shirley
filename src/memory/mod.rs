@@ -11,10 +11,12 @@
 //! SDK 对外类型。
 
 mod curator;
+mod embed;
 mod format;
 mod index;
 mod provider;
 mod store;
+mod vector;
 
 // 只 re-export **模块外**真正消费的类型（保持门面小）：
 //   - `bootstrap.rs`：`curate` / `CurateOutcome` / `CuratorError` /
@@ -23,5 +25,6 @@ mod store;
 // 其余（`Entry` / `EntryType` / `search` / `write_index` / `Candidate` …）是模块内部
 // 构件，跨子模块用 `super::` 直接引用，不必抬到 `crate::memory::`。
 pub use curator::{ConsolidateOutcome, CurateOutcome, CuratorError, consolidate, curate};
+pub use embed::{Embedder, EmbeddingConfig};
 pub use provider::{MemoryContextProvider, MemoryRuntime};
 pub use store::MemoryStore;

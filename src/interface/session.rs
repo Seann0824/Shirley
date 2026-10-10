@@ -425,6 +425,14 @@ impl ItemWire {
 ///
 /// `factory` / `catalog` 为 `None` 时退化为"单会话、不可新建/切换"——供不关心
 /// 多会话的测试使用（如 `App::new`）。
+/// 一次 curation 的全部输入（`spawn_curation` 与 `finish` 共用）。
+struct CurationInputs {
+    factory: Arc<AgentFactory>,
+    memory: Arc<MemoryRuntime>,
+    messages: Vec<Message>,
+    session_ref: String,
+}
+
 pub struct SessionManager {
     sessions: HashMap<u64, Session>,
     /// 前台会话的 key。
@@ -707,62 +715,104 @@ impl SessionManager {
     /// 用 `Handle::try_current()` 守卫：curation 是后台任务，**绝不阻塞**会话切换
     /// 这条同步路径。失败只记一条 stderr 日志，不影响主流程。
     fn spawn_curation(&self, name: &str) {
-        let Some(factory) = self.factory.clone() else {
+        let Some(inputs) = self.curation_inputs(name) else {
             return;
         };
-        let Some(session) = self.session(name) else {
-            return;
-        };
-        if session.memory.is_none() {
-            return;
-        }
-        // 只沉淀"有内容"的会话（用户 + 助手轮次）；空 / 单条不做无谓的模型调用。
-        let messages: Vec<Message> = session.agent.as_ref().map(|a| a.messages().to_vec()).unwrap_or_default();
-        if messages.is_empty() {
-            return;
-        }
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let session_ref = format!("{name}.jsonl");
-        // V2-D：命中计数攒在 MemoryRuntime 里，curation 落盘时一并 flush。
-        let memory = session.memory.clone();
-        handle.spawn(async move {
-            match factory.curate(&messages, &session_ref).await {
-                Ok(outcome) if !outcome.empty || !outcome.written.is_empty() => {
-                    eprintln!(
-                        "[memory] curated `{session_ref}`: {} written, {} rejected",
-                        outcome.written.len(),
-                        outcome.rejected.len()
-                    );
-                }
+        handle.spawn(Self::run_curation(inputs));
+    }
+
+    /// 退出程序前对**前台会话**跑一次 curation 并**等待完成**。
+    ///
+    /// 与 [`Self::spawn_curation`]（会话切换时后台触发）互补：单会话聊到底、直接退出
+    /// 时，切换路径永远不会发生，curation 也就永远不触发（`docs/memory.md` §5.1 已知
+    /// 缺口）。退出是「本轮结束」最确切的判定点，故在此补一次。用 `await` 而非
+    /// `spawn`：主循环退出后 tokio 运行时随即关闭，`spawn` 出去的任务可能来不及跑完
+    /// 就被丢弃——退出路径上必须同步等它落地。
+    pub async fn finish(&self) {
+        if let Some(name) = self.active().name.clone()
+            && let Some(inputs) = self.curation_inputs(&name)
+        {
+            Self::run_curation(inputs).await;
+        }
+    }
+
+    /// 收集一次 curation 所需的全部输入；不满足条件（无工厂 / 无记忆 / 无消息）返回
+    /// `None`。抽出来是为了让 [`Self::spawn_curation`] 与 [`Self::finish`] 共用同一份
+    /// 前置判定与快照逻辑。
+    fn curation_inputs(&self, name: &str) -> Option<CurationInputs> {
+        let factory = self.factory.clone()?;
+        let session = self.session(name)?;
+        // 只沉淀"有内容"的会话（用户 + 助手轮次）；空 / 单条不做无谓的模型调用。
+        let messages: Vec<Message> = session
+            .agent
+            .as_ref()
+            .map(|a| a.messages().to_vec())
+            .unwrap_or_default();
+        if messages.is_empty() {
+            return None;
+        }
+        Some(CurationInputs {
+            factory,
+            // 无记忆配置的会话不沉淀（无 store 可写）。
+            memory: session.memory.clone()?,
+            messages,
+            session_ref: format!("{name}.jsonl"),
+        })
+    }
+
+    /// 一次 curation 的完整流水线：增量抽取 → 命中计数回写 → 定期整理 → 向量刷新。
+    ///
+    /// 全程 best-effort：失败只记一条 stderr，绝不向上传播（curation 是后台副业，
+    /// 不该影响会话本身）。
+    async fn run_curation(inputs: CurationInputs) {
+        let CurationInputs {
+            factory,
+            memory,
+            messages,
+            session_ref,
+        } = inputs;
+
+        match factory.curate(&messages, &session_ref).await {
+            Ok(outcome) if !outcome.empty || !outcome.written.is_empty() => {
+                eprintln!(
+                    "[memory] curated `{session_ref}`: {} written, {} rejected",
+                    outcome.written.len(),
+                    outcome.rejected.len()
+                );
+            }
+            Ok(_) => {}
+            Err(error) => eprintln!("[memory] curation for `{session_ref}` failed: {error}"),
+        }
+        // V2-D：把本轮会话攒下的检索命中次数写回条目（usage_count / utility）。
+        match memory.flush_usage() {
+            Ok(0) => {}
+            Ok(n) => eprintln!("[memory] flushed usage for {n} entr(y/ies)"),
+            Err(error) => eprintln!("[memory] usage flush failed: {error}"),
+        }
+        // V2-B/C：增量 curation 之后再按阈值触发定期整理（睡眠学习）。
+        if factory.should_consolidate() {
+            match factory.consolidate().await {
+                Ok(outcome) if !outcome.empty => eprintln!(
+                    "[memory] consolidated: {} merged, {} superseded, {} requalified, {} rejected",
+                    outcome.merged,
+                    outcome.superseded,
+                    outcome.requalified,
+                    outcome.rejected.len()
+                ),
                 Ok(_) => {}
-                Err(error) => eprintln!("[memory] curation for `{session_ref}` failed: {error}"),
+                Err(error) => eprintln!("[memory] consolidation failed: {error}"),
             }
-            // V2-D：把本轮会话攒下的检索命中次数写回条目（usage_count / utility）。
-            if let Some(memory) = memory.as_ref() {
-                match memory.flush_usage() {
-                    Ok(0) => {}
-                    Ok(n) => eprintln!("[memory] flushed usage for {n} entr(y/ies)"),
-                    Err(error) => eprintln!("[memory] usage flush failed: {error}"),
-                }
-            }
-            // V2-B/C：增量 curation 之后再按阈值触发定期整理（睡眠学习）。同样是
-            // best-effort 后台任务——失败只记日志，绝不阻塞 / 影响会话切换。
-            if factory.should_consolidate() {
-                match factory.consolidate().await {
-                    Ok(outcome) if !outcome.empty => eprintln!(
-                        "[memory] consolidated: {} merged, {} superseded, {} requalified, {} rejected",
-                        outcome.merged,
-                        outcome.superseded,
-                        outcome.requalified,
-                        outcome.rejected.len()
-                    ),
-                    Ok(_) => {}
-                    Err(error) => eprintln!("[memory] consolidation failed: {error}"),
-                }
-            }
-        });
+        }
+        // V2.5：增量 / 整理都落盘后，把新条目嵌入、清理孤儿向量，让下一轮混合检索
+        // 的语义腿立刻用得上（未配置 embedding 时空操作）。
+        match memory.refresh_vectors().await {
+            Ok(0) => {}
+            Ok(n) => eprintln!("[memory] embedded {n} entr(y/ies) into the vector index"),
+            Err(error) => eprintln!("[memory] vector refresh failed: {error}"),
+        }
     }
 
     /// 名为 `name` 的**已加载**会话是否正在运行（`Agent` 被移入后台任务）。

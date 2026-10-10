@@ -10,10 +10,11 @@
 
 **范围声明**：本轮只做方案与最小落地（V1），不上向量库 / 嵌入 / 图数据库。
 
-> **实现状态（V1 已落地）**：`src/memory/`（`format` / `store` / `index` / `provider` /
-> `curator` 五模块，42 个单测全绿）+ 应用层接线（`bootstrap.rs` / `interface/session.rs`
-> / TUI / desktop）。**SDK 未改动**，只复用既有接缝 `ContextProvider`。V1 四条验收
-> 口径见第十节。缺口见第十一节（其中"curator 触发时机"已按下文现状收窄）。
+> **实现状态（V1 + V2 + V2.5 已落地）**：`src/memory/`（`format` / `store` / `index` /
+> `provider` / `curator` / `embed` / `vector` 七模块）+ 应用层接线（`bootstrap.rs` /
+> `interface/session.rs` / TUI / desktop）。**SDK 未改动**，只复用既有接缝
+> `ContextProvider`。V2.5 = 检索升级为**混合检索（BM25 + 语义向量，RRF 融合）**，
+> 未配置 embedding 时诚实退化为纯 BM25。分期与验收口径见第十节，缺口见第十一节。
 
 ---
 
@@ -53,9 +54,15 @@ YAML frontmatter** 一次覆盖两档——正文是简单笔记，frontmatter �
 选 Markdown 而非专用数据库，理由（第 3 章"文件系统范式"）：用户可直接读 / 改 /
 删；可进 Git 版本控制、可回滚；Agent 有 `write_file` 就能自主组织；**零部署成本**。
 
-检索 V1 用**关键词 / 主题匹配**（零依赖），V2 升级 BM25，V3 才考虑 embedding。
-接口始终是 `query → 相关条目`，所以升级不动架构——**别为将来可能用不上的向量库
-现在就付复杂度**（呼应 `plan.md` 的"不要为了抽象而抽象"）。
+检索 V1 用**关键词 / 主题匹配**（零依赖），V2 升级 BM25，**V2.5 起叠加可选 embedding
+语义腿形成混合检索**（见下）。接口始终是 `query → 相关条目`，所以升级不动架构——
+**别为将来可能用不上的向量库现在就付复杂度**（呼应 `plan.md` 的"不要为了抽象而抽象"）。
+
+**V2.5 补充（向量仍不引库）**：embedding 走**远程 HTTP**（OpenAI 兼容
+`POST /v1/embeddings`，`embed.rs`），向量落 **sidecar 文件**（每根一个 `vectors.json`，
+`vector.rs`），检索时读进内存做**暴力余弦**（条目数几百量级，线性扫描足够）。
+仍然零向量库、零新依赖、零外部服务——只是"多调一个可选的 HTTP 接口"。**未配置
+embedding 端点时整条语义腿缺席**，检索退化为纯 BM25，绝不打断对话。
 
 **决策 2：双层结构——"常驻概览 + 按需细节"。**
 
@@ -209,7 +216,8 @@ source:                     # ★ 证据引用，可回溯
 
 **4.3 预算护栏**
 
-- `core.md` 硬上限（如 500 tok），超限由 curator 提炼，不无限膨胀；
+- `core.md` 硬上限（如 500 tok / 实现取 `MAX_CORE_CHARS = 2000` 字符），超限由
+  `curator::rebuild_core` 按固定规则截断并标注，不无限膨胀；
 - 相关注入 top-k 上限（如 3 条）+ 总注入字符上限（如 2000 字符），超限截断并
   标注——防止记忆自己垄断上下文（与 `todo.rs` 的 `MAX_RENDER_CHARS` 同一思路）；
 - **空记忆不注入**（`render()` 返回 `None`）——避免每轮多一条无意义 system。
@@ -354,9 +362,11 @@ grain"这种 **executable procedure**。**增益取决于轨迹残留的证据�
 src/memory/
 ├── format.rs    # 条目 schema（frontmatter 解析 / 序列化）
 ├── store.rs     # MemoryStore：markdown 目录读写
-├── index.rs     # index.md 维护 + 轻量检索（query → 相关条目）
+├── index.rs     # index.md 维护 + 检索（BM25 / 向量 / hybrid_search RRF 融合）
 ├── provider.rs  # MemoryContextProvider: impl ContextProvider（每轮注入）
-└── curator.rs   # 后台 curator（增量 + 定期整理）
+├── curator.rs   # 后台 curator（增量 + 定期整理 + rebuild_core）
+├── embed.rs     # OpenAI 兼容 embeddings 客户端（V2.5 语义腿，可选）
+└── vector.rs    # sidecar 向量存储（cosine，多根合并；V2.5）
 ```
 
 | 文件 | 职责 |
@@ -364,7 +374,7 @@ src/memory/
 | `src/memory/`（**应用层**） | 上表五个子模块 |
 | `src/bootstrap.rs`（应用层） | `build_agent` 每会话新建一份 `Arc<MemoryRuntime>`，经 `CompositeContextProvider` 把 `TodoContextProvider` 与 `MemoryContextProvider` 拼成**单个** `context_provider` 注入（SDK 的 `Agent` 只收一个 provider，故需此胶水）。返回 `BuiltAgent { agent, memory }`——把 `MemoryRuntime` 句柄带回给驱动方 |
 | `src/interface/session.rs`（应用层） | `Session` 持 `memory: Option<Arc<MemoryRuntime>>`（每会话一份，query 槽独立）；`switch_to` / `create_new` 离开前台时 `spawn_curation`（`Handle::try_current()` 守卫、后台 best-effort） |
-| `src/interface/tui.rs` / `desktop/shell.rs`（应用层） | 发起一轮前 `memory.set_query(本轮用户输入)`——`ContextProvider::context()` 无参，靠这个 query 槽做相关检索 |
+| `src/interface/tui.rs` / `desktop/shell.rs`（应用层） | 发起一轮前 `memory.set_query(本轮用户输入)`，并 **`await prefetch_query_vector()`**——`ContextProvider::context()` 是**同步**接口，而 embedding 是异步 HTTP，故 query 向量必须**在进入 `run_stream` 前预取**好、放进内存槽；`context()` 只读该槽，不做网络 |
 | `crates/shirley-agent-sdk/src/runtime/context.rs`（SDK） | 复用既有通用接缝 `ContextProvider`，**不改** |
 
 - 可选的 `remember` / `recall` 记忆工具走应用层 `Tool`（手写 `impl Tool`），
@@ -379,7 +389,8 @@ src/memory/
 | --- | --- | --- |
 | **V1（稳）· 已实现** | `core.md` 常驻注入 + `index.md` 关键词检索注入 + 会话结束增量 curator（同模型 + 确定性自检）+ 时间化冲突字段 | 自动附带、异步 curator、冲突不删历史 |
 | **V2 · 已实现** | 定期整理（睡眠学习）+ 回原始证据核查 + 检索升级 BM25 + 可配独立 curator 模型 | 全量去重 / 合并、证据回查、异源审核 |
-| **V3** | 可选 embedding 语义检索、跨工作区记忆、多模态（第 3 章 3.3.7） | 大规模召回、主动服务 |
+| **V2.5 · 已实现** | **混合检索**：BM25 关键词腿 + 可选 embedding 语义腿（RRF 融合）+ 中文 bigram 分词 + `core.md` 确定性自动重建 + 退出前 curation | 中文自然语言查询召回、同义改写、常驻层永不缺失 |
+| **V3** | 跨工作区记忆、多模态（第 3 章 3.3.7） | 大规模召回、主动服务 |
 
 **V1 验收口径**：
 
@@ -412,6 +423,39 @@ src/memory/
 - **触发时机**：会话切走 / 新建时 `spawn_curation` 先做增量 curation，再按
   `should_consolidate()`（条目数达阈值）best-effort 触发一次 `consolidate`；全程后台、
   失败只记日志，不阻塞会话切换。
+
+**V2.5 落地说明**（混合检索 + 三个实测坑的修复）：
+
+- **V2.5-A 混合检索（`index.rs`）**：`hybrid_search` 把两条腿的**排名**用 **RRF
+  （Reciprocal Rank Fusion，k=60）** 融合——`score = Σ 1/(k + rank_i)`。每腿各召回
+  `max(limit*4, 20)` 条候选后融合、再取 top-k。**用排名而非分数融合**，是因为 BM25
+  分与余弦分量纲不同、直接加权需调参且不稳；RRF 只看名次，天然免调参、对量纲免疫。
+  未提供 query 向量时 `hybrid_search` **直接退化为纯 BM25**（`search`），零分支成本。
+- **V2.5-B 中文 bigram 分词（`index.rs::tokenize`）**：V1/V2 把**整段连续 CJK 当一个
+  term**，导致中文自然语言查询（"我的名字是什么"）几乎必然 0 命中（实测确认，见
+  `docs`）。改为：CJK 串切成**相邻双字 bigram**（如"用户的名字"→ 用、户、的、名、字
+  的相邻对），英文 / 数字仍按词切分。bigram 无需词典、对未登录词鲁棒，是中文检索的
+  零依赖基线。
+- **V2.5-C 语义腿（`embed.rs` + `vector.rs`）**：`embed.rs` 是 OpenAI 兼容
+  `POST /v1/embeddings` 客户端（分批 `MAX_BATCH=64`、按响应 `index` 归位、不跟随
+  重定向、连接 5s / 总 15s 超时、响应体封顶）。`vector.rs` 把 `id → 向量` 落成每根
+  一个 `vectors.json` sidecar（含生成它的**模型标识**，模型变更即整份旧向量作废，
+  防"用 A 模型向量查 B 模型 query"）。检索时读进内存做暴力余弦。**仍然零向量库**。
+- **V2.5-D query 向量预取**：`ContextProvider::context()` 是**同步**接口，embedding 是
+  异步 HTTP——所以 query 向量由驱动方（TUI `run_agent` / desktop `agent_send`）在
+  **进入 `run_stream` 前** `await prefetch_query_vector()` 算好、存进内存槽；`context()`
+  只读槽、不发网络。**预取失败 / 未配置 embedding 一律空操作**，语义腿静默缺席。
+- **V2.5-E `core.md` 确定性重建（`curator::rebuild_core`）**：V1 的 `core.md` 依赖人工 /
+  应用显式维护，实测从未生成（`write_core` 是 `dead_code`），导致常驻层永不注入。改为
+  **由程序按确定规则从活跃条目投影**：只取 `status: active`，顺序 `preference → fact →
+  procedure → event`，组内时间新→旧、再按 `id` 稳定排序；每行 `- [type] 摘要`；超
+  `MAX_CORE_CHARS = 2000` 截断并标注；空库则删除旧文件。在 `curate()` 与
+  `consolidate()` 尾部**均调用**，保证条目变动后常驻层同步。**不靠 LLM 生成**——常驻层
+  必须小而稳定、前缀缓存友好，确定性投影才可复现。
+- **V2.5-F 退出前 curation（`SessionManager::finish`）**：V1 只在"离开前台"（切会话 /
+  新建）触发 curation，单会话聊到底、**退出程序不触发** → 记忆从不整理。补
+  `SessionManager::finish()`：退出路径对**前台会话**跑一次 curation + `refresh_vectors`，
+  TUI 退出时 `await`。仍是 best-effort，失败只记日志。
 
 ---
 

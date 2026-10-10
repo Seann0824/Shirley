@@ -23,7 +23,8 @@ use shirley_agent_sdk::{
 };
 
 use crate::memory::{
-    self, CurateOutcome, CuratorError, MemoryContextProvider, MemoryRuntime, MemoryStore,
+    self, CurateOutcome, CuratorError, Embedder, EmbeddingConfig, MemoryContextProvider,
+    MemoryRuntime, MemoryStore,
 };
 use crate::models::{self, ModelCatalog};
 use crate::prompt;
@@ -68,6 +69,9 @@ pub struct AgentFactory {
     curator_model_config: Option<ModelConfig>,
     /// 条目数达到该阈值时，在 curation 后触发一次定期整理（睡眠学习）。`0` = 不自动触发。
     consolidate_after_entries: usize,
+    /// **V2.5** embedding 客户端：`[memory]` 配齐 `embedding_base_url` +
+    /// `embedding_model` 时才构造（`None` = 纯 BM25，诚实降级）。所有会话共用。
+    embedder: Option<Arc<Embedder>>,
 }
 
 /// 全局记忆相对 `config_dir` 的位置（跨项目）。
@@ -131,6 +135,10 @@ impl AgentFactory {
         // 否则为 `None`（回退主模型）。缺省继承主配置的流式 / thinking 等字段。
         let curator_model_config = build_curator_config(&settings, &model_config);
 
+        // 记忆混合检索的 embedding 客户端（V2.5）：配齐端点 + 模型才启用语义腿；
+        // 否则为 `None`（检索退化为纯 BM25，绝不假装有语义腿）。
+        let embedder = build_embedder(&settings);
+
         Ok(Self {
             model_config,
             system_prompt: prompt::build(working_dir.clone()),
@@ -142,6 +150,7 @@ impl AgentFactory {
             memory_roots: memory_roots(&working_dir),
             curator_model_config,
             consolidate_after_entries: settings.memory.consolidate_after_entries.unwrap_or(0),
+            embedder,
         })
     }
 
@@ -166,7 +175,10 @@ impl AgentFactory {
 
         // 记忆（应用层能力）：每个 `Agent` 一份 `MemoryRuntime`（独立 query 槽，
         // 多会话并发互不干扰），共享同一份 memory 目录（全局 + 工作区）。
-        let memory = Arc::new(MemoryRuntime::new(self.memory_store()));
+        let memory = Arc::new(MemoryRuntime::with_embedder(
+            self.memory_store(),
+            self.embedder.clone(),
+        ));
 
         // `ToolManager` 非 `Clone`，每次造 `Agent` 都新建一份并重新注册工具：
         // 工具定义稳定（prefix 缓存友好），`on_register` 钩子（如 web_search 的
@@ -301,6 +313,34 @@ fn build_curator_config(settings: &Settings, main: &ModelConfig) -> Option<Model
     Some(config)
 }
 
+/// 从 `[memory]` 配置构造 embedding 客户端（V2.5 混合检索的语义腿）。
+///
+/// 需 `embedding_base_url` + `embedding_model` 同时给出才启用；密钥可缺省（本地服务
+/// 常无鉴权）。任缺其一 → `None`（检索退化为纯 BM25）。
+fn build_embedder(settings: &Settings) -> Option<Arc<Embedder>> {
+    let mem = &settings.memory;
+    let endpoint = mem
+        .embedding_base_url
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())?;
+    let model = mem
+        .embedding_model
+        .as_ref()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())?;
+    let api_key = mem
+        .embedding_api_key
+        .clone()
+        .filter(|key| !key.is_empty());
+    let config = EmbeddingConfig {
+        endpoint: endpoint.to_string(),
+        api_key,
+        model: model.to_string(),
+    };
+    Embedder::new(config).ok().map(Arc::new)
+}
+
 /// [`AgentFactory::build_agent`] 的产物：`Agent` 及其配套的记忆运行时句柄。
 pub struct BuiltAgent {
     pub agent: Agent,
@@ -374,6 +414,7 @@ mod tests {
             memory_roots: vec![root.join(".shirley/memory")],
             curator_model_config: None,
             consolidate_after_entries: 0,
+            embedder: None,
         }
     }
 

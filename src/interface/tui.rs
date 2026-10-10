@@ -15,7 +15,15 @@ async fn run_agent(
     prompt: String,
     updates: mpsc::UnboundedSender<Result<AgentEvent, String>>,
     mut cancel: tokio::sync::oneshot::Receiver<()>,
+    memory: Option<Arc<crate::memory::MemoryRuntime>>,
 ) -> Agent {
+    // 记忆 V2.5：把本轮用户输入作为 query，并**预取 query 向量**（embedding 是异步
+    // HTTP，而 `ContextProvider::context()` 是同步的，只能在这里先算好）。未配置
+    // embedding / 预取失败时是空操作——相关腿退化为纯 BM25，绝不打断对话。
+    if let Some(memory) = memory.as_ref() {
+        memory.set_query(prompt.as_str());
+        let _ = memory.prefetch_query_vector().await;
+    }
     let mut stream = agent.run_stream(&prompt);
     loop {
         tokio::select! {
@@ -182,11 +190,10 @@ impl<'a> Tui<'a> {
                             if let Some(prompt) = update::update(&mut self.app, event)
                                 && let Some(agent) = self.app.take_agent()
                             {
-                                // 记忆：把本轮用户输入作为 query，供 provider 在
-                                // 组装请求时做相关检索注入（core.md 常驻 + top-k 相关）。
-                                if let Some(memory) = self.app.memory.as_ref() {
-                                    memory.set_query(prompt.as_str());
-                                }
+                                // 记忆：把本轮用户输入作为 query（含 query 向量预取，
+                                // 见 `run_agent`），供 provider 在组装请求时做相关检索
+                                // 注入（core.md 常驻 + top-k 相关，V2.5 混合检索）。
+                                let memory = self.app.memory.clone();
                                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                                 self.cancel = Some(cancel_tx);
                                 response = Some(tokio::spawn(run_agent(
@@ -194,6 +201,7 @@ impl<'a> Tui<'a> {
                                     prompt,
                                     updates_tx.clone(),
                                     cancel_rx,
+                                    memory,
                                 )));
                             }
                             // 用户请求打断：向运行中的任务发送取消信号（一次性）。
@@ -259,6 +267,11 @@ impl<'a> Tui<'a> {
         if let Some(task) = response {
             task.abort();
         }
+        // 退出前对前台会话跑一次记忆 curation（`docs/memory.md` §5.1）：单会话聊到底、
+        // 直接退出时切换路径永不发生，这里是「本轮结束」唯一能触发 curation 的时机。
+        // best-effort，且**必须 await**——主循环结束后运行时随即关闭，spawn 出去的任务
+        // 可能来不及跑完就被丢弃。
+        self.app.finish().await;
         self.exit();
         Ok(())
     }

@@ -172,19 +172,21 @@ async fn agent_send(
     // 记录，与 TUI 的 `App::submit` 对称），不记则 `Session.items` 永不含用户消息，
     // 切走再切回按快照重建时用户消息就丢了。记的是**人类可读原文**（`text`），
     // 不是拼了引用头的 `prompt`。
-    let mut agent = {
+    let (mut agent, memory) = {
         let mut guard = state.sessions.lock().await;
         let agent = guard
             .begin_turn(&session_name, text.clone())
             .ok_or_else(|| "agent 正在运行中".to_owned())?;
-        // 记忆：把本轮用户输入作为 query，供 provider 组装请求时做相关检索注入。
-        if let Some(memory) = guard
+        // 记忆：把本轮用户输入作为 query，供 provider 组装请求时做相关检索注入
+        // （core.md 常驻 + top-k 相关，V2.5 混合检索）。query 向量在下面的任务里
+        // 预取（embedding 是异步 HTTP，而 provider 的 `context()` 是同步的）。
+        let memory = guard
             .session(&session_name)
-            .and_then(|session| session.memory.clone())
-        {
+            .and_then(|session| session.memory.clone());
+        if let Some(memory) = memory.as_ref() {
             memory.set_query(text.as_str());
         }
-        agent
+        (agent, memory)
     };
 
     // `SessionManager` 作为任务执行者：跑 `run_stream`，把每个事件喂回**该会话**
@@ -193,6 +195,11 @@ async fn agent_send(
     // 自动命名需要目录句柄（写标题 sidecar），克隆一份进任务。
     let title_catalog = state.session_catalog.clone();
     tauri::async_runtime::spawn(async move {
+        // 记忆 V2.5：预取本轮 query 向量（未配置 embedding / 失败时是空操作，相关腿
+        // 退化为纯 BM25，绝不打断对话）。
+        if let Some(memory) = memory.as_ref() {
+            let _ = memory.prefetch_query_vector().await;
+        }
         {
             // `stream` 借用了 `agent`，用块把它圈住，出了块再 move `agent` 放回。
             let mut stream = agent.run_stream(&prompt);

@@ -1023,6 +1023,14 @@ impl App {
         self.sessions.catalog()
     }
 
+    /// 退出程序前对前台会话跑一次记忆 curation（`docs/memory.md` §5.1）。
+    ///
+    /// 委托给 [`SessionManager::finish`]：单会话聊到底、直接退出时切换路径永不发生，
+    /// 这是「本轮结束」唯一能触发 curation 的时机。best-effort，失败只记日志。
+    pub async fn finish(&self) {
+        self.sessions.finish().await;
+    }
+
     /// 当前（前台）会话名（供状态展示）。
     pub fn current_session(&self) -> Option<&str> {
         self.sessions.active_name()

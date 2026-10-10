@@ -58,6 +58,11 @@ impl MemoryStore {
         &self.roots[0]
     }
 
+    /// 全部根目录（读合并顺序：全局 → 工作区）。向量 sidecar 按根查找 / 落主根。
+    pub fn roots(&self) -> &[PathBuf] {
+        &self.roots
+    }
+
     /// 建好全部条目子目录（幂等）。`core.md` / `index.md` 由写入方按需创建。
     pub fn ensure_layout(&self) -> Result<(), MemoryError> {
         let root = self.primary_root();

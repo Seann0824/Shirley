@@ -32,7 +32,7 @@ To read a file, use the `read_file` tool rather than `cat` in bash:
 
 Treat terminal output as part of the limited model context. Avoid commands that produce large amounts of irrelevant output.
 
-Before taking any action, first reply with visible text content. When you receive a user message, start your turn with a short plain-text reply that answers or acknowledges it and states what you are about to do, and only then investigate or call tools. Never jump straight into tool calls with no leading content message.
+When you call tools, include a short plain-text preamble in the SAME assistant message that says what you are about to do — never split the preamble and the tool calls into two turns. A message with no tool calls ends your turn, so only send one when the task is actually complete (or to ask a genuine question).
 
 For any multi-step task, first break it down with the `todo` tool: set the goal and the step checklist before you act, keep exactly one step in progress, and record what each step found (conclusions, locations, decisions, open questions) so you never redo work. The ledger survives context compaction.
 ";
@@ -135,19 +135,20 @@ mod tests {
     }
 
     #[test]
-    fn render_requires_visible_content_before_acting() {
-        // 用户消息应先得到一段可见正文回复，再进入探索 / 工具调用，
-        // 避免模型一上来就沉默地连发工具、界面长时间空白。
+    fn render_keeps_preamble_in_same_message_as_tool_calls() {
+        // 旁白必须与工具调用写在**同一条** assistant 消息里，不能拆成两轮：
+        // 无 tool_calls 的消息会结束本轮（runtime 的 is_finished 判定），
+        // 把旁白单独发出去会让 ReAct 循环在探索中途"莫名停止"。
         // 这条断言防止以后改提示词时把这段指令弄丢。
         let dir = tempfile_dir("render_content_first");
         let text = render(&dir);
         assert!(
-            text.contains("reply with visible text content"),
-            "应先输出可见正文: {text}"
+            text.contains("SAME assistant message"),
+            "应要求旁白与工具调用同条消息: {text}"
         );
         assert!(
-            text.contains("Never jump straight into tool calls"),
-            "应禁止直接开工具调用: {text}"
+            text.contains("ends your turn"),
+            "应说明无 tool_calls 的消息会结束本轮: {text}"
         );
     }
 

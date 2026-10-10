@@ -12,15 +12,22 @@
 //! 用户说了什么"。所以 provider 持有一个共享运行时 [`MemoryRuntime`]，里面有个
 //! `Mutex<Option<String>>` query 槽——驱动方在发起一轮前 [`MemoryRuntime::set_query`]。
 //! 该运行时**按 `Agent`（会话）一份**，多会话并发互不干扰。
+//!
+//! **V2.5 混合检索**：配置了 embedding 时，相关腿走 [`hybrid_search`]（BM25 + 向量，
+//! RRF 融合）；`ContextProvider::context()` 是同步的、而 embedding 是异步 HTTP，故
+//! 查询向量由驱动方在发起一轮前经 [`MemoryRuntime::prefetch_query_vector`] **预取**
+//! 存进 `query_vector` 槽。未配置 embedding → 纯 BM25（诚实降级）。
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use shirley_agent_sdk::ContextProvider;
 
+use super::embed::{EmbedError, Embedder};
 use super::format::{Entry, EntryStatus, EntryType, MemoryError};
-use super::index::search;
+use super::index::hybrid_search;
 use super::store::MemoryStore;
+use super::vector::VectorStore;
 
 /// 相关注入的条目上限（§4.3）。
 pub const MAX_RELEVANT: usize = 3;
@@ -32,23 +39,120 @@ pub struct MemoryRuntime {
     store: MemoryStore,
     /// 本轮 query（发起一轮前由驱动方设置）。`None` 表示未知 → 只做常驻注入。
     query: Mutex<Option<String>>,
+    /// **V2.5**：预取好的本轮 query 向量（配置了 embedding 且预取成功时）。`None` =
+    /// 无向量 → 相关腿退化为纯 BM25。
+    query_vector: Mutex<Option<Vec<f32>>>,
+    /// **V2.5**：embedding 客户端。`None` = 未配置 → 纯 BM25（诚实降级）。
+    embedder: Option<Arc<Embedder>>,
     /// **V2-D 命中计数**：本轮检索命中的条目 id → 次数，攒在内存里，curation 落盘时
     /// 由 [`MemoryRuntime::flush_usage`] 一次性写回（避免每轮都写盘）。
     usage: Mutex<HashMap<String, u64>>,
 }
 
 impl MemoryRuntime {
+    /// 纯 BM25 运行时（未配置 embedding）。测试与"无 embedding"场景用。
+    #[allow(dead_code)]
     pub fn new(store: MemoryStore) -> Self {
         Self {
             store,
             query: Mutex::new(None),
+            query_vector: Mutex::new(None),
+            embedder: None,
             usage: Mutex::new(HashMap::new()),
         }
     }
 
-    /// 设置本轮 query（驱动方在 `run_stream` 前调用）。
+    /// 带 embedding 的运行时（V2.5 混合检索）。`embedder` 为 `None` 时等同 [`Self::new`]。
+    pub fn with_embedder(store: MemoryStore, embedder: Option<Arc<Embedder>>) -> Self {
+        Self {
+            store,
+            query: Mutex::new(None),
+            query_vector: Mutex::new(None),
+            embedder,
+            usage: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// 设置本轮 query（驱动方在 `run_stream` 前调用）。同时**清空上一轮的 query 向量**
+    /// ——避免"新 query 配旧向量"的静默错误；新的向量由 [`Self::prefetch_query_vector`] 填。
     pub fn set_query(&self, query: impl Into<String>) {
         *self.query.lock().expect("memory query lock poisoned") = Some(query.into());
+        *self
+            .query_vector
+            .lock()
+            .expect("memory query vector lock poisoned") = None;
+    }
+
+    /// **V2.5**：预取本轮 query 的 embedding（驱动方在 `run_stream` 前 `await`）。
+    ///
+    /// 未配置 embedding / query 为空 / 调用失败时都是 `Ok(())`——相关腿退回纯 BM25，
+    /// **绝不让一次 embedding 失败打断对话**（诚实降级：不假装有语义腿）。
+    pub async fn prefetch_query_vector(&self) -> Result<(), EmbedError> {
+        let Some(embedder) = self.embedder.as_ref() else {
+            return Ok(());
+        };
+        let query = self
+            .query
+            .lock()
+            .expect("memory query lock poisoned")
+            .clone();
+        let Some(query) = query.filter(|q| !q.trim().is_empty()) else {
+            return Ok(());
+        };
+        let mut vectors = embedder.embed(std::slice::from_ref(&query)).await?;
+        let vector = vectors.pop().unwrap_or_default();
+        *self
+            .query_vector
+            .lock()
+            .expect("memory query vector lock poisoned") = (!vector.is_empty()).then_some(vector);
+        Ok(())
+    }
+
+    /// **V2.5**：把库里**尚无向量**的条目嵌入并落 sidecar（curation 后调用）。同时清理
+    /// 已删除条目残留的向量。未配置 embedding 时空操作。返回新嵌入的条目数。
+    pub async fn refresh_vectors(&self) -> Result<usize, EmbedError> {
+        let Some(embedder) = self.embedder.as_ref() else {
+            return Ok(0);
+        };
+        let entries = self.store.list_entries().unwrap_or_default();
+        let mut vectors = VectorStore::load_merged(self.store.roots(), embedder.model());
+
+        // 清理：只保留当前仍存在的条目 id。
+        let ids: Vec<String> = entries.iter().map(|(_, entry)| entry.id.clone()).collect();
+        let pruned = vectors.retain_ids(ids.iter().map(String::as_str));
+
+        let missing: Vec<(String, String)> = entries
+            .iter()
+            .filter(|(_, entry)| vectors.get(&entry.id).is_none())
+            .map(|(_, entry)| (entry.id.clone(), embed_text(entry)))
+            .collect();
+
+        if missing.is_empty() {
+            if pruned > 0 {
+                vectors
+                    .save(self.store.primary_root())
+                    .map_err(|error| EmbedError::Transport(error.to_string()))?;
+            }
+            return Ok(0);
+        }
+        let texts: Vec<String> = missing.iter().map(|(_, text)| text.clone()).collect();
+        let embedded = embedder.embed(&texts).await?;
+        let count = missing.len();
+        for ((id, _), vector) in missing.into_iter().zip(embedded.into_iter()) {
+            vectors.upsert(id, vector);
+        }
+        vectors
+            .save(self.store.primary_root())
+            .map_err(|error| EmbedError::Transport(error.to_string()))?;
+        Ok(count)
+    }
+
+    /// 载入当前向量库（多根合并）；未配置 embedding 时返回空库。
+    fn load_vectors(&self) -> VectorStore {
+        match self.embedder.as_ref() {
+            Some(embedder) => VectorStore::load_merged(self.store.roots(), embedder.model()),
+            None => VectorStore::default(),
+        }
     }
 
     /// 渲染本轮要注入的记忆文本（空记忆返回 `None`，不注入空内容）。
@@ -64,7 +168,15 @@ impl MemoryRuntime {
                     .into_iter()
                     .map(|(path, entry)| (self.store.relative_path(&path), entry))
                     .collect();
-                search(&owned, q, MAX_RELEVANT)
+                // V2.5：配置了 embedding 且有预取的 query 向量 → BM25 + 向量 RRF 融合；
+                // 否则 `query_vector` 为 None → 纯 BM25。
+                let vectors = self.load_vectors();
+                let query_vector = self
+                    .query_vector
+                    .lock()
+                    .expect("memory query vector lock poisoned")
+                    .clone();
+                hybrid_search(&owned, q, query_vector.as_deref(), &vectors, MAX_RELEVANT)
             }
             _ => Vec::new(),
         };
@@ -170,7 +282,12 @@ impl ContextProvider for MemoryContextProvider {
     }
 }
 
-fn type_label(entry_type: EntryType) -> &'static str {
+/// 条目用于 embedding 的文本：主题 + id + 正文（`id` 含语义线索，如 `pref-rust-error-style`）。
+fn embed_text(entry: &Entry) -> String {
+    format!("{}\n{}\n{}", entry.subject, entry.id, entry.body)
+}
+
+pub(crate) fn type_label(entry_type: EntryType) -> &'static str {
     match entry_type {
         EntryType::Preference => "preference",
         EntryType::Fact => "fact",

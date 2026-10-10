@@ -5,14 +5,15 @@
 //! 1. **`index.md`**：程序维护的入口页，每条记忆一行（id / 类型 / 摘要 / 路径 / 日期）。
 //!    第 3 章警告"纯文本平铺会退化成孤岛"——索引页就是入口。由 [`write_index`]
 //!    从当前全部条目重新生成（幂等，不做增量）。
-//! 2. **检索**（V2：BM25）：按当前 query 给条目打分、取 top-k。**故意不做语义**——
-//!    V2 用 BM25（IDF + 词频饱和 + 文档长度归一），比 V1 的固定权重子串打分更稳；语义 /
-//!    嵌入检索留待 V3（`docs/memory.md` §10）。
+//! 2. **检索**：V2 用 BM25（IDF + 词频饱和 + 文档长度归一）；V2.5 叠加**语义向量腿**
+//!    （余弦），两腿用 RRF 融合成 [`hybrid_search`]。**未配置 embedding 时自动退化为
+//!    纯 BM25**（`docs/memory.md` §10）。
 
 use std::collections::{HashMap, HashSet};
 
 use super::format::{Entry, IndexLine, MemoryError};
 use super::store::{MemoryStore, INDEX_FILE};
+use super::vector::{cosine, VectorStore};
 
 /// 检索时一条条目的得分与命中词。
 #[derive(Debug, Clone)]
@@ -123,6 +124,95 @@ pub fn search(entries: &[(String, Entry)], query: &str, limit: usize) -> Vec<Sco
         .collect();
 
     // 分数降序；并列时时间新→旧（`docs/memory.md` 验收 3），再按 id 稳定。
+    sort_scored(&mut scored);
+    scored.truncate(limit);
+    scored
+}
+
+/// 语义检索腿：按**余弦相似度**给条目打分（需要预取好的 query 向量 + 已存条目向量）。
+///
+/// 只对**在 `vectors` 里有向量**的条目打分（没嵌入过的条目这条腿召回不了——这是
+/// 混合检索的意义所在：BM25 腿仍然覆盖它们）。状态 / 有用度因子与 BM25 腿一致。
+/// 返回相似度 > 0 的条目，按相似度降序（并列按时间新→旧，再按 id 稳定）。
+pub fn search_vector(
+    entries: &[(String, Entry)],
+    query_vector: &[f32],
+    vectors: &VectorStore,
+    limit: usize,
+) -> Vec<Scored> {
+    let mut scored: Vec<Scored> = entries
+        .iter()
+        .filter_map(|(path, entry)| {
+            let vector = vectors.get(&entry.id)?;
+            let score = cosine(query_vector, vector) as f64
+                * status_factor(entry.status)
+                * utility_factor(entry.utility);
+            (score > 0.0).then(|| Scored {
+                entry: entry.clone(),
+                path: path.clone(),
+                score,
+            })
+        })
+        .collect();
+    sort_scored(&mut scored);
+    scored.truncate(limit);
+    scored
+}
+
+/// RRF 常数（Reciprocal Rank Fusion）：`k = 60` 是经典取值。
+const RRF_K: f64 = 60.0;
+/// 每腿最少召回条数（融合前多召回一些，给另一腿补位的机会）。
+const LEG_LIMIT_MIN: usize = 20;
+
+/// **混合检索**：关键词 BM25 腿 + 语义向量腿，用 **RRF（Reciprocal Rank Fusion）** 融合。
+///
+/// 两腿各自召回 `max(limit*4, 20)` 条，按 `1/(k + rank)`（`k = 60`）累加分数。
+/// RRF 只看**排名**、不看原始分数，天然免去"BM25 分数与余弦分数不同量纲怎么归一"
+/// 的麻烦——这正是它成为混合检索标准做法的原因。
+///
+/// `query_vector` 为 `None`（未配置 embedding / 预取失败）时**退化为纯 BM25**，
+/// 与升级前行为一致（诚实降级，不假装有语义腿）。
+pub fn hybrid_search(
+    entries: &[(String, Entry)],
+    query: &str,
+    query_vector: Option<&[f32]>,
+    vectors: &VectorStore,
+    limit: usize,
+) -> Vec<Scored> {
+    let leg_limit = (limit * 4).max(LEG_LIMIT_MIN);
+    let bm25_hits = search(entries, query, leg_limit);
+    let vector_hits = match query_vector {
+        Some(query_vector) => search_vector(entries, query_vector, vectors, leg_limit),
+        None => Vec::new(),
+    };
+    // 语义腿没东西（未配置 / 无向量）→ 纯 BM25。
+    if vector_hits.is_empty() {
+        return bm25_hits.into_iter().take(limit).collect();
+    }
+
+    // 按 id 融合两腿的 RRF 分数。
+    let mut fused: HashMap<String, Scored> = HashMap::new();
+    for hits in [&bm25_hits, &vector_hits] {
+        for (rank, hit) in hits.iter().enumerate() {
+            let contribution = 1.0 / (RRF_K + (rank + 1) as f64);
+            fused
+                .entry(hit.entry.id.clone())
+                .and_modify(|existing| existing.score += contribution)
+                .or_insert_with(|| Scored {
+                    entry: hit.entry.clone(),
+                    path: hit.path.clone(),
+                    score: contribution,
+                });
+        }
+    }
+    let mut scored: Vec<Scored> = fused.into_values().collect();
+    sort_scored(&mut scored);
+    scored.truncate(limit);
+    scored
+}
+
+/// 统一的排序：分数降序，并列按时间新→旧，再按 id 稳定。
+fn sort_scored(scored: &mut [Scored]) {
     scored.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
@@ -130,8 +220,6 @@ pub fn search(entries: &[(String, Entry)], query: &str, limit: usize) -> Vec<Sco
             .then_with(|| b.entry.timeline_date().cmp(a.entry.timeline_date()))
             .then_with(|| a.entry.id.cmp(&b.entry.id))
     });
-    scored.truncate(limit);
-    scored
 }
 
 /// 字段权重（相对正文）：主题最重要，`id` / `scope` 辅助。
@@ -198,46 +286,81 @@ fn utility_factor(utility: Option<f64>) -> f64 {
     }
 }
 
-/// 查询分词：按非字母数字（含 CJK 视为字母）切分，去停用词，小写，**去重**。
-///
-/// CJK 不按词切（无词典），把每个连续 CJK 串当一个 term——配合 BM25 的字段加权
-/// 词频即可用。
+/// 英文停用词（CJK 不做停用词过滤——bigram 已足够短）。
+const STOP: [&str; 16] = [
+    "the", "a", "an", "of", "to", "and", "or", "is", "are", "in", "on", "for", "with", "that",
+    "this", "it",
+];
+
+/// 查询分词：拉丁按非字母数字切、去停用词、小写、**去重**；CJK 走 bigram（见下）。
 fn tokenize(text: &str) -> HashSet<String> {
     tokenize_counts(text).into_iter().collect()
 }
 
 /// 分词（**保留重复计数**，供 BM25 词频）。
+///
+/// 两条腿：
+/// - **拉丁 / 数字**：连续 `is_alphanumeric` 串当一个 term，去停用词、小写、长度 < 2 丢弃；
+/// - **CJK**：连续 CJK 串按 **bigram** 切（相邻两字成 term，单字串保留该字）。
+///   这修的是 V2 的一个真实缺陷：原先整段连续 CJK 被当成**一个** term，导致
+///   「我的名字是什么」与条目「用户的名字是 Sean」永远匹配不上（中文自然语言查询
+///   几乎必然 0 命中）。bigram 是零依赖、无词典的中文检索标准退而求其次做法，
+///   与 BM25 的字段加权词频天然兼容。
 fn tokenize_counts(text: &str) -> Vec<String> {
-    const STOP: [&str; 16] = [
-        "the", "a", "an", "of", "to", "and", "or", "is", "are", "in", "on", "for", "with", "that",
-        "this", "it",
-    ];
     let mut terms = Vec::new();
-    let mut current = String::new();
+    let mut run = String::new();
+    let mut run_is_cjk = false;
     for ch in text.chars() {
         if ch.is_alphanumeric() {
-            current.extend(ch.to_lowercase());
-        } else if !current.is_empty() {
-            push_term(&mut terms, &current, &STOP);
-            current.clear();
+            let is_cjk = is_cjk_char(ch);
+            // 类别切换（拉丁 ↔ CJK）先冲刷上一段。
+            if !run.is_empty() && is_cjk != run_is_cjk {
+                push_run(&mut terms, &run, run_is_cjk);
+                run.clear();
+            }
+            run_is_cjk = is_cjk;
+            run.extend(ch.to_lowercase());
+        } else if !run.is_empty() {
+            push_run(&mut terms, &run, run_is_cjk);
+            run.clear();
         }
     }
-    if !current.is_empty() {
-        push_term(&mut terms, &current, &STOP);
+    if !run.is_empty() {
+        push_run(&mut terms, &run, run_is_cjk);
     }
     terms
 }
 
-fn push_term(terms: &mut Vec<String>, term: &str, stop: &[&str]) {
-    // 单字符拉丁词无检索价值（CJK 单字保留，因为可能是有意义的）。
-    let is_cjk = term.chars().any(|c| c as u32 >= 0x4E00);
-    if term.chars().count() < 2 && !is_cjk {
+/// 一段同类字符（拉丁或 CJK）→ terms。
+fn push_run(terms: &mut Vec<String>, run: &str, is_cjk: bool) {
+    if is_cjk {
+        push_cjk_bigrams(run, terms);
+    } else if run.chars().count() >= 2 && !STOP.contains(&run) {
+        terms.push(run.to_string());
+    }
+}
+
+/// CJK 串按 bigram 切：相邻两字一个 term；单字串保留该字。
+fn push_cjk_bigrams(run: &str, terms: &mut Vec<String>) {
+    let chars: Vec<char> = run.chars().collect();
+    if chars.len() == 1 {
+        terms.push(chars[0].to_string());
         return;
     }
-    if stop.contains(&term) {
-        return;
+    for pair in chars.windows(2) {
+        terms.push(pair.iter().collect());
     }
-    terms.push(term.to_string());
+}
+
+/// 是否 CJK 字符（含扩展区 / 兼容区 / 日文假名）——按 Unicode 码位粗判，够用即可。
+fn is_cjk_char(ch: char) -> bool {
+    matches!(ch as u32,
+        0x3040..=0x30FF      // 平假名 / 片假名
+        | 0x3400..=0x4DBF    // CJK 扩展 A
+        | 0x4E00..=0x9FFF    // CJK 基本区
+        | 0xF900..=0xFAFF    // CJK 兼容
+        | 0x20000..=0x2FA1F  // CJK 扩展 B~F
+    )
 }
 
 #[cfg(test)]
@@ -398,6 +521,78 @@ mod tests {
         )];
         let hits = search(&entries, "错误处理", 5);
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn vector_leg_ranks_by_cosine() {
+        let entries = vec![
+            ("a.md".into(), entry("a", "s", EntryType::Fact, "alpha")),
+            ("b.md".into(), entry("b", "s", EntryType::Fact, "beta")),
+        ];
+        let mut vectors = VectorStore::new("m");
+        vectors.upsert("a", vec![1.0, 0.0]);
+        vectors.upsert("b", vec![0.0, 1.0]);
+        // query 与 a 同向 → a 应排第一。
+        let hits = search_vector(&entries, &[1.0, 0.0], &vectors, 5);
+        assert_eq!(hits[0].entry.id, "a");
+        // 与两条都正交 → 无命中。
+        assert!(search_vector(&entries, &[0.0, 0.0], &vectors, 5).is_empty());
+    }
+
+    #[test]
+    fn hybrid_fuses_both_legs_via_rrf() {
+        // a 只在 BM25 命中（关键词），b 只在向量腿命中（语义）——融合后两条都应在。
+        let entries = vec![
+            ("a.md".into(), entry("a", "note", EntryType::Fact, "thiserror")),
+            ("b.md".into(), entry("b", "note", EntryType::Fact, "无关正文")),
+        ];
+        let mut vectors = VectorStore::new("m");
+        vectors.upsert("a", vec![0.0, 1.0]);
+        vectors.upsert("b", vec![1.0, 0.0]);
+        let hits = hybrid_search(&entries, "thiserror", Some(&[1.0, 0.0]), &vectors, 5);
+        let ids: Vec<&str> = hits.iter().map(|h| h.entry.id.as_str()).collect();
+        assert!(ids.contains(&"a"), "BM25 腿应贡献 a: {ids:?}");
+        assert!(ids.contains(&"b"), "向量腿应贡献 b: {ids:?}");
+    }
+
+    #[test]
+    fn hybrid_without_query_vector_degrades_to_bm25() {
+        let entries = vec![(
+            "a.md".into(),
+            entry("a", "note", EntryType::Fact, "thiserror"),
+        )];
+        let vectors = VectorStore::new("m");
+        // 无 query 向量 → 纯 BM25（结果与 search 一致）。
+        let hybrid = hybrid_search(&entries, "thiserror", None, &vectors, 5);
+        let bm25 = search(&entries, "thiserror", 5);
+        assert_eq!(hybrid.len(), bm25.len());
+        assert_eq!(hybrid[0].entry.id, bm25[0].entry.id);
+    }
+
+    #[test]
+    fn cjk_natural_language_query_matches_via_bigram() {
+        // 回归：原先整段连续 CJK 被当成**一个** term，导致自然语言提问（与条目用词不同）
+        // 永远 0 命中。bigram 后「我的名字是什么」应能命中「用户的名字是 Sean。」（共享
+        // 的名 / 名字 / 字是 等 bigram）。
+        let entries = vec![(
+            "n.md".into(),
+            entry("n", "user-identity", EntryType::Fact, "用户的名字是 Sean。"),
+        )];
+        let hits = search(&entries, "我的名字是什么", 5);
+        assert_eq!(hits.len(), 1, "自然语言中文查询应命中（bigram）");
+        assert_eq!(hits[0].entry.id, "n");
+    }
+
+    #[test]
+    fn tokenize_splits_cjk_into_bigrams_and_latin_words() {
+        let terms = tokenize("用 Rust 写 thiserror 错误");
+        assert!(terms.contains("rust"), "拉丁词整词保留");
+        assert!(terms.contains("thiserror"));
+        assert!(terms.contains("错误"), "两字 CJK 串 = 一个 bigram");
+        assert!(
+            !terms.contains("thiserror错误"),
+            "拉丁与 CJK 属于不同 run，不应拼成一个 term"
+        );
     }
 
     #[test]

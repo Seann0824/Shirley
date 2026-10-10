@@ -124,6 +124,13 @@ pub struct MemorySettings {
     pub curator_protocol: Option<String>,
     /// 条目数达到该阈值时，在 curation 后触发一次定期整理（睡眠学习）。缺省 `0` = 不自动触发。
     pub consolidate_after_entries: Option<usize>,
+    /// **V2.5** embedding 端点（OpenAI 兼容 `POST .../embeddings`）。**三项全配齐**才
+    /// 启用混合检索的语义腿；缺任一项 → 纯 BM25（诚实降级，绝不假装有语义腿）。
+    pub embedding_base_url: Option<String>,
+    /// embedding 端点的密钥；缺省按"无鉴权"处理（本地服务常见）。
+    pub embedding_api_key: Option<String>,
+    /// embedding 模型标识。sidecar 记录它，模型变更即整份旧向量作废。
+    pub embedding_model: Option<String>,
 }
 
 impl MemorySettings {
@@ -140,6 +147,9 @@ impl MemorySettings {
             curator_api_key,
             curator_protocol,
             consolidate_after_entries,
+            embedding_base_url,
+            embedding_api_key,
+            embedding_model,
         );
     }
 }
