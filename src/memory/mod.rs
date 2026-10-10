@@ -22,6 +22,6 @@ mod store;
 //   - `interface/session.rs`：`MemoryRuntime`
 // 其余（`Entry` / `EntryType` / `search` / `write_index` / `Candidate` …）是模块内部
 // 构件，跨子模块用 `super::` 直接引用，不必抬到 `crate::memory::`。
-pub use curator::{CurateOutcome, CuratorError, curate};
+pub use curator::{ConsolidateOutcome, CurateOutcome, CuratorError, consolidate, curate};
 pub use provider::{MemoryContextProvider, MemoryRuntime};
 pub use store::MemoryStore;

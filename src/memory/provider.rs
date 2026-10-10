@@ -13,11 +13,12 @@
 //! `Mutex<Option<String>>` query 槽——驱动方在发起一轮前 [`MemoryRuntime::set_query`]。
 //! 该运行时**按 `Agent`（会话）一份**，多会话并发互不干扰。
 
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use shirley_agent_sdk::ContextProvider;
 
-use super::format::{EntryStatus, EntryType};
+use super::format::{Entry, EntryStatus, EntryType, MemoryError};
 use super::index::search;
 use super::store::MemoryStore;
 
@@ -31,6 +32,9 @@ pub struct MemoryRuntime {
     store: MemoryStore,
     /// 本轮 query（发起一轮前由驱动方设置）。`None` 表示未知 → 只做常驻注入。
     query: Mutex<Option<String>>,
+    /// **V2-D 命中计数**：本轮检索命中的条目 id → 次数，攒在内存里，curation 落盘时
+    /// 由 [`MemoryRuntime::flush_usage`] 一次性写回（避免每轮都写盘）。
+    usage: Mutex<HashMap<String, u64>>,
 }
 
 impl MemoryRuntime {
@@ -38,6 +42,7 @@ impl MemoryRuntime {
         Self {
             store,
             query: Mutex::new(None),
+            usage: Mutex::new(HashMap::new()),
         }
     }
 
@@ -63,6 +68,14 @@ impl MemoryRuntime {
             }
             _ => Vec::new(),
         };
+
+        // V2-D：记命中（供 curation 时 flush 到 `usage_count`）。
+        if !relevant.is_empty() {
+            let mut usage = self.usage.lock().expect("memory usage lock poisoned");
+            for hit in &relevant {
+                *usage.entry(hit.entry.id.clone()).or_insert(0) += 1;
+            }
+        }
 
         if core.is_none() && relevant.is_empty() {
             return None;
@@ -95,6 +108,49 @@ impl MemoryRuntime {
         }
         Some(rendered)
     }
+}
+
+impl MemoryRuntime {
+    /// **V2-D**：把内存里攒的命中次数写回条目（`usage_count` 累加），并据其维护
+    /// `utility`（缺失时按命中次数推导）。curation 落盘时调用。
+    ///
+    /// 只写回**当前仍存在**的条目（已被取代 / 删除的跳过）；写后清空计数槽。
+    /// 返回实际更新的条目数。
+    pub fn flush_usage(&self) -> Result<usize, MemoryError> {
+        let pending: HashMap<String, u64> = {
+            let mut usage = self.usage.lock().expect("memory usage lock poisoned");
+            if usage.is_empty() {
+                return Ok(0);
+            }
+            std::mem::take(&mut *usage)
+        };
+        let mut by_id: HashMap<String, Entry> = self
+            .store
+            .list_entries()?
+            .into_iter()
+            .map(|(_, entry)| (entry.id.clone(), entry))
+            .collect();
+
+        let mut updated = 0;
+        for (id, delta) in pending {
+            let Some(entry) = by_id.get_mut(&id) else {
+                continue; // 条目已不在库中，丢弃这次计数
+            };
+            entry.usage_count = Some(entry.usage_count.unwrap_or(0) + delta);
+            if entry.utility.is_none() {
+                entry.utility = Some(utility_from_usage(entry.usage_count.unwrap_or(0)));
+            }
+            self.store.write_entry(entry)?;
+            updated += 1;
+        }
+        Ok(updated)
+    }
+}
+
+/// 由命中次数推导 `utility ∈ [0,1)`（饱和曲线：`n/(n+5)`）。
+fn utility_from_usage(usage_count: u64) -> f64 {
+    let n = usage_count as f64;
+    n / (n + 5.0)
 }
 
 /// 每轮请求末尾注入记忆的提供者。
@@ -248,6 +304,50 @@ mod tests {
         let rendered = runtime.render().unwrap();
         assert!(rendered.chars().count() <= MAX_RENDER_CHARS + 40);
         assert!(rendered.contains("truncated"));
+    }
+
+    #[test]
+    fn flush_usage_accumulates_and_derives_utility() {
+        let root = tmp("flush");
+        let store = MemoryStore::new(&root);
+        store
+            .write_entry(&entry("fact-rust", "rust", EntryType::Fact, "Rust 相关事实。"))
+            .unwrap();
+        let runtime = MemoryRuntime::new(MemoryStore::new(&root));
+
+        runtime.set_query("rust");
+        let _ = runtime.render().unwrap();
+        let _ = runtime.render().unwrap(); // 命中两次
+        let updated = runtime.flush_usage().unwrap();
+        assert_eq!(updated, 1);
+
+        let entries = store.list_entries().unwrap();
+        let saved = entries
+            .iter()
+            .find(|(_, e)| e.id == "fact-rust")
+            .map(|(_, e)| e)
+            .unwrap();
+        assert_eq!(saved.usage_count, Some(2));
+        // utility 由命中次数派生（2/(2+5)），非 None。
+        assert!(saved.utility.is_some());
+
+        // 第二次 flush 无新增命中 → 空操作。
+        assert_eq!(runtime.flush_usage().unwrap(), 0);
+    }
+
+    #[test]
+    fn flush_usage_drops_counts_for_missing_entries() {
+        let root = tmp("flush_missing");
+        let store = MemoryStore::new(&root);
+        store
+            .write_entry(&entry("fact-gone", "topic", EntryType::Fact, "topic here"))
+            .unwrap();
+        let runtime = MemoryRuntime::new(MemoryStore::new(&root));
+        runtime.set_query("topic");
+        let _ = runtime.render().unwrap();
+        // 命中之后条目被删（模拟被取代 / 清理）。
+        store.delete_entry("fact-gone").unwrap();
+        assert_eq!(runtime.flush_usage().unwrap(), 0);
     }
 
     #[test]

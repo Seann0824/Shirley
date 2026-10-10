@@ -5,11 +5,11 @@
 //! 1. **`index.md`**：程序维护的入口页，每条记忆一行（id / 类型 / 摘要 / 路径 / 日期）。
 //!    第 3 章警告"纯文本平铺会退化成孤岛"——索引页就是入口。由 [`write_index`]
 //!    从当前全部条目重新生成（幂等，不做增量）。
-//! 2. **关键词检索**（V1）：按当前 query 给条目打分、取 top-k。**故意不做语义**——
-//!    V1 验收只要求"关键词检索 + 按时间排序"，同义改写不敏感的问题留待 V2 的 BM25 /
-//!    语义升级（`docs/memory.md` §11 缺口 3）。
+//! 2. **检索**（V2：BM25）：按当前 query 给条目打分、取 top-k。**故意不做语义**——
+//!    V2 用 BM25（IDF + 词频饱和 + 文档长度归一），比 V1 的固定权重子串打分更稳；语义 /
+//!    嵌入检索留待 V3（`docs/memory.md` §10）。
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use super::format::{Entry, IndexLine, MemoryError};
 use super::store::{MemoryStore, INDEX_FILE};
@@ -67,21 +67,53 @@ pub fn write_index(store: &MemoryStore, entries: &[(String, Entry)]) -> Result<(
     Ok(())
 }
 
-/// 关键词检索：给每条条目打分，返回得分 > 0 的条目，按分数降序（并列按时间新→旧）。
+/// 检索：给每条条目打分，返回得分 > 0 的条目，按分数降序（并列按时间新→旧）。
 ///
-/// 打分规则（V1，简单可解释）：
-/// - query 与条目的 `subject` / `id` / 正文 / `scope` 全部小写后分词；
-/// - 命中 `subject` 权重最高（主题最相关），其次正文，再次 `id` / `scope`；
-/// - 关键词做**子串**匹配（对 CJK 友好：`rust` 命中 `rust-error-handling`）。
+/// **打分用 BM25**（`docs/memory.md` §10 V2）：词频饱和 + 文档长度归一 + IDF——
+/// 罕见词权重高于常见词、长文档不因堆词而占优，比 V1 的固定权重子串打分更稳。
+/// 字段差异保留为**加权词频**（`subject` 最高，正文次之，`id` / `scope` 最低），
+/// 于是"主题命中优于正文命中"这条 V1 语义在 BM25 下依然成立。
+///
+/// 参数（经典 BM25）：`k1 = 1.2`（词频饱和速度）、`b = 0.75`（长度归一强度）。
+/// 检索接口不变（`query → 相关条目`），升级不动架构。
+///
+/// **V2-D**：命中得分再乘一个温和的 `utility` 因子（`0.9 ~ 1.1`）——历史有用度高的条目
+/// 在同等相关度下略微靠前，但**不压倒** BM25 相关性。`utility` 缺失按 `1.0`。
 pub fn search(entries: &[(String, Entry)], query: &str, limit: usize) -> Vec<Scored> {
     let terms = tokenize(query);
     if terms.is_empty() {
         return Vec::new();
     }
+
+    // 每篇文档的加权词频与长度。
+    let docs: Vec<(HashMap<String, f64>, f64)> =
+        entries.iter().map(|(_, entry)| doc_terms(entry)).collect();
+    let n = docs.len() as f64;
+    let avgdl = if docs.is_empty() {
+        0.0
+    } else {
+        docs.iter().map(|(_, dl)| *dl).sum::<f64>() / n
+    };
+
+    // 文档频率（含该词的文档数）→ IDF。
+    let mut df: HashMap<&str, usize> = HashMap::new();
+    for (tf, _) in &docs {
+        for term in tf.keys() {
+            *df.entry(term.as_str()).or_insert(0) += 1;
+        }
+    }
+    let idf = |term: &str| -> f64 {
+        let df = *df.get(term).unwrap_or(&0) as f64;
+        (1.0 + (n - df + 0.5) / (df + 0.5)).ln()
+    };
+
     let mut scored: Vec<Scored> = entries
         .iter()
-        .filter_map(|(path, entry)| {
-            let score = score_entry(entry, &terms);
+        .zip(docs.iter())
+        .filter_map(|((path, entry), (tf, dl))| {
+            let score = bm25(tf, *dl, avgdl, &terms, &idf)
+                * status_factor(entry.status)
+                * utility_factor(entry.utility);
             (score > 0.0).then(|| Scored {
                 entry: entry.clone(),
                 path: path.clone(),
@@ -89,51 +121,98 @@ pub fn search(entries: &[(String, Entry)], query: &str, limit: usize) -> Vec<Sco
             })
         })
         .collect();
-    // 分数降序；并列时时间新→旧（`docs/memory.md` 验收 3：检索按时间排序）。
+
+    // 分数降序；并列时时间新→旧（`docs/memory.md` 验收 3），再按 id 稳定。
     scored.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
             .then_with(|| b.entry.timeline_date().cmp(a.entry.timeline_date()))
+            .then_with(|| a.entry.id.cmp(&b.entry.id))
     });
     scored.truncate(limit);
     scored
 }
 
-fn score_entry(entry: &Entry, terms: &HashSet<String>) -> f64 {
-    let subject = entry.subject.to_lowercase();
-    let id = entry.id.to_lowercase();
-    let scope = entry.scope.as_deref().unwrap_or("").to_lowercase();
-    let body = entry.body.to_lowercase();
+/// 字段权重（相对正文）：主题最重要，`id` / `scope` 辅助。
+const SUBJECT_WEIGHT: f64 = 3.0;
+const ID_SCOPE_WEIGHT: f64 = 0.5;
 
-    let mut score = 0.0;
-    for term in terms {
-        if subject.contains(term.as_str()) {
-            score += 3.0;
-        }
-        if body.contains(term.as_str()) {
-            score += 1.0;
-        }
-        if id.contains(term.as_str()) || scope.contains(term.as_str()) {
-            score += 0.5;
+/// 把一条条目分词成**加权词频**表 + 文档长度（权重和）。
+fn doc_terms(entry: &Entry) -> (HashMap<String, f64>, f64) {
+    let mut tf: HashMap<String, f64> = HashMap::new();
+    for term in tokenize_counts(&entry.subject) {
+        *tf.entry(term).or_insert(0.0) += SUBJECT_WEIGHT;
+    }
+    for term in tokenize_counts(&entry.body) {
+        *tf.entry(term).or_insert(0.0) += 1.0;
+    }
+    for term in tokenize_counts(&entry.id) {
+        *tf.entry(term).or_insert(0.0) += ID_SCOPE_WEIGHT;
+    }
+    if let Some(scope) = &entry.scope {
+        for term in tokenize_counts(scope) {
+            *tf.entry(term).or_insert(0.0) += ID_SCOPE_WEIGHT;
         }
     }
-    // 被取代的旧条目降权（保留可检索，但不优先）。
-    if entry.status == super::format::EntryStatus::Superseded {
-        score *= 0.5;
+    let len = tf.values().sum();
+    (tf, len)
+}
+
+/// BM25 打分（对唯一查询词求和）。
+fn bm25(
+    tf: &HashMap<String, f64>,
+    dl: f64,
+    avgdl: f64,
+    terms: &HashSet<String>,
+    idf: &impl Fn(&str) -> f64,
+) -> f64 {
+    const K1: f64 = 1.2;
+    const B: f64 = 0.75;
+    let avgdl = avgdl.max(1.0);
+    let mut score = 0.0;
+    for term in terms {
+        let Some(&f) = tf.get(term) else { continue };
+        let denom = f + K1 * (1.0 - B + B * dl / avgdl);
+        score += idf(term) * (f * (K1 + 1.0)) / denom;
     }
     score
 }
 
-/// 极简分词：按非字母数字（含 CJK 视为字母）切分，去停用词，小写。
+/// 状态因子：被取代的旧条目降权（保留可检索，但不优先）。
+fn status_factor(status: super::format::EntryStatus) -> f64 {
+    match status {
+        super::format::EntryStatus::Superseded => 0.5,
+        _ => 1.0,
+    }
+}
+
+/// 有用度因子（V2-D）：`utility ∈ [0,1]` 映射到 `0.9 ~ 1.1` 的温和乘子；缺失按 `1.0`。
 ///
-/// CJK 不按词切（无词典），把每个连续 CJK 串当一个 term——配合子串匹配即可用。
+/// 刻意**只做温和调整**——相关性（BM25）仍是主序，`utility` 只在相关度接近时微调，
+/// 不改变"关键词检索 + 时间并列"的 V1 验收口径。
+fn utility_factor(utility: Option<f64>) -> f64 {
+    match utility {
+        Some(u) => 0.9 + 0.2 * u.clamp(0.0, 1.0),
+        None => 1.0,
+    }
+}
+
+/// 查询分词：按非字母数字（含 CJK 视为字母）切分，去停用词，小写，**去重**。
+///
+/// CJK 不按词切（无词典），把每个连续 CJK 串当一个 term——配合 BM25 的字段加权
+/// 词频即可用。
 fn tokenize(text: &str) -> HashSet<String> {
+    tokenize_counts(text).into_iter().collect()
+}
+
+/// 分词（**保留重复计数**，供 BM25 词频）。
+fn tokenize_counts(text: &str) -> Vec<String> {
     const STOP: [&str; 16] = [
         "the", "a", "an", "of", "to", "and", "or", "is", "are", "in", "on", "for", "with", "that",
         "this", "it",
     ];
-    let mut terms = HashSet::new();
+    let mut terms = Vec::new();
     let mut current = String::new();
     for ch in text.chars() {
         if ch.is_alphanumeric() {
@@ -149,7 +228,7 @@ fn tokenize(text: &str) -> HashSet<String> {
     terms
 }
 
-fn push_term(terms: &mut HashSet<String>, term: &str, stop: &[&str]) {
+fn push_term(terms: &mut Vec<String>, term: &str, stop: &[&str]) {
     // 单字符拉丁词无检索价值（CJK 单字保留，因为可能是有意义的）。
     let is_cjk = term.chars().any(|c| c as u32 >= 0x4E00);
     if term.chars().count() < 2 && !is_cjk {
@@ -158,7 +237,7 @@ fn push_term(terms: &mut HashSet<String>, term: &str, stop: &[&str]) {
     if stop.contains(&term) {
         return;
     }
-    terms.insert(term.to_string());
+    terms.push(term.to_string());
 }
 
 #[cfg(test)]
@@ -241,6 +320,27 @@ mod tests {
     }
 
     #[test]
+    fn utility_factor_is_bounded_and_centered() {
+        assert!((utility_factor(None) - 1.0).abs() < 1e-9);
+        assert!((utility_factor(Some(0.0)) - 0.9).abs() < 1e-9);
+        assert!((utility_factor(Some(1.0)) - 1.1).abs() < 1e-9);
+        // 越界值被 clamp，不放大成异常乘子。
+        assert!((utility_factor(Some(5.0)) - 1.1).abs() < 1e-9);
+        assert!((utility_factor(Some(-3.0)) - 0.9).abs() < 1e-9);
+    }
+
+    #[test]
+    fn utility_only_breaks_near_ties() {
+        // 两条相关度相同的条目，utility 高的略靠前；但相关度差足够大时 utility 翻不了盘。
+        let mut a = entry("a", "rust", EntryType::Fact, "rust");
+        let mut b = entry("b", "rust", EntryType::Fact, "rust");
+        a.utility = Some(1.0);
+        b.utility = Some(0.0);
+        let hits = search(&[("a.md".into(), a), ("b.md".into(), b)], "rust", 5);
+        assert_eq!(hits[0].entry.id, "a");
+    }
+
+    #[test]
     fn search_no_match_returns_empty() {
         assert!(search(&sample(), "kubernetes", 3).is_empty());
     }
@@ -298,6 +398,45 @@ mod tests {
         )];
         let hits = search(&entries, "错误处理", 5);
         assert_eq!(hits.len(), 1);
+    }
+
+    #[test]
+    fn bm25_rare_term_outweighs_common() {
+        // rust 出现在两篇，thiserror 只在一篇：query 同时含两者时，含罕见词的那篇应排前。
+        let entries = vec![
+            (
+                "a.md".into(),
+                entry("a", "rust", EntryType::Fact, "thiserror"),
+            ),
+            (
+                "b.md".into(),
+                entry("b", "rust", EntryType::Fact, "anyhow"),
+            ),
+        ];
+        let hits = search(&entries, "rust thiserror", 5);
+        assert_eq!(hits[0].entry.id, "a", "rare term should outweigh common term");
+    }
+
+    #[test]
+    fn bm25_length_normalization_penalizes_long_docs() {
+        // 同样命中一次，短文档应排在长文档之前（长度归一）。
+        let entries = vec![
+            (
+                "short.md".into(),
+                entry("short", "note", EntryType::Fact, "topic"),
+            ),
+            (
+                "long.md".into(),
+                entry(
+                    "long",
+                    "note",
+                    EntryType::Fact,
+                    "topic alpha beta gamma delta epsilon zeta eta theta",
+                ),
+            ),
+        ];
+        let hits = search(&entries, "topic", 5);
+        assert_eq!(hits[0].entry.id, "short", "longer doc should be penalized");
     }
 
     #[test]

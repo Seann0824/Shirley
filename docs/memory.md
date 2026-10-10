@@ -378,7 +378,7 @@ src/memory/
 | 阶段 | 内容 | 解决 |
 | --- | --- | --- |
 | **V1（稳）· 已实现** | `core.md` 常驻注入 + `index.md` 关键词检索注入 + 会话结束增量 curator（同模型 + 确定性自检）+ 时间化冲突字段 | 自动附带、异步 curator、冲突不删历史 |
-| **V2** | 定期整理（睡眠学习）+ 回原始证据核查 + 检索升级 BM25 + 可配独立 curator 模型 | 全量去重 / 合并、证据回查、异源审核 |
+| **V2 · 已实现** | 定期整理（睡眠学习）+ 回原始证据核查 + 检索升级 BM25 + 可配独立 curator 模型 | 全量去重 / 合并、证据回查、异源审核 |
 | **V3** | 可选 embedding 语义检索、跨工作区记忆、多模态（第 3 章 3.3.7） | 大规模召回、主动服务 |
 
 **V1 验收口径**：
@@ -387,6 +387,31 @@ src/memory/
 2. curator 能在会话结束后产出一条带 `source` 的条目；
 3. 两条冲突偏好能以 `supersedes` 时间线共存，检索按时间排序；
 4. 空记忆时**不注入**、不劣化现状。
+
+**V2 落地说明**（实现见 `src/memory/`）：
+
+- **V2-A 检索升级 BM25**（`index.rs`）：词频饱和 + 文档长度归一 + IDF；字段差异保留为
+  **加权词频**（`subject` ×3 / 正文 ×1 / `id`+`scope` ×0.5），V1 的"主���命中优于正文命中"
+  语义在 BM25 下依然成立。检索接口（`query → 相关条目`）不变。
+- **V2-B 定期整理 / 睡眠学习**（`curator.rs::consolidate`）：全量扫描 → 模型产出
+  `ConsolidateOp`（`Merge` / `Supersede` / `Requalify`）→ 逐条**确定性自检**后执行。
+  自检拒绝：merge 无 sources、引用未知 source、requalify 空 body / 无变更 / 作用于已
+  superseded 条目。**永不删除历史**（旧条目只置 `superseded`）；证据不足不强行收敛，
+  条件不同则 `requalify` 补 `scope`。新条目缺 `source` 时从旧条目并集继承，**不编造**。
+- **V2-B 回原始证据核查**：`collect_evidence` 解析 `source`（`<会话文件>#turn:N`，
+  1-based 取该行，否则整文件截断 800 字符），文件缺失记 `[missing evidence]`；证据注入
+  上限 `MAX_EVIDENCE_CHARS = 6000`。
+- **V2-C 独立 curator 模型**：`[memory]` 表可配 `curator_model` / `curator_base_url` /
+  `curator_api_key` / `curator_protocol`（全 `Option`，逐层合并，未配置**诚实回退主模型**）；
+  `consolidate_after_entries` 为触发阈值（`0` = 不自动触发）。`bootstrap::build_curator_config`
+  只覆盖显式给出的字段，其余继承主配置。
+- **V2-D `usage_count` / `utility` 维护**：`MemoryRuntime` 每次相关注入记命中（内存
+  `HashMap`），curation 落盘时 `flush_usage` 一次性写回 `usage_count` 累加，并据饱和曲线
+  `n/(n+5)` 派生 `utility`；检索再乘一个温和的 `utility` 因子（`0.9 ~ 1.1`，缺失 = `1.0`）
+  ——只在相关度接近时微调，不压倒 BM25 相关性。
+- **触发时机**：会话切走 / 新建时 `spawn_curation` 先做增量 curation，再按
+  `should_consolidate()`（条目数达阈值）best-effort 触发一次 `consolidate`；全程后台、
+  失败只记日志，不阻塞会话切换。
 
 ---
 

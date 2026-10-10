@@ -63,6 +63,11 @@ pub struct AgentFactory {
     /// 记忆根目录：`[全局, 工作区]`（`docs/memory.md` §3.1）。`roots[0]`（全局）是
     /// **写入主根**，读时合并（工作区覆盖全局）。所有会话共用同一份目录。
     memory_roots: Vec<PathBuf>,
+    /// curator 独立模型配置（V2-C，`docs/memory.md` §10）：`[memory]` 表配了
+    /// `curator_*` 时用它，否则为 `None`——curator 回退主模型（诚实回退，不假装异源）。
+    curator_model_config: Option<ModelConfig>,
+    /// 条目数达到该阈值时，在 curation 后触发一次定期整理（睡眠学习）。`0` = 不自动触发。
+    consolidate_after_entries: usize,
 }
 
 /// 全局记忆相对 `config_dir` 的位置（跨项目）。
@@ -122,6 +127,10 @@ impl AgentFactory {
             .map_err(|error| AgentError::Other(Box::new(error)))?;
         let session_catalog: Arc<dyn SessionCatalog> = Arc::new(file_catalog);
 
+        // curator 独立模型（V2-C）：`[memory]` 配了 curator_* 才另起一份配置，
+        // 否则为 `None`（回退主模型）。缺省继承主配置的流式 / thinking 等字段。
+        let curator_model_config = build_curator_config(&settings, &model_config);
+
         Ok(Self {
             model_config,
             system_prompt: prompt::build(working_dir.clone()),
@@ -131,6 +140,8 @@ impl AgentFactory {
             session_catalog,
             needs_login,
             memory_roots: memory_roots(&working_dir),
+            curator_model_config,
+            consolidate_after_entries: settings.memory.consolidate_after_entries.unwrap_or(0),
         })
     }
 
@@ -200,12 +211,9 @@ impl AgentFactory {
         messages: &[Message],
         session_ref: &str,
     ) -> Result<CurateOutcome, CuratorError> {
-        let agent = Agent::builder()
-            .model_config(self.model_config.clone())
-            .build()
-            .map_err(|error| CuratorError::Model(error.to_string()))?;
+        let agent = self.curator_agent()?;
         let store = self.memory_store();
-        let sessions_dir = self.working_dir.join(".shirley").join("sessions");
+        let sessions_dir = self.sessions_dir();
         memory::curate(
             &agent,
             &store,
@@ -215,6 +223,82 @@ impl AgentFactory {
         )
         .await
     }
+
+    /// 定期整理（睡眠学习，`docs/memory.md` §5.2）：全量扫描 → 模型提议 → 自检 → 合入。
+    ///
+    /// 与 [`AgentFactory::curate`] 共用 curator 模型（`[memory]` 配了就用独立模型）。
+    /// `sessions_dir` 存在时做**回原始证据核查**。
+    pub async fn consolidate(&self) -> Result<memory::ConsolidateOutcome, CuratorError> {
+        let agent = self.curator_agent()?;
+        let store = self.memory_store();
+        let sessions_dir = self.sessions_dir();
+        let sessions_dir = sessions_dir.exists().then_some(sessions_dir.as_path());
+        memory::consolidate(&agent, &store, sessions_dir).await
+    }
+
+    /// 当前记忆条目数是否达到定期整理阈值（`[memory] consolidate_after_entries`）。
+    ///
+    /// 阈值 `0` 表示不自动触发。读目录失败按"不触发"处理（best-effort）。
+    pub fn should_consolidate(&self) -> bool {
+        if self.consolidate_after_entries == 0 {
+            return false;
+        }
+        self.memory_store()
+            .list_entries()
+            .map(|entries| entries.len() >= self.consolidate_after_entries)
+            .unwrap_or(false)
+    }
+
+    /// 造 curator 用的**最小 `Agent`**：仅借模型配置，不带工具 / 系统提示词 / 记忆注入。
+    fn curator_agent(&self) -> Result<Agent, CuratorError> {
+        let config = self
+            .curator_model_config
+            .clone()
+            .unwrap_or_else(|| self.model_config.clone());
+        Agent::builder()
+            .model_config(config)
+            .build()
+            .map_err(|error| CuratorError::Model(error.to_string()))
+    }
+
+    /// 会话日志目录（curator 回证据核查用）。
+    fn sessions_dir(&self) -> PathBuf {
+        self.working_dir.join(".shirley").join("sessions")
+    }
+}
+
+/// 从 `[memory]` 配置构造 curator 独立模型配置；未配置 curator 端点/模型时返回 `None`
+/// （curator 回退主模型）。
+///
+/// 继承主配置的 `stream` / `thinking` / `reasoning_effort` / `context_window_tokens`
+/// 等字段，只覆盖 curator 显式给出的端点 / 密钥 / 模型 / 协议——避免"配了 curator 模型
+/// 却丢了主配置的其它字段"。
+fn build_curator_config(settings: &Settings, main: &ModelConfig) -> Option<ModelConfig> {
+    let mem = &settings.memory;
+    // 没配任何 curator 键就不另起配置。
+    if mem.curator_model.is_none()
+        && mem.curator_base_url.is_none()
+        && mem.curator_api_key.is_none()
+        && mem.curator_protocol.is_none()
+    {
+        return None;
+    }
+    let mut config = main.clone();
+    if let Some(model) = mem.curator_model.as_ref().filter(|m| !m.trim().is_empty()) {
+        config.model = model.clone();
+    }
+    if let Some(base_url) = mem.curator_base_url.as_ref().filter(|u| !u.trim().is_empty()) {
+        config.base_url = base_url.clone();
+    }
+    if let Some(api_key) = mem.curator_api_key.clone() {
+        config.api_key = (!api_key.is_empty()).then_some(api_key);
+    }
+    if let Some(protocol) = mem.curator_protocol.as_deref() {
+        if let Ok(parsed) = crate::settings::parse_protocol_name(protocol) {
+            config.protocol = parsed;
+        }
+    }
+    Some(config)
 }
 
 /// [`AgentFactory::build_agent`] 的产物：`Agent` 及其配套的记忆运行时句柄。
@@ -288,6 +372,8 @@ mod tests {
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
             needs_login: false,
             memory_roots: vec![root.join(".shirley/memory")],
+            curator_model_config: None,
+            consolidate_after_entries: 0,
         }
     }
 

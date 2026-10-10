@@ -725,6 +725,8 @@ impl SessionManager {
             return;
         };
         let session_ref = format!("{name}.jsonl");
+        // V2-D：命中计数攒在 MemoryRuntime 里，curation 落盘时一并 flush。
+        let memory = session.memory.clone();
         handle.spawn(async move {
             match factory.curate(&messages, &session_ref).await {
                 Ok(outcome) if !outcome.empty || !outcome.written.is_empty() => {
@@ -736,6 +738,29 @@ impl SessionManager {
                 }
                 Ok(_) => {}
                 Err(error) => eprintln!("[memory] curation for `{session_ref}` failed: {error}"),
+            }
+            // V2-D：把本轮会话攒下的检索命中次数写回条目（usage_count / utility）。
+            if let Some(memory) = memory.as_ref() {
+                match memory.flush_usage() {
+                    Ok(0) => {}
+                    Ok(n) => eprintln!("[memory] flushed usage for {n} entr(y/ies)"),
+                    Err(error) => eprintln!("[memory] usage flush failed: {error}"),
+                }
+            }
+            // V2-B/C：增量 curation 之后再按阈值触发定期整理（睡眠学习）。同样是
+            // best-effort 后台任务——失败只记日志，绝不阻塞 / 影响会话切换。
+            if factory.should_consolidate() {
+                match factory.consolidate().await {
+                    Ok(outcome) if !outcome.empty => eprintln!(
+                        "[memory] consolidated: {} merged, {} superseded, {} requalified, {} rejected",
+                        outcome.merged,
+                        outcome.superseded,
+                        outcome.requalified,
+                        outcome.rejected.len()
+                    ),
+                    Ok(_) => {}
+                    Err(error) => eprintln!("[memory] consolidation failed: {error}"),
+                }
             }
         });
     }

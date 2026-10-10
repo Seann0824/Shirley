@@ -51,6 +51,8 @@ pub struct FileSettings {
     pub provider: ProviderSettings,
     /// 上下文压缩策略（配置文件里的 `[compression]` 表）。
     pub compression: CompressionSettings,
+    /// 记忆系统配置（配置文件里的 `[memory]` 表）。
+    pub memory: MemorySettings,
 }
 
 /// 压缩策略配置（配置文件里的 `[compression]` 表）。
@@ -100,6 +102,45 @@ impl CompressionSettings {
         if over.template.is_some() {
             self.template = over.template;
         }
+    }
+}
+
+/// 记忆系统配置（配置文件里的 `[memory]` 表）。
+///
+/// V2 新增：允许给 curator 配**独立模型**（异源审核，`docs/memory.md` §10 / §6）——
+/// 抽取 / 整理记忆的模型与主对话模型分开，减少"自己审自己"的偏差。全 `Option`：
+/// 未配则诚实回退主模型。
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MemorySettings {
+    /// curator 用的模型标识；缺省回退主模型。
+    pub curator_model: Option<String>,
+    /// curator 的端点（含协议完整地址）；缺省回退主端点。
+    pub curator_base_url: Option<String>,
+    /// curator 的密钥；缺省回退主密钥。
+    pub curator_api_key: Option<String>,
+    /// curator 的协议名（`chat_completions` / `responses` / `anthropic_messages`）；
+    /// 缺省回退主协议。
+    pub curator_protocol: Option<String>,
+    /// 条目数达到该阈值时，在 curation 后触发一次定期整理（睡眠学习）。缺省 `0` = 不自动触发。
+    pub consolidate_after_entries: Option<usize>,
+}
+
+impl MemorySettings {
+    /// 逐层覆盖：高优先级的 `Some` 压过低优先级。
+    fn merge_into(&mut self, over: MemorySettings) {
+        macro_rules! take {
+            ($($field:ident),* $(,)?) => {
+                $(if over.$field.is_some() { self.$field = over.$field; })*
+            };
+        }
+        take!(
+            curator_model,
+            curator_base_url,
+            curator_api_key,
+            curator_protocol,
+            consolidate_after_entries,
+        );
     }
 }
 
@@ -180,6 +221,8 @@ pub struct Settings {
     pub context_window_tokens: u64,
     /// 压缩策略（已落定，可直接 `to_sdk()` 交给 `Agent`）。
     pub compression: CompressionSettings,
+    /// 记忆系统配置（curator 模型 / 定期整理阈值）。
+    pub memory: MemorySettings,
 }
 
 /// 配置装载错误。
@@ -227,7 +270,13 @@ impl Settings {
             compression.merge_into(layer.compression.clone());
         }
 
-        Self::finalize(merged, compression)
+        // 记忆配置同样逐层覆盖（env 层没有对应键，仅文件两层）。
+        let mut memory = MemorySettings::default();
+        for layer in [&global, &workspace].into_iter().flatten() {
+            memory.merge_into(layer.memory.clone());
+        }
+
+        Self::finalize(merged, compression, memory)
     }
 
     /// 便捷入口：使用真实的 `config_dir` 与进程环境变量。
@@ -253,6 +302,7 @@ impl Settings {
     fn finalize(
         merged: ProviderSettings,
         compression: CompressionSettings,
+        memory: MemorySettings,
     ) -> Result<Self, SettingsError> {
         let base_url = merged
             .base_url
@@ -287,6 +337,7 @@ impl Settings {
             model,
             context_window_tokens,
             compression,
+            memory,
         })
     }
 }
@@ -355,6 +406,11 @@ fn merge_into(base: &mut ProviderSettings, over: ProviderSettings) {
         model,
         context_window_tokens,
     );
+}
+
+/// 协议名解析的公开入口（供 `bootstrap` 解析 `[memory] curator_protocol`）。
+pub fn parse_protocol_name(name: &str) -> Result<ModelProtocol, SettingsError> {
+    parse_protocol(name)
 }
 
 /// 协议名解析。接受常见别名，未知名字报错（不静默回退）。
@@ -610,4 +666,38 @@ mod tests {
             Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
         assert_eq!(settings.base_url, "http://x");
     }
+
+    #[test]
+    fn memory_table_parses_and_merges() {
+        let root = temp_root("memory_table");
+        let global_dir = temp_root("memory_global");
+        let global = global_dir.join("config.toml");
+        std::fs::write(
+            &global,
+            "[memory]\ncurator_model = \"g-curator\"\nconsolidate_after_entries = 10\n",
+        )
+        .unwrap();
+        let ws_dir = root.join(".shirley");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("config.toml"),
+            "[memory]\ncurator_model = \"ws-curator\"\ncurator_base_url = \"http://c\"\n",
+        )
+        .unwrap();
+
+        let settings = Settings::load(&root, Some(&global), &env_of(&[])).unwrap();
+        // 工作区覆盖 curator_model；全局的 consolidate_after_entries 保留。
+        assert_eq!(settings.memory.curator_model.as_deref(), Some("ws-curator"));
+        assert_eq!(settings.memory.curator_base_url.as_deref(), Some("http://c"));
+        assert_eq!(settings.memory.consolidate_after_entries, Some(10));
+    }
+
+    #[test]
+    fn memory_table_absent_is_default() {
+        let root = temp_root("memory_absent");
+        let settings =
+            Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+        assert_eq!(settings.memory, MemorySettings::default());
+    }
+
 }

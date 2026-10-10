@@ -12,6 +12,11 @@
 //!
 //! 边界声明（照抄论文的 distiller 边界）：轨迹是**部分证据**、不是 ground truth——
 //! 一次通过不自动验证每个中间假设。这条写进给模型的提示词里。
+//!
+//! **V2 新增定期整理（睡眠学习，`docs/memory.md` §5.2 / §6）**：[`consolidate`] 全量扫描
+//! 记忆库，让模型产出 merge / supersede / requalify 操作，逐条经**确定性自检**后执行，
+//! 并**回原始证据核查**（把条目 `source` 指向的 `sessions/*.jsonl` 片段喂进提示词）。
+//! 冲突**不强行收敛**——条件不同就 `requalify` 补 `scope`，证据不足就保留原样。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -380,6 +385,373 @@ pub fn rebuild_index(store: &MemoryStore) -> Result<(), MemoryError> {
     super::index::write_index(store, &entries)
 }
 
+// ---------------------------------------------------------------------------
+// V2-B：定期整理（睡眠学习，`docs/memory.md` §5.2 / §6）
+// ---------------------------------------------------------------------------
+
+/// 原始证据片段注入上限（防证据自己垄断提示词）。
+pub const MAX_EVIDENCE_CHARS: usize = 6000;
+
+/// 一次定期整理的确定性结果。
+#[derive(Debug, Default)]
+pub struct ConsolidateOutcome {
+    /// 执行成功的 merge 操作数。
+    pub merged: usize,
+    /// 被置为 superseded 的旧条目数。
+    pub superseded: usize,
+    /// 执行成功的 requalify 操作数。
+    pub requalified: usize,
+    /// 被自检拒绝的操作。
+    pub rejected: Vec<Rejected>,
+    /// 无可整理内容（条目不足或模型没产出操作）。
+    pub empty: bool,
+}
+
+/// 一条整理操作（模型提议，程序自检后执行）。**永不删除历史**——只置 `superseded`。
+#[derive(Debug, Clone, Deserialize)]
+#[serde(tag = "op", rename_all = "snake_case")]
+pub enum ConsolidateOp {
+    /// 把 `sources` 合并成 `target` 一条新条目，旧条目全部置 superseded。
+    Merge {
+        target: Candidate,
+        sources: Vec<String>,
+    },
+    /// 用 `replacement` 取代 `id`（`id` 置 superseded）。
+    Supersede {
+        id: String,
+        replacement: Candidate,
+    },
+    /// 只改一条条目的适用场景 / 正文（补 qualification），不新建条目。
+    Requalify {
+        id: String,
+        #[serde(default)]
+        scope: Option<String>,
+        #[serde(default)]
+        body: Option<String>,
+    },
+}
+
+/// 从模型文本里抽出整理操作数组（容忍 ```json 围栏与前后废话）。
+pub fn parse_consolidate_ops(text: &str) -> Result<Vec<ConsolidateOp>, CuratorError> {
+    let start = text
+        .find('[')
+        .ok_or_else(|| CuratorError::Parse("no JSON array found".into()))?;
+    let end = text
+        .rfind(']')
+        .ok_or_else(|| CuratorError::Parse("no closing `]`".into()))?;
+    if end < start {
+        return Err(CuratorError::Parse("malformed JSON array".into()));
+    }
+    serde_json::from_str(&text[start..=end]).map_err(|err| CuratorError::Parse(err.to_string()))
+}
+
+/// 回原始证据核查（§5.2）：把每条条目 `source` 指向的会话片段摘出来，供整理提示词。
+///
+/// `source` 形如 `<会话文件>#turn:N`：给了 `#turn:N` 就取该行（1-based），否则取整文件
+/// 截断。文件缺失记 `[missing evidence]`——**不编造证据**。
+pub fn collect_evidence(entries: &[(String, Entry)], sessions_dir: &Path, budget: usize) -> String {
+    let mut out = String::new();
+    for (_, entry) in entries {
+        if out.chars().count() >= budget {
+            break;
+        }
+        out.push_str(&format!("### {}\n", entry.id));
+        for ref_ in &entry.source {
+            if out.chars().count() >= budget {
+                break;
+            }
+            out.push_str(&format!("- {}: ", ref_));
+            out.push_str(&evidence_snippet(ref_, sessions_dir));
+            out.push('\n');
+        }
+    }
+    out
+}
+
+/// 摘一条证据引用对应的会话片段。
+fn evidence_snippet(ref_: &str, sessions_dir: &Path) -> String {
+    let mut parts = ref_.splitn(2, '#');
+    let file = parts.next().unwrap_or(ref_).trim();
+    let turn = parts
+        .next()
+        .and_then(|t| t.strip_prefix("turn:"))
+        .and_then(|n| n.trim().parse::<usize>().ok());
+    let path = sessions_dir.join(file);
+    let Ok(text) = std::fs::read_to_string(&path) else {
+        return "[missing evidence]".into();
+    };
+    match turn {
+        Some(n) if n >= 1 => text
+            .lines()
+            .nth(n - 1)
+            .unwrap_or("[turn out of range]")
+            .to_string(),
+        _ => truncate(&text, 800),
+    }
+}
+
+fn truncate(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        text.to_string()
+    } else {
+        let mut out: String = text.chars().take(max).collect();
+        out.push('…');
+        out
+    }
+}
+
+/// 组装整理提示词：边界声明 + 全部条目 + 原始证据 + 输出格式。
+pub fn build_consolidate_prompt(entries: &[(String, Entry)], evidence: &str) -> String {
+    let mut prompt = String::new();
+    prompt.push_str(
+        "你是记忆整理器（consolidator）。下面是**全部**记忆条目及其原始证据片段。\n\n\
+         **边界**：证据只是对环境的一次局部观察，是部分证据、不是 ground truth。只在确有依据时整理；\
+         证据不足就**保留原样**，不要强行收敛。\n\n\
+         任务：\n\
+         1. **去重 / 合并**：语义重复或过碎的条目 → `merge` 成一条；\n\
+         2. **去旧 / 取代**：被新条目取代的旧条目 → `supersede`；\n\
+         3. **冲突场景限定**：两条都成立但条件不同 → `requalify` 给它们补 `scope`，**不要二选一**。\n\n\
+         **永不删除历史**（只把旧条目置 superseded）。只输出 JSON 数组（可为空 `[]`），每项是下列之一：\n\
+         - {\"op\":\"merge\",\"sources\":[\"id1\",\"id2\"],\"target\":{...条目字段...}}\n\
+         - {\"op\":\"supersede\",\"id\":\"old-id\",\"replacement\":{...条目字段...}}\n\
+         - {\"op\":\"requalify\",\"id\":\"id\",\"scope\":\"适用场景\",\"body\":\"可选新正文\"}\n\
+         条目字段同增量 curator：id / type / subject / created_at / valid_from / confidence / scope / source / body。\n\n",
+    );
+
+    prompt.push_str("## 现有条目\n");
+    for (_, entry) in entries {
+        prompt.push_str(&format!(
+            "- [{}] ({}) {} — {}（{}）\n",
+            entry.id,
+            entry.entry_type,
+            entry.subject,
+            entry.summary(),
+            entry.timeline_date()
+        ));
+    }
+    prompt.push('\n');
+
+    if !evidence.trim().is_empty() {
+        prompt.push_str("## 原始证据片段\n");
+        prompt.push_str(evidence);
+        prompt.push('\n');
+    }
+    prompt
+}
+
+/// 确定性执行整理操作（自检不通过就拒绝，绝不默认放行）。
+///
+/// 与 [`vet`] 同一原则：模型只提议，程序裁决。会写盘（新条目 / 改状态 / 改 scope），
+/// 但不重建索引（由 [`consolidate`] 统一做）。
+pub fn apply_consolidate_ops(
+    store: &MemoryStore,
+    ops: Vec<ConsolidateOp>,
+    existing: &HashMap<String, Entry>,
+    today: &str,
+) -> Result<ConsolidateOutcome, CuratorError> {
+    let mut working = existing.clone();
+    let mut outcome = ConsolidateOutcome {
+        empty: ops.is_empty(),
+        ..Default::default()
+    };
+
+    for op in ops {
+        match op {
+            ConsolidateOp::Merge { mut target, sources } => {
+                let target_id = target.id.clone();
+                let sources: Vec<String> = sources
+                    .into_iter()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if sources.is_empty() {
+                    outcome.rejected.push(Rejected {
+                        id: Some(target_id),
+                        reason: "merge without sources".into(),
+                    });
+                    continue;
+                }
+                if let Some(missing) = sources.iter().find(|id| !working.contains_key(*id)) {
+                    outcome.rejected.push(Rejected {
+                        id: Some(target_id),
+                        reason: format!("merge references unknown source `{missing}`"),
+                    });
+                    continue;
+                }
+                // 证据继承：新条目没给 source 就并集旧条目的 source（真实来源，不编造）。
+                if target.source.is_empty() {
+                    target.source = union_sources(&sources, &working);
+                }
+                if target.supersedes.is_none() {
+                    target.supersedes = Some(sources[0].clone());
+                }
+                match vet(target, &working, today, None, None) {
+                    Ok(entry) => {
+                        for id in &sources {
+                            if let Some(old) = working.get(id).cloned()
+                                && old.status != EntryStatus::Superseded
+                            {
+                                let mut old = old;
+                                old.status = EntryStatus::Superseded;
+                                store.write_entry(&old)?;
+                                working.insert(id.clone(), old);
+                                outcome.superseded += 1;
+                            }
+                        }
+                        store.write_entry(&entry)?;
+                        working.insert(entry.id.clone(), entry);
+                        outcome.merged += 1;
+                    }
+                    Err(reason) => outcome.rejected.push(Rejected {
+                        id: Some(target_id),
+                        reason,
+                    }),
+                }
+            }
+            ConsolidateOp::Supersede { id, mut replacement } => {
+                let id = id.trim().to_string();
+                let Some(old) = working.get(&id).cloned() else {
+                    outcome.rejected.push(Rejected {
+                        id: Some(id),
+                        reason: "supersede target does not exist".into(),
+                    });
+                    continue;
+                };
+                if replacement.source.is_empty() {
+                    replacement.source = old.source.clone();
+                }
+                replacement.supersedes = Some(id.clone());
+                match vet(replacement, &working, today, None, None) {
+                    Ok(entry) => {
+                        if old.status != EntryStatus::Superseded {
+                            let mut old = old;
+                            old.status = EntryStatus::Superseded;
+                            store.write_entry(&old)?;
+                            working.insert(id.clone(), old);
+                            outcome.superseded += 1;
+                        }
+                        store.write_entry(&entry)?;
+                        working.insert(entry.id.clone(), entry);
+                    }
+                    Err(reason) => outcome.rejected.push(Rejected {
+                        id: Some(id),
+                        reason,
+                    }),
+                }
+            }
+            ConsolidateOp::Requalify { id, scope, body } => {
+                let id = id.trim().to_string();
+                let Some(old) = working.get(&id).cloned() else {
+                    outcome.rejected.push(Rejected {
+                        id: Some(id),
+                        reason: "requalify target does not exist".into(),
+                    });
+                    continue;
+                };
+                if old.status == EntryStatus::Superseded {
+                    outcome.rejected.push(Rejected {
+                        id: Some(id),
+                        reason: "requalify a superseded entry".into(),
+                    });
+                    continue;
+                }
+                let mut entry = old;
+                let mut changed = false;
+                if let Some(scope) = scope {
+                    let scope = scope.trim();
+                    entry.scope = if scope.is_empty() {
+                        None
+                    } else {
+                        Some(scope.to_string())
+                    };
+                    changed = true;
+                }
+                if let Some(body) = body {
+                    let body = body.trim();
+                    if body.is_empty() {
+                        outcome.rejected.push(Rejected {
+                            id: Some(id),
+                            reason: "requalify with empty body".into(),
+                        });
+                        continue;
+                    }
+                    entry.body = body.to_string();
+                    changed = true;
+                }
+                if !changed {
+                    outcome.rejected.push(Rejected {
+                        id: Some(id),
+                        reason: "requalify with no changes".into(),
+                    });
+                    continue;
+                }
+                store.write_entry(&entry)?;
+                working.insert(id, entry);
+                outcome.requalified += 1;
+            }
+        }
+    }
+    Ok(outcome)
+}
+
+fn union_sources(ids: &[String], working: &HashMap<String, Entry>) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for id in ids {
+        if let Some(entry) = working.get(id) {
+            for ref_ in &entry.source {
+                if !out.contains(ref_) {
+                    out.push(ref_.clone());
+                }
+            }
+        }
+    }
+    out
+}
+
+/// 定期整理（睡眠学习）：全量扫描 → 模型提议 → 确定性自检 → 合入 → 重建索引。
+///
+/// 条目不足 2 条时直接返回空（没什么可整理的）。`sessions_dir` 给定时做**回原始证据
+/// 核查**；给不出（如无会话目录）就退化为纯条目整理。
+pub async fn consolidate(
+    agent: &Agent,
+    store: &MemoryStore,
+    sessions_dir: Option<&Path>,
+) -> Result<ConsolidateOutcome, CuratorError> {
+    let pairs: Vec<(String, Entry)> = store
+        .list_entries()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|(path, entry)| (store.relative_path(&path), entry))
+        .collect();
+    if pairs.len() < 2 {
+        return Ok(ConsolidateOutcome {
+            empty: true,
+            ..Default::default()
+        });
+    }
+    let existing: HashMap<String, Entry> = pairs
+        .iter()
+        .map(|(_, entry)| (entry.id.clone(), entry.clone()))
+        .collect();
+
+    let evidence = match sessions_dir {
+        Some(dir) => collect_evidence(&pairs, dir, MAX_EVIDENCE_CHARS),
+        None => String::new(),
+    };
+    let prompt = build_consolidate_prompt(&pairs, &evidence);
+
+    let raw = agent
+        .complete(&prompt)
+        .await
+        .map_err(|err| CuratorError::Model(err.to_string()))?;
+    let ops = parse_consolidate_ops(&raw)?;
+
+    let today = chrono::Local::now().format("%Y-%m-%d").to_string();
+    let outcome = apply_consolidate_ops(store, ops, &existing, &today)?;
+    rebuild_index(store)?;
+    Ok(outcome)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -523,4 +895,163 @@ mod tests {
         assert!(prompt.contains("pref-a"));
         assert!(prompt.contains("sessions/x.jsonl#turn:N"));
     }
+
+    // ---- V2-B：定期整理（consolidate）------------------------------------
+
+    fn tmpdir(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "shirley_curator_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    fn write_entry(store: &MemoryStore, id: &str, status: EntryStatus) -> Entry {
+        let mut entry = vet(candidate(id), &HashMap::new(), "2026-05-10", None, None).unwrap();
+        entry.status = status;
+        store.write_entry(&entry).unwrap();
+        entry
+    }
+
+    #[test]
+    fn parse_consolidate_ops_plain_and_fenced() {
+        let plain = r#"[{"op":"requalify","id":"a","scope":"x"}]"#;
+        assert_eq!(parse_consolidate_ops(plain).unwrap().len(), 1);
+        let fenced = format!("blah\n```json\n{plain}\n```\ntail");
+        assert_eq!(parse_consolidate_ops(&fenced).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn apply_merge_supersedes_sources_and_writes_target() {
+        let root = tmpdir("merge");
+        let store = MemoryStore::new(&root);
+        let a = write_entry(&store, "a", EntryStatus::Active);
+        let b = write_entry(&store, "b", EntryStatus::Active);
+        let existing: HashMap<String, Entry> =
+            [("a".to_string(), a), ("b".to_string(), b)].into_iter().collect();
+
+        let mut target = candidate("ab-merged");
+        target.source.clear(); // 触发从 sources 继承证据
+        let op = ConsolidateOp::Merge {
+            target,
+            sources: vec!["a".into(), "b".into()],
+        };
+        let out = apply_consolidate_ops(&store, vec![op], &existing, "2026-05-12").unwrap();
+        assert_eq!(out.merged, 1);
+        assert_eq!(out.superseded, 2);
+        assert!(out.rejected.is_empty());
+
+        let by_id: HashMap<String, Entry> = store
+            .list_entries()
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| (e.id.clone(), e))
+            .collect();
+        assert_eq!(by_id["a"].status, EntryStatus::Superseded);
+        assert_eq!(by_id["b"].status, EntryStatus::Superseded);
+        assert_eq!(by_id["ab-merged"].status, EntryStatus::Active);
+        assert!(!by_id["ab-merged"].source.is_empty(), "证据应从旧条目继承");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_supersede_marks_old_and_links_new() {
+        let root = tmpdir("supersede");
+        let store = MemoryStore::new(&root);
+        let old = write_entry(&store, "old", EntryStatus::Active);
+        let existing: HashMap<String, Entry> = [("old".to_string(), old)].into_iter().collect();
+
+        let mut replacement = candidate("new");
+        replacement.source.clear();
+        let op = ConsolidateOp::Supersede {
+            id: "old".into(),
+            replacement,
+        };
+        let out = apply_consolidate_ops(&store, vec![op], &existing, "2026-05-12").unwrap();
+        assert_eq!(out.superseded, 1);
+        assert!(out.rejected.is_empty());
+
+        let by_id: HashMap<String, Entry> = store
+            .list_entries()
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| (e.id.clone(), e))
+            .collect();
+        assert_eq!(by_id["old"].status, EntryStatus::Superseded);
+        assert_eq!(by_id["new"].supersedes.as_deref(), Some("old"));
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_requalify_updates_scope_without_new_entry() {
+        let root = tmpdir("requalify");
+        let store = MemoryStore::new(&root);
+        let entry = write_entry(&store, "topic", EntryStatus::Active);
+        let existing: HashMap<String, Entry> = [("topic".to_string(), entry)].into_iter().collect();
+
+        let op = ConsolidateOp::Requalify {
+            id: "topic".into(),
+            scope: Some("仅在 Linux".into()),
+            body: None,
+        };
+        let out = apply_consolidate_ops(&store, vec![op], &existing, "2026-05-12").unwrap();
+        assert_eq!(out.requalified, 1);
+
+        let by_id: HashMap<String, Entry> = store
+            .list_entries()
+            .unwrap()
+            .into_iter()
+            .map(|(_, e)| (e.id.clone(), e))
+            .collect();
+        assert_eq!(by_id["topic"].scope.as_deref(), Some("仅在 Linux"));
+        assert_eq!(by_id.len(), 1, "requalify 不应新建条目");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn apply_rejects_merge_with_unknown_source() {
+        let root = tmpdir("reject");
+        let store = MemoryStore::new(&root);
+        let existing: HashMap<String, Entry> = HashMap::new();
+        let op = ConsolidateOp::Merge {
+            target: candidate("m"),
+            sources: vec!["ghost".into()],
+        };
+        let out = apply_consolidate_ops(&store, vec![op], &existing, "2026-05-12").unwrap();
+        assert_eq!(out.merged, 0);
+        assert_eq!(out.rejected.len(), 1);
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn collect_evidence_reads_turn_line_and_flags_missing() {
+        let dir = tmpdir("evidence");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("s.jsonl"), "line1\nline2-topic\nline3\n").unwrap();
+        let mut e = vet(candidate("e"), &HashMap::new(), "2026-05-10", None, None).unwrap();
+        e.source = vec!["s.jsonl#turn:2".into(), "missing.jsonl#turn:1".into()];
+        let text = collect_evidence(&[("e.md".into(), e)], &dir, MAX_EVIDENCE_CHARS);
+        assert!(text.contains("line2-topic"));
+        assert!(text.contains("[missing evidence]"));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_consolidate_prompt_lists_entries_and_evidence() {
+        let entry = vet(candidate("pref-a"), &HashMap::new(), "2026-05-10", None, None).unwrap();
+        let prompt = build_consolidate_prompt(&[("preferences/a.md".into(), entry)], "EVIDENCE");
+        assert!(prompt.contains("pref-a"));
+        assert!(prompt.contains("EVIDENCE"));
+        assert!(prompt.contains("永不删除历史"));
+    }
+
 }
