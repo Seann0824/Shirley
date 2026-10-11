@@ -17,7 +17,9 @@
 //! - command `agent_subscribe { project, session }`：订阅一个会话（返回快照 + 起 pump）。
 //! - command `agent_list_projects { archived? }` / `agent_add_project`（原生文件夹选择器）
 //!   / `agent_rename_project` / `agent_archive_project` / `agent_restore_project`。
-//! - command `agent_cancel`：预留（`StopReason::Cancelled` 尚未产生，见 `Agent.md` 缺口 9）。
+//! - command `agent_cancel { project, session }`：取消指定会话正在跑的一轮——向驱动
+//!   该会话 `run_stream` 的任务发取消信号，任务 drop 掉流、回退 Agent 状态并以
+//!   `Finished(Cancelled)` 收尾。
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -25,10 +27,10 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use serde::Serialize;
-use shirley_agent_sdk::{Agent, Message};
+use shirley_agent_sdk::{Agent, AgentEvent, Message, RunResult, StopReason};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, oneshot};
 
 use crate::interface::session::SessionManager;
 use super::wire::{AgentEventWire, SessionSnapshotWire};
@@ -63,6 +65,10 @@ struct DesktopState {
     runtimes: Arc<Mutex<HashMap<String, Arc<Mutex<ProjectRuntime>>>>>,
     model_catalog: Arc<dyn ModelCatalog>,
     pumps: Arc<Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
+    /// 每个「项目::会话」正在运行一轮时的取消句柄。`agent_send` 发起一轮时插入，
+    /// 结束（正常 / 取消 / 出错）时移除；`agent_cancel` 取出并 `send(())` 触发打断。
+    /// 键与 `pumps` 一致（`route_key`）。
+    cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 }
 
 /// 事件 pump 的键：跨项目不重名（会话名在项目内唯一，项目 id 全局唯一）。
@@ -393,30 +399,86 @@ async fn agent_send(
 
     let catalog = runtime.lock().await.factory.session_catalog.clone();
     let runtime_for_task = runtime.clone();
+    // 取消句柄：与本轮任务同生命周期。`agent_cancel` 取出它并发信号；任务结束
+    // （正常 / 取消 / 出错）时移除，避免残留一个指向已结束任务的 sender。
+    let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
+    let key = route_key(&project, &session_name);
+    state.cancels.lock().await.insert(key.clone(), cancel_tx);
+    let cancels = state.cancels.clone();
+
     tauri::async_runtime::spawn(async move {
         if let Some(memory) = memory.as_ref() {
             let _ = memory.prefetch_query_vector().await;
         }
-        {
+
+        // 驱动本轮：`tokio::select!` 在「流的下一个事件」与「取消信号」之间竞争。
+        // 取消分支 `break` 后 `stream` 被 drop —— SDK 的 `run_stream` 是 async-stream
+        // 生成的流，**drop 即停止**（与 TUI `run_agent` 同款手法）。没有这条路径时
+        // 后台会一直把 ReAct 循环跑到底（点 stop 只改了前端 `busy`，从未真正打断）。
+        let cancelled = {
             let mut stream = agent.run_stream(&prompt);
-            while let Some(event) = stream.next().await {
-                let update = match event {
-                    Ok(event) => Ok(event),
-                    Err(error) => Err(error.to_string()),
-                };
-                runtime_for_task
-                    .lock()
-                    .await
-                    .sessions
-                    .apply_event(&session_name, update);
+            let mut cancel_rx = cancel_rx;
+            let mut cancelled = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    // `&mut` 借用：`select!` 每轮都会 poll 它，若按值移动会在第二轮报
+                    // `use of moved value`（oneshot::Receiver 不 Copy）。
+                    _ = &mut cancel_rx => {
+                        cancelled = true;
+                        break;
+                    }
+                    event = stream.next() => {
+                        let Some(event) = event else { break };
+                        let update = match event {
+                            Ok(event) => Ok(event),
+                            Err(error) => Err(error.to_string()),
+                        };
+                        runtime_for_task
+                            .lock()
+                            .await
+                            .sessions
+                            .apply_event(&session_name, update);
+                    }
+                }
             }
+            cancelled
+        };
+
+        if cancelled {
+            // 回退本轮：丢掉本轮用户消息及其后已完成的 assistant / tool 链，并同步
+            // 截尾会话日志（与 TUI `App::complete_turn` 的打断语义一致）。`truncate_messages`
+            // 会自行维护不变量（不越过置顶 system），这里只负责定位最后一条用户消息。
+            if let Some(index) = agent
+                .messages()
+                .iter()
+                .rposition(|m| matches!(m, Message::User { .. }))
+            {
+                agent.truncate_messages(index);
+            }
+            // 以 `Finished(Cancelled)` 收尾：让前端把本轮 assistant 标记为完成、
+            // 清掉 `busy`，并让订阅者知道本轮真的结束了。
+            let finished = AgentEvent::Finished(RunResult {
+                messages: Vec::new(),
+                stop_reason: StopReason::Cancelled,
+                usage: Default::default(),
+            });
+            runtime_for_task
+                .lock()
+                .await
+                .sessions
+                .apply_event(&session_name, Ok(finished));
+        } else {
+            // 正常结束才生成标题（`complete` 会再发一次模型请求，取消时必须跳过）。
+            auto_title_session(&agent, &catalog, &session_name).await;
         }
-        auto_title_session(&agent, &catalog, &session_name).await;
+
         runtime_for_task
             .lock()
             .await
             .sessions
             .restore_agent(&session_name, agent);
+        cancels.lock().await.remove(&key);
     });
 
     Ok(())
@@ -783,9 +845,24 @@ async fn agent_load_history(
     Ok(history_from_messages(agent.messages()))
 }
 
-/// 预留：取消本轮运行（SDK 侧取消机制尚未落地，见 `Agent.md` 缺口 9）。
+/// 取消指定会话正在跑的一轮。
+///
+/// 取出 `agent_send` 为该会话登记的取消句柄并发信号；驱动 `run_stream` 的任务
+/// 收到后 drop 掉流、回退本轮 Agent 状态，并以 `Finished(Cancelled)` 收尾。
+/// 会话不在运行（句柄已移除 / 从未发起）时静默成功（幂等）。
 #[tauri::command]
-fn agent_cancel() {}
+async fn agent_cancel(
+    state: State<'_, DesktopState>,
+    project: String,
+    session: String,
+) -> Result<(), String> {
+    let key = route_key(&project, &session);
+    if let Some(cancel) = state.cancels.lock().await.remove(&key) {
+        // `send` 失败 = 任务已结束（接收端已 drop），无害。
+        let _ = cancel.send(());
+    }
+    Ok(())
+}
 
 pub fn run(factory: AgentFactory) -> std::io::Result<()> {
     let factory = Arc::new(factory);
@@ -810,6 +887,7 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
         runtimes: Arc::new(Mutex::new(runtimes)),
         model_catalog,
         pumps: Arc::new(Mutex::new(HashMap::new())),
+        cancels: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tauri::Builder::default()

@@ -1,6 +1,7 @@
 import { Check, ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/ui/button";
+import { ScrollArea } from "@/ui/scroll-area";
 import { cn } from "@/ui/utils";
 import type { ModelEntry } from "@/lib/bridge";
 
@@ -72,46 +73,55 @@ export function ModelSelector({
         <ChevronDown className="size-3.5 shrink-0" />
       </Button>
       {open && (
-        <div
+        <ScrollArea
           role="listbox"
           aria-label="可选模型"
-          className="absolute bottom-[calc(100%+0.5rem)] right-0 z-20 max-h-72 w-64 overflow-y-auto rounded-card border border-line bg-surface p-1 shadow-lg"
+          className="absolute bottom-[calc(100%+0.5rem)] right-0 z-20 w-64 rounded-card border border-line bg-surface shadow-lg"
+          // 高度上限必须加在 **viewport** 上：Radix 的 viewport 是 `h-full`，
+          // 若上限加在 Root（auto 高度）上，viewport 会随内容长高、永不溢出，
+          // 滚动条也就不会出现（模型展示不全）。与 `FileMentionPopover` 保持一致。
+          viewportClassName="max-h-72 overscroll-contain"
+          // Radix ScrollArea 的 Root 会注入内联 `position: relative`，内联样式优先级高于
+          // `absolute` 类——不覆盖就会退回标准流、把输入框撑开。这里显式改回绝对定位。
+          style={{ position: "absolute" }}
         >
-          {loading && <p className="px-3 py-2 text-caption text-muted">加载中…</p>}
-          {!loading && entries.length === 0 && (
-            <p className="px-3 py-2 text-caption text-muted">没有可用的模型。</p>
-          )}
-          {!loading &&
-            entries.map((entry) => {
-              const active = entry.value === current;
-              return (
-                <button
-                  key={entry.value}
-                  type="button"
-                  role="option"
-                  aria-selected={active}
-                  className={cn(
-                    "flex w-full items-center justify-between gap-2 rounded-control px-3 py-2 text-left text-body-sm text-ink transition-colors",
-                    "hover:bg-quiet",
-                    active && "bg-selected",
-                  )}
-                  onClick={() => {
-                    setOpen(false);
-                    if (!active) onSelect(entry.value);
-                  }}
-                >
-                  <span className="min-w-0 flex-1 truncate">{entry.label}</span>
-                  {active ? (
-                    <Check className="size-4 shrink-0 text-primary" />
-                  ) : (
-                    entry.provider && (
-                      <span className="shrink-0 text-caption text-muted">{entry.provider}</span>
-                    )
-                  )}
-                </button>
-              );
-            })}
-        </div>
+          <div className="p-1">
+            {loading && <p className="px-3 py-2 text-caption text-muted">加载中…</p>}
+            {!loading && entries.length === 0 && (
+              <p className="px-3 py-2 text-caption text-muted">没有可用的模型。</p>
+            )}
+            {!loading &&
+              entries.map((entry) => {
+                const active = entry.value === current;
+                return (
+                  <button
+                    key={entry.value}
+                    type="button"
+                    role="option"
+                    aria-selected={active}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-2 rounded-control px-3 py-2 text-left text-body-sm text-ink transition-colors",
+                      "hover:bg-quiet",
+                      active && "bg-selected",
+                    )}
+                    onClick={() => {
+                      setOpen(false);
+                      if (!active) onSelect(entry.value);
+                    }}
+                  >
+                    <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+                    {active ? (
+                      <Check className="size-4 shrink-0 text-primary" />
+                    ) : (
+                      entry.provider && (
+                        <span className="shrink-0 text-caption text-muted">{entry.provider}</span>
+                      )
+                    )}
+                  </button>
+                );
+              })}
+          </div>
+        </ScrollArea>
       )}
     </div>
   );

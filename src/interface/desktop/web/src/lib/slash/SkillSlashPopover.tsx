@@ -89,16 +89,14 @@ export function SkillSlashPopover({
                   onClick={() => onSelect(item)}
                   title={item.description}
                   className={cn(
-                    "flex w-full min-w-0 flex-col gap-0.5 px-3 py-1.5 text-left transition-colors",
+                    "flex w-full min-w-0 items-center gap-2 px-3 py-1.5 text-left text-body-sm transition-colors",
                     isSelected ? "bg-selected text-ink" : "text-ink hover:bg-quiet",
                   )}
                 >
-                  <span className="flex min-w-0 items-center gap-1.5">
-                    <Sparkles className="size-3.5 shrink-0 text-muted" data-icon="inline-start" />
-                    <span className="truncate font-utility text-body-sm">/{item.name}</span>
-                  </span>
+                  <Sparkles className="size-3.5 shrink-0 text-muted" data-icon="inline-start" />
+                  <span className="min-w-0 flex-1 truncate">/{item.name}</span>
                   {item.description && (
-                    <span className="min-w-0 truncate pl-5 text-caption text-muted">
+                    <span className="min-w-0 max-w-[55%] shrink-0 truncate text-caption text-muted">
                       {item.description}
                     </span>
                   )}

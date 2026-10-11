@@ -7,6 +7,7 @@ import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { AssistantMessage } from "@/components/AssistantMessage";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
+import { AiConversationSkeleton } from "@/components/ai/AiConversationSkeleton";
 import { InlineReferences } from "@/lib/file-mentions/FileChips";
 import { FileMentionPopover } from "@/lib/file-mentions/FileMentionPopover";
 import {
@@ -16,7 +17,7 @@ import {
 import { useFileMentionSearch } from "@/lib/file-mentions/useFileMentionSearch";
 import { useSkillSlashSearch } from "@/lib/slash/useSkillSlashSearch";
 import { SkillSlashPopover } from "@/lib/slash/SkillSlashPopover";
-import { stripTokens } from "@/lib/file-mentions/editor-dom";
+import { CHIP_TOKEN, stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
 import { agentBridge, type ProjectEntry, type SessionSubscription } from "@/lib/bridge";
 import type { AgentEventWire, SessionSnapshot } from "@/types/wire";
@@ -37,10 +38,12 @@ type SessionView = {
   turnSegments: Record<string, AiSegment[]>;
   busy: boolean;
   error: string;
+  /** 历史快照尚未到达：先乐观展示，渲染骨架屏。 */
+  loading: boolean;
 };
 
 function emptyView(): SessionView {
-  return { messages: [], turnSegments: {}, busy: false, error: "" };
+  return { messages: [], turnSegments: {}, busy: false, error: "", loading: false };
 }
 
 /** 视图键：跨项目不重名。 */
@@ -49,9 +52,8 @@ const viewKey = (project: string, session: string) => `${project}::${session}`;
 export function App() {
   // 每个会话一份视图（后台会话也保留，切回不丢），键为 `project::session`。
   const [views, setViews] = useState<Record<string, SessionView>>({});
-  // 项目列表（活跃 + 归档分列）与当前项目。
+  // 项目列表（活跃）与当前项目。
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
-  const [archivedProjects, setArchivedProjects] = useState<ProjectEntry[]>([]);
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState<string | null>(null);
   const [input, setInput] = useState("");
@@ -67,6 +69,10 @@ export function App() {
   const subRef = useRef<SessionSubscription | null>(null);
   // 每个会话当前在跑的 assistant 轮次 id（事件按它落点），键为 `project::session`。
   const turnRef = useRef<Map<string, string>>(new Map());
+  // 每个会话本轮提交的输入（停止 / 打断时回退到输入框），键为 `project::session`。
+  const turnInputRef = useRef<Map<string, { display: string; refs: FileReference[] }>>(
+    new Map(),
+  );
   // 快照应用前缓冲事件（订阅与快照之间到达的增量不丢）。
   const readyRef = useRef<Set<string>>(new Set());
   const bufferRef = useRef<Map<string, AgentEventWire[]>>(new Map());
@@ -74,12 +80,8 @@ export function App() {
   const reloadProjects = useCallback(async () => {
     try {
       const bridge = await agentBridge();
-      const [active, archived] = await Promise.all([
-        bridge.listProjects(false),
-        bridge.listProjects(true).then((all) => all.filter((entry) => entry.archived)),
-      ]);
+      const active = await bridge.listProjects(false);
       setProjects(active);
-      setArchivedProjects(archived);
       return active;
     } catch (e) {
       setUiError(e instanceof Error ? e.message : String(e));
@@ -89,6 +91,43 @@ export function App() {
 
   // 把一个事件应用到指定会话的视图（纯函数式更新，避免闭包过期）。
   const applyEvent = useCallback((key: string, event: AgentEventWire) => {
+    // 用户点击停止：后端会回退本轮（丢掉本轮用户消息及其后内容）并以
+    // `finished(cancelled)` 收尾。这里同步回退前端本轮——移除乐观记入的用户消息
+    // 与其后的半截流式内容，并把本轮输入退回输入框（与 TUI 打断语义一致）。
+    if (event.type === "finished" && event.stop_reason === "cancelled") {
+      const stored = turnInputRef.current.get(key);
+      turnInputRef.current.delete(key);
+      turnRef.current.delete(key);
+      setViews((prev) => {
+        const view = prev[key] ?? emptyView();
+        // 本轮乐观记入的用户消息是最后一条用户消息：丢弃它及其后的所有条目。
+        let cut = view.messages.length;
+        for (let i = view.messages.length - 1; i >= 0; i -= 1) {
+          if (view.messages[i].role === "user") {
+            cut = i;
+            break;
+          }
+        }
+        const droppedIds = view.messages.slice(cut).map((message) => message.id);
+        const turnSegments = { ...view.turnSegments };
+        for (const id of droppedIds) delete turnSegments[String(id)];
+        return {
+          ...prev,
+          [key]: {
+            ...view,
+            messages: view.messages.slice(0, cut),
+            turnSegments,
+            busy: false,
+            error: "",
+          },
+        };
+      });
+      if (stored) {
+        setInput(stored.display);
+        setReferences(stored.refs);
+      }
+      return;
+    }
     const needsTurn =
       event.type === "content_delta" ||
       event.type === "reasoning_delta" ||
@@ -120,26 +159,54 @@ export function App() {
     });
   }, []);
 
+  // 先响应交互：立刻把前台会话切过去并进入加载态（渲染骨架屏），不等后端往返。
+  // 打开会话 / 切换会话都在取历史快照**之前**调它——历史快照要走一次
+  // `agent_subscribe` 往返，不能让用户对着旧会话干等。
+  const beginSessionLoad = useCallback((project: string, session: string) => {
+    const key = viewKey(project, session);
+    setSessionName(session);
+    setViews((prev) => {
+      const existing = prev[key];
+      // 已有缓存内容（后台会话跑过）直接复用、不闪骨架；否则占位加载。
+      if (existing && existing.messages.length > 0) {
+        return { ...prev, [key]: { ...existing, loading: true } };
+      }
+      return { ...prev, [key]: { ...emptyView(), loading: true } };
+    });
+  }, []);
+
   // 订阅一个会话：退订旧的，拿快照重建视图，再叠加之后的事件。
   const openSession = useCallback(
     async (project: string, session: string) => {
       const bridge = await agentBridge();
       const key = viewKey(project, session);
+      beginSessionLoad(project, session);
       subRef.current?.unsubscribe();
       subRef.current = null;
       readyRef.current.delete(key);
       bufferRef.current.delete(key);
       turnRef.current.delete(key);
-      const sub = await bridge.openSession(project, session, (event) => {
-        // 快照尚未应用：先缓冲，待快照落地后按序补放（不丢、不重）。
-        if (!readyRef.current.has(key)) {
-          const buffer = bufferRef.current.get(key) ?? [];
-          buffer.push(event);
-          bufferRef.current.set(key, buffer);
-          return;
-        }
-        applyEvent(key, event);
-      });
+      let sub;
+      try {
+        sub = await bridge.openSession(project, session, (event) => {
+          // 快照尚未应用：先缓冲，待快照落地后按序补放（不丢、不重）。
+          if (!readyRef.current.has(key)) {
+            const buffer = bufferRef.current.get(key) ?? [];
+            buffer.push(event);
+            bufferRef.current.set(key, buffer);
+            return;
+          }
+          applyEvent(key, event);
+        });
+      } catch (e) {
+        // 订阅失败：退出加载态并如实报错，别让骨架屏一直转下去。
+        const message = e instanceof Error ? e.message : String(e);
+        setViews((prev) => ({
+          ...prev,
+          [key]: { ...(prev[key] ?? emptyView()), loading: false, error: message },
+        }));
+        return;
+      }
       subRef.current = sub;
       const { view, lastAssistantId } = viewFromSnapshot(sub.snapshot);
       if (lastAssistantId) turnRef.current.set(key, lastAssistantId);
@@ -148,9 +215,8 @@ export function App() {
       const buffered = bufferRef.current.get(key) ?? [];
       bufferRef.current.delete(key);
       for (const event of buffered) applyEvent(key, event);
-      setSessionName(session);
     },
-    [applyEvent],
+    [applyEvent, beginSessionLoad],
   );
 
   // 选中一个项目：切前台 + 打开它当前会话。
@@ -238,33 +304,22 @@ export function App() {
     [activeProject, reloadProjects, selectProject],
   );
 
-  const restoreProject = useCallback(
-    async (project: string) => {
-      try {
-        setUiError("");
-        await (await agentBridge()).restoreProject(project);
-        await reloadProjects();
-        await selectProject(project);
-      } catch (e) {
-        setUiError(e instanceof Error ? e.message : String(e));
-      }
-    },
-    [reloadProjects, selectProject],
-  );
-
   const switchSession = useCallback(
-    async (name: string) => {
-      if (!activeProject) return;
+    async (project: string, name: string) => {
       try {
         setUiError("");
+        // 先响应交互：立刻切前台 + 骨架屏，再等后端把 active 指针挪过去。
+        beginSessionLoad(project, name);
         const bridge = await agentBridge();
-        await bridge.switchSession(activeProject, name);
-        await openSession(activeProject, name);
+        // 会话名只在项目内唯一——若点的是别的项目，先把它切到前台，再切会话。
+        if (project !== activeProject) await selectProject(project);
+        await bridge.switchSession(project, name);
+        await openSession(project, name);
       } catch (e) {
         setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [activeProject, openSession],
+    [activeProject, openSession, beginSessionLoad, selectProject],
   );
 
   // 在指定项目下新建会话（项目行上的「＋」可直接作用于任意项目，不限于前台）。
@@ -288,29 +343,27 @@ export function App() {
   );
 
   const renameSession = useCallback(
-    async (name: string, title: string) => {
-      if (!activeProject) return;
+    async (project: string, name: string, title: string) => {
       try {
         setUiError("");
-        await (await agentBridge()).renameSession(activeProject, name, title);
+        await (await agentBridge()).renameSession(project, name, title);
       } catch (e) {
         setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [activeProject],
+    [],
   );
 
   const deleteSession = useCallback(
-    async (name: string) => {
-      if (!activeProject) return;
+    async (project: string, name: string) => {
       try {
         setUiError("");
         const bridge = await agentBridge();
-        await bridge.deleteSession(activeProject, name);
-        // 删的若是当前会话，重新打开后端选中的会话（可能为空）。
-        if (name === sessionName) {
-          const current = await bridge.currentSession(activeProject).catch(() => null);
-          if (current) await openSession(activeProject, current);
+        await bridge.deleteSession(project, name);
+        // 删的若是前台会话，重新打开后端选中的会话（可能为空）。
+        if (project === activeProject && name === sessionName) {
+          const current = await bridge.currentSession(project).catch(() => null);
+          if (current) await openSession(project, current);
           else {
             subRef.current?.unsubscribe();
             subRef.current = null;
@@ -333,11 +386,13 @@ export function App() {
       text: string,
       display: string,
       refs: FileReference[],
+      sendPaths: string[],
     ) => {
       const key = viewKey(project, session);
       if (views[key]?.busy ?? false) return;
       const assistantId = nextId();
       turnRef.current.set(key, assistantId);
+      turnInputRef.current.set(key, { display, refs });
       setViews((prev) => {
         const view = prev[key] ?? emptyView();
         return {
@@ -358,7 +413,7 @@ export function App() {
 
       const bridge = await agentBridge();
       try {
-        await bridge.send(project, session, text, refs.map((reference) => reference.path));
+        await bridge.send(project, session, text, sendPaths);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         setViews((prev) => {
@@ -371,79 +426,84 @@ export function App() {
   );
 
   const send = useCallback(async () => {
+    const project = activeProject;
+    const session = sessionName;
+    if (!project || !session) return;
+    const key = viewKey(project, session);
+    if (views[key]?.busy ?? false) return;
+
+    const refs = references;
+    // `/` 技能入口（与 TUI 同语义）：技能以 chip 形式出现在输入框里；chip 之后的
+    // 文本即 args。无参 = 只激活 + 本地系统提示（不发模型）；有参 = 激活 + 把 args
+    // 作为本轮 prompt。desktop 无本地内置 slash 指令，只有 chip 才走这条路径。
+    const skill = refs.find((reference) => reference.kind === "skill");
+    if (skill) {
+      try {
+        await (await agentBridge()).activateSkill(project, session, skill.name);
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+        return;
+      }
+      slashSearch.close();
+      setInput("");
+      setReferences([]);
+      setUiError("");
+      const args = stripTokens(input).trim();
+      if (!args) {
+        // 无参：只激活，不打扰模型，给一条本地系统提示（保留 chip 回显）。
+        setViews((prev) => {
+          const view = prev[key] ?? emptyView();
+          return {
+            ...prev,
+            [key]: {
+              ...view,
+              messages: [
+                ...view.messages,
+                {
+                  id: nextId(),
+                  role: "user",
+                  content: `${CHIP_TOKEN} 已激活技能（本轮起每轮注入其指令）。`,
+                  status: "complete",
+                  references: [skill],
+                },
+              ],
+            },
+          };
+        });
+        return;
+      }
+      // 有参：激活后把 args 当本轮 prompt 继续走正常发送流程；display 保留 chip，
+      // 但**不把技能名当引用路径发给后端**（sendPaths 为空）。
+      await dispatchTurn(project, session, args, `${CHIP_TOKEN}${args}`, [skill], []);
+      return;
+    }
+
     // 发给模型 / 判空的正文要剥掉占位符（占位符不是用户文字）；但**回显用的
     // content 必须保留占位符**——`InlineReferences` 正是按占位符位置把 chip 落回
     // 正文的，剥掉就一个 tag 都渲染不出来（曾经的 bug）。
     const plain = stripTokens(input).trim();
-    const project = activeProject;
-    const session = sessionName;
-    if (!plain || !project || !session) return;
-
-    // `/` 技能入口（与 TUI 同语义）：`/name` 或 `/name args`。
-    //   无参 = 只激活 + 本地系统提示（不发模型）；有参 = 激活 + 把 args 作为本轮 prompt。
-    // desktop 无本地内置 slash 指令，命中 skill 才走这条路径；否则按普通消息发。
-    if (plain.startsWith("/")) {
-      const [head, ...rest] = plain.slice(1).split(/\s+/);
-      const args = rest.join(" ").trim();
-      if (head && slashSearch.hasSkill(head)) {
-        const key = viewKey(project, session);
-        if (views[key]?.busy ?? false) return;
-        try {
-          await (await agentBridge()).activateSkill(project, session, head);
-        } catch (e) {
-          const message = e instanceof Error ? e.message : String(e);
-          setUiError(message);
-          return;
-        }
-        slashSearch.close();
-        setInput("");
-        setReferences([]);
-        setUiError("");
-        if (!args) {
-          // 无参：只激活，不打扰模型，给一条本地系统提示。
-          setViews((prev) => {
-            const view = prev[key] ?? emptyView();
-            return {
-              ...prev,
-              [key]: {
-                ...view,
-                messages: [
-                  ...view.messages,
-                  {
-                    id: nextId(),
-                    role: "user",
-                    content: `已激活技能 /${head}（本轮起每轮注入其指令）。`,
-                    status: "complete",
-                  },
-                ],
-              },
-            };
-          });
-          return;
-        }
-        // 有参：激活后把 args 当本轮 prompt 继续走正常发送流程。
-        await dispatchTurn(project, session, args, args, []);
-        return;
-      }
-    }
-
-    const refs = references;
+    if (!plain) return;
     setInput("");
     setReferences([]);
     setUiError("");
-    await dispatchTurn(project, session, plain, input.trim(), refs);
+    await dispatchTurn(
+      project,
+      session,
+      plain,
+      input.trim(),
+      refs,
+      refs.map((reference) => reference.path),
+    );
   }, [activeProject, input, references, sessionName, views, slashSearch, dispatchTurn]);
 
   const stop = useCallback(async () => {
     const project = activeProject;
     const session = sessionName;
     if (!project || !session) return;
-    const key = viewKey(project, session);
+    // 只发取消信号：真正的收尾（回退本轮 + 把 `busy` 置 false）由后端回推的
+    // `finished(cancelled)` 事件统一完成——避免这里先乐观置 `busy=false`，用户
+    // 立刻重发时又与后端“agent 正在运行中”判定打架。
     await (await agentBridge()).cancel(project, session).catch(() => {});
-    setViews((prev) => {
-      const view = prev[key] ?? emptyView();
-      return { ...prev, [key]: { ...view, busy: false } };
-    });
   }, [activeProject, sessionName]);
 
   const switchModel = useCallback(
@@ -472,23 +532,27 @@ export function App() {
       {/* 左侧 sidebar：NewChat / 置顶 / 项目（多项目 + 会话导航）。 */}
       <SessionSidebar
         projects={projects}
-        archivedProjects={archivedProjects}
         activeProject={activeProject}
         current={sessionName}
         onSelectProject={(id) => void selectProject(id)}
         onAddProject={() => void addProject()}
         onRenameProject={(id, name) => void renameProject(id, name)}
         onArchiveProject={(id) => void archiveProject(id)}
-        onRestoreProject={(id) => void restoreProject(id)}
-        onSelect={(name) => void switchSession(name)}
+        onSelect={(project, name) => void switchSession(project, name)}
         onNew={(project) => void newSession(project)}
-        onRename={(name, title) => void renameSession(name, title)}
-        onDelete={(name) => void deleteSession(name)}
+        onRename={(project, name, title) => void renameSession(project, name, title)}
+        onDelete={(project, name) => void deleteSession(project, name)}
       />
       {/* 右侧主区：固定宽度居中（对齐 shiwen AiConversationSurface 的 max-w-190 = 760px）。
           聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}
       <main className="flex min-h-0 flex-1 flex-col">
         <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
+        {view.loading ? (
+          // 历史快照尚未到达：先渲染骨架屏，给用户「正在加载消息记录」的即时反馈。
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <AiConversationSkeleton />
+          </div>
+        ) : (
         <AiConversationTranscript
           messages={view.messages}
           conversationKey={activeProject && sessionName ? viewKey(activeProject, sessionName) : "main"}
@@ -506,7 +570,7 @@ export function App() {
               <div className="space-y-2">
                 <h1 className="font-display text-title-sm text-ink">Shirley</h1>
                 <p className="text-body-sm text-muted">
-                  开始和 Shirley 对话吧。输入 <kbd className="font-utility">@</kbd> 可引用工作区文件。
+                  开始和 Shirley 对话吧。输入 <kbd className="font-utility">@</kbd> 引用工作区文件，或 <kbd className="font-utility">/</kbd> 调用技能。
                 </p>
               </div>
             </div>
@@ -523,6 +587,7 @@ export function App() {
             )
           }
         />
+        )}
         {error && (
           <p className="mx-3 mb-1 text-body-sm text-danger-ink" role="alert">
             {error}
@@ -537,7 +602,7 @@ export function App() {
                 results={slashSearch.results}
                 error={slashSearch.error}
                 selectedIndex={slashSearch.selectedIndex}
-                onSelect={(result) => editorRef.current?.insertSlashCommand(result.name)}
+                onSelect={(result) => editorRef.current?.insertSkill(result)}
                 onRetry={() => {}}
               />
             </div>
@@ -561,7 +626,7 @@ export function App() {
             id="shirley-composer"
             label="发送消息"
             value={stripTokens(input)}
-            placeholder="给 Shirley 发消息…（输入 @ 引用文件）"
+            placeholder="给 Shirley 发消息…（@ 引用文件，/ 调用技能）"
             busy={busy}
             onValueChange={() => {}}
             onSend={() => void send()}
@@ -576,7 +641,7 @@ export function App() {
                 label="发送消息"
                 value={input}
                 references={references}
-                placeholder="给 Shirley 发消息…（输入 @ 引用文件）"
+                placeholder="给 Shirley 发消息…（@ 引用文件，/ 调用技能）"
                 autoFocus
                 search={mentionSearch}
                 slash={slashSearch}
@@ -800,7 +865,7 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
   }
 
   return {
-    view: { messages, turnSegments, busy: snapshot.running, error: "" },
+    view: { messages, turnSegments, busy: snapshot.running, error: "", loading: false },
     lastAssistantId: currentAssistantId,
   };
 }

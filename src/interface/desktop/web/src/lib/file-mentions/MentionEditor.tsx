@@ -29,9 +29,19 @@ export type MentionEditorHandle = {
   focus: () => void;
   /** 把某个文件/目录作为 chip 插入光标处（供外部「+」按钮调用）。 */
   insertReference: (reference: FileReference) => void;
-  /** 把 `/` 技能候选替换成 `/name `（供 `SkillSlashPopover` 点击项调用）。 */
-  insertSlashCommand: (name: string) => void;
+  /** 把 `/` 技能候选替换成一个技能 chip（供 `SkillSlashPopover` 点击项调用）。 */
+  insertSkill: (skill: SkillEntry) => void;
 };
+
+/** 光标前最近的 `/` 起点（其间无空白）；找不到返回 -1。 */
+function slashQueryStart(text: string, caret: number): number {
+  for (let i = caret - 1; i >= 0; i -= 1) {
+    const ch = text[i];
+    if (ch === "/") return i;
+    if (/\s/.test(ch)) return -1;
+  }
+  return -1;
+}
 
 /** 只保留正文里实际出现的占位符数量对应的引用（防御外部传入不一致）。 */
 function deriveReferences(text: string, references: FileReference[]): FileReference[] {
@@ -76,8 +86,6 @@ export const MentionEditor = forwardRef<
   const mentionRef = useRef<{ queryStart: number } | null>(null);
   const pendingCaretRef = useRef<number | null>(null);
   // 最新一版编辑命令（供挂载期一次性注册的原生 `beforeinput` 监听调用，避免闭包过期）。
-  const backspaceRef = useRef<() => boolean>(() => false);
-  const deleteForwardRef = useRef<() => boolean>(() => false);
   const inputRef = useRef<() => void>(() => {});
   const [empty, setEmpty] = useState(value.length === 0);
 
@@ -189,28 +197,44 @@ export const MentionEditor = forwardRef<
     [rebuild, emit, search],
   );
 
-  // 确认一个技能候选：把整段 `/query` 替换成 `/name `（保留尾随空格便于继续输入参数）。
-  // 之后用户按 Enter 提交，由 `App::send` 判定是否命中技能入口并激活。
-  const handleSlashSelect = useCallback(
+  // 确认一个技能候选：把当前的 `/query` 片段替换成一个**技能 chip**（与 `@` 文件
+  // 同款内联节点）。chip 后可直接输入参数（`/skill` 的 args），按 Enter 提交时由
+  // `App::send` 依据 chip 判定「激活哪个技能」。
+  const handleSkillSelect = useCallback(
     (skill: SkillEntry) => {
       const root = rootRef.current;
       if (!root) return;
-      const next = `/${skill.name} `;
+      const text = serializeEditor(root);
+      const caret = caretOffset(root);
+      const start = slashQueryStart(text, caret);
+      const from = start >= 0 ? start : caret;
+      const before = text.slice(0, from);
+      const after = text.slice(caret);
+      const reference: FileReference = {
+        path: skill.name,
+        name: skill.name,
+        kind: "skill",
+        description: skill.description,
+      };
+      const tokenIndex = countTokens(before);
+      const refs = refsRef.current.slice();
+      refs.splice(tokenIndex, 0, reference);
+      const next = `${before}${CHIP_TOKEN}${after}`;
       slash.close();
-      rebuild(next, refsRef.current, next.length);
-      emit(next, refsRef.current);
+      rebuild(next, refs, (before + CHIP_TOKEN).length);
+      emit(next, refs);
     },
     [rebuild, emit, slash],
   );
 
   const selectRef = useRef<(reference: FileReference) => void>(() => {});
   selectRef.current = handleSelect;
-  const slashSelectRef = useRef<(name: string) => void>(() => {});
-  slashSelectRef.current = (name) => handleSlashSelect({ name, description: "" });
+  const slashSelectRef = useRef<(skill: SkillEntry) => void>(() => {});
+  slashSelectRef.current = handleSkillSelect;
   useImperativeHandle(ref, () => ({
     focus: () => rootRef.current?.focus({ preventScroll: true }),
     insertReference: (reference) => selectRef.current(reference),
-    insertSlashCommand: (name) => slashSelectRef.current(name),
+    insertSkill: (skill) => slashSelectRef.current(skill),
   }));
 
   const handleBackspace = useCallback((): boolean => {
@@ -320,7 +344,7 @@ export const MentionEditor = forwardRef<
           const result = slash.confirmSelection();
           if (result) {
             event.preventDefault();
-            handleSlashSelect(result);
+            handleSkillSelect(result);
             return;
           }
           // 没有可确认的候选：Tab 吞掉（避免焦点跳走），Enter 交回正常提交。
@@ -342,12 +366,28 @@ export const MentionEditor = forwardRef<
           return;
         }
       }
+      // 退格 / 删除：chip 是 `contenteditable=false` 的原子节点，浏览器默认要
+      // 「先把整个 chip 选中、再删」——于是第一下只把光标移到 chip 边界、第二下才真删。
+      // 在 keydown（早于浏览器默认行为）里直接接管：光标紧邻 chip 时手动删并阻止默认，
+      // 其余情况返回 false，交回浏览器原生删除。
+      if (event.key === "Backspace" && !event.altKey && !event.metaKey && !event.ctrlKey) {
+        if (handleBackspace()) {
+          event.preventDefault();
+          return;
+        }
+      }
+      if (event.key === "Delete" && !event.altKey && !event.metaKey && !event.ctrlKey) {
+        if (handleDeleteForward()) {
+          event.preventDefault();
+          return;
+        }
+      }
       if (event.key === "Enter" && !event.shiftKey) {
         event.preventDefault();
         onSubmit();
       }
     },
-    [search, slash, handleSelect, handleSlashSelect, onSubmit, moveCaret],
+    [search, slash, handleSelect, handleSkillSelect, handleBackspace, handleDeleteForward, onSubmit, moveCaret],
   );
 
   // 原生 `beforeinput`：React 的 `onBeforeInput` 是 textInput/keypress 合成的旧接口，
@@ -357,14 +397,6 @@ export const MentionEditor = forwardRef<
     const root = rootRef.current;
     if (!root) return;
     const onBeforeInput = (event: InputEvent) => {
-      if (event.inputType === "deleteContentBackward") {
-        if (backspaceRef.current()) event.preventDefault();
-        return;
-      }
-      if (event.inputType === "deleteContentForward") {
-        if (deleteForwardRef.current()) event.preventDefault();
-        return;
-      }
       if (event.inputType === "insertLineBreak" || event.inputType === "insertParagraph") {
         event.preventDefault();
         insertTextAtCaret(root, "\n");
@@ -405,8 +437,6 @@ export const MentionEditor = forwardRef<
   );
 
   // 让挂载期注册的原生监听始终调用到最新实现。
-  backspaceRef.current = handleBackspace;
-  deleteForwardRef.current = handleDeleteForward;
   inputRef.current = handleInput;
 
   return (

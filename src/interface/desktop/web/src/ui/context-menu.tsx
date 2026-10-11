@@ -83,7 +83,8 @@ export function ContextMenu({
   menu,
   className,
 }: {
-  children: ReactNode;
+  /** 普通节点 = 仅右键触发；函数 = `(open) => node`，可让自定义按钮调用 `open(event)` 打开菜单。 */
+  children: ReactNode | ((open: (event: React.MouseEvent) => void) => ReactNode);
   menu: ReactNode | ((close: () => void) => ReactNode);
   className?: string;
 }) {
@@ -132,7 +133,7 @@ export function ContextMenu({
   return (
     <>
       <div className={className} onContextMenu={open}>
-        {children}
+        {typeof children === "function" ? children(open) : children}
       </div>
       {pos &&
         createPortal(
