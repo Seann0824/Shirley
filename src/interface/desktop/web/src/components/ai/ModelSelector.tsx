@@ -1,6 +1,7 @@
 import { Check, ChevronDown } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/ui/button";
+import { ScrollArea } from "@/ui/scroll-area";
 import { cn } from "@/ui/utils";
 import type { ModelEntry } from "@/lib/bridge";
 
@@ -72,10 +73,11 @@ export function ModelSelector({
         <ChevronDown className="size-3.5 shrink-0" />
       </Button>
       {open && (
-        <div
+        <ScrollArea
           role="listbox"
           aria-label="可选模型"
-          className="absolute bottom-[calc(100%+0.5rem)] right-0 z-20 max-h-72 w-64 overflow-y-auto rounded-card border border-line bg-surface p-1 shadow-lg"
+          className="absolute bottom-[calc(100%+0.5rem)] right-0 z-20 max-h-72 w-64 rounded-card border border-line bg-surface shadow-lg"
+          viewportClassName="p-1"
         >
           {loading && <p className="px-3 py-2 text-caption text-muted">加载中…</p>}
           {!loading && entries.length === 0 && (
@@ -111,7 +113,7 @@ export function ModelSelector({
                 </button>
               );
             })}
-        </div>
+        </ScrollArea>
       )}
     </div>
   );

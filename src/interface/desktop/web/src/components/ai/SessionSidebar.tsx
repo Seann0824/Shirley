@@ -2,7 +2,8 @@ import {
   Archive,
   ArchiveRestore,
   ChevronRight,
-  FolderGit2,
+  Folder,
+  FolderOpen,
   FolderPlus,
   Loader2,
   MoreHorizontal,
@@ -302,7 +303,7 @@ export function SessionSidebar({
         key={entry.name}
         menu={sessionMenu(entry, group)}
         className={cn(
-          "group flex items-center gap-1.5 rounded-control px-2 py-1.5 transition-colors",
+          "group flex h-8 items-center gap-1.5 rounded-control pr-2 pl-[26px] transition-colors",
           active ? "bg-selected" : "hover:bg-quiet",
         )}
       >
@@ -449,7 +450,7 @@ export function SessionSidebar({
                   <ContextMenu menu={projectMenu}>
                     <div
                       className={cn(
-                        "group flex items-center gap-1 rounded-control px-2 py-1.5 transition-colors",
+                        "group flex h-8 items-center gap-1 rounded-control px-2 transition-colors",
                         isActive ? "bg-selected" : "hover:bg-quiet",
                       )}
                     >
@@ -469,20 +470,22 @@ export function SessionSidebar({
                           onBlur={() => setEditingProject(null)}
                         />
                       ) : (
-                        <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1 text-left">
-                          {/* 展开/折叠共用同一个文件图标（不再用箭头区分状态）。 */}
-                          <FolderGit2 className="size-3.5 shrink-0 text-muted" />
-                          <button
-                            type="button"
-                            className="min-w-0 flex-1 truncate text-left text-body-sm text-ink"
-                            title={entry.path}
-                            onClick={(event) => {
-                              event.stopPropagation();
-                              if (!isActive) onSelectProject(entry.id);
-                            }}
-                          >
+                        <CollapsibleTrigger
+                          className="flex min-w-0 flex-1 items-center gap-1 text-left"
+                          title={entry.path}
+                          onClick={() => {
+                            if (!isActive) onSelectProject(entry.id);
+                          }}
+                        >
+                          {/* 展开/折叠共用同一位置的文件夹图标，随状态切换（不用箭头）。 */}
+                          {isCollapsed ? (
+                            <Folder className="size-3.5 shrink-0 text-muted" />
+                          ) : (
+                            <FolderOpen className="size-3.5 shrink-0 text-muted" />
+                          )}
+                          <span className="min-w-0 flex-1 truncate text-body-sm text-ink">
                             {entry.name}
-                          </button>
+                          </span>
                           <span className="shrink-0 text-caption text-muted">
                             {projectSessions.length}
                           </span>
@@ -508,7 +511,7 @@ export function SessionSidebar({
                     <div
                       role="listbox"
                       aria-label={`${entry.name} 的会话`}
-                      className="mt-0.5 ml-3 flex flex-col gap-0.5 pl-1.5"
+                      className="mt-0.5 flex flex-col gap-0.5"
                     >
                       {projectSessions.length === 0 ? (
                         <p className="px-2 py-1.5 text-caption text-muted">
@@ -546,7 +549,7 @@ export function SessionSidebar({
               <span className="shrink-0 text-caption text-muted">{archivedProjects.length}</span>
             </button>
             {archivedOpen && (
-              <div className="mt-0.5 ml-3 flex flex-col gap-0.5 pl-1">
+              <div className="mt-0.5 flex flex-col gap-0.5">
                 {archivedProjects.map((entry) => (
                   <ContextMenu
                     key={entry.id}
@@ -559,7 +562,7 @@ export function SessionSidebar({
                       </ContextMenuItem>
                     }
                   >
-                    <div className="group flex items-center gap-1.5 rounded-control px-2 py-1.5 transition-colors hover:bg-quiet">
+                    <div className="group flex items-center gap-1.5 rounded-control py-1.5 pr-2 pl-[26px] transition-colors hover:bg-quiet">
                       <span className="min-w-0 flex-1">
                         <span className="block truncate text-body-sm text-muted">{entry.name}</span>
                         <span className="mt-0.5 block truncate text-caption text-muted">
