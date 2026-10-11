@@ -43,6 +43,7 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         Arc::new(factory),
         Some(store),
         Some(built.memory),
+        Some(built.skills),
     );
 
     let mut terminal = ratatui::init();

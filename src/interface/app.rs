@@ -204,7 +204,7 @@ impl App {
         session_catalog: Arc<dyn SessionCatalog>,
     ) -> Self {
         Self::with_manager(
-            SessionManager::single(agent, None, session_catalog, None, None),
+            SessionManager::single(agent, None, session_catalog, None, None, None),
             catalog,
         )
     }
@@ -435,7 +435,10 @@ impl App {
         // - 展开成 prompt：把展开后内容替换回 input，UI 显示的是展开后的自然语言，
         //   AI 收到的也只是 prompt，与直接打字无任何差别。
         // - 本地系统消息：不打扰 AI，直接提示用户。
-        match self.commands.resolve(&self.input) {
+        // 当前会话可见的 skill 名（动态 slash 入口）。取一次，传给解析器。
+        let skill_names = self.skill_names();
+        let outcome = self.commands.resolve(&self.input, &skill_names);
+        match outcome {
             CommandOutcome::Prompt(expanded) => {
                 self.input = expanded;
             }
@@ -484,6 +487,35 @@ impl App {
                 self.suggestions.clear();
                 self.start_login();
                 return None;
+            }
+            CommandOutcome::ActivateSkill { name, args } => {
+                // 动态 slash 入口：harness 直接激活 skill（确定性，跳过模型判断，
+                // `docs/skills.md` 5.6）。激活写入 `SkillRuntime`，下一轮由
+                // `SkillContextProvider` 追加注入——不新增注入接缝。
+                self.suggestions.clear();
+                match self.activate_skill(&name) {
+                    Ok(()) => {
+                        if args.trim().is_empty() {
+                            // 无参：只激活，不打扰模型，给一条本地系统提示。
+                            self.input.clear();
+                            self.input_cursor = 0;
+                            self.add_system_message(format!(
+                                "已激活技能 `{name}`（本轮起每轮注入其指令）。"
+                            ));
+                            return None;
+                        }
+                        // 带参：激活后把参数作为本轮 prompt 正常发送。
+                        self.input = args;
+                        self.input_cursor = self.input.len();
+                    }
+                    Err(reason) => {
+                        // 激活失败（未知技能 / 读文件失败）：本地报错，不发模型。
+                        self.input.clear();
+                        self.input_cursor = 0;
+                        self.add_system_message(format!("激活技能 `{name}` 失败：{reason}"));
+                        return None;
+                    }
+                }
             }
             CommandOutcome::Unknown => {}
         }
@@ -887,9 +919,46 @@ impl App {
     /// 根据当前输入刷新模糊指令候选。仅在输入以 prefix 开头且未精确命中时给出。
     /// 无候选时清空。每次编辑输入后调用。
     pub fn refresh_suggestions(&mut self) {
-        self.suggestions = self.commands.fuzzy_match(&self.input).into_iter().map(|(n, _)| n).collect();
+        let skill_names = self.skill_names();
+        self.suggestions = self
+            .commands
+            .fuzzy_match(&self.input, &skill_names)
+            .into_iter()
+            .map(|(n, _)| n)
+            .collect();
         // 候选集变了，高亮回到第一项。
         self.suggestion_index = 0;
+    }
+
+    /// 当前会话可见的 skill 名（动态 slash 入口候选）。
+    ///
+    /// 目录跨会话共享 → 名字恒定；这里从前台会话的 `SkillRuntime` 取。
+    fn skill_names(&self) -> Vec<String> {
+        self.sessions
+            .active()
+            .skills
+            .as_ref()
+            .map(|runtime| runtime.skill_names())
+            .unwrap_or_default()
+    }
+
+    /// 在当前会话的 `SkillRuntime` 上激活一个 skill（slash 入口）。
+    ///
+    /// 复用 P1 的运行时：激活只写运行时集合，正文由 `SkillContextProvider`
+    /// 在下一轮组装请求时**追加注入**——`render()` 的追加语义保证 KV 前缀稳定。
+    fn activate_skill(&self, name: &str) -> Result<(), String> {
+        let runtime = self
+            .sessions
+            .active()
+            .skills
+            .as_ref()
+            .ok_or_else(|| "当前会话未启用技能".to_owned())?;
+        runtime.activate(name).map(|_| ()).map_err(|error| match error {
+            crate::skills::runtime::ActivateError::UnknownSkill(name) => {
+                format!("未知技能 `{name}`")
+            }
+            crate::skills::runtime::ActivateError::ReadFailed(reason) => reason,
+        })
     }
 
     /// 当前指令候选（按匹配度排序）。

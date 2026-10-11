@@ -227,7 +227,7 @@ impl AgentFactory {
             .tools(tool_manager)
             .messages(messages)
             .build()?;
-        Ok(BuiltAgent { agent, memory })
+        Ok(BuiltAgent { agent, memory, skills: skill_runtime })
     }
 
     /// 本工厂的记忆存储（全局 + 工作区多根，读合并、写落主根）。
@@ -370,6 +370,9 @@ pub struct BuiltAgent {
     pub agent: Agent,
     /// 记忆运行时（每会话一份）：驱动方在发起一轮前 `set_query`，会话结束交给 curator。
     pub memory: Arc<MemoryRuntime>,
+    /// 技能运行时（每会话一份）：TUI 的 `/<skill-name>` slash 入口经此句柄直接激活
+    /// （`docs/skills.md` 5.6）。与 `SkillContextProvider` 共享同一 `Arc`。
+    pub skills: Arc<SkillRuntime>,
 }
 
 /// 把多个 [`ContextProvider`] 拼成一个：按顺序拼接各自 `context()`，全空返回 `None`。
@@ -462,6 +465,7 @@ mod tests {
             Arc::new(factory(root.clone())),
             None,
             None,
+            None,
         );
         assert_eq!(manager.active_name(), Some("s"));
 
@@ -519,6 +523,7 @@ mod tests {
             Some("s".into()),
             catalog,
             Arc::new(factory(root.clone())),
+            None,
             None,
             None,
         );

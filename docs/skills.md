@@ -13,13 +13,15 @@
 **范围声明**：方案遵循既有范式（todo / memory）：**应用层持有状态 +
 `ContextProvider` 注入 + 配套工具，SDK 零改动**。
 
-> **实现状态**：**P0+P1 已落地**（`src/skills/`：`parse` / `discovery` / `catalog` /
-> `provider` / `runtime` / `tool`）。P0 经 `bootstrap::build_agent` 注入 Tier1 目录；
-> P1 新增 `activate_skill`（`name` 限枚举）+ `SkillRuntime`（已激活集合，与 provider
-> 共享同一 `Arc`）+ 每轮末尾**追加**注入已激活正文（跨压缩存活）+ `read_skill_file`
-> （Tier3 资源按需读）。**KV 缓存约束**：注入恒为追加式（目录是稳定前缀、已激活块
-> 按激活顺序拼接，旧内容逐字节不变）。P2（`/skill-name` slash 等）及以后**未落地**。
-> 分期与验收见第八、九节。
+> **实现状态**：**P0+P1+P2(slash) 已落地**（`src/skills/`：`parse` / `discovery` /
+> `catalog` / `provider` / `runtime` / `tool`）。P0 经 `bootstrap::build_agent` 注入
+> Tier1 目录；P1 新增 `activate_skill`（`name` 限枚举）+ `SkillRuntime`（已激活集合，
+> 与 provider 共享同一 `Arc`）+ 每轮末尾**追加**注入已激活正文（跨压缩存活）+
+> `read_skill_file`（Tier3 资源按需读）。P2(slash) 新增 `/<skill-name>` 命令入口
+> （`CommandOutcome::ActivateSkill`，harness 直接激活、跳过模型判断；只动应用层命令层，
+> 复用 `SkillRuntime`）。**KV 缓存约束**：注入恒为追加式（目录是稳定前缀、已激活块
+> 按激活顺序拼接，旧内容逐字节不变）。P2 其余项（去重激活提示 / 正文上限调优）及以后
+> **未落地**。分期与验收见第八、九节。
 
 ---
 
@@ -303,10 +305,24 @@ let _ = tool_manager.register(ReadSkillFileTool::new(skill_catalog));
 - 实现上把 `read_file` 的读取内核抽成 `read_text_range(root, path, ...)`，
   两处共用，避免边界漂移（对齐 `docs/security.md` "边界只有一处"）。
 
-**5.6 与 slash 命令的关系**
+**5.6 与 slash 命令的关系（P2，已落地）**
 
-可选增强：`/skill-name` 由 TUI harness 直接激活（`CommandOutcome` 加一个
-`ActivateSkill` 分支）。这属交互层、不影响 SDK 与 provider 接缝，放 P2。
+除模型经 `activate_skill` 激活外，用户还可敲 **`/<skill-name>`** 由 harness
+**直接激活**——确定性入口，跳过模型的判断。
+
+- **解析**：`CommandManager::resolve` / `fuzzy_match` 增 `skills: &[String]` 参数；
+  候选名 = 内置指令 + 当前会话可见的 skill 名。**内置指令优先**（`/model` 等不被
+  同名 skill 抢走），skill 名只在内置未命中时匹配。skill 名作为**数据**传入，
+  `CommandManager` 保持无状态、不缓存（避免 stale）。
+- **拿到 `SkillRuntime`**：仿 `memory` 模式——`BuiltAgent` 多带 `skills: Arc<SkillRuntime>`，
+  `Session` 持 `pub skills: Option<Arc<SkillRuntime>>`，App 从前台会话取。
+- **注入**：激活只写 `SkillRuntime` 的已激活集合，正文仍由 `SkillContextProvider`
+  下一轮**追加注入**——**不新增注入接缝**，`render()` 的追加语义保证 KV 前缀稳定。
+- **UX**：`/<skill-name>`（无参）= 激活 + 一条本地系统提示（不发模型）；
+  `/<skill-name> <text>` = 激活后把 `<text>` 作为本轮 prompt 发送；激活失败
+  （未知技能 / 读文件失败）本地报错、不发模型。skill 名不在目录里则按普通文本处理
+  （宽松策略，不打断输入）。
+- **边界**：纯应用层（`src/interface/command.rs` + `app.rs` 接线），**SDK 零改动**。
 
 ---
 
@@ -367,7 +383,7 @@ let _ = tool_manager.register(ReadSkillFileTool::new(skill_catalog));
 | --- | --- | --- |
 | **P0** ✅ | `discovery` + `parse` + `catalog`（扫目录、解析、容错）+ `SkillContextProvider` 只注入 Tier1 目录 | 无 |
 | **P1** ✅ | `activate_skill` + `SkillRuntime` + 每轮**追加**注入已激活正文（跨压缩存活）+ `read_skill_file`（Tier3） | P0 |
-| **P2** | `/skill-name` slash 命令直接激活；去重激活提示；每 skill 正文上限调优 | P1 |
+| **P2** ◐ | `/skill-name` slash 命令直接激活 ✅（`CommandOutcome::ActivateSkill` + 命令层 `skills` 参数）；去重激活提示、每 skill 正文上限调优（未落地） | P1 |
 | **P3（可选）** | 兼容 Claude Code 私有字段中的**只读**子集（`when_to_use` 等）；subagent 隔离 | P2 |
 | **不做** | 自动执行 `scripts/`；`allowed-tools` 强制；skill 市场 / 安装器；跨工作区 skill 同步 | — |
 

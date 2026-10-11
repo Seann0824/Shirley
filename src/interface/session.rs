@@ -23,6 +23,7 @@ use tokio::sync::broadcast;
 use super::app::{ChatMessage, Item, Role, ToolCallView};
 use crate::bootstrap::AgentFactory;
 use crate::memory::MemoryRuntime;
+use crate::skills::SkillRuntime;
 use crate::session::{SessionCatalog, SessionStore};
 
 /// 事件扇出通道容量。运行中订阅者若落后超过此数会 `Lagged`，由订阅方（desktop
@@ -80,6 +81,12 @@ pub struct Session {
     /// 驱动方在发起一轮前 `set_query`（按本轮用户输入做相关检索），会话结束
     /// 交给 curator。
     pub memory: Option<Arc<MemoryRuntime>>,
+    /// 该会话的技能运行时（`None` = 无技能，供测试 / 无目录场景）。
+    ///
+    /// 每会话一份（与 `memory` 对称）：已激活集合随会话隔离。TUI 的
+    /// `/<skill-name>` slash 入口经此句柄直接激活（`docs/skills.md` 5.6），
+    /// 复用 P1 的 `SkillContextProvider` 注入接缝——不新增注入路径。
+    pub skills: Option<Arc<SkillRuntime>>,
 }
 
 impl Session {
@@ -92,6 +99,7 @@ impl Session {
         name: Option<String>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
+        skills: Option<Arc<SkillRuntime>>,
     ) -> Self {
         Self {
             name,
@@ -114,6 +122,7 @@ impl Session {
             running: false,
             store,
             memory,
+            skills,
         }
     }
 
@@ -450,9 +459,10 @@ impl SessionManager {
         catalog: Arc<dyn SessionCatalog>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
+        skills: Option<Arc<SkillRuntime>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name, store, memory));
+        sessions.insert(0, Session::new(agent, name, store, memory, skills));
         Self {
             sessions,
             active: 0,
@@ -470,9 +480,10 @@ impl SessionManager {
         factory: Arc<AgentFactory>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
+        skills: Option<Arc<SkillRuntime>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name, store, memory));
+        sessions.insert(0, Session::new(agent, name, store, memory, skills));
         Self {
             sessions,
             active: 0,
@@ -521,11 +532,12 @@ impl SessionManager {
         name: Option<String>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
+        skills: Option<Arc<SkillRuntime>>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.sessions
-            .insert(id, Session::new(agent, name, store, memory));
+            .insert(id, Session::new(agent, name, store, memory, skills));
         id
     }
 
@@ -563,6 +575,7 @@ impl SessionManager {
             Some(name.to_owned()),
             Some(store),
             Some(built.memory),
+            Some(built.skills),
         );
         // 从磁盘恢复的会话：用其历史重建视图条目，快照 / 渲染才有内容。
         if let Some(session) = self.sessions.get_mut(&id) {
@@ -599,6 +612,7 @@ impl SessionManager {
             Some(entry.name.clone()),
             Some(store),
             Some(built.memory),
+            Some(built.skills),
         );
         self.active = id;
         if let Some(previous) = previous.filter(|p| p != entry.name.as_str()) {
@@ -859,6 +873,7 @@ mod tests {
             test_agent(),
             Some("s".into()),
             Arc::new(EmptySessionCatalog),
+            None,
             None,
             None,
         )

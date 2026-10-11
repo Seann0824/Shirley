@@ -83,6 +83,7 @@ fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime, St
         factory.clone(),
         Some(store),
         Some(built.memory),
+        Some(built.skills),
     );
     Ok(ProjectRuntime { factory, sessions })
 }
