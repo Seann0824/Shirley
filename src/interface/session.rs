@@ -613,11 +613,16 @@ impl SessionManager {
     /// 从 `sessions` 移除该会话；若删掉的正是前台会话，则**新建一份惰性空会话并切过去**
     /// （与启动时同一 UX：此刻只定名、不落盘，发首条消息才建文件）。这样删掉当前会话后
     /// 前台指针不会悬空，`active_name()` 也不会再返回已删的名字。
+    ///
+    /// **未加载的会话直接放行**：侧栏 / 列表列的是目录扫描出的**全部**会话，但只有被
+    /// 打开过的才在内存里。对未加载的会话没有内存编排可做，磁盘删除由调用方负责——若
+    /// 这里仍报「会话不存在」，就会表现为「必须先点开（选中）才能删」。名字是否真实
+    /// 存在于磁盘，交由调用方的 `SessionCatalog::delete` 判定。
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn delete_session(&mut self, name: &str) -> Result<(), String> {
-        let id = self
-            .id_of_name(name)
-            .ok_or_else(|| format!("会话不存在：{name}"))?;
+        let Some(id) = self.id_of_name(name) else {
+            return Ok(());
+        };
         if self
             .sessions
             .get(&id)
@@ -884,5 +889,20 @@ mod tests {
 
         // 同一会话运行中不得再次发起（不并发驱动同一 Agent）。
         assert!(manager.begin_turn("s", "again".into()).is_none());
+    }
+
+    /// 回归：删除**未加载**（仅存在于磁盘、从未被打开）的会话必须放行。
+    ///
+    /// 侧栏 / 列表列的是目录扫描出的全部会话，只有被打开过的才在内存里。此前
+    /// `delete_session` 对未加载的会话直接报「会话不存在」，于是必须先点开（选中）
+    /// 才能删——这正是「desktop 必须选中后删除」的根因。磁盘是否真实存在交由调用方
+    /// 的 `SessionCatalog::delete` 判定，内存侧不该拦。
+    #[test]
+    fn delete_session_allows_unloaded_name() {
+        let mut manager = manager();
+        assert!(
+            manager.delete_session("never-opened").is_ok(),
+            "未加载的会话应放行，交由调用方的磁盘删除判定"
+        );
     }
 }
