@@ -1,6 +1,13 @@
 /target
 .env
 .shirley/
+
+# macOS 目录元数据
+.DS_Store
+
+# WorkBuddy AI 在本项目里的工作数据（记忆 / 笔记），不属于仓库内容
+.workbuddy-ai/
+
 # workspace 成员不应有独立 lock，统一用根目录的
 crates/*/Cargo.lock
 

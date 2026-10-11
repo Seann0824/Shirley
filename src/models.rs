@@ -10,6 +10,8 @@
 
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
 use serde::Deserialize;
 
@@ -89,11 +91,29 @@ impl ModelCatalog for StaticCatalog {
     }
 }
 
+/// 成功结果在内存里的有效期。
+///
+/// 模型清单在一次会话里几乎不会变，而每次打开 `/model` 都打一次网络会让选择器
+/// 一直转圈（尤其是远端端点）。缓存一份，重复打开就是瞬时。
+const CACHE_TTL: Duration = Duration::from_secs(60);
+
+/// 单次拉取的超时。
+///
+/// `reqwest::Client` 默认**没有超时**：端点无响应时请求会一直挂着，
+/// 选择器就一直显示"加载中"。给一个上界，超时后回退兜底列表。
+const FETCH_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// 远端模型目录：请求 OpenAI 兼容的 `GET /v1/models` 接口。
 ///
 /// 响应的 `data[].id` 作为请求用的模型值，`name`（缺省回退 `id`）作为展示名，
 /// `owned_by` 作为 provider。接口拉取失败时**回退到给定的兜底列表**——列表拿不到
 /// 不应该让 `/model` 整个不可用（远端抖动时仍能用上次的静态清单）。
+///
+/// 两处性能设计（此前每次都重新建 client + 无缓存，导致每次打开都要等）：
+/// - **复用同一个 [`reqwest::Client`]**：它内部带连接池，复用才能省掉每次请求的
+///   TCP + TLS 握手；每次 `Client::new()` 等于每次重新握手。
+/// - **成功结果带 TTL 缓存**：只缓存成功，失败不缓存——端点抖一下不会把错误
+///   钉死整个会话，下次打开会重试。
 pub struct RemoteCatalog {
     /// 模型列表接口的完整地址，例如 `http://127.0.0.1:8788/v1/models`。
     endpoint: String,
@@ -101,6 +121,10 @@ pub struct RemoteCatalog {
     api_key: Option<String>,
     /// 拉取失败时的兜底条目。
     fallback: Vec<ModelEntry>,
+    /// 复用的 HTTP client（连接池 + 超时）。
+    client: reqwest::Client,
+    /// 上次**成功**拉取的结果与时间戳。`None` = 还没有成功过。
+    cache: Mutex<Option<(Instant, Vec<ModelEntry>)>>,
 }
 
 impl RemoteCatalog {
@@ -109,10 +133,32 @@ impl RemoteCatalog {
         api_key: Option<String>,
         fallback: Vec<ModelEntry>,
     ) -> Self {
+        let client = reqwest::Client::builder()
+            .timeout(FETCH_TIMEOUT)
+            .build()
+            // 构造失败（极少见，例如 TLS 后端初始化不了）时退回默认 client：
+            // 列表拿不到只是降级，不该让应用起不来。
+            .unwrap_or_else(|_| reqwest::Client::new());
         Self {
             endpoint: endpoint.into(),
             api_key,
             fallback,
+            client,
+            cache: Mutex::new(None),
+        }
+    }
+
+    /// 命中未过期的缓存就返回副本。锁内不做任何 `.await`。
+    fn cached(&self) -> Option<Vec<ModelEntry>> {
+        let guard = self.cache.lock().ok()?;
+        let (at, entries) = guard.as_ref()?;
+        (at.elapsed() < CACHE_TTL).then(|| entries.clone())
+    }
+
+    /// 记录一次成功拉取。
+    fn store(&self, entries: &[ModelEntry]) {
+        if let Ok(mut guard) = self.cache.lock() {
+            *guard = Some((Instant::now(), entries.to_vec()));
         }
     }
 }
@@ -135,8 +181,12 @@ struct ModelDto {
 impl ModelCatalog for RemoteCatalog {
     fn list(&self) -> ModelListFuture<'_> {
         Box::pin(async move {
-            let client = reqwest::Client::new();
-            let mut request = client.get(&self.endpoint);
+            // 命中未过期缓存：直接返回，不发任何网络请求。
+            if let Some(entries) = self.cached() {
+                return entries;
+            }
+
+            let mut request = self.client.get(&self.endpoint);
             if let Some(key) = &self.api_key {
                 request = request.bearer_auth(key);
             }
@@ -160,23 +210,51 @@ impl ModelCatalog for RemoteCatalog {
             .await;
 
             match parsed {
-                Some(entries) if !entries.is_empty() => entries,
+                Some(entries) if !entries.is_empty() => {
+                    self.store(&entries);
+                    entries
+                }
                 // 请求失败或返回空：回退到兜底列表，保证 `/model` 仍可用。
+                // 刻意**不写缓存**：一次抖动不该被钉死一整个 TTL，下次打开会重试。
                 _ => self.fallback.clone(),
             }
         })
     }
 }
 
-/// 从 chat completions 的 `base_url` 推导模型列表接口地址。
+/// 三种协议的 `base_url` 收尾。它们都指向同一个模型列表接口。
 ///
-/// 约定 base_url 以 `/chat/completions` 结尾（见 `.env` 的 `LOCAL_BASE_URL`），
-/// 把它替换成 `/models` 即得列表接口；否则退回在末尾拼 `/models`。
+/// `base_url` 是**完整请求端点**（见 SDK 的 `ModelConfig`），各协议收尾不同：
+/// `chat_completions` 收在 `/chat/completions`，`anthropic_messages` 收在
+/// `/messages`，`responses` 收在 `/responses`。只认其中一种，另两种就会拼出
+/// 不存在的地址（例如 `…/v1/messages/models`），列表拉取失败后静默回退到
+/// 内置静态清单——表现为 `/model` 选择器里看不到真实模型。
+const PROTOCOL_ENDPOINT_SUFFIXES: [&str; 3] = [
+    "/chat/completions",
+    "/messages",
+    "/responses",
+];
+
+/// 从 `base_url` 推导模型列表接口地址。
+///
+/// 命中已知协议后缀就把它换成 `/models`：
+///
+/// | 协议 | `base_url` | 推导结果 |
+/// | --- | --- | --- |
+/// | ChatCompletions | `https://host/v1/chat/completions` | `https://host/v1/models` |
+/// | AnthropicMessages | `https://host/v1/messages` | `https://host/v1/models` |
+/// | Responses | `https://host/responses` | `https://host/models` |
+///
+/// 都不命中时（例如 `base_url` 本身就是 `…/v1`）退回在末尾拼 `/models`。
+/// 若服务端的列表地址不遵循这个约定，用配置里的 `models_url` 显式覆盖。
 pub fn models_endpoint(base_url: &str) -> String {
-    if let Some(prefix) = base_url.strip_suffix("/chat/completions") {
-        return format!("{prefix}/models");
+    let trimmed = base_url.trim_end_matches('/');
+    for suffix in PROTOCOL_ENDPOINT_SUFFIXES {
+        if let Some(prefix) = trimmed.strip_suffix(suffix) {
+            return format!("{prefix}/models");
+        }
     }
-    format!("{}/models", base_url.trim_end_matches('/'))
+    format!("{trimmed}/models")
 }
 
 #[cfg(test)]
@@ -198,10 +276,12 @@ mod tests {
 
     #[test]
     fn derives_models_endpoint_from_base_url() {
+        // ChatCompletions：剥掉 /chat/completions
         assert_eq!(
             models_endpoint("http://127.0.0.1:8788/v1/chat/completions"),
             "http://127.0.0.1:8788/v1/models"
         );
+        // 不含协议后缀：退回末尾拼 /models
         assert_eq!(
             models_endpoint("http://127.0.0.1:8788/v1"),
             "http://127.0.0.1:8788/v1/models"
@@ -222,6 +302,71 @@ mod tests {
         assert_eq!(catalog.list().await, fallback);
     }
 
+    /// 回归：成功拉取会命中 TTL 缓存，第二次 `list()` 不再发网络请求。
+    ///
+    /// 此前每次 `list()` 都新建 `reqwest::Client` 并重新请求，导致每次打开
+    /// `/model` 都要等一次完整往返。这里用最小 HTTP 桩 + 请求计数把它钉住。
+    #[tokio::test]
+    async fn remote_catalog_caches_successful_fetch() {
+        use std::io::{Read, Write};
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        let hits = Arc::new(AtomicUsize::new(0));
+        let hits_server = Arc::clone(&hits);
+
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { break };
+                // GET 无 body：读到请求头结束就够了。
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 512];
+                while let Ok(n) = stream.read(&mut chunk) {
+                    if n == 0 {
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.windows(4).any(|w| w == b"\r\n\r\n".as_slice()) {
+                        break;
+                    }
+                }
+                hits_server.fetch_add(1, Ordering::SeqCst);
+                let body = r#"{"data":[{"id":"m1"},{"id":"m2"}]}"#;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                     Content-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+
+        let catalog = RemoteCatalog::new(
+            format!("http://{addr}/v1/models"),
+            None,
+            vec![ModelEntry::new("fb", "fb", "local")],
+        );
+
+        let first = catalog.list().await;
+        let second = catalog.list().await;
+
+        assert_eq!(
+            first.iter().map(|e| e.value.as_str()).collect::<Vec<_>>(),
+            vec!["m1", "m2"],
+            "首次应拉到远端列表"
+        );
+        assert_eq!(second, first, "第二次应命中缓存，返回同一份列表");
+        assert_eq!(
+            hits.load(Ordering::SeqCst),
+            1,
+            "命中缓存时不应再发网络请求"
+        );
+    }
+
     #[tokio::test]
     #[ignore]
     async fn remote_catalog_fetches_live() {
@@ -238,6 +383,34 @@ mod tests {
             "应拉到远端列表而非兜底: {entries:?}"
         );
         eprintln!("拉取到 {} 个模型，例如 {:?}", entries.len(), entries.first());
+    }
+
+    /// 活体诊断：按**工作区真实配置**构造 `RemoteCatalog` 并拉取，
+    /// 验证 `models_endpoint` 对当前协议后缀的推导是否正确。
+    ///
+    /// 依赖外部服务与工作区配置，默认忽略，手动跑：
+    ///   cargo test --bin Shirley live_remote_catalog_from_workspace_config -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn live_remote_catalog_from_workspace_config() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let settings = crate::settings::Settings::load_default(&root).expect("装载配置失败");
+        let url = settings
+            .models_url
+            .clone()
+            .unwrap_or_else(|| models_endpoint(&settings.base_url));
+        eprintln!("[catalog] base_url   = {}", settings.base_url);
+        eprintln!("[catalog] models_url = {url}");
+
+        let fallback = StaticCatalog::builtin().entries();
+        let catalog = RemoteCatalog::new(url, settings.api_key.clone(), fallback.clone());
+        let entries = catalog.list().await;
+        eprintln!(
+            "[catalog] 拉到 {} 个模型，前 3 个: {:?}",
+            entries.len(),
+            entries.iter().take(3).map(|e| &e.value).collect::<Vec<_>>()
+        );
+        assert_ne!(entries, fallback, "不应回退到内置兜底列表（说明真的拉到了远端）");
     }
 
     #[test]

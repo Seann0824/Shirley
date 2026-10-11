@@ -116,8 +116,9 @@ impl AgentFactory {
             .maybe_api_key(settings.api_key.clone())
             .model(settings.model.clone())
             .stream(true)
-            .thinking(true)
-            .reasoning_effort("low")
+            .thinking(settings.thinking)
+            .reasoning_effort(settings.reasoning_effort.clone())
+            .maybe_extra_body(settings.extra_body.clone())
             .build();
         model_config.context_window_tokens = Some(settings.context_window_tokens);
 
@@ -204,6 +205,20 @@ impl AgentFactory {
             .messages(messages)
             .build()?;
         Ok(BuiltAgent { agent, memory })
+    }
+
+    /// 预热模型目录：后台拉一次列表，让**首次**打开 `/model` 也能命中缓存。
+    ///
+    /// 不阻塞启动，失败静默——`RemoteCatalog` 自身会回退到兜底清单。
+    /// 不在 tokio 运行时里调用（例如单元测试）时直接跳过：预热只是优化，不是必需。
+    pub fn prewarm_model_catalog(&self) {
+        let Ok(handle) = tokio::runtime::Handle::try_current() else {
+            return;
+        };
+        let catalog = self.model_catalog.clone();
+        handle.spawn(async move {
+            let _ = catalog.list().await;
+        });
     }
 
     /// 本工厂的记忆存储（全局 + 工作区多根，读合并、写落主根）。
@@ -448,6 +463,34 @@ mod tests {
         assert!(manager.active_agent().is_some(), "新空会话应已就绪");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 活体冒烟：按**工作区真实配置**装配并跑一轮，验证端点 / 协议 / 密钥可用。
+    ///
+    /// 依赖外部服务，默认忽略，手动跑：
+    ///   cargo test --bin Shirley live_smoke_against_configured_provider -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore]
+    async fn live_smoke_against_configured_provider() {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let factory = AgentFactory::assemble(root).expect("装配失败");
+        let mut built = factory.build_agent(Vec::new()).expect("造 Agent 失败");
+        let result = built
+            .agent
+            .run("只回复两个字：你好")
+            .await
+            .expect("请求失败");
+        let text = result
+            .messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Assistant { content, .. } => content.clone(),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
+        eprintln!("[smoke] 模型回复: {text:?}");
+        assert!(!text.trim().is_empty(), "应拿到非空回复");
     }
 
     /// 空实现 provider，便于验证 CompositeContextProvider 的拼接 / 短路语义。
