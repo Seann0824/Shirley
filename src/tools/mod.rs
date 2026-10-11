@@ -1,5 +1,5 @@
 mod bash;
-mod read;
+pub(crate) mod read;
 mod web_search;
 
 pub use bash::bash as bash_tool;

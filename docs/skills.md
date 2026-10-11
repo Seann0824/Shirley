@@ -10,11 +10,16 @@
 《Equipping agents for the real world with Agent Skills》与客户端实现指南。
 反面参照是 Claude Code 的私有扩展字段——只吸收它直观、跨客户端通用的部分。
 
-**范围声明**：本轮只做调研与方案（用户原话是"先调研一下 skill 的方案"），
-**不含实现**。方案遵循既有范式（todo / memory）：**应用层持有状态 +
+**范围声明**：方案遵循既有范式（todo / memory）：**应用层持有状态 +
 `ContextProvider` 注入 + 配套工具，SDK 零改动**。
 
-> **实现状态**：**未落地**。本文是设计提案。分期与验收见第八、九节。
+> **实现状态**：**P0+P1 已落地**（`src/skills/`：`parse` / `discovery` / `catalog` /
+> `provider` / `runtime` / `tool`）。P0 经 `bootstrap::build_agent` 注入 Tier1 目录；
+> P1 新增 `activate_skill`（`name` 限枚举）+ `SkillRuntime`（已激活集合，与 provider
+> 共享同一 `Arc`）+ 每轮末尾**追加**注入已激活正文（跨压缩存活）+ `read_skill_file`
+> （Tier3 资源按需读）。**KV 缓存约束**：注入恒为追加式（目录是稳定前缀、已激活块
+> 按激活顺序拼接，旧内容逐字节不变）。P2（`/skill-name` slash 等）及以后**未落地**。
+> 分期与验收见第八、九节。
 
 ---
 
@@ -360,8 +365,8 @@ let _ = tool_manager.register(ReadSkillFileTool::new(skill_catalog));
 
 | 期 | 内容 | 依赖 |
 | --- | --- | --- |
-| **P0** | `discovery` + `parse` + `catalog`（扫目录、解析、容错）+ `SkillContextProvider` 只注入 Tier1 目录 | 无 |
-| **P1** | `activate_skill` + `SkillRuntime` + 每轮注入已激活正文（跨压缩存活）+ `read_skill_file`（Tier3） | P0 |
+| **P0** ✅ | `discovery` + `parse` + `catalog`（扫目录、解析、容错）+ `SkillContextProvider` 只注入 Tier1 目录 | 无 |
+| **P1** ✅ | `activate_skill` + `SkillRuntime` + 每轮**追加**注入已激活正文（跨压缩存活）+ `read_skill_file`（Tier3） | P0 |
 | **P2** | `/skill-name` slash 命令直接激活；去重激活提示；每 skill 正文上限调优 | P1 |
 | **P3（可选）** | 兼容 Claude Code 私有字段中的**只读**子集（`when_to_use` 等）；subagent 隔离 | P2 |
 | **不做** | 自动执行 `scripts/`；`allowed-tools` 强制；skill 市场 / 安装器；跨工作区 skill 同步 | — |

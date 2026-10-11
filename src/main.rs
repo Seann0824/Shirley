@@ -8,6 +8,7 @@ mod project;
 mod prompt;
 mod session;
 mod settings;
+mod skills;
 mod todo;
 mod tools;
 mod workspace_search;

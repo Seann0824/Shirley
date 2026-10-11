@@ -40,7 +40,7 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | `docs/tool-lifecycle.md` | 工具生命周期：`ToolContext` 归 `ToolManager` / `on_register`（created）/ `on_unregister`（destroy）/ `unregister`（**已实现**） |
 | `docs/tool-macro.md` | 工具宏表达力：函数宏扩展可选伴生钩子，lifecycle 由宏接线（**已实现**） |
 | `docs/desktop-interface.md` | 桌面界面：Tauri 2 + React 迁移 shiwen 聊天 UI / 共享 LCA（`AgentEvent`）/ 剥离 shiwen 定制逻辑（**M0–M3 已落地**，含 `@` 引用重绑工作区文件、markdown 渲染对齐、聊天区固定宽度 `max-w-190`、连续工具调用收集成折叠区、**多项目多工作区**：登记 / 切换 / 重命名 / 归档 / 恢复） |
-| `docs/skills.md` | 技能（skills）：拥抱 Agent Skills 开放标准（`SKILL.md` 目录 / frontmatter）/ 渐进式披露（目录常驻 + 按需激活 + 资源按需读）/ `activate_skill` + `SkillContextProvider` 每轮注入（跨压缩存活）/ 应用层实现，SDK 零改动（**方案，未落地**） |
+| `docs/skills.md` | 技能（skills）：拥抱 Agent Skills 开放标准（`SKILL.md` 目录 / frontmatter）/ 渐进式披露（目录常驻 + 按需激活 + 资源按需读）/ `SkillContextProvider` 每轮末尾追加注入（目录 + 已激活正文，跨压缩存活、KV 友好）/ 应用层实现，SDK 零改动（**P0+P1 已落地**：`src/skills/` 发现 + 解析 + 目录 + `activate_skill` / `SkillRuntime` 激活 + `read_skill_file` 资源读取） |
 
 ---
 
@@ -376,7 +376,7 @@ cargo clippy --all-targets         # 静态检查
 8. ~~未接线配置~~：`temperature` / `max_output_tokens` / `tool_choice` 已接线，并新增 `extra_body` 逃生口（见 `docs/sdk-gaps.md` gap-4）
 9. **未使用的 `StopReason`**：`MaxStepsReached` / `Cancelled` 定义了但不会产生（没有 max_steps 和取消机制）
 10. **压缩重试**：压缩失败直接中断，`plan.md` 提到"压缩失败重试有时能成功"
-11. **技能（skills）**：**方案已出、未落地**（`docs/skills.md`）。拥抱 Agent Skills 开放标准（`SKILL.md` 目录 + frontmatter），渐进式披露（Tier1 目录常驻 / Tier2 按需激活 / Tier3 资源按需读）；拟在应用层新增 `src/skills/`，用 `activate_skill` 工具激活 + `SkillContextProvider` 每轮末尾注入已激活正文（复用 `ContextProvider` 接缝，跨压缩存活），SDK 零改动
+11. **技能（skills）**：**P0+P1 已落地、P2+ 未落地**（`docs/skills.md`）。拥抱 Agent Skills 开放标准（`SKILL.md` 目录 + frontmatter），渐进式披露（Tier1 目录常驻 / Tier2 按需激活 / Tier3 资源按需读）。**应用层实现，SDK 零改动**：`src/skills/`（`parse` / `discovery` / `catalog` / `provider` / `runtime` / `tool`），经 `bootstrap::build_agent` 把 `SkillContextProvider` 接进 `CompositeContextProvider`。**P0** 每轮末尾注入 Tier1 目录；**P1** 新增 `activate_skill`（`name` 限枚举、剥 frontmatter、列 `resources`）+ `SkillRuntime`（已激活集合，与 provider 共享同一 `Arc`）+ 每轮末尾**追加**注入已激活正文（跨压缩存活）+ `read_skill_file`（Tier3 资源按需读，根钉死在 `skill.root`，复用 `read_file` 的 `read_text_range` 内核）。**KV 缓存关键约束**：注入恒为追加式——目录是稳定前缀、已激活块按激活顺序拼接在其后、旧内容逐字节不变（`runtime::SkillRuntime::render`）。**未做**（P2+）：`/skill-name` slash 直接激活、去重激活提示、`allowed-tools` 强制、skill 安装器 / 市场
 
 
 **顺手能修的**：

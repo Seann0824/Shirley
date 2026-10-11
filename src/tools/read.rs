@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use shirley_agent_sdk::workspace::{WorkSpace, WorkspaceError};
 use shirley_agent_sdk::{ToolError, tool};
@@ -58,7 +58,7 @@ fn clip_to_budget(text: &str, budget: usize) -> &str {
     &text[..end]
 }
 
-/// 按行读取工作区内的文本文件，返回带行号的片段。
+/// 按行读取工作区内文本文件，返回带行号的片段。
 ///
 /// 存在的意义是**把读取能力变得可控**：路径受工作区约束、行数与字节数都有
 /// 硬上限，模型不再需要（也不该）用 `cat` 裸读整个文件把上下文灌满。
@@ -76,6 +76,24 @@ pub async fn read_file(
     #[param(description = "最多读取多少行，省略时 200 行，上限 2000 行")]
     line_count: Option<usize>,
 ) -> Result<String, ToolError> {
+    let root = workspace_root()
+        .ok_or_else(|| ToolError::ExecutionError("无法确定工作区根目录".into()))?;
+    read_text_range(&root, &path, &path, start_line, line_count).await
+}
+
+/// 受控读取内核：把 `root` 下的相对路径 `path` 按行读出，返回带行号的片段。
+///
+/// 这是 `read_file`（根 = 工作区）与 `read_skill_file`（根 = skill 目录）**唯一
+/// 的读取实现**——边界只有一处（`docs/security.md`）：路径受 `root` 约束、行数 /
+/// 字节数有硬上限、疑似密钥拒绝、二进制探测。`display` 是给模型看的路径名
+/// （相对引用），与 `path` 分开，方便 skill 场景展示 `scripts/foo.py` 这种形式。
+pub(crate) async fn read_text_range(
+    root: &Path,
+    path: &str,
+    display: &str,
+    start_line: Option<usize>,
+    line_count: Option<usize>,
+) -> Result<String, ToolError> {
     let start_line = start_line.unwrap_or(1);
     if start_line == 0 {
         return Err(ToolError::ArgumentsError("起始行必须大于 0".into()));
@@ -86,12 +104,10 @@ pub async fn read_file(
     }
     let count = requested.min(MAX_LINE_COUNT);
 
-    // 1. 路径先过工作区校验：绝对路径与 `..` 越界都在这里被拒绝。
-    let root = workspace_root()
-        .ok_or_else(|| ToolError::ExecutionError("无法确定工作区根目录".into()))?;
-    let workspace = WorkSpace::new(root)
+    // 1. 路径先过根约束：绝对路径与 `..` 越界都在这里被拒绝。
+    let workspace = WorkSpace::new(root.to_path_buf())
         .map_err(|error| ToolError::ExecutionError(format!("工作区初始化失败: {error}")))?;
-    let resolved = workspace.resolve(&path).map_err(|error| match error {
+    let resolved = workspace.resolve(path).map_err(|error| match error {
         // 越界 / 非法路径都是请求侧问题：模型换个路径或写法就能成功，
         // 所以归为参数错误，而不是执行失败。
         WorkspaceError::OutsideRoot(_) | WorkspaceError::InvalidPath(_) => {
@@ -105,42 +121,42 @@ pub async fn read_file(
         && is_secret_file(name)
     {
         return Err(ToolError::ArgumentsError(format!(
-            "拒绝读取疑似密钥文件: {path}"
+            "拒绝读取疑似密钥文件: {display}"
         )));
     }
 
     // 3. 目录 / 特殊文件给出明确引导，而不是让读取莫名其妙地失败。
     let metadata = tokio::fs::metadata(&resolved)
         .await
-        .map_err(|error| ToolError::ExecutionError(format!("读取 {path} 元信息失败: {error}")))?;
+        .map_err(|error| ToolError::ExecutionError(format!("读取 {display} 元信息失败: {error}")))?;
     if metadata.is_dir() {
         return Err(ToolError::ExecutionError(format!(
-            "{path} 是目录；查看目录请用 bash 的 ls，本工具只读文件"
+            "{display} 是目录；查看目录请用 bash 的 ls，本工具只读文件"
         )));
     }
     if !metadata.is_file() {
         return Err(ToolError::ExecutionError(format!(
-            "{path} 不是普通文件，无法读取"
+            "{display} 不是普通文件，无法读取"
         )));
     }
 
     // 4. 打开并做二进制探测。
     let mut file = tokio::fs::File::open(&resolved)
         .await
-        .map_err(|error| ToolError::ExecutionError(format!("打开文件 {path} 失败: {error}")))?;
+        .map_err(|error| ToolError::ExecutionError(format!("打开文件 {display} 失败: {error}")))?;
     let mut sniff = vec![0u8; BINARY_SNIFF_BYTES];
     let sniffed = file
         .read(&mut sniff)
         .await
-        .map_err(|error| ToolError::ExecutionError(format!("读取文件 {path} 失败: {error}")))?;
+        .map_err(|error| ToolError::ExecutionError(format!("读取文件 {display} 失败: {error}")))?;
     if sniff[..sniffed].contains(&0) {
         return Err(ToolError::ExecutionError(format!(
-            "{path} 看起来是二进制文件，已拒绝读取"
+            "{display} 看起来是二进制文件，已拒绝读取"
         )));
     }
     file.seek(std::io::SeekFrom::Start(0))
         .await
-        .map_err(|error| ToolError::ExecutionError(format!("定位文件 {path} 失败: {error}")))?;
+        .map_err(|error| ToolError::ExecutionError(format!("定位文件 {display} 失败: {error}")))?;
 
     // 5. 跳到起始行。
     let mut reader = BufReader::new(file);
@@ -151,10 +167,10 @@ pub async fn read_file(
         let read = reader
             .read_until(b'\n', &mut buffer)
             .await
-            .map_err(|error| ToolError::ExecutionError(format!("读取文件 {path} 失败: {error}")))?;
+            .map_err(|error| ToolError::ExecutionError(format!("读取文件 {display} 失败: {error}")))?;
         if read == 0 {
             return Ok(format!(
-                "[{path} 在第 {start_line} 行之前已结束，没有可读取的内容]"
+                "[{display} 在第 {start_line} 行之前已结束，没有可读取的内容]"
             ));
         }
         line_no += 1;
@@ -170,7 +186,7 @@ pub async fn read_file(
             // 行数已达标，探一下还有没有后续内容，决定是否提示续读。
             buffer.clear();
             let read = reader.read_until(b'\n', &mut buffer).await.map_err(|error| {
-                ToolError::ExecutionError(format!("读取文件 {path} 失败: {error}"))
+                ToolError::ExecutionError(format!("读取文件 {display} 失败: {error}"))
             })?;
             more_lines = read > 0;
             break;
@@ -180,7 +196,7 @@ pub async fn read_file(
         let read = reader
             .read_until(b'\n', &mut buffer)
             .await
-            .map_err(|error| ToolError::ExecutionError(format!("读取文件 {path} 失败: {error}")))?;
+            .map_err(|error| ToolError::ExecutionError(format!("读取文件 {display} 失败: {error}")))?;
         if read == 0 {
             break;
         }
@@ -217,12 +233,12 @@ pub async fn read_file(
 
     if emitted == 0 {
         return Ok(format!(
-            "[{path} 在第 {start_line} 行之前已结束，没有可读取的内容]"
+            "[{display} 在第 {start_line} 行之前已结束，没有可读取的内容]"
         ));
     }
 
     let last_line = start_line + emitted - 1;
-    let mut result = format!("# {path}（第 {start_line}-{last_line} 行）\n{out}");
+    let mut result = format!("# {display}（第 {start_line}-{last_line} 行）\n{out}");
     if truncated {
         let next = last_line + 1;
         result.push_str(&format!(
