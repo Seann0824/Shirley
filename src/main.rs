@@ -43,6 +43,9 @@ async fn main() -> Result<(), AgentError> {
     // 应用装配（配置 / 模型目录 / 工具 / 会话 / Agent）——两个界面共用。
     let factory = bootstrap::AgentFactory::assemble(working_dir)?;
 
+    // 后台预热模型目录：让首次打开 `/model` 不必等一次网络往返。
+    factory.prewarm_model_catalog();
+
     match Mode::from_env_and_args() {
         Mode::Tui => interface::run(factory).await,
         // 桌面界面：进入 Tauri 事件循环（阻塞主线程）。

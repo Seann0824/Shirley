@@ -2,6 +2,8 @@
 
 A coding agent written in Rust, named after Shirley from *Code Geass*.
 
+> English | [简体中文](README.zh-CN.md)
+
 The repository is organized in three layers:
 
 | Layer | Location | Responsibility |
@@ -17,7 +19,16 @@ cp .env.example .env   # create it yourself using the keys documented in .env
 cargo run
 ```
 
-Configuration is resolved in increasing priority: built-in defaults → global `<config_dir>/shirley/config.toml` → workspace `<root>/.shirley/config.toml` → environment variables.
+Configuration comes from four layers, each overriding the previous one field by field:
+
+1. built-in defaults (protocol, model, context window)
+2. global `<config_dir>/shirley/config.toml`
+3. workspace `<root>/.shirley/config.toml`
+4. environment variables (`LOCAL_*`)
+
+A layer only speaks for the keys it actually sets — anything omitted falls through to the layer below. That is why overriding just `model` in the workspace config still inherits `base_url` from the global one.
+
+![Shirley configuration structure](docs/assets/config-resolution.en.svg)
 
 The easiest path is to put it in `.env`:
 

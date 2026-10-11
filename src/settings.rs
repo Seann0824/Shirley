@@ -39,6 +39,8 @@ const WORKSPACE_CONFIG_REL: &str = ".shirley/config.toml";
 const DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
 /// 内置默认上下文窗口：`104858 >> 1`（旧 `main.rs` 的取值）。
 const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 104858 >> 1;
+/// 内置默认推理强度（与旧 `bootstrap.rs` 的硬编码一致）。
+const DEFAULT_REASONING_EFFORT: &str = "low";
 
 /// 配置文件的结构（也是每一层覆盖的载体）。
 ///
@@ -170,6 +172,17 @@ pub struct ProviderSettings {
     pub model: Option<String>,
     /// 上下文窗口 token 数。
     pub context_window_tokens: Option<u64>,
+    /// 是否开启思考（reasoning）。缺省 `true`。
+    ///
+    /// 真实 Anthropic 兼容端点要求 `thinking` 必须同时给 `budget_tokens`，而适配器
+    /// 只写 `{"type":"enabled"}`；这类端点需把本项设为 `false`，或用 `extra_body`
+    /// 整个覆盖 `thinking` 对象。
+    pub thinking: Option<bool>,
+    /// 推理强度（`low` / `medium` / `high`）。缺省 `low`；Anthropic 协议下刻意忽略。
+    pub reasoning_effort: Option<String>,
+    /// 覆盖 / 追加请求体的逃生口（浅合并，`null` 删键）。
+    /// 见 SDK `ModelConfig::extra_body`；用来填各家私有字段。
+    pub extra_body: Option<toml::Value>,
 }
 
 impl FileSettings {
@@ -229,6 +242,12 @@ pub struct Settings {
     pub models_url: Option<String>,
     pub model: String,
     pub context_window_tokens: u64,
+    /// 是否开启思考（缺省 `true`）。
+    pub thinking: bool,
+    /// 推理强度（缺省 `low`）。
+    pub reasoning_effort: String,
+    /// 请求体逃生口（已转成 JSON，供 SDK 浅合并）。
+    pub extra_body: Option<serde_json::Value>,
     /// 压缩策略（已落定，可直接 `to_sdk()` 交给 `Agent`）。
     pub compression: CompressionSettings,
     /// 记忆系统配置（curator 模型 / 定期整理阈值）。
@@ -339,6 +358,20 @@ impl Settings {
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
 
+        // 思考开关缺省开启；推理强度缺省 `low`（与旧硬编码一致）。
+        let thinking = merged.thinking.unwrap_or(true);
+        let reasoning_effort = merged
+            .reasoning_effort
+            .filter(|v| !v.trim().is_empty())
+            .unwrap_or_else(|| DEFAULT_REASONING_EFFORT.to_owned());
+        // TOML 逃生口 → JSON（SDK 的 `extra_body` 是 `serde_json::Value`）。
+        let extra_body = match merged.extra_body {
+            Some(value) => Some(serde_json::to_value(value).map_err(|error| {
+                SettingsError::Invalid(format!("extra_body 无法转换为 JSON: {error}"))
+            })?),
+            None => None,
+        };
+
         Ok(Self {
             protocol,
             base_url,
@@ -346,6 +379,9 @@ impl Settings {
             models_url: merged.models_url.filter(|v| !v.trim().is_empty()),
             model,
             context_window_tokens,
+            thinking,
+            reasoning_effort,
+            extra_body,
             compression,
             memory,
         })
@@ -388,6 +424,16 @@ fn env_layer(env: &dyn Fn(&str) -> Option<String>) -> ProviderSettings {
         models_url: env("LOCAL_MODELS_URL"),
         model: env("LOCAL_MODEL"),
         context_window_tokens: env("LOCAL_CONTEXT_WINDOW_TOKENS").and_then(|v| v.parse().ok()),
+        // `LOCAL_THINKING` 用常见真值写法解析；缺省不表态（None），让位给文件层 / 内置默认。
+        thinking: env("LOCAL_THINKING").map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        }),
+        reasoning_effort: env("LOCAL_REASONING_EFFORT"),
+        // 逃生口结构复杂，只走配置文件，不提供环境变量。
+        extra_body: None,
     }
 }
 
@@ -415,6 +461,9 @@ fn merge_into(base: &mut ProviderSettings, over: ProviderSettings) {
         models_url,
         model,
         context_window_tokens,
+        thinking,
+        reasoning_effort,
+        extra_body,
     );
 }
 
@@ -708,6 +757,36 @@ mod tests {
         let settings =
             Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
         assert_eq!(settings.memory, MemorySettings::default());
+    }
+
+    #[test]
+    fn thinking_defaults_to_true_and_effort_to_low() {
+        let root = temp_root("thinking_default");
+        let settings =
+            Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+        assert!(settings.thinking, "缺省应开启思考");
+        assert_eq!(settings.reasoning_effort, "low");
+        assert_eq!(settings.extra_body, None);
+    }
+
+    #[test]
+    fn thinking_and_extra_body_parse_from_provider_table() {
+        let root = temp_root("thinking_extra");
+        let ws_dir = root.join(".shirley");
+        std::fs::create_dir_all(&ws_dir).unwrap();
+        std::fs::write(
+            ws_dir.join("config.toml"),
+            "[provider]\nbase_url = \"http://x\"\nthinking = false\nreasoning_effort = \"high\"\n\n[provider.extra_body]\nbudget_tokens = 2048\n",
+        )
+        .unwrap();
+
+        let settings = Settings::load(&root, None, &env_of(&[])).unwrap();
+        assert!(!settings.thinking, "thinking 应被配置为 false");
+        assert_eq!(settings.reasoning_effort, "high");
+        assert_eq!(
+            settings.extra_body,
+            Some(serde_json::json!({ "budget_tokens": 2048 }))
+        );
     }
 
 }
