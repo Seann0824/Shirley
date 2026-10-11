@@ -867,6 +867,10 @@ impl App {
             models_url: None,
             model: model.clone(),
             context_window_tokens: None,
+            // `/login` 只改端点 / 密钥 / 模型，思考与逃生口保持原样（None = 不覆盖）。
+            thinking: None,
+            reasoning_effort: None,
+            extra_body: None,
         };
         match crate::settings::save_provider(&target, provider) {
             Ok(path) => {
