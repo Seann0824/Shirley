@@ -59,6 +59,18 @@ impl SkillRuntime {
         self.catalog.skill_names()
     }
 
+    /// 目录里的 `(name, description)` 列表（供 desktop `/` 候选浮层展示）。
+    ///
+    /// 与 [`SkillRuntime::skill_names`] 同源，只是多带一条 description——
+    /// 前端候选需要它做副标题。
+    pub fn entries(&self) -> Vec<(String, String)> {
+        self.catalog
+            .skills()
+            .iter()
+            .map(|skill| (skill.name.clone(), skill.description.clone()))
+            .collect()
+    }
+
     /// 是否已激活该 skill（诊断 / 测试用）。
     #[cfg(test)]
     pub fn is_active(&self, name: &str) -> bool {

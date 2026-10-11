@@ -29,6 +29,14 @@ export type FileEntry = {
   kind: "file" | "dir";
 };
 
+/** `/` 技能候选条目（与 Rust 侧 `SkillEntryWire` 对齐）。 */
+export type SkillEntry = {
+  /** 技能名（`/<name>` 入口按它匹配）。 */
+  name: string;
+  /** 技能描述（候选副标题）。 */
+  description: string;
+};
+
 /** 一个项目 = 一个已关联的工作区目录（与 Rust 侧 `ProjectEntryWire` 对齐）。 */
 export type ProjectEntry = {
   /** 项目标识（规范路径字符串）——改名 / 归档 / 恢复都按它。 */
@@ -105,6 +113,10 @@ export type AgentBridge = {
   setModel: (project: string, value: string) => Promise<void>;
   /** 按关键词检索工作区文件（`@` 引用用，纯应用层）。 */
   searchFiles: (project: string, query: string) => Promise<FileEntry[]>;
+  /** 列出某项目当前会话可见的技能（`/` 候选用）。 */
+  listSkills: (project: string) => Promise<SkillEntry[]>;
+  /** 激活某项目指定会话的一个技能（`/<skill-name>` 入口，与 TUI 同语义）。 */
+  activateSkill: (project: string, session: string, name: string) => Promise<void>;
   /** 列出某项目的全部会话（按最近修改降序）。 */
   listSessions: (project: string) => Promise<SessionEntry[]>;
   /** 某项目当前会话名（无则 null）。 */
@@ -185,6 +197,12 @@ async function createTauriBridge(): Promise<AgentBridge> {
     },
     async searchFiles(project, query) {
       return invoke<FileEntry[]>("agent_search_files", { project, query });
+    },
+    async listSkills(project) {
+      return invoke<SkillEntry[]>("agent_list_skills", { project });
+    },
+    async activateSkill(project, session, name) {
+      await invoke("agent_activate_skill", { project, session, name });
     },
     async listSessions(project) {
       return invoke<SessionEntry[]>("agent_list_sessions", { project });
@@ -305,6 +323,17 @@ function createMockBridge(): AgentBridge {
       const q = query.trim().toLowerCase();
       if (!q) return all;
       return all.filter((entry) => entry.path.toLowerCase().includes(q));
+    },
+    async listSkills() {
+      // mock：返回几个假技能，让 `/` 弹层在纯浏览器下可调试。
+      return [
+        { name: "commit", description: "按逻辑主题拆分并提交改动" },
+        { name: "review", description: "审查当前改动并给出建议" },
+        { name: "migrate", description: "把 TS 后端迁移到 Rust 的流程指引" },
+      ];
+    },
+    async activateSkill() {
+      // mock：激活无副作用（后端会写 SkillRuntime）。
     },
     async listSessions(project) {
       return mockSessions(project).map((s) => ({ ...s }));

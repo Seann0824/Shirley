@@ -14,6 +14,8 @@ import {
   type MentionEditorHandle,
 } from "@/lib/file-mentions/MentionEditor";
 import { useFileMentionSearch } from "@/lib/file-mentions/useFileMentionSearch";
+import { useSkillSlashSearch } from "@/lib/slash/useSkillSlashSearch";
+import { SkillSlashPopover } from "@/lib/slash/SkillSlashPopover";
 import { stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
 import { agentBridge, type ProjectEntry, type SessionSubscription } from "@/lib/bridge";
@@ -58,7 +60,8 @@ export function App() {
   // UI 级错误（项目 / 会话 / 模型切换失败）；运行期错误进各会话视图的 `error`。
   const [uiError, setUiError] = useState("");
 
-  const mentionSearch = useFileMentionSearch();
+  const mentionSearch = useFileMentionSearch(activeProject);
+  const slashSearch = useSkillSlashSearch(activeProject);
   const editorRef = useRef<MentionEditorHandle>(null);
   // 当前订阅句柄（切走时退订）。
   const subRef = useRef<SessionSubscription | null>(null);
@@ -321,6 +324,52 @@ export function App() {
     [activeProject, openSession, sessionName],
   );
 
+  /** 把一条消息作为新一轮发给模型（回显 user + 起 assistant 流式占位）。
+   *  `display` 是回显正文（保留 chip 占位符），`text` 是发给模型的纯文本。 */
+  const dispatchTurn = useCallback(
+    async (
+      project: string,
+      session: string,
+      text: string,
+      display: string,
+      refs: FileReference[],
+    ) => {
+      const key = viewKey(project, session);
+      if (views[key]?.busy ?? false) return;
+      const assistantId = nextId();
+      turnRef.current.set(key, assistantId);
+      setViews((prev) => {
+        const view = prev[key] ?? emptyView();
+        return {
+          ...prev,
+          [key]: {
+            ...view,
+            messages: [
+              ...view.messages,
+              { id: nextId(), role: "user", content: display, status: "complete", references: refs },
+              { id: assistantId, role: "assistant", content: "", status: "streaming" },
+            ],
+            turnSegments: { ...view.turnSegments, [assistantId]: [] },
+            busy: true,
+            error: "",
+          },
+        };
+      });
+
+      const bridge = await agentBridge();
+      try {
+        await bridge.send(project, session, text, refs.map((reference) => reference.path));
+      } catch (e) {
+        const message = e instanceof Error ? e.message : String(e);
+        setViews((prev) => {
+          const view = prev[key] ?? emptyView();
+          return { ...prev, [key]: { ...view, busy: false, error: message } };
+        });
+      }
+    },
+    [views],
+  );
+
   const send = useCallback(async () => {
     // 发给模型 / 判空的正文要剥掉占位符（占位符不是用户文字）；但**回显用的
     // content 必须保留占位符**——`InlineReferences` 正是按占位符位置把 chip 落回
@@ -329,45 +378,61 @@ export function App() {
     const project = activeProject;
     const session = sessionName;
     if (!plain || !project || !session) return;
-    const key = viewKey(project, session);
-    if ((views[key]?.busy ?? false)) return;
-    const display = input.trim();
+
+    // `/` 技能入口（与 TUI 同语义）：`/name` 或 `/name args`。
+    //   无参 = 只激活 + 本地系统提示（不发模型）；有参 = 激活 + 把 args 作为本轮 prompt。
+    // desktop 无本地内置 slash 指令，命中 skill 才走这条路径；否则按普通消息发。
+    if (plain.startsWith("/")) {
+      const [head, ...rest] = plain.slice(1).split(/\s+/);
+      const args = rest.join(" ").trim();
+      if (head && slashSearch.hasSkill(head)) {
+        const key = viewKey(project, session);
+        if (views[key]?.busy ?? false) return;
+        try {
+          await (await agentBridge()).activateSkill(project, session, head);
+        } catch (e) {
+          const message = e instanceof Error ? e.message : String(e);
+          setUiError(message);
+          return;
+        }
+        slashSearch.close();
+        setInput("");
+        setReferences([]);
+        setUiError("");
+        if (!args) {
+          // 无参：只激活，不打扰模型，给一条本地系统提示。
+          setViews((prev) => {
+            const view = prev[key] ?? emptyView();
+            return {
+              ...prev,
+              [key]: {
+                ...view,
+                messages: [
+                  ...view.messages,
+                  {
+                    id: nextId(),
+                    role: "user",
+                    content: `已激活技能 /${head}（本轮起每轮注入其指令）。`,
+                    status: "complete",
+                  },
+                ],
+              },
+            };
+          });
+          return;
+        }
+        // 有参：激活后把 args 当本轮 prompt 继续走正常发送流程。
+        await dispatchTurn(project, session, args, args, []);
+        return;
+      }
+    }
+
     const refs = references;
     setInput("");
     setReferences([]);
     setUiError("");
-
-    const assistantId = nextId();
-    turnRef.current.set(key, assistantId);
-    setViews((prev) => {
-      const view = prev[key] ?? emptyView();
-      return {
-        ...prev,
-        [key]: {
-          ...view,
-          messages: [
-            ...view.messages,
-            { id: nextId(), role: "user", content: display, status: "complete", references: refs },
-            { id: assistantId, role: "assistant", content: "", status: "streaming" },
-          ],
-          turnSegments: { ...view.turnSegments, [assistantId]: [] },
-          busy: true,
-          error: "",
-        },
-      };
-    });
-
-    const bridge = await agentBridge();
-    try {
-      await bridge.send(project, session, plain, refs.map((reference) => reference.path));
-    } catch (e) {
-      const message = e instanceof Error ? e.message : String(e);
-      setViews((prev) => {
-        const view = prev[key] ?? emptyView();
-        return { ...prev, [key]: { ...view, busy: false, error: message } };
-      });
-    }
-  }, [activeProject, input, references, sessionName, views]);
+    await dispatchTurn(project, session, plain, input.trim(), refs);
+  }, [activeProject, input, references, sessionName, views, slashSearch, dispatchTurn]);
 
   const stop = useCallback(async () => {
     const project = activeProject;
@@ -464,7 +529,20 @@ export function App() {
           </p>
         )}
         <div className="relative shrink-0 px-3 pb-3">
-          {mentionSearch.popoverOpen && (
+          {slashSearch.open && (
+            <div className="absolute inset-x-3 bottom-full z-30 mb-1">
+              <SkillSlashPopover
+                open={slashSearch.open}
+                query={slashSearch.query}
+                results={slashSearch.results}
+                error={slashSearch.error}
+                selectedIndex={slashSearch.selectedIndex}
+                onSelect={(result) => editorRef.current?.insertSlashCommand(result.name)}
+                onRetry={() => {}}
+              />
+            </div>
+          )}
+          {!slashSearch.open && mentionSearch.popoverOpen && (
             <div className="absolute inset-x-3 bottom-full z-30 mb-1">
               <FileMentionPopover
                 open={mentionSearch.popoverOpen}
@@ -501,6 +579,7 @@ export function App() {
                 placeholder="给 Shirley 发消息…（输入 @ 引用文件）"
                 autoFocus
                 search={mentionSearch}
+                slash={slashSearch}
                 onChange={(text, refs) => {
                   setInput(text);
                   setReferences(refs);

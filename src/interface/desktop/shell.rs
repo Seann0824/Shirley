@@ -144,6 +144,13 @@ struct FileEntryWire {
     kind: &'static str,
 }
 
+/// `/` 技能候选条目（与 `web/src/lib/bridge.ts` 的 `SkillEntry` 对齐）。
+#[derive(Debug, Clone, Serialize)]
+struct SkillEntryWire {
+    name: String,
+    description: String,
+}
+
 /// 前端消费的项目条目（与 `web/src/lib/bridge.ts` 的 `ProjectEntry` 对齐）。
 #[derive(Debug, Clone, Serialize)]
 struct ProjectEntryWire {
@@ -600,6 +607,59 @@ async fn agent_search_files(
         .collect())
 }
 
+/// 列出某项目当前会话可见的技能（`/` 候选用）。
+///
+/// 技能目录跨会话共享（装配时扫一次），故取该项目任一已加载会话的 `SkillRuntime`；
+/// 优先当前前台会话。项目运行时尚未加载时，先 `ensure_runtime` 造出（会扫一次目录）。
+#[tauri::command]
+async fn agent_list_skills(
+    state: State<'_, DesktopState>,
+    project: String,
+) -> Result<Vec<SkillEntryWire>, String> {
+    let runtime = ensure_runtime(&state, &project).await?;
+    let guard = runtime.lock().await;
+    let skills = guard
+        .sessions
+        .active()
+        .skills
+        .as_ref()
+        .map(|skills| skills.entries())
+        .unwrap_or_default();
+    Ok(skills
+        .into_iter()
+        .map(|(name, description)| SkillEntryWire { name, description })
+        .collect())
+}
+
+/// 激活某项目指定会话的一个技能（`/<skill-name>` 入口，与 TUI 同语义）。
+///
+/// 只写该会话的 `SkillRuntime`：下一轮由 `SkillContextProvider` 追加注入其正文
+/// （不新增注入接缝，`docs/skills.md` 5.6）。未知技能 / 读文件失败返回错误文案。
+#[tauri::command]
+async fn agent_activate_skill(
+    state: State<'_, DesktopState>,
+    project: String,
+    session: String,
+    name: String,
+) -> Result<(), String> {
+    let runtime = ensure_runtime(&state, &project).await?;
+    let guard = runtime.lock().await;
+    let session_ref = guard
+        .sessions
+        .session(&session)
+        .ok_or_else(|| format!("会话不存在：{session}"))?;
+    let skills = session_ref
+        .skills
+        .as_ref()
+        .ok_or_else(|| "当前会话不支持技能".to_owned())?;
+    skills.activate(&name).map(|_| ()).map_err(|error| match error {
+        crate::skills::runtime::ActivateError::UnknownSkill(name) => {
+            format!("未知技能：{name}")
+        }
+        crate::skills::runtime::ActivateError::ReadFailed(reason) => reason,
+    })
+}
+
 /// 列出某项目的全部会话（按最近修改降序）。
 #[tauri::command]
 async fn agent_list_sessions(
@@ -769,6 +829,8 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
             agent_list_models,
             agent_set_model,
             agent_search_files,
+            agent_list_skills,
+            agent_activate_skill,
             agent_list_sessions,
             agent_current_session,
             agent_new_session,

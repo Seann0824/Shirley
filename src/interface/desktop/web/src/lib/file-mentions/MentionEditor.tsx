@@ -21,12 +21,16 @@ import {
   setCaretAt,
 } from "./editor-dom";
 import type { FileMentionSearchState } from "./useFileMentionSearch";
+import type { SkillSlashState } from "../slash/useSkillSlashSearch";
 import type { FileReference } from "./types";
+import type { SkillEntry } from "@/lib/bridge";
 
 export type MentionEditorHandle = {
   focus: () => void;
   /** 把某个文件/目录作为 chip 插入光标处（供外部「+」按钮调用）。 */
   insertReference: (reference: FileReference) => void;
+  /** 把 `/` 技能候选替换成 `/name `（供 `SkillSlashPopover` 点击项调用）。 */
+  insertSlashCommand: (name: string) => void;
 };
 
 /** 只保留正文里实际出现的占位符数量对应的引用（防御外部传入不一致）。 */
@@ -56,11 +60,13 @@ export const MentionEditor = forwardRef<
     autoFocus?: boolean;
     className?: string;
     search: FileMentionSearchState;
+    /** `/` 技能候选控制器（与 `@` 同款，浮层由调用方渲染）。 */
+    slash: SkillSlashState;
     onChange: (value: string, references: FileReference[]) => void;
     onSubmit: () => void;
   }
 >(function MentionEditor(
-  { id, label, value, references, placeholder, disabled, autoFocus, className, search, onChange, onSubmit },
+  { id, label, value, references, placeholder, disabled, autoFocus, className, search, slash, onChange, onSubmit },
   ref,
 ) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -149,13 +155,17 @@ export const MentionEditor = forwardRef<
         refs = refs.slice(0, chipCount);
       }
       emit(text, refs);
-      syncMention(text, caretOffset(root), chipCount);
+      const caret = caretOffset(root);
+      syncMention(text, caret, chipCount);
+      slash.sync(text);
       return;
     }
 
     emit(text, refs);
-    syncMention(text, caretOffset(root), chipCount);
-  }, [emit, syncMention]);
+    const caret = caretOffset(root);
+    syncMention(text, caret, chipCount);
+    slash.sync(text);
+  }, [emit, syncMention, slash]);
 
   const handleSelect = useCallback(
     (result: FileReference) => {
@@ -179,11 +189,28 @@ export const MentionEditor = forwardRef<
     [rebuild, emit, search],
   );
 
+  // 确认一个技能候选：把整段 `/query` 替换成 `/name `（保留尾随空格便于继续输入参数）。
+  // 之后用户按 Enter 提交，由 `App::send` 判定是否命中技能入口并激活。
+  const handleSlashSelect = useCallback(
+    (skill: SkillEntry) => {
+      const root = rootRef.current;
+      if (!root) return;
+      const next = `/${skill.name} `;
+      slash.close();
+      rebuild(next, refsRef.current, next.length);
+      emit(next, refsRef.current);
+    },
+    [rebuild, emit, slash],
+  );
+
   const selectRef = useRef<(reference: FileReference) => void>(() => {});
   selectRef.current = handleSelect;
+  const slashSelectRef = useRef<(name: string) => void>(() => {});
+  slashSelectRef.current = (name) => handleSlashSelect({ name, description: "" });
   useImperativeHandle(ref, () => ({
     focus: () => rootRef.current?.focus({ preventScroll: true }),
     insertReference: (reference) => selectRef.current(reference),
+    insertSlashCommand: (name) => slashSelectRef.current(name),
   }));
 
   const handleBackspace = useCallback((): boolean => {
@@ -272,6 +299,37 @@ export const MentionEditor = forwardRef<
         }
         return;
       }
+      if (slash.open) {
+        if (event.key === "ArrowDown") {
+          event.preventDefault();
+          slash.moveSelection(1);
+          return;
+        }
+        if (event.key === "ArrowUp") {
+          event.preventDefault();
+          slash.moveSelection(-1);
+          return;
+        }
+        if (event.key === "Escape") {
+          event.preventDefault();
+          event.stopPropagation();
+          slash.close();
+          return;
+        }
+        if (event.key === "Enter" || event.key === "Tab") {
+          const result = slash.confirmSelection();
+          if (result) {
+            event.preventDefault();
+            handleSlashSelect(result);
+            return;
+          }
+          // 没有可确认的候选：Tab 吞掉（避免焦点跳走），Enter 交回正常提交。
+          if (event.key === "Tab") {
+            event.preventDefault();
+            return;
+          }
+        }
+      }
       if (event.key === "ArrowLeft" && !event.shiftKey && !event.altKey && !event.metaKey && !event.ctrlKey) {
         if (moveCaret(-1)) {
           event.preventDefault();
@@ -289,7 +347,7 @@ export const MentionEditor = forwardRef<
         onSubmit();
       }
     },
-    [search, handleSelect, onSubmit, moveCaret],
+    [search, slash, handleSelect, handleSlashSelect, onSubmit, moveCaret],
   );
 
   // 原生 `beforeinput`：React 的 `onBeforeInput` 是 textInput/keypress 合成的旧接口，
