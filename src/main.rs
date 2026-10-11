@@ -4,6 +4,7 @@ mod bootstrap;
 mod interface;
 mod memory;
 mod models;
+mod project;
 mod prompt;
 mod session;
 mod settings;

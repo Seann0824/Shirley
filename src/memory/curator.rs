@@ -263,7 +263,7 @@ pub fn render_transcript(messages: &[Message]) -> String {
 pub fn build_prompt(transcript: &str, existing: &[(String, Entry)], session_ref: &str) -> String {
     let mut prompt = String::new();
     prompt.push_str(
-        "你是记忆整理器（curator）。读下面这段对话轨迹，产出**尽可能小**的记忆条目增量。\n\n\
+        "你是记忆整理器（curator）。读下面这段对话轨迹，产出**尽可能少而精**的记忆条目增量——条目数要少，但每条要完整，能独立支撑将来的检索与引用。\n\n\
          **边界**：轨迹只是对环境的一次局部观察，是部分证据、不是 ground truth——\
          一次成功不自动验证每个中间假设。只沉淀**跨会话仍然成立**的用户事实 / 偏好 / 事件 / 程序；\
          不确定就不要写（或把 confidence 设为 low）。不要推演轨迹里没有的东西。\n\n\
@@ -280,7 +280,12 @@ pub fn build_prompt(transcript: &str, existing: &[(String, Entry)], session_ref:
          - `source`: 证据引用数组，**必填**，格式 `<会话文件>#turn:N`，本次会话填 ",
     );
     prompt.push_str(&format!("`{session_ref}#turn:N`"));
-    prompt.push_str("\n- `body`: 正文（Markdown，一句话讲清）\n\n");
+    prompt.push_str(
+        "\n- `body`: 正文（Markdown）。**第一行是一句话摘要**（供索引 / 相关注入展示），\n\
+         空一行后写**跨会话可复用的具体细节**——日期 / 地点 / 人名 / 数字 / 决策 / 约束等确定\n\
+         事实，用要点列出（简明但完整，别超过约 500 字）。只写轨迹里真实出现、且将来仍然成立\n\
+         的内容；不要复述整段对话，不要推演。\n\n",
+    );
     prompt.push_str("不要删除历史：要改旧偏好就新建条目并 `supersedes` 旧 id。\n\n");
 
     if !existing.is_empty() {
@@ -976,6 +981,19 @@ mod tests {
         assert!(prompt.contains("部分证据"));
         assert!(prompt.contains("pref-a"));
         assert!(prompt.contains("sessions/x.jsonl#turn:N"));
+    }
+
+    #[test]
+    fn build_prompt_keeps_detail_in_body() {
+        // 回归：body 不再被要求压成一句话——首行摘要 + 空行 + 具体细节，
+        // 否则 L2「按需细节层」为空，跨会话检索不到细节（旅游规划场景）。
+        let prompt = build_prompt("## User\nhi\n", &[], "sessions/x.jsonl");
+        assert!(prompt.contains("第一行是一句话摘要"), "应要求首行做摘要: {prompt}");
+        assert!(prompt.contains("具体细节"), "应要求正文写具体细节: {prompt}");
+        assert!(
+            !prompt.contains("一句话讲清"),
+            "不应再把 body 压成一句话: {prompt}"
+        );
     }
 
     // ---- V2-B：定期整理（consolidate）------------------------------------

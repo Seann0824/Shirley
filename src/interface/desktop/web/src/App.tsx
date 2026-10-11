@@ -16,7 +16,7 @@ import {
 import { useFileMentionSearch } from "@/lib/file-mentions/useFileMentionSearch";
 import { stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
-import { agentBridge, type SessionSubscription } from "@/lib/bridge";
+import { agentBridge, type ProjectEntry, type SessionSubscription } from "@/lib/bridge";
 import type { AgentEventWire, SessionSnapshot } from "@/types/wire";
 import type { AiSegment, AiToolExecution } from "@/types/ai";
 
@@ -26,8 +26,9 @@ const nextId = () => `m${++messageSeq}`;
 /**
  * 单个会话的视图状态（transcript + 每轮段落 + busy / 错误）。
  *
- * 多会话：事件按会话打标，每个会话各持一份视图；当前会话渲染，后台会话照常累加
- * （不因切走丢上下文）。切换会话 = 换渲染哪一份 + 换订阅哪个会话的事件流。
+ * 多项目多会话：事件按 `project` + `session` 打标，每个会话各持一份视图；当前会话
+ * 渲染，后台会话照常累加（不因切走丢上下文）。切换会话 = 换渲染哪一份 + 换订阅哪个
+ * 事件流。视图键是 `project::session`——会话名只在项目内唯一，跨项目会重名。
  */
 type SessionView = {
   messages: AiTranscriptMessage[];
@@ -40,40 +41,63 @@ function emptyView(): SessionView {
   return { messages: [], turnSegments: {}, busy: false, error: "" };
 }
 
+/** 视图键：跨项目不重名。 */
+const viewKey = (project: string, session: string) => `${project}::${session}`;
+
 export function App() {
-  // 每个会话一份视图（后台会话也保留，切回不丢）。
+  // 每个会话一份视图（后台会话也保留，切回不丢），键为 `project::session`。
   const [views, setViews] = useState<Record<string, SessionView>>({});
+  // 项目列表（活跃 + 归档分列）与当前项目。
+  const [projects, setProjects] = useState<ProjectEntry[]>([]);
+  const [archivedProjects, setArchivedProjects] = useState<ProjectEntry[]>([]);
+  const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [references, setReferences] = useState<FileReference[]>([]);
   const [model, setModel] = useState("");
-  // UI 级错误（切换 / 新建 / 删除 / 模型切换失败）；运行期错误进各会话视图的 `error`。
+  // UI 级错误（项目 / 会话 / 模型切换失败）；运行期错误进各会话视图的 `error`。
   const [uiError, setUiError] = useState("");
 
   const mentionSearch = useFileMentionSearch();
   const editorRef = useRef<MentionEditorHandle>(null);
   // 当前订阅句柄（切走时退订）。
   const subRef = useRef<SessionSubscription | null>(null);
-  // 每个会话当前在跑的 assistant 轮次 id（事件按它落点）。
+  // 每个会话当前在跑的 assistant 轮次 id（事件按它落点），键为 `project::session`。
   const turnRef = useRef<Map<string, string>>(new Map());
   // 快照应用前缓冲事件（订阅与快照之间到达的增量不丢）。
   const readyRef = useRef<Set<string>>(new Set());
   const bufferRef = useRef<Map<string, AgentEventWire[]>>(new Map());
 
+  const reloadProjects = useCallback(async () => {
+    try {
+      const bridge = await agentBridge();
+      const [active, archived] = await Promise.all([
+        bridge.listProjects(false),
+        bridge.listProjects(true).then((all) => all.filter((entry) => entry.archived)),
+      ]);
+      setProjects(active);
+      setArchivedProjects(archived);
+      return active;
+    } catch (e) {
+      setUiError(e instanceof Error ? e.message : String(e));
+      return [] as ProjectEntry[];
+    }
+  }, []);
+
   // 把一个事件应用到指定会话的视图（纯函数式更新，避免闭包过期）。
-  const applyEvent = useCallback((session: string, event: AgentEventWire) => {
+  const applyEvent = useCallback((key: string, event: AgentEventWire) => {
     const needsTurn =
       event.type === "content_delta" ||
       event.type === "reasoning_delta" ||
       event.type === "tool_started" ||
       event.type === "tool_finished";
-    let assistantId = turnRef.current.get(session) ?? null;
+    let assistantId = turnRef.current.get(key) ?? null;
     if (needsTurn && !assistantId) {
       assistantId = nextId();
-      turnRef.current.set(session, assistantId);
+      turnRef.current.set(key, assistantId);
     }
     setViews((prev) => {
-      const view = prev[session] ?? emptyView();
+      const view = prev[key] ?? emptyView();
       let next = view;
       if (
         needsTurn &&
@@ -89,98 +113,201 @@ export function App() {
           turnSegments: { ...view.turnSegments, [assistantId]: [] },
         };
       }
-      return { ...prev, [session]: applyWireEvent(next, event, assistantId) };
+      return { ...prev, [key]: applyWireEvent(next, event, assistantId) };
     });
   }, []);
 
   // 订阅一个会话：退订旧的，拿快照重建视图，再叠加之后的事件。
   const openSession = useCallback(
-    async (session: string) => {
+    async (project: string, session: string) => {
       const bridge = await agentBridge();
+      const key = viewKey(project, session);
       subRef.current?.unsubscribe();
       subRef.current = null;
-      readyRef.current.delete(session);
-      bufferRef.current.delete(session);
-      turnRef.current.delete(session);
-      const sub = await bridge.openSession(session, (event) => {
+      readyRef.current.delete(key);
+      bufferRef.current.delete(key);
+      turnRef.current.delete(key);
+      const sub = await bridge.openSession(project, session, (event) => {
         // 快照尚未应用：先缓冲，待快照落地后按序补放（不丢、不重）。
-        if (!readyRef.current.has(session)) {
-          const buffer = bufferRef.current.get(session) ?? [];
+        if (!readyRef.current.has(key)) {
+          const buffer = bufferRef.current.get(key) ?? [];
           buffer.push(event);
-          bufferRef.current.set(session, buffer);
+          bufferRef.current.set(key, buffer);
           return;
         }
-        applyEvent(session, event);
+        applyEvent(key, event);
       });
       subRef.current = sub;
       const { view, lastAssistantId } = viewFromSnapshot(sub.snapshot);
-      if (lastAssistantId) turnRef.current.set(session, lastAssistantId);
-      setViews((prev) => ({ ...prev, [session]: view }));
-      readyRef.current.add(session);
-      const buffered = bufferRef.current.get(session) ?? [];
-      bufferRef.current.delete(session);
-      for (const event of buffered) applyEvent(session, event);
+      if (lastAssistantId) turnRef.current.set(key, lastAssistantId);
+      setViews((prev) => ({ ...prev, [key]: view }));
+      readyRef.current.add(key);
+      const buffered = bufferRef.current.get(key) ?? [];
+      bufferRef.current.delete(key);
+      for (const event of buffered) applyEvent(key, event);
       setSessionName(session);
     },
     [applyEvent],
   );
 
-  useEffect(() => {
-    void (async () => {
-      const bridge = await agentBridge();
-      await bridge.modelName().then(setModel).catch(() => {});
-      const name = await bridge.currentSession().catch(() => null);
-      if (name) await openSession(name).catch(() => {});
-    })();
-  }, [openSession]);
-
-  const switchSession = useCallback(
-    async (name: string) => {
+  // 选中一个项目：切前台 + 打开它当前会话。
+  const selectProject = useCallback(
+    async (project: string) => {
       try {
         setUiError("");
+        if (project === activeProject) return;
         const bridge = await agentBridge();
-        await bridge.switchSession(name);
-        await openSession(name);
+        subRef.current?.unsubscribe();
+        subRef.current = null;
+        setSessionName(null);
+        setActiveProject(project);
+        await bridge.modelName(project).then(setModel).catch(() => setModel(""));
+        const name = await bridge.currentSession(project).catch(() => null);
+        if (name) await openSession(project, name).catch(() => {});
       } catch (e) {
         setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [openSession],
+    [activeProject, openSession],
   );
 
-  const newSession = useCallback(async () => {
+  // 启动：载入项目列表，选第一个（最近打开）并打开它当前会话。
+  useEffect(() => {
+    void (async () => {
+      const bridge = await agentBridge();
+      const active = await reloadProjects();
+      const first = active[0]?.id ?? null;
+      if (!first) return;
+      setActiveProject(first);
+      await bridge.modelName(first).then(setModel).catch(() => {});
+      const name = await bridge.currentSession(first).catch(() => null);
+      if (name) await openSession(first, name).catch(() => {});
+    })();
+  }, [reloadProjects, openSession]);
+
+  const addProject = useCallback(async () => {
     try {
       setUiError("");
       const bridge = await agentBridge();
-      // 不带标题：名字在首条消息后由 AI 自动生成，用户想改再手动重命名。
-      const entry = await bridge.newSession(null);
-      await openSession(entry.name);
-      // 直接聚焦输入框——新建会话的意图是"马上开始聊"，而不是先做管理。
-      editorRef.current?.focus();
+      const entry = await bridge.addProject();
+      if (!entry) return; // 用户取消
+      await reloadProjects();
+      await selectProject(entry.id);
     } catch (e) {
       setUiError(e instanceof Error ? e.message : String(e));
     }
-  }, [openSession]);
+  }, [reloadProjects, selectProject]);
 
-  const renameSession = useCallback(async (name: string, title: string) => {
-    try {
-      setUiError("");
-      await (await agentBridge()).renameSession(name, title);
-    } catch (e) {
-      setUiError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
+  const renameProject = useCallback(
+    async (project: string, name: string) => {
+      try {
+        setUiError("");
+        await (await agentBridge()).renameProject(project, name);
+        await reloadProjects();
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [reloadProjects],
+  );
 
-  const deleteSession = useCallback(
+  const archiveProject = useCallback(
+    async (project: string) => {
+      try {
+        setUiError("");
+        await (await agentBridge()).archiveProject(project);
+        // 归档的是当前项目：清空前台，切到下一个可用项目（可能为空）。
+        if (project === activeProject) {
+          subRef.current?.unsubscribe();
+          subRef.current = null;
+          setSessionName(null);
+          setActiveProject(null);
+          const active = await reloadProjects();
+          const next = active[0]?.id ?? null;
+          if (next) await selectProject(next);
+        } else {
+          await reloadProjects();
+        }
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [activeProject, reloadProjects, selectProject],
+  );
+
+  const restoreProject = useCallback(
+    async (project: string) => {
+      try {
+        setUiError("");
+        await (await agentBridge()).restoreProject(project);
+        await reloadProjects();
+        await selectProject(project);
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [reloadProjects, selectProject],
+  );
+
+  const switchSession = useCallback(
     async (name: string) => {
+      if (!activeProject) return;
       try {
         setUiError("");
         const bridge = await agentBridge();
-        await bridge.deleteSession(name);
+        await bridge.switchSession(activeProject, name);
+        await openSession(activeProject, name);
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [activeProject, openSession],
+  );
+
+  // 在指定项目下新建会话（项目行上的「＋」可直接作用于任意项目，不限于前台）。
+  const newSession = useCallback(
+    async (project: string) => {
+      try {
+        setUiError("");
+        const bridge = await agentBridge();
+        // 不带标题：名字在首条消息后由 AI 自动生成，用户想改再手动重命名。
+        const entry = await bridge.newSession(project, null);
+        // 若在非当前项目下新建，先把该项目切到前台，再打开新会话。
+        if (project !== activeProject) await selectProject(project);
+        await openSession(project, entry.name);
+        // 直接聚焦输入框——新建会话的意图是"马上开始聊"，而不是先做管理。
+        editorRef.current?.focus();
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [activeProject, selectProject, openSession],
+  );
+
+  const renameSession = useCallback(
+    async (name: string, title: string) => {
+      if (!activeProject) return;
+      try {
+        setUiError("");
+        await (await agentBridge()).renameSession(activeProject, name, title);
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [activeProject],
+  );
+
+  const deleteSession = useCallback(
+    async (name: string) => {
+      if (!activeProject) return;
+      try {
+        setUiError("");
+        const bridge = await agentBridge();
+        await bridge.deleteSession(activeProject, name);
         // 删的若是当前会话，重新打开后端选中的会话（可能为空）。
         if (name === sessionName) {
-          const current = await bridge.currentSession().catch(() => null);
-          if (current) await openSession(current);
+          const current = await bridge.currentSession(activeProject).catch(() => null);
+          if (current) await openSession(activeProject, current);
           else {
             subRef.current?.unsubscribe();
             subRef.current = null;
@@ -191,7 +318,7 @@ export function App() {
         setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [openSession, sessionName],
+    [activeProject, openSession, sessionName],
   );
 
   const send = useCallback(async () => {
@@ -199,9 +326,11 @@ export function App() {
     // content 必须保留占位符**——`InlineReferences` 正是按占位符位置把 chip 落回
     // 正文的，剥掉就一个 tag 都渲染不出来（曾经的 bug）。
     const plain = stripTokens(input).trim();
+    const project = activeProject;
     const session = sessionName;
-    if (!plain || !session) return;
-    if ((views[session]?.busy ?? false)) return;
+    if (!plain || !project || !session) return;
+    const key = viewKey(project, session);
+    if ((views[key]?.busy ?? false)) return;
     const display = input.trim();
     const refs = references;
     setInput("");
@@ -209,12 +338,12 @@ export function App() {
     setUiError("");
 
     const assistantId = nextId();
-    turnRef.current.set(session, assistantId);
+    turnRef.current.set(key, assistantId);
     setViews((prev) => {
-      const view = prev[session] ?? emptyView();
+      const view = prev[key] ?? emptyView();
       return {
         ...prev,
-        [session]: {
+        [key]: {
           ...view,
           messages: [
             ...view.messages,
@@ -230,47 +359,64 @@ export function App() {
 
     const bridge = await agentBridge();
     try {
-      await bridge.send(session, plain, refs.map((reference) => reference.path));
+      await bridge.send(project, session, plain, refs.map((reference) => reference.path));
     } catch (e) {
       const message = e instanceof Error ? e.message : String(e);
       setViews((prev) => {
-        const view = prev[session] ?? emptyView();
-        return { ...prev, [session]: { ...view, busy: false, error: message } };
+        const view = prev[key] ?? emptyView();
+        return { ...prev, [key]: { ...view, busy: false, error: message } };
       });
     }
-  }, [input, references, sessionName, views]);
+  }, [activeProject, input, references, sessionName, views]);
 
   const stop = useCallback(async () => {
+    const project = activeProject;
     const session = sessionName;
-    if (!session) return;
-    await (await agentBridge()).cancel(session).catch(() => {});
+    if (!project || !session) return;
+    const key = viewKey(project, session);
+    await (await agentBridge()).cancel(project, session).catch(() => {});
     setViews((prev) => {
-      const view = prev[session] ?? emptyView();
-      return { ...prev, [session]: { ...view, busy: false } };
+      const view = prev[key] ?? emptyView();
+      return { ...prev, [key]: { ...view, busy: false } };
     });
-  }, [sessionName]);
+  }, [activeProject, sessionName]);
 
-  const switchModel = useCallback(async (value: string) => {
-    try {
-      const bridge = await agentBridge();
-      await bridge.setModel(value);
-      setModel(value);
-    } catch (e) {
-      setUiError(e instanceof Error ? e.message : String(e));
-    }
-  }, []);
+  const switchModel = useCallback(
+    async (value: string) => {
+      if (!activeProject) return;
+      try {
+        const bridge = await agentBridge();
+        await bridge.setModel(activeProject, value);
+        setModel(value);
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [activeProject],
+  );
 
-  const view = sessionName ? (views[sessionName] ?? emptyView()) : emptyView();
+  const view =
+    activeProject && sessionName
+      ? (views[viewKey(activeProject, sessionName)] ?? emptyView())
+      : emptyView();
   const busy = view.busy;
   const error = uiError || view.error;
 
   return (
     <div className="flex h-screen w-full min-h-0 bg-canvas">
-      {/* 左侧 sidebar：NewChat / 置顶 / 项目（会话导航）。 */}
+      {/* 左侧 sidebar：NewChat / 置顶 / 项目（多项目 + 会话导航）。 */}
       <SessionSidebar
+        projects={projects}
+        archivedProjects={archivedProjects}
+        activeProject={activeProject}
         current={sessionName}
+        onSelectProject={(id) => void selectProject(id)}
+        onAddProject={() => void addProject()}
+        onRenameProject={(id, name) => void renameProject(id, name)}
+        onArchiveProject={(id) => void archiveProject(id)}
+        onRestoreProject={(id) => void restoreProject(id)}
         onSelect={(name) => void switchSession(name)}
-        onNew={() => void newSession()}
+        onNew={(project) => void newSession(project)}
         onRename={(name, title) => void renameSession(name, title)}
         onDelete={(name) => void deleteSession(name)}
       />
@@ -280,7 +426,7 @@ export function App() {
         <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
         <AiConversationTranscript
           messages={view.messages}
-          conversationKey={sessionName ?? "main"}
+          conversationKey={activeProject && sessionName ? viewKey(activeProject, sessionName) : "main"}
           extraContentKey={busy ? "busy" : ""}
           emptyContent={
             <div className="flex flex-col items-center gap-4 px-4 py-6 text-center sm:py-10">

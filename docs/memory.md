@@ -49,7 +49,14 @@ Shirley 现在是"会话即孤岛"：`session.rs` 把每个会话的原始 Messa
 第 3 章把存储格式按"简单性递减 / 表达力递增"排成四档（Simple Notes →
 Enhanced Notes → JSON Cards → Advanced JSON Cards），结论是**混合模式**：
 关键少量数据用结构化卡片，大量非关键事实用简单笔记。Shirley 用 **Markdown 目录 +
-YAML frontmatter** 一次覆盖两档——正文是简单笔记，frontmatter 是结构化字段。
+YAML frontmatter** 一次覆盖两档——正文是笔记，frontmatter 是结构化字段。
+
+**正文契约（2026-10 修订）**：正文**首行是一句话摘要**（供 `index.md` 与相关注入展示），
+空行后写**跨会话可复用的具体细节**（日期 / 地点 / 人名 / 数字 / 决策 / 约束，要点列出）。
+这是双层结构里「按需细节层（L2）」的实际内容——V1 曾把 `body` 要求成「一句话讲清」，
+导致 L2 从构造上就是空的：跨会话 `recall` 拿得到条目、却拿不到任何细节（旅游规划这类
+长任务尤其明显）。curator 提示词现已要求「条目数少而精、每条完整」，由
+`build_prompt_keeps_detail_in_body` 回归测试守护。
 
 选 Markdown 而非专用数据库，理由（第 3 章"文件系统范式"）：用户可直接读 / 改 /
 删；可进 Git 版本控制、可回滚；Agent 有 `write_file` 就能自主组织；**零部署成本**。

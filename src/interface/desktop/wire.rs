@@ -26,24 +26,29 @@ use crate::interface::session::{ItemWire as CoreItemWire, ToolCallWire};
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEventWire {
     ContentDelta {
+        project: Option<String>,
         session: Option<String>,
         text: String,
     },
     ReasoningDelta {
+        project: Option<String>,
         session: Option<String>,
         text: String,
     },
     MessageAdded {
+        project: Option<String>,
         session: Option<String>,
         role: &'static str,
     },
     ToolStarted {
+        project: Option<String>,
         session: Option<String>,
         call_id: String,
         name: String,
         arguments: String,
     },
     ToolFinished {
+        project: Option<String>,
         session: Option<String>,
         call_id: String,
         name: String,
@@ -52,25 +57,31 @@ pub enum AgentEventWire {
         elapsed_ms: u64,
     },
     Usage {
+        project: Option<String>,
         session: Option<String>,
         usage: UsageWire,
     },
     ContextUsage {
+        project: Option<String>,
         session: Option<String>,
         used_tokens: u64,
         limit_tokens: u64,
     },
     CompressionStarted {
+        project: Option<String>,
         session: Option<String>,
     },
     CompressionFinished {
+        project: Option<String>,
         session: Option<String>,
     },
     Finished {
+        project: Option<String>,
         session: Option<String>,
         stop_reason: &'static str,
     },
     Error {
+        project: Option<String>,
         session: Option<String>,
         message: String,
     },
@@ -98,18 +109,21 @@ impl From<Usage> for UsageWire {
 
 impl AgentEventWire {
     /// 把内部事件翻译成线格式。`MessageAdded` 只透出角色（前端不消费正文，
-    /// 正文已由增量事件推送）。`session` 先留空，由 [`Self::with_session`] 打标。
+    /// 正文已由增量事件推送）。`project` / `session` 先留空，由 [`Self::with_route`] 打标。
     pub fn from_event(event: AgentEvent) -> Self {
         match event {
             AgentEvent::ContentDelta(text) => Self::ContentDelta {
+                project: None,
                 session: None,
                 text,
             },
             AgentEvent::ReasoningDelta(text) => Self::ReasoningDelta {
+                project: None,
                 session: None,
                 text,
             },
             AgentEvent::MessageAdded(message) => Self::MessageAdded {
+                project: None,
                 session: None,
                 role: message_role(&message),
             },
@@ -118,6 +132,7 @@ impl AgentEventWire {
                 name,
                 arguments,
             } => Self::ToolStarted {
+                project: None,
                 session: None,
                 call_id,
                 name,
@@ -130,6 +145,7 @@ impl AgentEventWire {
                 output,
                 elapsed_ms,
             } => Self::ToolFinished {
+                project: None,
                 session: None,
                 call_id,
                 name,
@@ -138,6 +154,7 @@ impl AgentEventWire {
                 elapsed_ms,
             },
             AgentEvent::Usage(usage) => Self::Usage {
+                project: None,
                 session: None,
                 usage: usage.into(),
             },
@@ -145,13 +162,15 @@ impl AgentEventWire {
                 used_tokens,
                 limit_tokens,
             } => Self::ContextUsage {
+                project: None,
                 session: None,
                 used_tokens,
                 limit_tokens,
             },
-            AgentEvent::CompressionStarted => Self::CompressionStarted { session: None },
-            AgentEvent::CompressionFinished => Self::CompressionFinished { session: None },
+            AgentEvent::CompressionStarted => Self::CompressionStarted { project: None, session: None },
+            AgentEvent::CompressionFinished => Self::CompressionFinished { project: None, session: None },
             AgentEvent::Finished(result) => Self::Finished {
+                project: None,
                 session: None,
                 stop_reason: match result.stop_reason {
                     shirley_agent_sdk::StopReason::Completed => "completed",
@@ -162,22 +181,26 @@ impl AgentEventWire {
         }
     }
 
-    /// 给事件打上来源会话名（多会话下前端据此路由）。
-    pub fn with_session(mut self, session: &str) -> Self {
-        let slot = match &mut self {
-            Self::ContentDelta { session, .. }
-            | Self::ReasoningDelta { session, .. }
-            | Self::MessageAdded { session, .. }
-            | Self::ToolStarted { session, .. }
-            | Self::ToolFinished { session, .. }
-            | Self::Usage { session, .. }
-            | Self::ContextUsage { session, .. }
-            | Self::CompressionStarted { session }
-            | Self::CompressionFinished { session }
-            | Self::Finished { session, .. }
-            | Self::Error { session, .. } => session,
+    /// 给事件打上来源项目 + 会话（多项目多会话下前端据此路由）。
+    ///
+    /// 项目 id 全局唯一（规范路径），会话名只在项目内唯一——两者一起才是
+    /// 前端的路由键（与后端 pump 的 `project::session` 键对应）。
+    pub fn with_route(mut self, project: &str, session: &str) -> Self {
+        let (project_slot, session_slot) = match &mut self {
+            Self::ContentDelta { project, session, .. }
+            | Self::ReasoningDelta { project, session, .. }
+            | Self::MessageAdded { project, session, .. }
+            | Self::ToolStarted { project, session, .. }
+            | Self::ToolFinished { project, session, .. }
+            | Self::Usage { project, session, .. }
+            | Self::ContextUsage { project, session, .. }
+            | Self::CompressionStarted { project, session }
+            | Self::CompressionFinished { project, session }
+            | Self::Finished { project, session, .. }
+            | Self::Error { project, session, .. } => (project, session),
         };
-        *slot = Some(session.to_owned());
+        *project_slot = Some(project.to_owned());
+        *session_slot = Some(session.to_owned());
         self
     }
 }
