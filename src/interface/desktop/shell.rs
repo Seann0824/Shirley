@@ -350,6 +350,21 @@ async fn agent_model_name(state: State<'_, DesktopState>) -> Result<String, Stri
         .unwrap_or_default())
 }
 
+/// 当前工作区根目录的展示名（sidebar 的 Projects 分组用它做项目标签）。
+///
+/// 取路径最后一段（`/Users/sean/Desktop/repo/Shirley` → `Shirley`）；取不到时回落
+/// 完整路径。**仅展示用**——工作区身份仍由 `DesktopState.working_dir` 唯一承载。
+#[tauri::command]
+async fn agent_workspace_name(state: State<'_, DesktopState>) -> Result<String, String> {
+    let root = &state.working_dir;
+    let name = root
+        .file_name()
+        .map(|segment| segment.to_string_lossy().into_owned())
+        .filter(|segment| !segment.is_empty())
+        .unwrap_or_else(|| root.display().to_string());
+    Ok(name)
+}
+
 /// 列出可选模型（模型目录由 `AgentFactory` 注入）。
 #[tauri::command]
 async fn agent_list_models(state: State<'_, DesktopState>) -> Result<Vec<ModelEntryWire>, String> {
@@ -580,6 +595,7 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
             agent_unsubscribe,
             agent_cancel,
             agent_model_name,
+            agent_workspace_name,
             agent_list_models,
             agent_set_model,
             agent_search_files,

@@ -70,6 +70,8 @@ export type AgentBridge = {
   ) => Promise<SessionSubscription>;
   /** 当前会话的模型名，用于页脚展示。 */
   modelName: () => Promise<string>;
+  /** 当前工作区根目录的展示名（sidebar 的 Projects 分组用）。 */
+  workspaceName: () => Promise<string>;
   /** 列出可选模型（模型目录由 Rust 侧 `ModelCatalog` 提供）。 */
   listModels: () => Promise<ModelEntry[]>;
   /** 热切换模型：不重建 Agent，只换 `ModelConfig::model`。 */
@@ -126,6 +128,9 @@ async function createTauriBridge(): Promise<AgentBridge> {
     },
     async modelName() {
       return invoke<string>("agent_model_name");
+    },
+    async workspaceName() {
+      return invoke<string>("agent_workspace_name");
     },
     async listModels() {
       return invoke<ModelEntry[]>("agent_list_models");
@@ -197,6 +202,9 @@ function createMockBridge(): AgentBridge {
     },
     async modelName() {
       return "mock-model";
+    },
+    async workspaceName() {
+      return "shirley";
     },
     async listModels() {
       return [

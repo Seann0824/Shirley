@@ -6,7 +6,7 @@ import {
 import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { AssistantMessage } from "@/components/AssistantMessage";
 import { ModelSelector } from "@/components/ai/ModelSelector";
-import { SessionSelector } from "@/components/ai/SessionSelector";
+import { SessionSidebar } from "@/components/ai/SessionSidebar";
 import { InlineReferences } from "@/lib/file-mentions/FileChips";
 import { FileMentionPopover } from "@/lib/file-mentions/FileMentionPopover";
 import {
@@ -265,29 +265,19 @@ export function App() {
   const error = uiError || view.error;
 
   return (
-    <div className="flex h-screen w-full min-h-0 flex-col bg-canvas">
-      <header className="flex h-12 shrink-0 items-center gap-2 border-b border-line px-4">
-        <img
-          src="/brand/shirley-logo.png"
-          alt=""
-          aria-hidden="true"
-          width={28}
-          height={28}
-          className="size-7 shrink-0 object-contain"
-          draggable={false}
-        />
-        <span className="font-display text-body-sm text-ink">Shirley</span>
-        <SessionSelector
-          current={sessionName}
-          onSelect={(name) => void switchSession(name)}
-          onNew={() => void newSession()}
-          onRename={(name, title) => void renameSession(name, title)}
-          onDelete={(name) => void deleteSession(name)}
-        />
-      </header>
-      {/* 固定宽度居中（对齐 shiwen AiConversationSurface 的 max-w-190 = 760px）：
+    <div className="flex h-screen w-full min-h-0 bg-canvas">
+      {/* 左侧 sidebar：NewChat / 置顶 / 项目（会话导航）。 */}
+      <SessionSidebar
+        current={sessionName}
+        onSelect={(name) => void switchSession(name)}
+        onNew={() => void newSession()}
+        onRename={(name, title) => void renameSession(name, title)}
+        onDelete={(name) => void deleteSession(name)}
+      />
+      {/* 右侧主区：固定宽度居中（对齐 shiwen AiConversationSurface 的 max-w-190 = 760px）。
           聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}
-      <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
+      <main className="flex min-h-0 flex-1 flex-col">
+        <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
         <AiConversationTranscript
           messages={view.messages}
           conversationKey={sessionName ?? "main"}
@@ -374,7 +364,8 @@ export function App() {
             }
           />
         </div>
-      </section>
+        </section>
+      </main>
     </div>
   );
 }
