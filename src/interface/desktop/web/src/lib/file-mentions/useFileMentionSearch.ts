@@ -29,7 +29,7 @@ const SEARCH_DEBOUNCE_MS = 120;
  * 编辑区（`MentionEditor`）在用户敲 `@` 时 `open()`、随输入 `setQuery()`，
  * 选中后把返回的 `FileReference` 插成 inline chip。
  */
-export function useFileMentionSearch(): FileMentionSearchState {
+export function useFileMentionSearch(project: string | null): FileMentionSearchState {
   const [popoverOpen, setPopoverOpen] = useState(false);
   const [query, setQueryState] = useState("");
   const [results, setResults] = useState<FileReference[]>([]);
@@ -38,6 +38,10 @@ export function useFileMentionSearch(): FileMentionSearchState {
   const [selectedIndex, setSelectedIndex] = useState(0);
   const searchTimerRef = useRef<number | null>(null);
   const lastQueryRef = useRef("");
+  // 当前项目（工作区）：检索必须带项目 id。用 ref 规避闭包过期，
+  // 项目切换不需要重建搜索控制器。
+  const projectRef = useRef(project);
+  projectRef.current = project;
 
   const cancelPendingSearch = useCallback(() => {
     if (searchTimerRef.current) {
@@ -48,10 +52,18 @@ export function useFileMentionSearch(): FileMentionSearchState {
 
   const executeSearch = useCallback(async (searchQuery: string) => {
     lastQueryRef.current = searchQuery;
+    const projectId = projectRef.current;
+    // 没有前台项目（工作区）：没有可检索的文件，直接给空结果，别打后端。
+    if (!projectId) {
+      setResults([]);
+      setError(null);
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     setError(null);
     try {
-      const items = await (await agentBridge()).searchFiles(searchQuery);
+      const items = await (await agentBridge()).searchFiles(projectId, searchQuery);
       setResults(items);
       setSelectedIndex(0);
     } catch (reason) {

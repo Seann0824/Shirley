@@ -27,6 +27,7 @@
 | `web-search.md` | 联网搜索工具 `web_search`：Anthropic-compatible Messages API / 归一化 / 配置（**已实现**） | P1 |
 | `desktop-interface.md` | 桌面界面：Tauri 2 + React 迁移 shiwen 聊天 UI / 共享 LCA / 剥离 shiwen 定制逻辑（**M0–M2 已落地**） | P1 |
 | `memory.md` | 记忆系统：纯 markdown + 双层结构（常驻概览自动注入 / 按需细节检索）/ 后台 curator 异步整理 / 冲突靠时间线表达（**方案，未落地**） | P1 |
+| `skills.md` | 技能（skills）：拥抱 Agent Skills 开放标准（`SKILL.md` 目录）/ 渐进式披露（目录常驻 + 按需激活 + 资源按需读）/ `SkillContextProvider` 每轮末尾追加注入（目录 + 已激活正文，跨压缩存活、KV 友好）/ 应用层实现，SDK 零改动（**P0+P1 已落地**：发现 + 解析 + 目录 + `activate_skill` / `SkillRuntime` 激活 + `read_skill_file` 资源读取；`/skill-name` slash 等 P2） | P1 |
 
 
 ---

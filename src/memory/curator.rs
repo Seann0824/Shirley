@@ -24,7 +24,7 @@ use std::path::Path;
 use serde::Deserialize;
 use shirley_agent_sdk::{Agent, Message};
 
-use super::format::{Confidence, Entry, EntryStatus, EntryType, MemoryError};
+use super::format::{Confidence, Domain, Entry, EntryStatus, EntryType, MemoryError};
 use super::store::MemoryStore;
 
 /// curator 的错误。
@@ -68,6 +68,9 @@ pub struct Candidate {
     pub id: String,
     #[serde(rename = "type")]
     pub entry_type: EntryType,
+    /// 归属域：`personal`（默认，个人/全局）| `project`（项目/工作区）。缺省按个人。
+    #[serde(default)]
+    pub domain: Domain,
     pub subject: String,
     #[serde(default)]
     pub created_at: Option<String>,
@@ -187,6 +190,7 @@ pub fn vet(
     Ok(Entry {
         id: id.to_string(),
         entry_type: candidate.entry_type,
+        domain: candidate.domain,
         subject: candidate.subject.trim().to_string(),
         created_at,
         valid_from: candidate
@@ -259,13 +263,14 @@ pub fn render_transcript(messages: &[Message]) -> String {
 pub fn build_prompt(transcript: &str, existing: &[(String, Entry)], session_ref: &str) -> String {
     let mut prompt = String::new();
     prompt.push_str(
-        "你是记忆整理器（curator）。读下面这段对话轨迹，产出**尽可能小**的记忆条目增量。\n\n\
+        "你是记忆整理器（curator）。读下面这段对话轨迹，产出**尽可能少而精**的记忆条目增量——条目数要少，但每条要完整，能独立支撑将来的检索与引用。\n\n\
          **边界**：轨迹只是对环境的一次局部观察，是部分证据、不是 ground truth——\
          一次成功不自动验证每个中间假设。只沉淀**跨会话仍然成立**的用户事实 / 偏好 / 事件 / 程序；\
          不确定就不要写（或把 confidence 设为 low）。不要推演轨迹里没有的东西。\n\n\
          只输出一个 JSON 数组（可为空 `[]`），每个元素字段：\n\
          - `id`: 稳定 slug（小写字母数字与 `-`），如 `pref-rust-error-style`\n\
          - `type`: `preference` | `fact` | `event` | `procedure`\n\
+         - `domain`: `personal` | `project`——**这条属于谁**：`personal` = 用户本人的画像 / 偏好 / 跨项目事实（落全局记忆）；`project` = 当前工作区 / 代码库专有的架构、约定、事实（落项目记忆、随仓库走）。拿不准就用 `personal`。\n\
          - `subject`: 主题（供检索），如 `rust-error-handling`\n\
          - `created_at`: `YYYY-MM-DD`（可省，默认今天）\n\
          - `valid_from`: `YYYY-MM-DD`（可省）\n\
@@ -275,7 +280,12 @@ pub fn build_prompt(transcript: &str, existing: &[(String, Entry)], session_ref:
          - `source`: 证据引用数组，**必填**，格式 `<会话文件>#turn:N`，本次会话填 ",
     );
     prompt.push_str(&format!("`{session_ref}#turn:N`"));
-    prompt.push_str("\n- `body`: 正文（Markdown，一句话讲清）\n\n");
+    prompt.push_str(
+        "\n- `body`: 正文（Markdown）。**第一行是一句话摘要**（供索引 / 相关注入展示），\n\
+         空一行后写**跨会话可复用的具体细节**——日期 / 地点 / 人名 / 数字 / 决策 / 约束等确定\n\
+         事实，用要点列出（简明但完整，别超过约 500 字）。只写轨迹里真实出现、且将来仍然成立\n\
+         的内容；不要复述整段对话，不要推演。\n\n",
+    );
     prompt.push_str("不要删除历史：要改旧偏好就新建条目并 `supersedes` 旧 id。\n\n");
 
     if !existing.is_empty() {
@@ -378,12 +388,17 @@ pub async fn curate(
 
 /// 用当前全部条目重建 `index.md`（curator 合入后调用）。
 pub fn rebuild_index(store: &MemoryStore) -> Result<(), MemoryError> {
-    let entries: Vec<(String, Entry)> = store
-        .list_entries()?
-        .into_iter()
-        .map(|(path, entry)| (store.relative_path(&path), entry))
-        .collect();
-    super::index::write_index(store, &entries)
+    // **按根各自重建**：全局（个人）与工作区（项目）各写各的 `index.md`——
+    // 索引只收录本根的条目，不把项目条目混进全局索引（反之亦然）。
+    for root in store.roots() {
+        let entries: Vec<(String, Entry)> = store
+            .list_entries_in(root)?
+            .into_iter()
+            .map(|(path, entry)| (store.relative_path(&path), entry))
+            .collect();
+        super::index::write_index(root, &entries)?;
+    }
+    Ok(())
 }
 
 /// `core.md` 常驻层硬上限（字符；≈ 500 token，`docs/memory.md` §4.3）。
@@ -401,52 +416,57 @@ pub const MAX_CORE_CHARS: usize = 2000;
 ///
 /// 空库时删除旧 `core.md`（避免残留过时画像被继续注入）。
 pub fn rebuild_core(store: &MemoryStore) -> Result<(), MemoryError> {
-    let mut entries: Vec<Entry> = store
-        .list_entries()?
-        .into_iter()
-        .map(|(_, entry)| entry)
-        .filter(|entry| entry.status == EntryStatus::Active)
-        .collect();
+    // **按根各自重建**：每个根只投影**本根内**的活跃条目。全局 `core.md` 只含个人
+    // 记忆、工作区 `core.md` 只含项目记忆——注入时 [`MemoryStore::read_core`] 会按
+    // 全局→工作区顺序拼接，故两条常驻层互不污染。
+    for root in store.roots() {
+        let mut entries: Vec<Entry> = store
+            .list_entries_in(root)?
+            .into_iter()
+            .map(|(_, entry)| entry)
+            .filter(|entry| entry.status == EntryStatus::Active)
+            .collect();
 
-    let path = store.primary_root().join(super::store::CORE_FILE);
-    if entries.is_empty() {
-        let _ = std::fs::remove_file(&path);
-        return Ok(());
-    }
-
-    // 固定类型顺序（画像 / 偏好在前，事件在后），组内时间新→旧、再按 id。
-    let rank = |entry_type: EntryType| match entry_type {
-        EntryType::Preference => 0,
-        EntryType::Fact => 1,
-        EntryType::Procedure => 2,
-        EntryType::Event => 3,
-    };
-    entries.sort_by(|a, b| {
-        rank(a.entry_type)
-            .cmp(&rank(b.entry_type))
-            .then_with(|| b.timeline_date().cmp(a.timeline_date()))
-            .then_with(|| a.id.cmp(&b.id))
-    });
-
-    let mut text = String::from("# Memory Core\n\n> 由程序维护（活跃条目投影）；勿手改。\n\n");
-    let mut truncated = false;
-    for entry in &entries {
-        let line = format!(
-            "- [{}] {}\n",
-            super::provider::type_label(entry.entry_type),
-            entry.summary()
-        );
-        if text.chars().count() + line.chars().count() > MAX_CORE_CHARS {
-            truncated = true;
-            break;
+        let path = root.join(super::store::CORE_FILE);
+        if entries.is_empty() {
+            let _ = std::fs::remove_file(&path);
+            continue;
         }
-        text.push_str(&line);
-    }
-    if truncated {
-        text.push_str("\n_(truncated; see index.md for the full list)_\n");
-    }
 
-    store.write_core(&text)?;
+        // 固定类型顺序（画像 / 偏好在前，事件在后），组内时间新→旧、再按 id。
+        let rank = |entry_type: EntryType| match entry_type {
+            EntryType::Preference => 0,
+            EntryType::Fact => 1,
+            EntryType::Procedure => 2,
+            EntryType::Event => 3,
+        };
+        entries.sort_by(|a, b| {
+            rank(a.entry_type)
+                .cmp(&rank(b.entry_type))
+                .then_with(|| b.timeline_date().cmp(a.timeline_date()))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+
+        let mut text = String::from("# Memory Core\n\n> 由程序维护（活跃条目投影）；勿手改。\n\n");
+        let mut truncated = false;
+        for entry in &entries {
+            let line = format!(
+                "- [{}] {}\n",
+                super::provider::type_label(entry.entry_type),
+                entry.summary()
+            );
+            if text.chars().count() + line.chars().count() > MAX_CORE_CHARS {
+                truncated = true;
+                break;
+            }
+            text.push_str(&line);
+        }
+        if truncated {
+            text.push_str("\n_(truncated; see index.md for the full list)_\n");
+        }
+
+        store.write_core_at(root, &text)?;
+    }
     Ok(())
 }
 
@@ -580,7 +600,7 @@ pub fn build_consolidate_prompt(entries: &[(String, Entry)], evidence: &str) -> 
          - {\"op\":\"merge\",\"sources\":[\"id1\",\"id2\"],\"target\":{...条目字段...}}\n\
          - {\"op\":\"supersede\",\"id\":\"old-id\",\"replacement\":{...条目字段...}}\n\
          - {\"op\":\"requalify\",\"id\":\"id\",\"scope\":\"适用场景\",\"body\":\"可选新正文\"}\n\
-         条目字段同增量 curator：id / type / subject / created_at / valid_from / confidence / scope / source / body。\n\n",
+         条目字段同增量 curator：id / type / domain / subject / created_at / valid_from / confidence / scope / source / body。\n\n",
     );
 
     prompt.push_str("## 现有条目\n");
@@ -826,6 +846,7 @@ mod tests {
         Candidate {
             id: id.into(),
             entry_type: EntryType::Preference,
+            domain: Domain::Personal,
             subject: "rust-error-handling".into(),
             created_at: Some("2026-05-12".into()),
             valid_from: None,
@@ -960,6 +981,19 @@ mod tests {
         assert!(prompt.contains("部分证据"));
         assert!(prompt.contains("pref-a"));
         assert!(prompt.contains("sessions/x.jsonl#turn:N"));
+    }
+
+    #[test]
+    fn build_prompt_keeps_detail_in_body() {
+        // 回归：body 不再被要求压成一句话——首行摘要 + 空行 + 具体细节，
+        // 否则 L2「按需细节层」为空，跨会话检索不到细节（旅游规划场景）。
+        let prompt = build_prompt("## User\nhi\n", &[], "sessions/x.jsonl");
+        assert!(prompt.contains("第一行是一句话摘要"), "应要求首行做摘要: {prompt}");
+        assert!(prompt.contains("具体细节"), "应要求正文写具体细节: {prompt}");
+        assert!(
+            !prompt.contains("一句话讲清"),
+            "不应再把 body 压成一句话: {prompt}"
+        );
     }
 
     // ---- V2-B：定期整理（consolidate）------------------------------------

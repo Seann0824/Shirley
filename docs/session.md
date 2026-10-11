@@ -354,11 +354,13 @@ desktop 的 `agent_new_session` 同走 `create_lazy`，语义一致。
 
 会话操作与 `agent_send` **共用 `Arc<Mutex<Option<Agent>>>`**：运行中
 `agent=None`，此时任何会话操作返回"agent 正在运行中"，不会并发驱动同一个
-`Agent`。前端 `SessionSelector` 参照 `ModelSelector` 范式（点击外部 / Esc 关闭、
-listbox），提供新建（可命名）/ 切换 / 重命名（内联编辑）/ 删除（两次点击确认）。
+`Agent`。前端 `SessionSidebar.tsx`（左侧栏）参照 `ModelSelector` 范式，
+在**项目分组**下提供新建（可命名）/ 切换 / 重命名（内联编辑）/ 删除（两次点击确认）；
+多项目（多工作区）的登记 / 切换 / 重命名 / 归档 / 恢复见 `docs/desktop-interface.md` 4.5。
 
-**本期范围**：list / new（可命名）/ switch / rename / delete。
-**不做**：fork / archive / 启动 `--resume`（记为后续）。
+**本期范围**：会话 list / new（可命名）/ switch / rename / delete；项目 list / add /
+switch / rename / archive / restore。
+**不做**：fork / 启动 `--resume`（记为后续）。
 
 **验收口径**：
 

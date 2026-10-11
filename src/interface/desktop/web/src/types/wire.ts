@@ -1,6 +1,6 @@
 // AgentEvent / 会话快照的线格式 DTO。Rust 侧 `desktop/wire.rs` 负责映射；
-// 这里固化契约，前端只依赖这份类型。多会话下每个事件都带来源会话名 `session`
-// （`null` = 未打标），前端据此把事件路由到对应会话的视图。
+// 这里固化契约，前端只依赖这份类型。多项目多会话下每个事件都带来源 `project` +
+// `session`（`null` = 未打标），前端据此把事件路由到对应会话的视图。
 
 export type StopReason = "completed" | "max_steps_reached" | "cancelled";
 
@@ -11,8 +11,8 @@ export type UsageWire = {
   cache_reported_input_tokens: number | null;
 };
 
-/** 事件来源会话名；`null` = 未打标（旧 Rust 侧 / 测试）。 */
-type SessionTag = { session: string | null };
+/** 事件来源项目 id + 会话名；`null` = 未打标（旧 Rust 侧 / 测试）。 */
+type SessionTag = { project: string | null; session: string | null };
 
 export type AgentEventWire =
   | ({ type: "content_delta"; text: string } & SessionTag)

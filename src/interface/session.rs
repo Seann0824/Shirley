@@ -23,6 +23,7 @@ use tokio::sync::broadcast;
 use super::app::{ChatMessage, Item, Role, ToolCallView};
 use crate::bootstrap::AgentFactory;
 use crate::memory::MemoryRuntime;
+use crate::skills::SkillRuntime;
 use crate::session::{SessionCatalog, SessionStore};
 
 /// 事件扇出通道容量。运行中订阅者若落后超过此数会 `Lagged`，由订阅方（desktop
@@ -80,6 +81,12 @@ pub struct Session {
     /// 驱动方在发起一轮前 `set_query`（按本轮用户输入做相关检索），会话结束
     /// 交给 curator。
     pub memory: Option<Arc<MemoryRuntime>>,
+    /// 该会话的技能运行时（`None` = 无技能，供测试 / 无目录场景）。
+    ///
+    /// 每会话一份（与 `memory` 对称）：已激活集合随会话隔离。TUI 的
+    /// `/<skill-name>` slash 入口经此句柄直接激活（`docs/skills.md` 5.6），
+    /// 复用 P1 的 `SkillContextProvider` 注入接缝——不新增注入路径。
+    pub skills: Option<Arc<SkillRuntime>>,
 }
 
 impl Session {
@@ -92,6 +99,7 @@ impl Session {
         name: Option<String>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
+        skills: Option<Arc<SkillRuntime>>,
     ) -> Self {
         Self {
             name,
@@ -114,6 +122,7 @@ impl Session {
             running: false,
             store,
             memory,
+            skills,
         }
     }
 
@@ -450,9 +459,10 @@ impl SessionManager {
         catalog: Arc<dyn SessionCatalog>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
+        skills: Option<Arc<SkillRuntime>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name, store, memory));
+        sessions.insert(0, Session::new(agent, name, store, memory, skills));
         Self {
             sessions,
             active: 0,
@@ -470,9 +480,10 @@ impl SessionManager {
         factory: Arc<AgentFactory>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
+        skills: Option<Arc<SkillRuntime>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name, store, memory));
+        sessions.insert(0, Session::new(agent, name, store, memory, skills));
         Self {
             sessions,
             active: 0,
@@ -521,11 +532,12 @@ impl SessionManager {
         name: Option<String>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
+        skills: Option<Arc<SkillRuntime>>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.sessions
-            .insert(id, Session::new(agent, name, store, memory));
+            .insert(id, Session::new(agent, name, store, memory, skills));
         id
     }
 
@@ -563,6 +575,7 @@ impl SessionManager {
             Some(name.to_owned()),
             Some(store),
             Some(built.memory),
+            Some(built.skills),
         );
         // 从磁盘恢复的会话：用其历史重建视图条目，快照 / 渲染才有内容。
         if let Some(session) = self.sessions.get_mut(&id) {
@@ -599,6 +612,7 @@ impl SessionManager {
             Some(entry.name.clone()),
             Some(store),
             Some(built.memory),
+            Some(built.skills),
         );
         self.active = id;
         if let Some(previous) = previous.filter(|p| p != entry.name.as_str()) {
@@ -613,11 +627,16 @@ impl SessionManager {
     /// 从 `sessions` 移除该会话；若删掉的正是前台会话，则**新建一份惰性空会话并切过去**
     /// （与启动时同一 UX：此刻只定名、不落盘，发首条消息才建文件）。这样删掉当前会话后
     /// 前台指针不会悬空，`active_name()` 也不会再返回已删的名字。
+    ///
+    /// **未加载的会话直接放行**：侧栏 / 列表列的是目录扫描出的**全部**会话，但只有被
+    /// 打开过的才在内存里。对未加载的会话没有内存编排可做，磁盘删除由调用方负责——若
+    /// 这里仍报「会话不存在」，就会表现为「必须先点开（选中）才能删」。名字是否真实
+    /// 存在于磁盘，交由调用方的 `SessionCatalog::delete` 判定。
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn delete_session(&mut self, name: &str) -> Result<(), String> {
-        let id = self
-            .id_of_name(name)
-            .ok_or_else(|| format!("会话不存在：{name}"))?;
+        let Some(id) = self.id_of_name(name) else {
+            return Ok(());
+        };
         if self
             .sessions
             .get(&id)
@@ -856,6 +875,7 @@ mod tests {
             Arc::new(EmptySessionCatalog),
             None,
             None,
+            None,
         )
     }
 
@@ -884,5 +904,20 @@ mod tests {
 
         // 同一会话运行中不得再次发起（不并发驱动同一 Agent）。
         assert!(manager.begin_turn("s", "again".into()).is_none());
+    }
+
+    /// 回归：删除**未加载**（仅存在于磁盘、从未被打开）的会话必须放行。
+    ///
+    /// 侧栏 / 列表列的是目录扫描出的全部会话，只有被打开过的才在内存里。此前
+    /// `delete_session` 对未加载的会话直接报「会话不存在」，于是必须先点开（选中）
+    /// 才能删——这正是「desktop 必须选中后删除」的根因。磁盘是否真实存在交由调用方
+    /// 的 `SessionCatalog::delete` 判定，内存侧不该拦。
+    #[test]
+    fn delete_session_allows_unloaded_name() {
+        let mut manager = manager();
+        assert!(
+            manager.delete_session("never-opened").is_ok(),
+            "未加载的会话应放行，交由调用方的磁盘删除判定"
+        );
     }
 }

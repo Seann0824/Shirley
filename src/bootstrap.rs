@@ -24,12 +24,15 @@ use shirley_agent_sdk::{
 
 use crate::memory::{
     self, CurateOutcome, CuratorError, Embedder, EmbeddingConfig, MemoryContextProvider,
-    MemoryRuntime, MemoryStore,
+    MemoryRuntime, MemoryStore, RecallTool,
 };
 use crate::models::{self, ModelCatalog};
 use crate::prompt;
 use crate::session::{self, SessionCatalog};
 use crate::settings::Settings;
+use crate::skills::{
+    self, ActivateSkillTool, ReadSkillFileTool, SkillCatalog, SkillContextProvider, SkillRuntime,
+};
 use crate::todo::{TodoContextProvider, TodoStore, TodoTool};
 use crate::tools;
 
@@ -72,6 +75,9 @@ pub struct AgentFactory {
     /// **V2.5** embedding 客户端：`[memory]` 配齐 `embedding_base_url` +
     /// `embedding_model` 时才构造（`None` = 纯 BM25，诚实降级）。所有会话共用。
     embedder: Option<Arc<Embedder>>,
+    /// 技能目录（`docs/skills.md` P0）：装配时扫一次，所有会话共用（只读、不变）。
+    /// 每个 `Agent` 经 `SkillContextProvider` 每轮末尾注入其 Tier1 目录。
+    skill_catalog: SkillCatalog,
 }
 
 /// 全局记忆相对 `config_dir` 的位置（跨项目）。
@@ -140,6 +146,10 @@ impl AgentFactory {
         // 否则为 `None`（检索退化为纯 BM25，绝不假装有语义腿）。
         let embedder = build_embedder(&settings);
 
+        // 技能目录（`docs/skills.md` P0）：装配时扫一次项目级 + 用户级 skill，
+        // 只读、会话间共享；每会话经 `SkillContextProvider` 注入其 Tier1 目录。
+        let skill_catalog = SkillCatalog::discover(&working_dir, skills::user_home().as_deref());
+
         Ok(Self {
             model_config,
             system_prompt: prompt::build(working_dir.clone()),
@@ -152,6 +162,7 @@ impl AgentFactory {
             curator_model_config,
             consolidate_after_entries: settings.memory.consolidate_after_entries.unwrap_or(0),
             embedder,
+            skill_catalog,
         })
     }
 
@@ -186,12 +197,25 @@ impl AgentFactory {
         // 凭据注入）各自执行一次——状态本就按工具实例隔离，可接受（决策 5）。
         let mut tool_manager = assemble_tools();
         let _ = tool_manager.register(TodoTool::new(todo_store.clone()));
+        // 主动查记忆工具（只读）：与自动注入共享同一 `MemoryRuntime`。
+        // 记忆写入**不经**任何工具，只由后台 curator 完成（`docs/memory.md` 决策 3）。
+        let _ = tool_manager.register(RecallTool::new(memory.clone()));
 
-        // SDK 的 `Agent` 只接受**单个** `context_provider`，而这里要注入两份
-        // （任务账本 + 记忆）——用 `CompositeContextProvider` 顺序拼接。
+        // 技能运行时（应用层能力）：目录只读、跨会话共享；已激活集合**每会话新建**
+        // （激活状态随会话隔离）。`activate_skill` 写、`SkillContextProvider` 读，
+        // 共享同一 `Arc`，与 todo / memory 的运行时分发完全一致。
+        let skill_catalog = Arc::new(self.skill_catalog.clone());
+        let skill_runtime = Arc::new(SkillRuntime::new(skill_catalog.clone()));
+        let _ = tool_manager.register(ActivateSkillTool::new(skill_runtime.clone()));
+        let _ = tool_manager.register(ReadSkillFileTool::new(skill_catalog));
+
+        // SDK 的 `Agent` 只接受**单个** `context_provider`，而这里要注入多份
+        // （任务账本 + 记忆 + 技能）——用 `CompositeContextProvider` 顺序拼接。
         let provider = CompositeContextProvider::new(vec![
             Arc::new(TodoContextProvider::new(todo_store)) as Arc<dyn ContextProvider>,
             Arc::new(MemoryContextProvider::new(memory.clone())) as Arc<dyn ContextProvider>,
+            // 技能（Tier1 目录 + Tier2 已激活正文）：每轮末尾追加注入，KV 友好。
+            Arc::new(SkillContextProvider::new(skill_runtime.clone())) as Arc<dyn ContextProvider>,
         ]);
 
         let agent = Agent::builder()
@@ -204,7 +228,7 @@ impl AgentFactory {
             .tools(tool_manager)
             .messages(messages)
             .build()?;
-        Ok(BuiltAgent { agent, memory })
+        Ok(BuiltAgent { agent, memory, skills: skill_runtime })
     }
 
     /// 预热模型目录：后台拉一次列表，让**首次**打开 `/model` 也能命中缓存。
@@ -361,6 +385,9 @@ pub struct BuiltAgent {
     pub agent: Agent,
     /// 记忆运行时（每会话一份）：驱动方在发起一轮前 `set_query`，会话结束交给 curator。
     pub memory: Arc<MemoryRuntime>,
+    /// 技能运行时（每会话一份）：TUI 的 `/<skill-name>` slash 入口经此句柄直接激活
+    /// （`docs/skills.md` 5.6）。与 `SkillContextProvider` 共享同一 `Arc`。
+    pub skills: Arc<SkillRuntime>,
 }
 
 /// 把多个 [`ContextProvider`] 拼成一个：按顺序拼接各自 `context()`，全空返回 `None`。
@@ -430,6 +457,7 @@ mod tests {
             curator_model_config: None,
             consolidate_after_entries: 0,
             embedder: None,
+            skill_catalog: SkillCatalog::new(Vec::new()),
         }
     }
 
@@ -450,6 +478,7 @@ mod tests {
             Some("s".into()),
             catalog,
             Arc::new(factory(root.clone())),
+            None,
             None,
             None,
         );
@@ -537,6 +566,7 @@ mod tests {
             Some("s".into()),
             catalog,
             Arc::new(factory(root.clone())),
+            None,
             None,
             None,
         );

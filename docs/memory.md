@@ -49,7 +49,14 @@ Shirley 现在是"会话即孤岛"：`session.rs` 把每个会话的原始 Messa
 第 3 章把存储格式按"简单性递减 / 表达力递增"排成四档（Simple Notes →
 Enhanced Notes → JSON Cards → Advanced JSON Cards），结论是**混合模式**：
 关键少量数据用结构化卡片，大量非关键事实用简单笔记。Shirley 用 **Markdown 目录 +
-YAML frontmatter** 一次覆盖两档——正文是简单笔记，frontmatter 是结构化字段。
+YAML frontmatter** 一次覆盖两档——正文是笔记，frontmatter 是结构化字段。
+
+**正文契约（2026-10 修订）**：正文**首行是一句话摘要**（供 `index.md` 与相关注入展示），
+空行后写**跨会话可复用的具体细节**（日期 / 地点 / 人名 / 数字 / 决策 / 约束，要点列出）。
+这是双层结构里「按需细节层（L2）」的实际内容——V1 曾把 `body` 要求成「一句话讲清」，
+导致 L2 从构造上就是空的：跨会话 `recall` 拿得到条目、却拿不到任何细节（旅游规划这类
+长任务尤其明显）。curator 提示词现已要求「条目数少而精、每条完整」，由
+`build_prompt_keeps_detail_in_body` 回归测试守护。
 
 选 Markdown 而非专用数据库，理由（第 3 章"文件系统范式"）：用户可直接读 / 改 /
 删；可进 Git 版本控制、可回滚；Agent 有 `write_file` 就能自主组织；**零部署成本**。
@@ -107,31 +114,41 @@ embedding 端点时整条语义腿缺席**，检索退化为纯 BM25，绝不打
 
 **3.1 目录布局**
 
+**归属域（personal / project）由存储根承载**，与语义类型（`type`）是**正交**的两条轴。
+写入时 `Entry.domain` 决定落哪个根（`store.rs::write_entry` → `root_for_domain`）：
+`personal` 落全局根，`project` 落工作区根。每个根下都是同一套目录结构。
+
 ```
-<config_dir>/shirley/memory/        # 个人记忆（跨项目、全局）
-├── core.md                         # ★ 常驻层：画像 + 明确偏好 + 活跃项目（≤ 500 tok）
-├── index.md                        # 程序维护的索引页（每条一行：id / 主题 / 摘要 / 路径）
+<config_dir>/shirley/memory/        # personal 域：用户画像 / 偏好 / 跨项目事实
+├── core.md                         # ★ 常驻层：本根活跃条目投影（≤ 2000 字）
+├── index.md                        # 程序维护的索引页（每条一行：id / 类型 / 摘要 / 路径）
+├── vectors.json                    # 语义向量 sidecar（V2.5，按根各一份）
 ├── episodic/                       # 情景记忆：具体事件（带时间戳）
-│   └── 2026-05-12-ts-migration.md
-├── people/                         # 人（"张三是我的同事"）
 ├── preferences/                    # 偏好 / 习惯（"以后都这样"）
 ├── procedures/                     # 程序记忆：行为流程（"先 X 再 Y"）
-└── projects/                       # 项目级记忆
+└── facts/                          # 语义事实（画像 / 跨项目知识）
 
-<root>/.shirley/memory/             # 工作区级记忆（项目相关，随仓库走）
+<root>/.shirley/memory/             # project 域：当前工作区专有（随仓库走，每 workspace 隔离）
+├── core.md / index.md / vectors.json
+├── episodic/ preferences/ procedures/ facts/
 <root>/.shirley/sessions/*.jsonl    # 原始证据层（已有，只增不改）
 ```
 
-目录分类沿用 `plan.md` 的 `episodic / people / projects / preferences / procedures`，
-对齐第 3 章的认知科学三类记忆（情景 / 语义 / 程序）——`episodic` 是情景，
-`preferences` / `people` 偏语义，`procedures` 是程序。
+语义类型对齐第 3 章的认知科学三类记忆（情景 / 语义 / 程序）——`episodic` 是情景，
+`facts` 偏语义，`procedures` 是程序，`preferences` 是稳定偏好。
+
+> **为什么用双根而不是新增 `EntryType::Project`**：类型轴（这是什么）与归属轴（属于谁）
+> 正交。把项目记忆放进 `type` 会让类型膨胀，且仍只落全局根、不随仓库走。用双根承载
+> 归属，`core.md` / `index.md` / `vectors.json` **按根各自重建**（`curator::rebuild_core`
+> / `rebuild_index` 遍历 `store.roots()`），读取时合并（工作区覆盖同名 `id`）。
 
 **3.2 条目 schema（frontmatter）**
 
 ```markdown
 ---
 id: pref-rust-error-style
-type: preference            # preference | fact | event | procedure
+type: preference            # preference | fact | event | procedure（语义类型）
+domain: personal            # personal | project（归属域：落哪个存储根）
 subject: rust-error-handling
 created_at: 2026-05-10
 valid_from: 2026-05-10      # 生效时间（时间线的关键）
@@ -153,6 +170,7 @@ source:                     # ★ 证据引用，可回溯
 | 字段 | 作用 | 来源 |
 | --- | --- | --- |
 | `type` / `subject` | 分类与主题，供索引与检索 | `plan.md` |
+| `domain` | **归属域**：`personal`（全局根）| `project`（工作区根，随仓库走） | 方案 A（正交于 `type`） |
 | `created_at` / `valid_from` | **时间线**：何时写入、何时生效 | `plan.md` + 决策 4 |
 | `supersedes` / `status` | 版本化：取代关系，不删历史 | 决策 4（Mem0 v3 教训） |
 | `confidence` | 证据不足时降级标注 | `plan.md` 的"蒸馏验证" |

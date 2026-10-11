@@ -105,7 +105,7 @@ Shirley 现在只有一个界面：`src/interface/` 下的 ratatui TUI。本方�
 | **实体/空间/文章锚定**（`host_kind` / `promoted_space_id` / `host_repository`） | shiwen 工作区模型 | 删 |
 | **会话分享**（`AiConversationShare` / 公开分享） | shiwen 功能 | 删 |
 | **OCR / 素材上传**（`fetchMaterialOcrStatuses` / `handleMaterialUploaded`） | shiwen 桌面应用 | 删 |
-| **桌面工作区切换器**（`useDesktopWorkspaces` / `DesktopScreen`） | shiwen 桌面登录/工作区 | 删（Shirley 不需要） |
+| **桌面工作区切换器**（`useDesktopWorkspaces` / `DesktopScreen`） | shiwen 桌面登录/工作区（绑定其账号体系） | 删 shiwen 实现；**Shirley 自建多项目 UX**（见 4.5） |
 | **SSE 线格式**（`packages/ai-session` 的 `parseAiStreamEvent` / `streamAiMessage`） | shiwen 服务端协议 | **重绑**到 Shirley 的 `AgentEvent`（见第六节） |
 | `AiConversationMinimap`（轮次缩略图） | 依赖 shiwen 消息结构，非核心 | 可删（第一步先删，后续想要再加） |
 | `lucide-react` 之外的 shiwen 依赖（tiptap / blocknote / pdfjs / tesseract 等） | shiwen 文档/OCR 栈 | 不引入 |
@@ -288,6 +288,23 @@ shiwen 的 `AiConversationSurface` 把**转写区 + 输入框**一起包在
 - 连续工具调用收集成折叠区（见 4.3.2）。
 - `tokens.css` 的暖灰设计语言。
 
+### 4.5 多项目（多工作区）UX（**已落地**）
+
+Shirley 是独立 app，不绑定单一目录。左侧栏把**多个工作区登记为「项目」**，每个项目下挂自己的会话：
+
+**交互原则：每个项目 item 上常驻一个「＋ 新建会话」按钮（可直接在该项目下开新会话），其余操作全部收进右键菜单**（默认不可见、不占版面）——左侧栏因此干净，操作密度高时也不会被一排悬停按钮淹没。右键菜单是自建的轻量原语（`src/ui/context-menu.tsx`，`react-dom` portal，**不引入新依赖**），Esc / 点空白 / 滚动 / resize 关闭，贴边自动回收到视口内。菜单项里的破坏性操作（归档 / 删除）在**菜单内二次确认**。
+
+- **新建会话**（项目行上的常驻「＋」按钮）：在**该项目**下开一个空会话并聚焦输入框；若目标非当前前台项目，先切到前台再打开（按钮对任意项目都可用，不限于当前项目）。
+- **登记项目**：右键「项目」分组标题 → 「新建项目」→ 原生文件夹选择器（`tauri-plugin-dialog`）；同一目录按规范路径去重，此前归档过的则**恢复**而非新增。
+- **重命名项目**：右键项目行 → 「重命名」→ 内联编辑，只改展示名（不动路径 / 会话数据）。
+- **归档项目**（= 用户口中的「移除」）：右键项目行 → 「归档」→ 菜单内二次确认。**只置 `archived = true` 并释放内存运行时，不删磁盘数据**；项目从「项目」分组移入底部「归档」分组（默认收起）。
+- **恢复项目**：右键归档分组里的项目行 → 「恢复」，项目回到「项目」分组，下次打开懒加载。
+- **切换项目**：点项目名 → 切前台并打开它当前的会话；项目内会话的置顶 / 折叠状态用 `localStorage` 记忆。
+- **会话行操作**（右键）：置顶 / 取消置顶、重命名（内联编辑）、删除（菜单内二次确认）。
+
+前端视图键 = `project::session`（会话名只在项目内唯一，跨项目会重名）；事件带 `project` + `session` 两个字段供路由。
+注册表与命令契约见第六节。
+
 ---
 
 **五、技术选型**
@@ -322,60 +339,75 @@ shiwen 的 `AiConversationSurface` 把**转写区 + 输入框**一起包在
 | `Finished(RunResult)` | 结束本轮（对应 `onDone`） |
 | `Err(AgentError)` | 错误态（对应 `onError`） |
 
-**Rust 侧桥接**（示意，已按多会话演进）：
+**Rust 侧桥接**（示意，已按多项目多会话演进）：
 ```rust
 #[tauri::command]
-async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String, session: Option<String>) -> Result<(), String> {
-    // 按**会话名**取（未传则回落前台会话）；运行期间把该会话的 Agent 移入后台任务，
-    // 结束后按名放回。不同会话各持独立 Agent，可真正并行。
-    let name = resolve_session(&state, session).await?;
+async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, project: String, text: String, session: Option<String>) -> Result<(), String> {
+    // 按 `project` 拿到该项目运行时（懒加载），再按**会话名**取（未传则回落该项目前台会话）；
+    // 运行期间把该会话的 Agent 移入后台任务，结束后按名放回。不同会话各持独立 Agent，可真正并行。
+    let runtime = state.ensure_runtime(&project).await?;
+    let name = resolve_session(&runtime, session).await?;
     // `begin_turn` = 取走 Agent + 乐观记入用户消息（`apply_event` 有意忽略
     // `MessageAdded(User)`，用户消息须由驱动方记录——与 TUI `submit` 对称）。
-    let mut agent = state.sessions.lock().await
+    let mut agent = runtime.sessions.lock().await
         .begin_turn(&name, text.clone()).ok_or("agent 正在运行中")?;
     tauri::async_runtime::spawn(async move {
         let mut stream = agent.run_stream(&text);
         while let Some(event) = stream.next().await {
             let update = match event {
-                Ok(event) => Ok(AgentEventWire::from_event(event).with_session(&name)),
+                Ok(event) => Ok(AgentEventWire::from_event(event).with_route(&project, &name)),
                 Err(error) => Err(error.to_string()),
             };
             // 事实源在 SessionManager：把事件喂给**对应会话**（按名，不依赖 active 指针）。
-            state.sessions.lock().await.apply_event(&name, update);
+            runtime.sessions.lock().await.apply_event(&name, update);
         }
-        state.sessions.lock().await.restore_agent(&name, agent);
+        runtime.sessions.lock().await.restore_agent(&name, agent);
     });
     Ok(())
 }
 ```
-每个 `Session` 自持一条 `broadcast` 通道；`agent_subscribe { session }` 在同一把锁内
+每个 `Session` 自持一条 `broadcast` 通道；`agent_subscribe { project, session }` 在同一把锁内
 **先 `subscribe` 再 `snapshot`**（保证不丢 / 不重），起一个 per-session pump 任务把
-该会话事件经 `agent://event` 推给前端；`agent_unsubscribe { session }` abort 该 pump。
-前端按 `AgentEventWire.session` 把事件路由到对应会话视图（见 `web/src/lib/bridge.ts`）。
+该会话事件经 `agent://event` 推给前端；`agent_unsubscribe { project, session }` abort 该 pump。
+前端按 `AgentEventWire` 的 `project` + `session` 把事件路由到对应会话视图（键 = `project::session`，见 `web/src/lib/bridge.ts`）。
 
 **Tauri commands 一览**（`src/interface/desktop/shell.rs`）：
 
+**多项目多会话**：Shirley 作为独立 app 不绑定单一目录，可把**多个工作区**登记为「项目」。
+项目注册表 `ProjectRegistry`（`src/project.rs`）只记「项目在哪」，落 `<config_dir>/shirley/projects.json`；
+每个项目一个 `AgentFactory`（各读该项目 `<root>/.shirley/config.toml`），会话日志仍落各项目自己的
+`<root>/.shirley/sessions/`（随仓库走）。**项目 id = 规范路径**（全局唯一），会话名只在项目内唯一，
+故**前端路由键 = `project::session`**（与后端 pump 键一致，事件打 `project` + `session`）。
+运行时按项目**懒加载**（`ensure_runtime`）：`runtimes: HashMap<project_id, Arc<Mutex<ProjectRuntime>>>`，
+每个 `ProjectRuntime { factory, sessions }` 持自己的 `SessionManager`；**归档项目 = 释放其内存运行时**
+（`runtimes` 表移除），磁盘数据不动，恢复时下次打开懒加载。
+
 | command | 作用 |
 | --- | --- |
-| `agent_send { text, references?, session? }` | 发起一轮 `run_stream`（`session` 缺省回落前台会话），事件经 `agent://event` 推送 |
-| `agent_model_name` | 当前模型名（页脚 / 选择器展示） |
-| `agent_list_models` | 列出可选模型（转发 `ModelCatalog`） |
-| `agent_set_model { model }` | 热切换模型（`Agent::set_model`，不重建 Agent） |
-| `agent_search_files { query }` | `@` 引用的工作区文件检索（应用层 `workspace_search`，不碰 SDK） |
-| `agent_list_sessions` | 列出全部会话（转发 `SessionCatalog::list`，按最近修改降序） |
-| `agent_current_session` | 当前会话名（无则 `null`） |
-| `agent_new_session { title? }` | 新建会话（`title` 省略即匿名，名字稍后由 AI 自动生成）并切换过去（`SessionManager::create_new`） |
-| `agent_switch_session { name }` | 切换到指定会话（`SessionManager::switch_to`，与 TUI 同一编排器） |
-| `agent_rename_session { name, title }` | 重命名会话（只改标题 sidecar，不改标识 / 内容） |
-| `agent_delete_session { name }` | 删除会话（连同日志与标题） |
-| `agent_load_history` | 回放当前会话历史（User / Assistant 正文）供前端重建 transcript |
-| `agent_subscribe { session }` | 订阅某会话：同锁内 `subscribe` + `snapshot`，返回 `SessionSnapshotWire { session, items, running }` 并起 pump |
-| `agent_unsubscribe { session }` | 退订某会话：abort 其 pump |
-| `agent_cancel` | 预留（SDK 取消机制未落地，见 `Agent.md` 缺口 9） |
+| `agent_list_projects { archived? }` | 列出项目（`archived = true` 时含归档项目，供归档列表），按最近打开降序 |
+| `agent_add_project` | 打开原生文件夹选择器新建项目（`tauri-plugin-dialog`）；已登记的目录按路径去重 / 归档则恢复；用户取消返回 `null` |
+| `agent_rename_project { project, name }` | 重命名项目（只改展示名，不动路径 / 会话数据） |
+| `agent_archive_project { project }` | **归档**项目（= 用户口中的「移除」）：只置 `archived = true` + 释放内存运行时，**不删磁盘数据** |
+| `agent_restore_project { project }` | 从归档恢复项目（下次打开懒加载） |
+| `agent_send { project, text, references?, session? }` | 发起一轮 `run_stream`（`session` 缺省回落该项目前台会话），事件经 `agent://event` 推送 |
+| `agent_model_name { project }` | 该项目当前模型名（页脚 / 选择器展示） |
+| `agent_list_models` | 列出可选模型（转发 `ModelCatalog`，全局） |
+| `agent_set_model { project, model }` | 热切换模型（`Agent::set_model`，不重建 Agent） |
+| `agent_search_files { project, query }` | `@` 引用的工作区文件检索（应用层 `workspace_search`，不碰 SDK） |
+| `agent_list_sessions { project }` | 列出该项目全部会话（转发 `SessionCatalog::list`，按最近修改降序） |
+| `agent_current_session { project }` | 该项目当前会话名（无则 `null`） |
+| `agent_new_session { project, title? }` | 新建会话（`title` 省略即匿名，名字稍后由 AI 自动生成）并切换过去（`SessionManager::create_new`） |
+| `agent_switch_session { project, name }` | 切换到指定会话（`SessionManager::switch_to`，与 TUI 同一编排器） |
+| `agent_rename_session { project, name, title }` | 重命名会话（只改标题 sidecar，不改标识 / 内容） |
+| `agent_delete_session { project, name }` | 删除会话（连同日志与标题） |
+| `agent_load_history { project }` | 回放该项目当前会话历史（User / Assistant 正文）供前端重建 transcript |
+| `agent_subscribe { project, session }` | 订阅某会话：同锁内 `subscribe` + `snapshot`，返回 `SessionSnapshotWire { session, items, running }` 并起 pump |
+| `agent_unsubscribe { project, session }` | 退订某会话：abort 其 pump |
+| `agent_cancel { project, session }` | 预留（SDK 取消机制未落地，见 `Agent.md` 缺口 9） |
 
 > **模型切换选择器**：放在发送按钮旁边（`AiChatComposer` 的 `trailingAction` 槽位，`ModelSelector.tsx`）。目录与切换都走 Rust 侧（`agent_list_models` / `agent_set_model`），前端不持有模型状态——与 TUI 的 `/model` 同语义，只是从「浮层面板」变成「发送栏内联下拉」。
 
-> **会话管理选择器**（`SessionSelector.tsx`，放在顶栏标题旁）：参照 Codex 的 `/resume` picker，提供列出 / 切换 / 新建 / 重命名（内联编辑）/ 删除（两次点击确认）。**点「新建会话」不再要求先输名**——直接开一个空会话并聚焦输入框（聚焦用户意图而非管理逻辑）；会话名在**首条消息发出后由 AI 自动生成**（见下），用户想改再走重命名。会话目录与全部操作都走 Rust 侧 `SessionCatalog`——**与 TUI 共用同一个实现、同一份 `<root>/.shirley/sessions` 数据**（见 `docs/session.md` 八.决策 7）。切换 / 新建 / 删除经 `SessionManager`（每个会话各持独立 `Agent`，运行中只拒绝该会话）。**前端按会话订阅事件**：切到某会话即 `agent_subscribe`（拿 `SessionSnapshot` 重建 transcript）+ 订阅其事件流；切走 `agent_unsubscribe`。后台会话照常运行，事件按 `AgentEventWire.session` 路由到各自视图，不串台。
+> **会话管理（左侧栏 `SessionSidebar.tsx`）**：参照 Codex 的 `/resume` picker，在项目分组下提供列出 / 切换 / 新建 / 重命名（内联编辑）/ 删除（菜单内二次确认）；**每个项目行常驻「＋ 新建会话」按钮**，项目分组标题行右键提供新建项目，项目行右键提供重命名 / 归档，归档行右键提供恢复（见 4.5）。**除项目行上的「新建会话」外所有操作都在右键菜单里**。**点「新建会话」不再要求先输名**——直接开一个空会话并聚焦输入框（聚焦用户意图而非管理逻辑）；会话名在**首条消息发出后由 AI 自动生成**（见下），用户想改再走重命名。会话目录与全部操作都走 Rust 侧 `SessionCatalog`——**与 TUI 共用同一个实现、同一份 `<root>/.shirley/sessions` 数据**（见 `docs/session.md` 八.决策 7）。切换 / 新建 / 删除经 `SessionManager`（每个会话各持独立 `Agent`，运行中只拒绝该会话）。**前端按会话订阅事件**：切到某会话即 `agent_subscribe`（拿 `SessionSnapshot` 重建 transcript）+ 订阅其事件流；切走 `agent_unsubscribe`。后台会话照常运行，事件按 `AgentEventWire.session` 路由到各自视图，不串台。
 
 > **会话自动命名**：新建会话的名字最初是时间戳占位（`fresh_name()`，见 `docs/session.md`）。首轮 `run_stream` 结束后，`agent_send` 的任务在 `restore_agent` 之前调 `auto_title_session(&agent, &catalog, &name)`：若该会话**还没有自定义标题**（目录里 `label == name`，即从未命名 / 重命名过），就用其**首条用户消息**（`session::first_user_message`）经一次无工具、非流式的补全（SDK `Agent::complete`）生成短标题，清洗（`session::sanitize_title`）后写入 `<name>.title` sidecar。任何一步失败都静默忽略、留待下轮再试；用户手动改过名后 `label != name`，自动命名不再覆盖。**这就是 `Agent::complete` 的用途**——一个"用一次模型调用做点小事"的通用原语，不碰 `Agent` 的会话状态（`&self` 可调）。
 
@@ -408,7 +440,8 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, text: String
 **M3 · 补齐会话与指令**
 - [x] 模型切换选择器（放在发送按钮旁，`ModelSelector.tsx` + `agent_list_models` / `agent_set_model`）
 - [x] `@` 引用：工作区文件/目录的提及浮层 + chip 展示（见 4.3；`agent_search_files` + `file-mentions/`）
-- [x] 会话管理：列表 / 切换 / 新建（点开即空会话、AI 自动命名）/ 重命名 / 删除（`SessionSelector.tsx` + `SessionCatalog`，与 TUI 共用数据）
+- [x] 会话管理：列表 / 切换 / 新建（点开即空会话、AI 自动命名）/ 重命名 / 删除（`SessionSidebar.tsx` + `SessionCatalog`，与 TUI 共用数据）
+- [x] **多项目（多工作区）**：登记 / 切换 / 重命名 / 归档 / 恢复（`ProjectRegistry` + `agent_*_project` 命令，见 4.5）
 - [ ] `/login` `/session` 等指令的 desktop 呈现
 - [ ] 思考显示 / 工具参数展开 / 滚动等交互对齐 TUI
 

@@ -25,7 +25,7 @@ use shirley_agent_sdk::ContextProvider;
 
 use super::embed::{EmbedError, Embedder};
 use super::format::{Entry, EntryStatus, EntryType, MemoryError};
-use super::index::hybrid_search;
+use super::index::{hybrid_search, Scored};
 use super::store::MemoryStore;
 use super::vector::VectorStore;
 
@@ -155,6 +155,40 @@ impl MemoryRuntime {
         }
     }
 
+    /// 供 `recall` 工具调用：按 query 做**混合检索**，返回 top-`limit` 命中（含全文）。
+    ///
+    /// 与自动注入路径（`render`）的区别：这里能 `await`，所以**按需嵌入 query 向量**，
+    /// 不必依赖驱动方预取。未配置 embedding / 嵌入失败时退化为纯 BM25（诚实降级）。
+    /// 命中同样计入 V2-D 的 `usage`（与自动注入共享计数）。
+    pub async fn recall(&self, query: &str, limit: usize) -> Vec<Scored> {
+        let entries = self.store.list_entries().unwrap_or_default();
+        let owned: Vec<(String, Entry)> = entries
+            .into_iter()
+            .map(|(path, entry)| (self.store.relative_path(&path), entry))
+            .collect();
+        let vectors = self.load_vectors();
+        let query_vector = match self.embedder.as_ref() {
+            Some(embedder) => {
+                let texts = [query.to_string()];
+                embedder
+                    .embed(&texts)
+                    .await
+                    .ok()
+                    .and_then(|mut vectors| vectors.pop())
+                    .filter(|vector| !vector.is_empty())
+            }
+            None => None,
+        };
+        let hits = hybrid_search(&owned, query, query_vector.as_deref(), &vectors, limit);
+        if !hits.is_empty() {
+            let mut usage = self.usage.lock().expect("memory usage lock poisoned");
+            for hit in &hits {
+                *usage.entry(hit.entry.id.clone()).or_insert(0) += 1;
+            }
+        }
+        hits
+    }
+
     /// 渲染本轮要注入的记忆文本（空记忆返回 `None`，不注入空内容）。
     ///
     /// 供 [`MemoryContextProvider`] 调用，也可被测试直接调用。
@@ -195,8 +229,11 @@ impl MemoryRuntime {
 
         let mut body = String::new();
         if let Some(core) = &core {
+            // 剥掉 `core.md` 的**程序元信息头**（`# Memory Core` 标题 + `> 由程序维护…`
+            // 注释）再注入：那是写给人类的维护说明，会向模型暗示"存在一个可操作的文件"，
+            // 诱发它用 bash 去读写记忆目录（曾真实发生）。只注入条目正文。
             body.push_str("<core>\n");
-            body.push_str(core.trim());
+            body.push_str(&strip_core_header(core));
             body.push_str("\n</core>\n");
         }
         if !relevant.is_empty() {
@@ -296,12 +333,37 @@ pub(crate) fn type_label(entry_type: EntryType) -> &'static str {
     }
 }
 
-fn status_label(status: EntryStatus) -> &'static str {
+pub(crate) fn status_label(status: EntryStatus) -> &'static str {
     match status {
         EntryStatus::Active => "active",
         EntryStatus::Superseded => "superseded",
         EntryStatus::Unconfirmed => "unconfirmed",
     }
+}
+
+/// 剥掉 `core.md` 的元信息头：`# Memory Core` 标题、紧随的 `>` 注释行、以及它们
+/// 之间的空行。保留条目正文（`- [type] ...`）。
+///
+/// **可出现多次**：双根存储下 [`MemoryStore::read_core`] 会把全局根与工作区根各自的
+/// `core.md` 拼在一起，于是会有第二个标题块；这里逐块剥离，只留下条目行。
+fn strip_core_header(core: &str) -> String {
+    let mut out = Vec::new();
+    let mut in_header = false;
+    for line in core.lines() {
+        let trimmed = line.trim();
+        if trimmed == "# Memory Core" {
+            in_header = true; // 进入一个元信息头块（跳过其后的空行与 `>` 注释）
+            continue;
+        }
+        if in_header {
+            if trimmed.is_empty() || trimmed.starts_with('>') {
+                continue;
+            }
+            in_header = false;
+        }
+        out.push(line);
+    }
+    out.join("\n").trim().to_string()
 }
 
 /// XML 文本转义（与 `todo.rs` 同款）。
@@ -314,8 +376,35 @@ fn escape(input: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn strip_core_header_drops_metadata_keeps_entries() {
+        let raw = "# Memory Core\n\n> 由程序维护（活跃条目投影）；勿手改。\n\n- [fact] 用户是 Sean。\n- [preference] 偏好 Rust。\n";
+        let stripped = strip_core_header(raw);
+        assert!(!stripped.contains("# Memory Core"), "应剥掉标题: {stripped}");
+        assert!(!stripped.contains("勿手改"), "应剥掉维护注释: {stripped}");
+        assert!(stripped.contains("用户是 Sean。"), "应保留条目: {stripped}");
+        assert!(stripped.starts_with("- [fact]"), "应以首条条目开头: {stripped}");
+    }
+
+    #[test]
+    fn strip_core_header_handles_empty_and_bodyless() {
+        assert_eq!(strip_core_header(""), "");
+        // 只有头、没有条目 → 空串（不注入空 core）。
+        assert_eq!(strip_core_header("# Memory Core\n\n> 由程序维护；勿手改。\n"), "");
+    }
+
+    #[test]
+    fn strip_core_header_drops_every_header_block() {
+        // 双根拼接：全局 + 工作区各带一个标题块，两个都要剥掉，只留条目。
+        let raw = "# Memory Core\n\n> 由程序维护；勿手改。\n\n- [fact] 个人事实。\n\n# Memory Core\n\n> 由程序维护；勿手改。\n\n- [fact] 项目事实。\n";
+        let stripped = strip_core_header(raw);
+        assert_eq!(stripped, "- [fact] 个人事实。\n\n- [fact] 项目事实。");
+        assert!(!stripped.contains("# Memory Core"));
+        assert!(!stripped.contains("勿手改"));
+    }
     use super::*;
-    use crate::memory::format::{Confidence, Entry};
+    use crate::memory::format::{Confidence, Domain, Entry};
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -334,6 +423,7 @@ mod tests {
         Entry {
             id: id.into(),
             entry_type,
+            domain: Domain::Personal,
             subject: subject.into(),
             created_at: "2026-05-10".into(),
             valid_from: None,

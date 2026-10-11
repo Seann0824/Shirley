@@ -16,6 +16,7 @@ mod format;
 mod index;
 mod provider;
 mod store;
+mod tool;
 mod vector;
 
 // 只 re-export **模块外**真正消费的类型（保持门面小）：
@@ -28,3 +29,4 @@ pub use curator::{ConsolidateOutcome, CurateOutcome, CuratorError, consolidate, 
 pub use embed::{Embedder, EmbeddingConfig};
 pub use provider::{MemoryContextProvider, MemoryRuntime};
 pub use store::MemoryStore;
+pub use tool::RecallTool;
