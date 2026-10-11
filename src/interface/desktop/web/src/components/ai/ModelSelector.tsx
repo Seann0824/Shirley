@@ -78,6 +78,9 @@ export function ModelSelector({
           aria-label="可选模型"
           className="absolute bottom-[calc(100%+0.5rem)] right-0 z-20 max-h-72 w-64 rounded-card border border-line bg-surface shadow-lg"
           viewportClassName="p-1"
+          // Radix ScrollArea 的 Root 会注入内联 `position: relative`，内联样式优先级高于
+          // `absolute` 类——不覆盖就会退回标准流、把输入框撑开。这里显式改回绝对定位。
+          style={{ position: "absolute" }}
         >
           {loading && <p className="px-3 py-2 text-caption text-muted">加载中…</p>}
           {!loading && entries.length === 0 && (

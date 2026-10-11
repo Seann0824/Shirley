@@ -70,6 +70,10 @@ export function App() {
   const subRef = useRef<SessionSubscription | null>(null);
   // 每个会话当前在跑的 assistant 轮次 id（事件按它落点），键为 `project::session`。
   const turnRef = useRef<Map<string, string>>(new Map());
+  // 每个会话本轮提交的输入（停止 / 打断时回退到输入框），键为 `project::session`。
+  const turnInputRef = useRef<Map<string, { display: string; refs: FileReference[] }>>(
+    new Map(),
+  );
   // 快照应用前缓冲事件（订阅与快照之间到达的增量不丢）。
   const readyRef = useRef<Set<string>>(new Set());
   const bufferRef = useRef<Map<string, AgentEventWire[]>>(new Map());
@@ -92,6 +96,43 @@ export function App() {
 
   // 把一个事件应用到指定会话的视图（纯函数式更新，避免闭包过期）。
   const applyEvent = useCallback((key: string, event: AgentEventWire) => {
+    // 用户点击停止：后端会回退本轮（丢掉本轮用户消息及其后内容）并以
+    // `finished(cancelled)` 收尾。这里同步回退前端本轮——移除乐观记入的用户消息
+    // 与其后的半截流式内容，并把本轮输入退回输入框（与 TUI 打断语义一致）。
+    if (event.type === "finished" && event.stop_reason === "cancelled") {
+      const stored = turnInputRef.current.get(key);
+      turnInputRef.current.delete(key);
+      turnRef.current.delete(key);
+      setViews((prev) => {
+        const view = prev[key] ?? emptyView();
+        // 本轮乐观记入的用户消息是最后一条用户消息：丢弃它及其后的所有条目。
+        let cut = view.messages.length;
+        for (let i = view.messages.length - 1; i >= 0; i -= 1) {
+          if (view.messages[i].role === "user") {
+            cut = i;
+            break;
+          }
+        }
+        const droppedIds = view.messages.slice(cut).map((message) => message.id);
+        const turnSegments = { ...view.turnSegments };
+        for (const id of droppedIds) delete turnSegments[String(id)];
+        return {
+          ...prev,
+          [key]: {
+            ...view,
+            messages: view.messages.slice(0, cut),
+            turnSegments,
+            busy: false,
+            error: "",
+          },
+        };
+      });
+      if (stored) {
+        setInput(stored.display);
+        setReferences(stored.refs);
+      }
+      return;
+    }
     const needsTurn =
       event.type === "content_delta" ||
       event.type === "reasoning_delta" ||
@@ -370,6 +411,7 @@ export function App() {
       if (views[key]?.busy ?? false) return;
       const assistantId = nextId();
       turnRef.current.set(key, assistantId);
+      turnInputRef.current.set(key, { display, refs });
       setViews((prev) => {
         const view = prev[key] ?? emptyView();
         return {
@@ -470,12 +512,10 @@ export function App() {
     const project = activeProject;
     const session = sessionName;
     if (!project || !session) return;
-    const key = viewKey(project, session);
+    // 只发取消信号：真正的收尾（回退本轮 + 把 `busy` 置 false）由后端回推的
+    // `finished(cancelled)` 事件统一完成——避免这里先乐观置 `busy=false`，用户
+    // 立刻重发时又与后端“agent 正在运行中”判定打架。
     await (await agentBridge()).cancel(project, session).catch(() => {});
-    setViews((prev) => {
-      const view = prev[key] ?? emptyView();
-      return { ...prev, [key]: { ...view, busy: false } };
-    });
   }, [activeProject, sessionName]);
 
   const switchModel = useCallback(
