@@ -5,6 +5,7 @@ import {
   FolderGit2,
   FolderPlus,
   Loader2,
+  MoreHorizontal,
   Pencil,
   Pin,
   PinOff,
@@ -15,6 +16,7 @@ import { useEffect, useRef, useState } from "react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/ui/collapsible";
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from "@/ui/context-menu";
 import { ScrollArea } from "@/ui/scroll-area";
+import { HoverScrollLabel } from "@/ui/hover-scroll-label";
 import { cn } from "@/ui/utils";
 import type { ProjectEntry, SessionEntry } from "@/lib/bridge";
 
@@ -29,10 +31,10 @@ import type { ProjectEntry, SessionEntry } from "@/lib/bridge";
  * 4. **Archived**：归档项目（默认收起），可恢复——归档不删磁盘数据，恢复即回到
  *    Projects 分组。
  *
- * **交互：所有非「新建会话」的操作都收进右键菜单**（默认不可见、不占版面）：
+ * **交互**：会话行把常用操作提到行内图标（默认隐藏、悬停 / 聚焦才现），其余仍走右键菜单：
+ * - 会话行悬停：`pin` 图标（置顶 / 取消置顶，已置顶时常驻）、`more`（⋯）图标（打开与右键同款菜单）。
  * - 会话行右键：置顶 / 取消置顶、重命名、删除（菜单内二次确认）。
- * - 项目行右键：重命名、归档（菜单内二次确认）。
- * - 「项目」分组标题右键：新建项目（原生文件夹选择器）。
+ * - 项目行右键：重命名、归档（菜单内二次确认）；「项目」分组标题行有常驻 `+`（新建项目）。
  * - 归档项目行右键：恢复。
  *
  * 数据与操作全来自 Rust 侧 `ProjectRegistry` / `SessionCatalog` / `SessionManager`
@@ -263,55 +265,88 @@ export function SessionSidebar({
   const renderRow = (entry: SessionEntry, group: "pinned" | "project") => {
     const active = entry.name === current;
     const isEditing = editingSession === entry.name;
-    return (
-      <ContextMenu key={entry.name} menu={sessionMenu(entry, group)}>
-        <div
-          className={cn(
-            "group flex items-center gap-1.5 rounded-control px-2 py-1.5 transition-colors",
-            active ? "bg-selected" : "hover:bg-quiet",
-          )}
+    const isPinned = group === "pinned" || pinned.includes(entry.name);
+    // 行内操作：pin（置顶/取消置顶）与 more（右键菜单同款，收起重命名/删除）。
+    // 默认隐藏、悬停或聚焦时显示；已置顶的 pin 常驻可见以指示状态。
+    const actions = (open: (event: React.MouseEvent) => void) => (
+      <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
+        <button
+          type="button"
+          aria-label="更多操作"
+          title="更多操作"
+          className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
+          onClick={(event) => {
+            event.stopPropagation();
+            open(event);
+          }}
         >
-          {isEditing ? (
-            <input
-              autoFocus
-              value={editValue}
-              className="min-w-0 flex-1 rounded-control bg-inset px-2 py-1 text-body-sm text-ink outline-none"
-              onChange={(event) => setEditValue(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") submitSessionRename(entry.name);
-                if (event.key === "Escape") {
-                  event.stopPropagation();
-                  setEditingSession(null);
-                }
-              }}
-              onBlur={() => setEditingSession(null)}
-            />
-          ) : (
-            <button
-              type="button"
-              role="option"
-              aria-selected={active}
-              className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
-              onClick={() => {
-                if (!active) onSelect(entry.name);
-              }}
-            >
-              {entry.running && (
-                <Loader2 className="size-3.5 shrink-0 animate-spin text-accent" aria-label="运行中" />
-              )}
-              <span className="min-w-0 flex-1">
-                <span className={cn("block truncate text-body-sm text-ink", active && "font-medium")}>
-                  {entry.label}
-                </span>
-                {entry.preview && (
-                  <span className="mt-0.5 block truncate text-caption text-muted">
-                    {entry.preview}
-                  </span>
-                )}
-              </span>
-            </button>
-          )}
-        </div>
+          <MoreHorizontal className="size-3.5" />
+        </button>
+        <button
+          type="button"
+          aria-label={isPinned ? "取消置顶" : "置顶"}
+          title={isPinned ? "取消置顶" : "置顶"}
+          className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
+          onClick={(event) => {
+            event.stopPropagation();
+            togglePin(entry.name);
+          }}
+        >
+          {/* 置顶态用实心 Pin（同一位置），未置顶用 PinOff 提示可置顶。 */}
+          {isPinned ? <Pin className="size-3.5" /> : <PinOff className="size-3.5" />}
+        </button>
+      </div>
+    );
+    return (
+      <ContextMenu
+        key={entry.name}
+        menu={sessionMenu(entry, group)}
+        className={cn(
+          "group flex items-center gap-1.5 rounded-control px-2 py-1.5 transition-colors",
+          active ? "bg-selected" : "hover:bg-quiet",
+        )}
+      >
+        {(open) => (
+          <>
+            {isEditing ? (
+              <input
+                autoFocus
+                value={editValue}
+                className="min-w-0 flex-1 rounded-control bg-inset px-2 py-1 text-body-sm text-ink outline-none"
+                onChange={(event) => setEditValue(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter") submitSessionRename(entry.name);
+                  if (event.key === "Escape") {
+                    event.stopPropagation();
+                    setEditingSession(null);
+                  }
+                }}
+                onBlur={() => setEditingSession(null)}
+              />
+            ) : (
+              <>
+                <button
+                  type="button"
+                  role="option"
+                  aria-selected={active}
+                  className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+                  onClick={() => {
+                    if (!active) onSelect(entry.name);
+                  }}
+                >
+                  <HoverScrollLabel
+                    text={entry.label}
+                    className={cn("flex-1 text-body-sm text-ink", active && "font-medium")}
+                  />
+                  {entry.running && (
+                    <Loader2 className="size-3.5 shrink-0 animate-spin text-muted" aria-label="运行中" />
+                  )}
+                </button>
+                {actions(open)}
+              </>
+            )}
+          </>
+        )}
       </ContextMenu>
     );
   };
@@ -348,8 +383,17 @@ export function SessionSidebar({
               </ContextMenuItem>
             }
           >
-            <div className="flex items-center justify-between px-2 py-1">
+            <div className="group flex items-center justify-between gap-1 px-2 py-1">
               <h2 className="text-caption font-medium tracking-wide text-muted uppercase">项目</h2>
+              <button
+                type="button"
+                aria-label="新建项目"
+                title="新建项目"
+                className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
+                onClick={onAddProject}
+              >
+                <FolderPlus className="size-3.5" />
+              </button>
             </div>
           </ContextMenu>
           <div className="flex flex-col gap-1">
@@ -426,12 +470,7 @@ export function SessionSidebar({
                         />
                       ) : (
                         <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1 text-left">
-                          <ChevronRight
-                            className={cn(
-                              "size-3.5 shrink-0 text-muted transition-transform",
-                              !isCollapsed && "rotate-90",
-                            )}
-                          />
+                          {/* 展开/折叠共用同一个文件图标（不再用箭头区分状态）。 */}
                           <FolderGit2 className="size-3.5 shrink-0 text-muted" />
                           <button
                             type="button"
@@ -454,7 +493,7 @@ export function SessionSidebar({
                           type="button"
                           aria-label={`在「${entry.name}」新建会话`}
                           title="新建会话"
-                          className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
+                          className="hidden size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors group-hover:flex hover:bg-selected hover:text-ink"
                           onClick={(event) => {
                             event.stopPropagation();
                             onNew(entry.id);
@@ -469,7 +508,7 @@ export function SessionSidebar({
                     <div
                       role="listbox"
                       aria-label={`${entry.name} 的会话`}
-                      className="mt-0.5 ml-3 flex flex-col gap-0.5 border-l border-line pl-1"
+                      className="mt-0.5 ml-3 flex flex-col gap-0.5 pl-1.5"
                     >
                       {projectSessions.length === 0 ? (
                         <p className="px-2 py-1.5 text-caption text-muted">
@@ -507,7 +546,7 @@ export function SessionSidebar({
               <span className="shrink-0 text-caption text-muted">{archivedProjects.length}</span>
             </button>
             {archivedOpen && (
-              <div className="mt-0.5 ml-3 flex flex-col gap-0.5 border-l border-line pl-1">
+              <div className="mt-0.5 ml-3 flex flex-col gap-0.5 pl-1">
                 {archivedProjects.map((entry) => (
                   <ContextMenu
                     key={entry.id}

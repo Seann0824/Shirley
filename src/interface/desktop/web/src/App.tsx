@@ -7,6 +7,7 @@ import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { AssistantMessage } from "@/components/AssistantMessage";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
+import { AiConversationSkeleton } from "@/components/ai/AiConversationSkeleton";
 import { InlineReferences } from "@/lib/file-mentions/FileChips";
 import { FileMentionPopover } from "@/lib/file-mentions/FileMentionPopover";
 import {
@@ -37,10 +38,12 @@ type SessionView = {
   turnSegments: Record<string, AiSegment[]>;
   busy: boolean;
   error: string;
+  /** 历史快照尚未到达：先乐观展示，渲染骨架屏。 */
+  loading: boolean;
 };
 
 function emptyView(): SessionView {
-  return { messages: [], turnSegments: {}, busy: false, error: "" };
+  return { messages: [], turnSegments: {}, busy: false, error: "", loading: false };
 }
 
 /** 视图键：跨项目不重名。 */
@@ -120,26 +123,54 @@ export function App() {
     });
   }, []);
 
+  // 先响应交互：立刻把前台会话切过去并进入加载态（渲染骨架屏），不等后端往返。
+  // 打开会话 / 切换会话都在取历史快照**之前**调它——历史快照要走一次
+  // `agent_subscribe` 往返，不能让用户对着旧会话干等。
+  const beginSessionLoad = useCallback((project: string, session: string) => {
+    const key = viewKey(project, session);
+    setSessionName(session);
+    setViews((prev) => {
+      const existing = prev[key];
+      // 已有缓存内容（后台会话跑过）直接复用、不闪骨架；否则占位加载。
+      if (existing && existing.messages.length > 0) {
+        return { ...prev, [key]: { ...existing, loading: true } };
+      }
+      return { ...prev, [key]: { ...emptyView(), loading: true } };
+    });
+  }, []);
+
   // 订阅一个会话：退订旧的，拿快照重建视图，再叠加之后的事件。
   const openSession = useCallback(
     async (project: string, session: string) => {
       const bridge = await agentBridge();
       const key = viewKey(project, session);
+      beginSessionLoad(project, session);
       subRef.current?.unsubscribe();
       subRef.current = null;
       readyRef.current.delete(key);
       bufferRef.current.delete(key);
       turnRef.current.delete(key);
-      const sub = await bridge.openSession(project, session, (event) => {
-        // 快照尚未应用：先缓冲，待快照落地后按序补放（不丢、不重）。
-        if (!readyRef.current.has(key)) {
-          const buffer = bufferRef.current.get(key) ?? [];
-          buffer.push(event);
-          bufferRef.current.set(key, buffer);
-          return;
-        }
-        applyEvent(key, event);
-      });
+      let sub;
+      try {
+        sub = await bridge.openSession(project, session, (event) => {
+          // 快照尚未应用：先缓冲，待快照落地后按序补放（不丢、不重）。
+          if (!readyRef.current.has(key)) {
+            const buffer = bufferRef.current.get(key) ?? [];
+            buffer.push(event);
+            bufferRef.current.set(key, buffer);
+            return;
+          }
+          applyEvent(key, event);
+        });
+      } catch (e) {
+        // 订阅失败：退出加载态并如实报错，别让骨架屏一直转下去。
+        const message = e instanceof Error ? e.message : String(e);
+        setViews((prev) => ({
+          ...prev,
+          [key]: { ...(prev[key] ?? emptyView()), loading: false, error: message },
+        }));
+        return;
+      }
       subRef.current = sub;
       const { view, lastAssistantId } = viewFromSnapshot(sub.snapshot);
       if (lastAssistantId) turnRef.current.set(key, lastAssistantId);
@@ -148,9 +179,8 @@ export function App() {
       const buffered = bufferRef.current.get(key) ?? [];
       bufferRef.current.delete(key);
       for (const event of buffered) applyEvent(key, event);
-      setSessionName(session);
     },
-    [applyEvent],
+    [applyEvent, beginSessionLoad],
   );
 
   // 选中一个项目：切前台 + 打开它当前会话。
@@ -257,6 +287,8 @@ export function App() {
       if (!activeProject) return;
       try {
         setUiError("");
+        // 先响应交互：立刻切前台 + 骨架屏，再等后端把 active 指针挪过去。
+        beginSessionLoad(activeProject, name);
         const bridge = await agentBridge();
         await bridge.switchSession(activeProject, name);
         await openSession(activeProject, name);
@@ -264,7 +296,7 @@ export function App() {
         setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [activeProject, openSession],
+    [activeProject, openSession, beginSessionLoad],
   );
 
   // 在指定项目下新建会话（项目行上的「＋」可直接作用于任意项目，不限于前台）。
@@ -489,6 +521,12 @@ export function App() {
           聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}
       <main className="flex min-h-0 flex-1 flex-col">
         <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
+        {view.loading ? (
+          // 历史快照尚未到达：先渲染骨架屏，给用户「正在加载消息记录」的即时反馈。
+          <div className="min-h-0 flex-1 overflow-hidden">
+            <AiConversationSkeleton />
+          </div>
+        ) : (
         <AiConversationTranscript
           messages={view.messages}
           conversationKey={activeProject && sessionName ? viewKey(activeProject, sessionName) : "main"}
@@ -523,6 +561,7 @@ export function App() {
             )
           }
         />
+        )}
         {error && (
           <p className="mx-3 mb-1 text-body-sm text-danger-ink" role="alert">
             {error}
@@ -800,7 +839,7 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
   }
 
   return {
-    view: { messages, turnSegments, busy: snapshot.running, error: "" },
+    view: { messages, turnSegments, busy: snapshot.running, error: "", loading: false },
     lastAssistantId: currentAssistantId,
   };
 }
