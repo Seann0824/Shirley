@@ -9,6 +9,7 @@ import {
 } from "streamdown";
 import "streamdown/styles.css";
 import { cn } from "@/ui/utils";
+import { FlightMapRenderer } from "@/components/ai/FlightMapRenderer";
 
 const BASE_REMARK_PLUGINS = Object.values(defaultRemarkPlugins);
 const SAFE_REHYPE_PLUGINS = Object.entries(defaultRehypePlugins)
@@ -43,6 +44,13 @@ export function aiMarkdownExternalLinkProps(className: string | undefined) {
     target: "_blank",
   };
 }
+
+// 自定义围栏代码块渲染器：```flightmap 代码块交给 FlightMap 画静态地图。
+// 这是 streamdown 的公开扩展点（plugins.renderers），不改动 Message / 事件协议——
+// 地图只是正文 markdown 里的一个代码块，走既有文本链路。
+const MARKDOWN_PLUGINS: StreamdownProps["plugins"] = {
+  renderers: [{ language: "flightmap", component: FlightMapRenderer }],
+};
 
 const BASE_COMPONENTS: Components = {
   a: ({ href, children, className, title }) => (
@@ -101,6 +109,7 @@ export function AiMarkdown({
         linkSafety={DISABLED_LINK_SAFETY}
         mode="streaming"
         parseIncompleteMarkdown={streaming}
+        plugins={MARKDOWN_PLUGINS}
         rehypePlugins={SAFE_REHYPE_PLUGINS}
         remarkPlugins={mergedPlugins}
         tableMaxHeight="none"
