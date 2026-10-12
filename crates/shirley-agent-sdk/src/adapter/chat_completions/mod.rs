@@ -406,6 +406,21 @@ mod tests {
     use super::*;
     use crate::ModelProtocol;
 
+    #[test]
+    fn response_ids_can_be_omitted() {
+        let stream: dto::ModelStreamResponse = serde_json::from_value(serde_json::json!({
+            "choices": [{"index": 0, "delta": {"content": "你好"}, "finish_reason": null}]
+        }))
+        .expect("流式响应不应强制要求顶层 id");
+        assert!(stream.id.is_empty());
+
+        let response = decode_response(serde_json::json!({
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "你好"}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
+        }));
+        assert!(response.is_ok(), "非流式响应不应强制要求顶层 id: {response:?}");
+    }
+
     fn config() -> ModelConfig {
         ModelConfig::builder()
             .protocol(ModelProtocol::ChatCompletions)

@@ -315,6 +315,7 @@ export function App() {
         if (project !== activeProject) await selectProject(project);
         await bridge.switchSession(project, name);
         await openSession(project, name);
+        await bridge.modelName(project).then(setModel);
       } catch (e) {
         setUiError(e instanceof Error ? e.message : String(e));
       }
@@ -333,6 +334,7 @@ export function App() {
         // 若在非当前项目下新建，先把该项目切到前台，再打开新会话。
         if (project !== activeProject) await selectProject(project);
         await openSession(project, entry.name);
+        await bridge.modelName(project).then(setModel);
         // 直接聚焦输入框——新建会话的意图是"马上开始聊"，而不是先做管理。
         editorRef.current?.focus();
       } catch (e) {
@@ -534,7 +536,6 @@ export function App() {
         projects={projects}
         activeProject={activeProject}
         current={sessionName}
-        onSelectProject={(id) => void selectProject(id)}
         onAddProject={() => void addProject()}
         onRenameProject={(id, name) => void renameProject(id, name)}
         onArchiveProject={(id) => void archiveProject(id)}
@@ -632,7 +633,7 @@ export function App() {
             onSend={() => void send()}
             onStop={() => void stop()}
             trailingAction={
-              <ModelSelector current={model} onSelect={(value) => void switchModel(value)} />
+              <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
             }
             inputSlot={
               <MentionEditor

@@ -550,6 +550,11 @@ impl SessionManager {
         // 离开前台即视为该会话"本轮结束"——切走后触发一次增量 curation
         // （`docs/memory.md` §5.1；旧会话仍留在内存，其 `Agent` 消息可读）。
         let previous = self.active().name.clone();
+        let selected_model = self
+            .active()
+            .agent
+            .as_ref()
+            .map(|agent| agent.model_config().model.clone());
         if let Some(id) = self.id_of_name(name) {
             self.active = id;
             if let Some(previous) = previous.filter(|p| p != name) {
@@ -567,9 +572,12 @@ impl SessionManager {
             .map_err(|error| error.to_string())?;
         // 会话持久化在应用层：先 load 日志，再交给工厂起 `Agent`（system 现生成置顶）。
         let log = store.load().map_err(|error| error.to_string())?;
-        let built = factory
+        let mut built = factory
             .build_agent(log)
             .map_err(|error| error.to_string())?;
+        if let Some(model) = selected_model {
+            built.agent.set_model(model);
+        }
         let id = self.insert(
             built.agent,
             Some(name.to_owned()),
@@ -594,6 +602,11 @@ impl SessionManager {
     pub fn create_new(&mut self, title: Option<&str>) -> Result<String, String> {
         // 与 `switch_to` 同理：新建并切走 = 旧会话本轮结束，触发一次 curation。
         let previous = self.active().name.clone();
+        let selected_model = self
+            .active()
+            .agent
+            .as_ref()
+            .map(|agent| agent.model_config().model.clone());
         let factory = self
             .factory
             .as_ref()
@@ -604,9 +617,12 @@ impl SessionManager {
             .map_err(|error| error.to_string())?;
         // 惰性会话此刻为空：load 得空工作集，首条消息落盘时才物化文件。
         let log = store.load().map_err(|error| error.to_string())?;
-        let built = factory
+        let mut built = factory
             .build_agent(log)
             .map_err(|error| error.to_string())?;
+        if let Some(model) = selected_model {
+            built.agent.set_model(model);
+        }
         let id = self.insert(
             built.agent,
             Some(entry.name.clone()),
