@@ -12,10 +12,12 @@ import type { ModelEntry } from "@/lib/bridge";
  * (`ModelCatalog` / `Agent::set_model`) 提供，前端不持有模型状态。
  */
 export function ModelSelector({
+  project,
   current,
   onSelect,
   className,
 }: {
+  project: string;
   current: string;
   onSelect: (value: string) => void;
   className?: string;
@@ -23,6 +25,7 @@ export function ModelSelector({
   const [open, setOpen] = useState(false);
   const [entries, setEntries] = useState<ModelEntry[]>([]);
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
 
   // 点击组件外部 / Esc 关闭。
@@ -47,11 +50,13 @@ export function ModelSelector({
     setOpen(next);
     if (!next) return;
     setLoading(true);
+    setError("");
     try {
       const { agentBridge } = await import("@/lib/bridge");
-      setEntries(await (await agentBridge()).listModels());
-    } catch {
+      setEntries(await (await agentBridge()).listModels(project));
+    } catch (cause) {
       setEntries([]);
+      setError(cause instanceof Error ? cause.message : String(cause));
     } finally {
       setLoading(false);
     }
@@ -87,7 +92,8 @@ export function ModelSelector({
         >
           <div className="p-1">
             {loading && <p className="px-3 py-2 text-caption text-muted">加载中…</p>}
-            {!loading && entries.length === 0 && (
+            {!loading && error && <p className="px-3 py-2 text-caption text-danger-ink">模型列表加载失败：{error}</p>}
+            {!loading && !error && entries.length === 0 && (
               <p className="px-3 py-2 text-caption text-muted">没有可用的模型。</p>
             )}
             {!loading &&

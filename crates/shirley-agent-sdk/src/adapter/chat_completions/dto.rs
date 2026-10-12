@@ -5,6 +5,7 @@
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ModelResponse {
+    #[serde(default)]
     pub id: String,
     pub choices: Vec<Choice>,
     pub usage: Usage,
@@ -69,6 +70,7 @@ pub struct PromptTokensDetails {
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ModelStreamResponse {
+    #[serde(default)]
     pub id: String,
     pub choices: Vec<ChoiceStream>,
     pub usage: Option<Usage>,

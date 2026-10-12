@@ -143,10 +143,7 @@ impl SkillCatalog {
 ///
 /// P1 起引导模型用 `activate_skill` 加载指令（用户级 skill 在工作区外，`read_file`
 /// 够不到）；`location` 仍列出，供人排查。见 `docs/skills.md` 5.3 / 九。
-pub const SKILLS_HEADER: &str = "Available skills are listed below. Each is a directory with a \
-SKILL.md holding detailed instructions. When a task matches a skill's description, call \
-`activate_skill` with that skill's name to load its instructions before proceeding. Load a \
-skill's scripts / references / assets on demand with `read_skill_file`.";
+pub const SKILLS_HEADER: &str = include_str!("../../prompts/skills_header.md");
 
 /// 列出 skill 目录下约定资源子目录（`scripts` / `references` / `assets`）里的文件，
 /// 路径相对 skill 根。按子目录顺序稳定排序——**顺序稳定**是 KV 缓存友好的前提

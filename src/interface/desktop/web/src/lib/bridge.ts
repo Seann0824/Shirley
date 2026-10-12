@@ -107,8 +107,8 @@ export type AgentBridge = {
   ) => Promise<SessionSubscription>;
   /** 指定项目当前会话的模型名，用于页脚展示。 */
   modelName: (project: string) => Promise<string>;
-  /** 列出可选模型（模型目录由 Rust 侧 `ModelCatalog` 提供，全局）。 */
-  listModels: () => Promise<ModelEntry[]>;
+  /** 列出当前项目端点可选的模型。 */
+  listModels: (project: string) => Promise<ModelEntry[]>;
   /** 热切换模型：不重建 Agent，只换 `ModelConfig::model`。 */
   setModel: (project: string, value: string) => Promise<void>;
   /** 按关键词检索工作区文件（`@` 引用用，纯应用层）。 */
@@ -189,8 +189,8 @@ async function createTauriBridge(): Promise<AgentBridge> {
     async modelName(project) {
       return invoke<string>("agent_model_name", { project });
     },
-    async listModels() {
-      return invoke<ModelEntry[]>("agent_list_models");
+    async listModels(project) {
+      return invoke<ModelEntry[]>("agent_list_models", { project });
     },
     async setModel(project, value) {
       await invoke("agent_set_model", { project, model: value });

@@ -7,6 +7,11 @@ use serde::Serialize;
 use crate::error::{ErrorKind, SdkError};
 use crate::message;
 
+/// 协议层保留的工具名：content 模式下，当解析发现工具块不完整 / 非法时，
+/// `parse_content_response` 会合成一个对它的调用；runtime 无需改动即可把
+/// 「可纠正的回灌」交回主循环（见 `adapter/tool_calling.rs` Step 5）。
+pub(crate) const PROTOCOL_ERROR_TOOL: &str = "__protocol__";
+
 /// 工具层错误。
 ///
 /// 展示格式统一为 `[前缀]: 详情`，与 `AdapterError` / `SandboxError` /
@@ -242,6 +247,18 @@ impl ToolManager {
         input: &message::ToolCall,
         ctx: ToolContext,
     ) -> Result<serde_json::Value, ToolError> {
+        // 协议保留工具：不查表，直接把参数里的 `message` 作为回灌内容返回。
+        // 这样「解析失败」也能走工具结果通道回到模型，而 agent.rs 零改动。
+        if input.name == PROTOCOL_ERROR_TOOL {
+            let message = serde_json::from_str::<serde_json::Value>(&input.arguments)
+                .ok()
+                .and_then(|value| {
+                    value.get("message").and_then(|m| m.as_str()).map(str::to_string)
+                })
+                .unwrap_or_else(|| "工具调用格式错误，请重新发送完整、合法的调用。".to_string());
+            return Ok(serde_json::Value::String(message));
+        }
+
         let tool = self.tools.get(&input.name).ok_or_else(|| {
             ToolError::NotFoundError(input.name.clone())
         })?;

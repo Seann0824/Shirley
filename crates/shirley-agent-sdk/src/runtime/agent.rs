@@ -106,6 +106,16 @@ impl Agent {
         self.model_config.model = model.into();
     }
 
+    /// 整体替换模型配置：把「模型 + 协议 + 端点」等一次性下发。
+    ///
+    /// 这是「模型配置一次下发」的 SDK 接缝（`docs/tool-calling-refactor.md` Step 3）：
+    /// 调用方先用工厂算好一份完整 `ModelConfig`，再整份交给它，**不必记**
+    /// 「先 `set_model` 再 `set_tool_calling`」的顺序，也不会漏切协议。
+    /// `set_model` / `set_provider` 仍是只改单字段的小接缝，按需选用。
+    pub fn set_model_config(&mut self, config: adapter::ModelConfig) {
+        self.model_config = config;
+    }
+
     /// 切换模型服务连接（`base_url` + `api_key`）：其余配置原样保留。
     ///
     /// 这是应用层 `/login` 指令落地的 SDK 接缝（与 [`Agent::set_model`] 对称）：

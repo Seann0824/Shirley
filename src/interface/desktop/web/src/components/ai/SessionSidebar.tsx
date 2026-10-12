@@ -73,7 +73,6 @@ export function SessionSidebar({
   projects,
   activeProject,
   current,
-  onSelectProject,
   onAddProject,
   onRenameProject,
   onArchiveProject,
@@ -89,7 +88,6 @@ export function SessionSidebar({
   activeProject: string | null;
   /** 当前会话名（无则 null）。 */
   current: string | null;
-  onSelectProject: (id: string) => void;
   onAddProject: () => void;
   onRenameProject: (id: string, name: string) => void;
   onArchiveProject: (id: string) => void;
@@ -387,7 +385,6 @@ export function SessionSidebar({
             )}
             {groups.map(({ entry, sessions: projectSessions }) => {
               const isCollapsed = collapsed.includes(entry.id);
-              const isActive = entry.id === activeProject;
               const isEditing = editingProject === entry.id;
               const isConfirming = confirmingArchive === entry.id;
               const projectMenu = (
@@ -432,12 +429,7 @@ export function SessionSidebar({
                   onOpenChange={() => toggleCollapsed(entry.id)}
                 >
                   <ContextMenu menu={projectMenu}>
-                    <div
-                      className={cn(
-                        "group flex h-8 items-center gap-1 rounded-control px-2 transition-colors",
-                        isActive ? "bg-selected" : "hover:bg-quiet",
-                      )}
-                    >
+                    <div className="group flex h-8 items-center gap-1 rounded-control px-2 transition-colors hover:bg-quiet">
                       {isEditing ? (
                         <input
                           autoFocus
@@ -457,9 +449,6 @@ export function SessionSidebar({
                         <CollapsibleTrigger
                           className="flex min-w-0 flex-1 items-center gap-1 text-left"
                           title={entry.path}
-                          onClick={() => {
-                            if (!isActive) onSelectProject(entry.id);
-                          }}
                         >
                           {/* 展开/折叠共用同一位置的文件夹图标，随状态切换（不用箭头）。 */}
                           {isCollapsed ? (

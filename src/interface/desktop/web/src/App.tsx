@@ -315,6 +315,7 @@ export function App() {
         if (project !== activeProject) await selectProject(project);
         await bridge.switchSession(project, name);
         await openSession(project, name);
+        await bridge.modelName(project).then(setModel);
       } catch (e) {
         setUiError(e instanceof Error ? e.message : String(e));
       }
@@ -333,6 +334,7 @@ export function App() {
         // 若在非当前项目下新建，先把该项目切到前台，再打开新会话。
         if (project !== activeProject) await selectProject(project);
         await openSession(project, entry.name);
+        await bridge.modelName(project).then(setModel);
         // 直接聚焦输入框——新建会话的意图是"马上开始聊"，而不是先做管理。
         editorRef.current?.focus();
       } catch (e) {
@@ -534,7 +536,6 @@ export function App() {
         projects={projects}
         activeProject={activeProject}
         current={sessionName}
-        onSelectProject={(id) => void selectProject(id)}
         onAddProject={() => void addProject()}
         onRenameProject={(id, name) => void renameProject(id, name)}
         onArchiveProject={(id) => void archiveProject(id)}
@@ -632,7 +633,7 @@ export function App() {
             onSend={() => void send()}
             onStop={() => void stop()}
             trailingAction={
-              <ModelSelector current={model} onSelect={(value) => void switchModel(value)} />
+              <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
             }
             inputSlot={
               <MentionEditor
@@ -783,25 +784,40 @@ function updateTool(
   assistantId: string,
   event: Extract<AgentEventWire, { type: "tool_finished" }>,
 ): Record<string, AiSegment[]> {
+  const current = segments[assistantId] ?? [];
+  const next = [...current];
+  let fallback: { segmentIndex: number; executionIndex: number } | null = null;
+  for (let segmentIndex = next.length - 1; segmentIndex >= 0; segmentIndex -= 1) {
+    const segment = next[segmentIndex];
+    if (segment.kind !== "tools") continue;
+    let executionIndex = segment.executions.length - 1;
+    while (executionIndex >= 0 && segment.executions[executionIndex].call_id !== event.call_id) {
+      executionIndex -= 1;
+    }
+    if (executionIndex < 0) continue;
+    if (segment.executions[executionIndex].status !== "running") {
+      fallback ??= { segmentIndex, executionIndex };
+      continue;
+    }
+    fallback = { segmentIndex, executionIndex };
+    break;
+  }
+  if (fallback) {
+    const { segmentIndex, executionIndex } = fallback;
+    const segment = next[segmentIndex];
+    if (segment.kind !== "tools") return segments;
+    const executions = [...segment.executions];
+    executions[executionIndex] = {
+      ...executions[executionIndex],
+      status: event.ok ? "complete" : "error",
+      summary: event.output.slice(0, 200),
+      error: event.ok ? null : event.output,
+    };
+    next[segmentIndex] = { ...segment, executions };
+  }
   return {
     ...segments,
-    [assistantId]: (segments[assistantId] ?? []).map((segment) =>
-      segment.kind === "tools"
-        ? {
-            ...segment,
-            executions: segment.executions.map((tool) =>
-              tool.call_id === event.call_id
-                ? {
-                    ...tool,
-                    status: event.ok ? "complete" : "error",
-                    summary: event.output.slice(0, 200),
-                    error: event.ok ? null : event.output,
-                  }
-                : tool,
-            ),
-          }
-        : segment,
-    ),
+    [assistantId]: next,
   };
 }
 
@@ -852,8 +868,8 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
         kind: "tools",
         executions: item.calls.map(
           (call): AiToolExecution => ({
-            id: call.name,
-            call_id: call.name,
+            id: call.id,
+            call_id: call.id,
             tool_name: call.name,
             status: "complete",
             summary: "",

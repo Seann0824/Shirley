@@ -1,0 +1,1 @@
+Available skills are listed below. Each is a directory with a SKILL.md holding detailed instructions. When a task matches a skill's description, call `activate_skill` with that skill's name to load its instructions before proceeding. Load a skill's scripts / references / assets on demand with `read_skill_file`.

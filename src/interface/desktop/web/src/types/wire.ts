@@ -37,7 +37,7 @@ export type AgentEventWire =
 /** 快照里一条 UI 条目（与 Rust 侧 `desktop/wire.rs` 的 `ItemWire` 对齐）。 */
 export type ItemWire =
   | { kind: "message"; role: string; content: string; thinking: boolean }
-  | { kind: "tools"; calls: { name: string; arguments: string }[] };
+  | { kind: "tools"; calls: { id: string; name: string; arguments: string }[] };
 
 /** 订阅某会话时下发的完整视图快照（与 Rust 侧 `SessionSnapshotWire` 对齐）。 */
 export type SessionSnapshot = {

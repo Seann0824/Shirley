@@ -35,7 +35,6 @@ use tokio::sync::{Mutex, oneshot};
 use crate::interface::session::SessionManager;
 use super::wire::{AgentEventWire, SessionSnapshotWire};
 use crate::bootstrap::AgentFactory;
-use crate::models::ModelCatalog;
 use crate::project::{ProjectEntry, ProjectRegistry};
 use crate::session::{
     SessionCatalog, SessionEntry, first_user_message, sanitize_title, title_prompt,
@@ -58,12 +57,10 @@ struct ProjectRuntime {
 /// - `registry`：项目注册表（哪些目录是项目）。
 /// - `runtimes`：**已打开**项目的运行时，按项目 id 懒加载（`ensure_runtime`）。
 ///   关掉 / 归档项目即从表里移除，其内存态会话随之释放。
-/// - `model_catalog`：模型目录（全局，取默认项目的工厂）。
 /// - `pumps`：每个「项目::会话」的事件 pump 句柄。
 struct DesktopState {
     registry: Arc<Mutex<ProjectRegistry>>,
     runtimes: Arc<Mutex<HashMap<String, Arc<Mutex<ProjectRuntime>>>>>,
-    model_catalog: Arc<dyn ModelCatalog>,
     pumps: Arc<Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
     /// 每个「项目::会话」正在运行一轮时的取消句柄。`agent_send` 发起一轮时插入，
     /// 结束（正常 / 取消 / 出错）时移除；`agent_cancel` 取出并 `send(())` 触发打断。
@@ -76,21 +73,50 @@ fn route_key(project: &str, session: &str) -> String {
     format!("{project}::{session}")
 }
 
-/// 用一份现成工厂造一个项目运行时：惰性开一份空会话（此刻只定名、不落盘）。
+/// 用一份现成工厂造一个项目运行时。
+///
+/// **恢复语义**：优先打开该项目**最近修改**的会话（`SessionCatalog::list` 已按
+/// `modified_ms` 降序），把它作为前台会话恢复；项目**没有任何会话**时才惰性开一份
+/// 空会话（此刻只定名、不落盘）。
+///
+/// 这里必须"恢复最近会话"而不是无条件新建：`ensure_runtime` 在项目**首次懒加载**
+/// 时就会调用本函数（前端切项目 / 侧栏轮询 `agent_list_sessions` 都会触发），若总是
+/// `create_lazy(None)`，`agent_current_session` 就会把一个**刚凭空造出的空会话**报给
+/// 前端，表现为"切项目把当前选中 session 切成 new session"。
 fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime, String> {
     let catalog = factory.session_catalog.clone();
-    let (entry, store) = catalog.create_lazy(None).map_err(|e| e.to_string())?;
+    // 最近修改的会话优先；没有会话才新建惰性空会话。
+    let latest = catalog
+        .list()
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .next();
+    let (name, store, from_disk) = match latest {
+        Some(entry) => {
+            let store = catalog.open(&entry.name).map_err(|e| e.to_string())?;
+            (entry.name, store, true)
+        }
+        None => {
+            let (entry, store) = catalog.create_lazy(None).map_err(|e| e.to_string())?;
+            (entry.name, store, false)
+        }
+    };
     let log = store.load().map_err(|e| e.to_string())?;
     let built = factory.build_agent(log).map_err(|e| e.to_string())?;
-    let sessions = SessionManager::with_factory(
+    let mut sessions = SessionManager::with_factory(
         built.agent,
-        Some(entry.name),
+        Some(name),
         catalog,
         factory.clone(),
         Some(store),
         Some(built.memory),
         Some(built.skills),
     );
+    // 从磁盘恢复的会话：其 `Agent` 已带全量历史，但视图条目还是空的——重建一次，
+    // 快照 / 渲染才有内容（与 `SessionManager::switch_to` 的恢复路径一致）。
+    if from_disk {
+        sessions.active_mut().rebuild_items_from_agent();
+    }
     Ok(ProjectRuntime { factory, sessions })
 }
 
@@ -611,10 +637,15 @@ async fn agent_model_name(
         .unwrap_or_default())
 }
 
-/// 列出可选模型（模型目录全局，取自默认项目的工厂）。
+/// 列出当前项目端点可选的模型。
 #[tauri::command]
-async fn agent_list_models(state: State<'_, DesktopState>) -> Result<Vec<ModelEntryWire>, String> {
-    let entries = state.model_catalog.list().await;
+async fn agent_list_models(
+    state: State<'_, DesktopState>,
+    project: String,
+) -> Result<Vec<ModelEntryWire>, String> {
+    let runtime = ensure_runtime(&state, &project).await?;
+    let catalog = runtime.lock().await.factory.model_catalog.clone();
+    let entries = catalog.list().await;
     Ok(entries
         .into_iter()
         .map(|entry| ModelEntryWire {
@@ -626,6 +657,12 @@ async fn agent_list_models(state: State<'_, DesktopState>) -> Result<Vec<ModelEn
 }
 
 /// 热切换模型：不重建 Agent，只换 `ModelConfig::model`（与 TUI 的 `/model` 同语义）。
+///
+/// 同时按模型声明 **自动选工具协议**（`docs/tool-calling-refactor.md` Step 3）：
+/// 从模型目录按 `model` 值反查条目，经 [`crate::bootstrap::AgentFactory::model_config_for`]
+/// 算一份完整 `ModelConfig`（模型值 + 工具协议），再一次性下发
+/// （[`shirley_agent_sdk::Agent::set_model_config`]）。
+/// 前端不感知协议——它只传模型值，选择全在 Rust 侧。
 #[tauri::command]
 async fn agent_set_model(
     state: State<'_, DesktopState>,
@@ -633,12 +670,25 @@ async fn agent_set_model(
     model: String,
 ) -> Result<(), String> {
     let runtime = ensure_runtime(&state, &project).await?;
+    // 反查目录：先 clone 出 factory / catalog，再锁 sessions（避免持锁跨 await）。
+    let (factory, catalog) = {
+        let guard = runtime.lock().await;
+        (guard.factory.clone(), guard.factory.model_catalog.clone())
+    };
+    let entry = catalog.list().await.into_iter().find(|entry| entry.value == model);
+    // 按模型条目算一份完整 `ModelConfig`（模型值 + 工具协议），**一次性下发**
+    // （`docs/tool-calling-refactor.md` Step 3）。目录里查不到就只改模型名。
+    let config = entry.as_ref().map(|entry| factory.model_config_for(entry));
+
     let mut guard = runtime.lock().await;
     let agent = guard
         .sessions
         .active_agent_mut()
         .ok_or_else(|| "agent 正在运行中".to_owned())?;
-    agent.set_model(model);
+    match config {
+        Some(config) => agent.set_model_config(config),
+        None => agent.set_model(model),
+    }
     Ok(())
 }
 
@@ -867,7 +917,6 @@ async fn agent_cancel(
 pub fn run(factory: AgentFactory) -> std::io::Result<()> {
     let factory = Arc::new(factory);
     let working_dir = factory.working_dir.clone();
-    let model_catalog = factory.model_catalog.clone();
 
     // 把当前工作区登记为默认项目（幂等：已登记则只刷新打开时间）。
     let mut registry = ProjectRegistry::load_default()
@@ -885,7 +934,6 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
     let state = DesktopState {
         registry: Arc::new(Mutex::new(registry)),
         runtimes: Arc::new(Mutex::new(runtimes)),
-        model_catalog,
         pumps: Arc::new(Mutex::new(HashMap::new())),
         cancels: Arc::new(Mutex::new(HashMap::new())),
     };
@@ -919,4 +967,72 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
         ])
         .run(tauri::generate_context!())
         .map_err(|error| std::io::Error::other(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::FileSessionCatalog;
+
+    fn tmp_root(tag: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("shirley_shell_{tag}_{}", std::process::id()))
+    }
+
+    /// 回归：懒加载一个**已有会话**的项目时，必须恢复其最近修改的会话，
+    /// 而不是凭空造一个空会话——否则前端切项目会把选中 session 变成 new session。
+    #[test]
+    fn runtime_from_factory_resumes_latest_session() {
+        let root = tmp_root("resume_latest");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let catalog = FileSessionCatalog::new(&root);
+        let (older, older_store) = catalog.create_named(Some("旧会话")).unwrap();
+        older_store
+            .append(&Message::User {
+                content: "旧".into(),
+            })
+            .unwrap();
+        // 拉开 mtime，保证「最近修改」判定不因同毫秒而抖动。
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        let (newer, newer_store) = catalog.create_named(Some("新会话")).unwrap();
+        newer_store
+            .append(&Message::User {
+                content: "新".into(),
+            })
+            .unwrap();
+
+        let factory = Arc::new(AgentFactory::assemble(root.clone()).unwrap());
+        let runtime = runtime_from_factory(factory).unwrap();
+
+        assert_eq!(
+            runtime.sessions.active_name(),
+            Some(newer.name.as_str()),
+            "应恢复最近修改的会话，而不是新建空会话"
+        );
+        assert_ne!(runtime.sessions.active_name(), Some(older.name.as_str()));
+        // 恢复的会话视图条目应已重建（含历史），否则切回来会看到空白。
+        let snapshot = runtime.sessions.snapshot(&newer.name).unwrap();
+        assert!(!snapshot.is_empty(), "恢复会话应带历史条目");
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// 项目**没有任何会话**时才惰性开一份空会话（只定名、不落盘）。
+    #[test]
+    fn runtime_from_factory_creates_empty_session_when_none_exists() {
+        let root = tmp_root("resume_empty");
+        let _ = std::fs::remove_dir_all(&root);
+
+        let factory = Arc::new(AgentFactory::assemble(root.clone()).unwrap());
+        let runtime = runtime_from_factory(factory).unwrap();
+
+        assert!(runtime.sessions.active_name().is_some(), "应开出一份空会话");
+        // 惰性会话此刻未落盘：会话目录里不应有任何 jsonl。
+        assert!(
+            FileSessionCatalog::new(&root).list().unwrap().is_empty(),
+            "惰性空会话不应立即落盘"
+        );
+
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

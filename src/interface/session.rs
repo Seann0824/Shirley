@@ -230,6 +230,7 @@ impl Session {
                             calls: tool_calls
                                 .iter()
                                 .map(|call| ToolCallView {
+                                    id: call.id.clone(),
                                     name: call.name.clone(),
                                     arguments: call.arguments.clone(),
                                 })
@@ -306,6 +307,7 @@ impl Session {
                     let calls = tool_calls
                         .into_iter()
                         .map(|call| ToolCallView {
+                            id: call.id,
                             name: call.name,
                             arguments: call.arguments,
                         })
@@ -402,6 +404,7 @@ pub enum ItemWire {
 /// [`ItemWire::Tools`] 里的单次工具调用。
 #[derive(Debug, Clone)]
 pub struct ToolCallWire {
+    pub id: String,
     pub name: String,
     pub arguments: String,
 }
@@ -420,6 +423,7 @@ impl ItemWire {
                     .calls
                     .iter()
                     .map(|call| ToolCallWire {
+                        id: call.id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                     })
@@ -517,6 +521,15 @@ impl SessionManager {
         Arc::clone(&self.catalog)
     }
 
+    /// 造 `Agent` 的工厂（只读句柄）。无工厂（单会话退化）时返回 `None`。
+    ///
+    /// 界面用它把「选中的模型条目」换算成一份完整 `ModelConfig`
+    /// （[`AgentFactory::model_config_for`]），再一次性下发给 `Agent`
+    /// （`docs/tool-calling-refactor.md` Step 3）。
+    pub fn factory(&self) -> Option<Arc<AgentFactory>> {
+        self.factory.clone()
+    }
+
     /// 已加载会话里是否已有该名字（用于切换时复用现成 `Agent`，不重建）。
     fn id_of_name(&self, name: &str) -> Option<u64> {
         self.sessions
@@ -550,6 +563,11 @@ impl SessionManager {
         // 离开前台即视为该会话"本轮结束"——切走后触发一次增量 curation
         // （`docs/memory.md` §5.1；旧会话仍留在内存，其 `Agent` 消息可读）。
         let previous = self.active().name.clone();
+        let selected_model = self
+            .active()
+            .agent
+            .as_ref()
+            .map(|agent| agent.model_config().model.clone());
         if let Some(id) = self.id_of_name(name) {
             self.active = id;
             if let Some(previous) = previous.filter(|p| p != name) {
@@ -567,9 +585,12 @@ impl SessionManager {
             .map_err(|error| error.to_string())?;
         // 会话持久化在应用层：先 load 日志，再交给工厂起 `Agent`（system 现生成置顶）。
         let log = store.load().map_err(|error| error.to_string())?;
-        let built = factory
+        let mut built = factory
             .build_agent(log)
             .map_err(|error| error.to_string())?;
+        if let Some(model) = selected_model {
+            built.agent.set_model(model);
+        }
         let id = self.insert(
             built.agent,
             Some(name.to_owned()),
@@ -594,6 +615,11 @@ impl SessionManager {
     pub fn create_new(&mut self, title: Option<&str>) -> Result<String, String> {
         // 与 `switch_to` 同理：新建并切走 = 旧会话本轮结束，触发一次 curation。
         let previous = self.active().name.clone();
+        let selected_model = self
+            .active()
+            .agent
+            .as_ref()
+            .map(|agent| agent.model_config().model.clone());
         let factory = self
             .factory
             .as_ref()
@@ -604,9 +630,12 @@ impl SessionManager {
             .map_err(|error| error.to_string())?;
         // 惰性会话此刻为空：load 得空工作集，首条消息落盘时才物化文件。
         let log = store.load().map_err(|error| error.to_string())?;
-        let built = factory
+        let mut built = factory
             .build_agent(log)
             .map_err(|error| error.to_string())?;
+        if let Some(model) = selected_model {
+            built.agent.set_model(model);
+        }
         let id = self.insert(
             built.agent,
             Some(entry.name.clone()),

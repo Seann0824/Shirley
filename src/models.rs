@@ -26,6 +26,12 @@ pub struct ModelEntry {
     pub value: String,
     /// 来源供应商标识。现在只有一个；将来用于按 provider 分组 / 拉取。
     pub provider: String,
+    /// 提供商声明的**工具传输模式**（`docs/tool-calling.md` 五之补）。
+    ///
+    /// `GET /v1/models` 每项可带 `tool_mode` 字段（`"native" | "content"`，可选）。
+    /// 应用层据此为该模型选择 `ToolCalling`：`content` 表示该模型不支持原生
+    /// function calling，应走文本协议。`None` = 未声明（回退默认 `Native`）。
+    pub tool_mode: Option<String>,
 }
 
 impl ModelEntry {
@@ -38,7 +44,14 @@ impl ModelEntry {
             label: label.into(),
             value: value.into(),
             provider: provider.into(),
+            tool_mode: None,
         }
+    }
+
+    /// 链式设置工具传输模式（构建 `StaticCatalog` 兜底条目时用）。
+    pub fn with_tool_mode(mut self, tool_mode: Option<String>) -> Self {
+        self.tool_mode = tool_mode;
+        self
     }
 }
 
@@ -89,6 +102,25 @@ impl ModelCatalog for StaticCatalog {
         let entries = self.entries.clone();
         Box::pin(async move { entries })
     }
+}
+
+/// 把模型条目的工具传输模式**归一成目录数据**。
+///
+/// 优先级：目录声明的 `tool_mode`（去空白、小写）> 供应商推断 > `None`。
+/// Figma Make 的模型目录尚未声明工具能力，按其 provider / 模型名前缀补齐为
+/// `content`——**这里是数据归一，不是解析分支**（`docs/tool-calling-refactor.md`
+/// Step 3：能力声明归目录数据，解析逻辑不认供应商）。
+fn normalize_tool_mode(id: &str, provider: &str, declared: Option<String>) -> Option<String> {
+    if let Some(mode) = declared
+        .map(|mode| mode.trim().to_ascii_lowercase())
+        .filter(|mode| !mode.is_empty())
+    {
+        return Some(mode);
+    }
+    if provider.eq_ignore_ascii_case("figma-make") || id.starts_with("figma-make-") {
+        return Some("content".to_owned());
+    }
+    None
 }
 
 /// 成功结果在内存里的有效期。
@@ -176,6 +208,9 @@ struct ModelDto {
     name: Option<String>,
     #[serde(default)]
     owned_by: Option<String>,
+    /// 提供商声明的工具传输模式（可选，见 [`ModelEntry::tool_mode`]）。
+    #[serde(default)]
+    tool_mode: Option<String>,
 }
 
 impl ModelCatalog for RemoteCatalog {
@@ -202,7 +237,8 @@ impl ModelCatalog for RemoteCatalog {
                         .map(|m| {
                             let label = m.name.unwrap_or_else(|| m.id.clone());
                             let provider = m.owned_by.unwrap_or_else(|| "remote".to_owned());
-                            ModelEntry::new(label, m.id, provider)
+                            let tool_mode = normalize_tool_mode(&m.id, &provider, m.tool_mode);
+                            ModelEntry::new(label, m.id, provider).with_tool_mode(tool_mode)
                         })
                         .collect::<Vec<_>>(),
                 )

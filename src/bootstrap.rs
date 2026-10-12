@@ -19,14 +19,14 @@ use std::sync::Arc;
 
 use shirley_agent_sdk::{
     Agent, AgentError, CompressionConfig, ContextProvider, Message, ModelConfig, SystemPrompt,
-    ToolManager,
+    ToolCallingMode, ToolManager,
 };
 
 use crate::memory::{
     self, CurateOutcome, CuratorError, Embedder, EmbeddingConfig, MemoryContextProvider,
     MemoryRuntime, MemoryStore, RecallTool,
 };
-use crate::models::{self, ModelCatalog};
+use crate::models::{self, ModelCatalog, ModelEntry};
 use crate::prompt;
 use crate::session::{self, SessionCatalog};
 use crate::settings::Settings;
@@ -36,12 +36,8 @@ use crate::skills::{
 use crate::todo::{TodoContextProvider, TodoStore, TodoTool};
 use crate::tools;
 
-/// 压缩指令：所有会话共用（不随会话变化）。
-const COMPRESSION_INSTRUCTION: &str = r"
-            你在为 coding agent 压缩对话上下文。请忠实保留用户下达的原始指令与约束，
-            以及继续任务所必需的信息：关键决策及其原因、当前进度与状态、未解决的问题、
-            涉及的文件路径、执行过的命令、遇到的错误和测试结果。删除重复、闲聊与过时的中间想法。
-        ";
+/// 压缩指令：所有会话共用（不随会话变化）。文案维护在 `prompts/compression_instruction.md`。
+const COMPRESSION_INSTRUCTION: &str = include_str!("../prompts/compression_instruction.md");
 
 /// 装配完成的运行时依赖：两个界面都能拿它起界面。
 ///
@@ -125,6 +121,9 @@ impl AgentFactory {
             .thinking(settings.thinking)
             .reasoning_effort(settings.reasoning_effort.clone())
             .maybe_extra_body(settings.extra_body.clone())
+            // 工具传输模式（`docs/tool-calling-refactor.md`）：配置里写了就照办，
+            // 否则默认 `Native`。切换模型时的「按模型声明」由 `model_config_for` 处理。
+            .tool_calling(resolve_tool_calling(&settings))
             .build();
         model_config.context_window_tokens = Some(settings.context_window_tokens);
 
@@ -231,6 +230,40 @@ impl AgentFactory {
         Ok(BuiltAgent { agent, memory, skills: skill_runtime })
     }
 
+    /// 按模型条目算一份完整 [`ModelConfig`]（`docs/tool-calling-refactor.md` Step 3）。
+    ///
+    /// 这是「模型配置一次下发」的唯一入口：把「模型值 + 工具协议」一起算好，
+    /// 调用方整份交给 [`shirley_agent_sdk::Agent::set_model_config`]，**不必记**
+    /// 「先 `set_model` 再 `set_tool_calling`」。协议按模型声明的 `tool_mode` 选，
+    /// 未声明回退配置层默认（`self.model_config.tool_calling`）。
+    pub fn model_config_for(&self, entry: &ModelEntry) -> ModelConfig {
+        let mut config = self.model_config.clone();
+        config.model = entry.value.clone();
+        config.tool_calling =
+            resolve_tool_calling_for(entry.tool_mode.as_deref(), config.tool_calling);
+        config
+    }
+
+    /// `/login` 用：换端点 / 密钥后重算模型配置（`model` 未填则保留当前）。
+    ///
+    /// 修「`/login` 不重新判定协议」：从 content 端点换到别的端点后，协议跟着回到
+    /// 配置默认，不残留（`docs/tool-calling-refactor.md` Step 3）。协议不随 `model`
+    /// 走——`/login` 填的是「默认模型」，其声明未知，回配置默认最稳。
+    pub fn model_config_for_login(
+        &self,
+        base_url: String,
+        api_key: Option<String>,
+        model: Option<String>,
+    ) -> ModelConfig {
+        let mut config = self.model_config.clone();
+        config.base_url = base_url;
+        config.api_key = api_key;
+        if let Some(model) = model {
+            config.model = model;
+        }
+        config
+    }
+
     /// 预热模型目录：后台拉一次列表，让**首次**打开 `/model` 也能命中缓存。
     ///
     /// 不阻塞启动，失败静默——`RemoteCatalog` 自身会回退到兜底清单。
@@ -315,6 +348,40 @@ impl AgentFactory {
     /// 会话日志目录（curator 回证据核查用）。
     fn sessions_dir(&self) -> PathBuf {
         self.working_dir.join(".shirley").join("sessions")
+    }
+}
+
+/// 从配置解析工具传输模式（`docs/tool-calling-refactor.md`）。
+///
+/// `tool_mode = "content"` → [`ToolCallingMode::Tagged`]；其余（含未表态）
+/// → [`ToolCallingMode::Native`]（结构化 function calling）。
+fn resolve_tool_calling(settings: &Settings) -> ToolCallingMode {
+    resolve_tool_calling_for(settings.tool_mode.as_deref(), ToolCallingMode::Native)
+}
+
+/// 把「模型声明的 `tool_mode`」解析成 [`ToolCallingMode`]，未声明时回退 `fallback`。
+///
+/// 这是「按模型声明自动选协议」的**唯一解析入口**：`model_config_for` 用它，
+/// 用户不必每换一个模型就手动配。
+///
+/// 优先级（model-first）：`content` → `Tagged`；`native` → `Native`；
+/// 未声明（`None` / 空串 / 其它值）→ 回退 `fallback`（配置层默认，缺省 `Native`）。
+///
+/// 供应商特判（如 Figma Make）不在这里——能力声明归**模型目录数据**
+/// （`ModelEntry::tool_mode`，见 `crate::models`）。
+pub fn resolve_tool_calling_for(
+    model_tool_mode: Option<&str>,
+    fallback: ToolCallingMode,
+) -> ToolCallingMode {
+    let mode = model_tool_mode
+        .map(str::trim)
+        .filter(|mode| !mode.is_empty())
+        .map(|mode| mode.to_ascii_lowercase());
+    match mode.as_deref() {
+        Some("content") => ToolCallingMode::Tagged,
+        Some("native") => ToolCallingMode::Native,
+        // 未声明 / 认不出的值：回退配置层默认，不猜。
+        _ => fallback,
     }
 }
 
@@ -554,6 +621,43 @@ mod tests {
         ]);
         assert_eq!(none.context(), None);
         assert_eq!(CompositeContextProvider::new(vec![]).context(), None);
+    }
+
+    /// 模型声明优先：`content` / `native` 覆盖 fallback，未声明回退 fallback。
+    #[test]
+    fn resolve_tool_calling_is_model_first() {
+        let native = ToolCallingMode::Native;
+        let content = ToolCallingMode::Tagged;
+
+        // 模型声明 content → content（即便 fallback 是 native）。
+        assert!(resolve_tool_calling_for(Some("content"), native).is_content());
+        // 模型声明 native → native（即便 fallback 是 content）。
+        assert!(!resolve_tool_calling_for(Some("native"), content).is_content());
+        // 大小写 / 空白归一。
+        assert!(resolve_tool_calling_for(Some("  CONTENT "), native).is_content());
+        // 未声明 / 空串 / 认不出 → 回退 fallback（两侧都要验证）。
+        assert!(!resolve_tool_calling_for(None, native).is_content());
+        assert!(!resolve_tool_calling_for(Some(""), native).is_content());
+        assert!(!resolve_tool_calling_for(Some("wat"), native).is_content());
+        assert!(resolve_tool_calling_for(None, content).is_content());
+        assert!(resolve_tool_calling_for(Some("wat"), content).is_content());
+    }
+
+    /// `model_config_for`：模型值 + 工具协议一次算好（`docs/tool-calling-refactor.md` Step 3）。
+    #[test]
+    fn model_config_for_applies_entry_tool_mode() {
+        let f = factory(tmp_root("mcfg"));
+        let tagged = ModelEntry::new("tagged", "tagged", "p")
+            .with_tool_mode(Some("content".into()));
+        let plain = ModelEntry::new("plain", "plain", "p");
+
+        let config = f.model_config_for(&tagged);
+        assert_eq!(config.model, "tagged");
+        assert!(config.tool_calling.is_content(), "声明 content 应选 Tagged 协议");
+
+        let config = f.model_config_for(&plain);
+        assert_eq!(config.model, "plain");
+        assert!(!config.tool_calling.is_content(), "未声明应回退配置默认 Native");
     }
 
     /// 运行中的会话不得被删除（避免删掉正在写入的日志）。

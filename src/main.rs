@@ -6,6 +6,7 @@ mod memory;
 mod models;
 mod project;
 mod prompt;
+mod prompt_template;
 mod session;
 mod settings;
 mod skills;

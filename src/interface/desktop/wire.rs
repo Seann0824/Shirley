@@ -236,6 +236,7 @@ pub enum ItemWire {
 /// 快照里单次工具调用的 DTO。
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolCallWireDto {
+    pub id: String,
     pub name: String,
     pub arguments: String,
 }
@@ -255,7 +256,7 @@ impl From<CoreItemWire> for ItemWire {
             CoreItemWire::Tools { calls } => ItemWire::Tools {
                 calls: calls
                     .into_iter()
-                    .map(|ToolCallWire { name, arguments }| ToolCallWireDto { name, arguments })
+                    .map(|ToolCallWire { id, name, arguments }| ToolCallWireDto { id, name, arguments })
                     .collect(),
             },
         }
