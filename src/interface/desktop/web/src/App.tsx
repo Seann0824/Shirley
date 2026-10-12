@@ -784,25 +784,40 @@ function updateTool(
   assistantId: string,
   event: Extract<AgentEventWire, { type: "tool_finished" }>,
 ): Record<string, AiSegment[]> {
+  const current = segments[assistantId] ?? [];
+  const next = [...current];
+  let fallback: { segmentIndex: number; executionIndex: number } | null = null;
+  for (let segmentIndex = next.length - 1; segmentIndex >= 0; segmentIndex -= 1) {
+    const segment = next[segmentIndex];
+    if (segment.kind !== "tools") continue;
+    let executionIndex = segment.executions.length - 1;
+    while (executionIndex >= 0 && segment.executions[executionIndex].call_id !== event.call_id) {
+      executionIndex -= 1;
+    }
+    if (executionIndex < 0) continue;
+    if (segment.executions[executionIndex].status !== "running") {
+      fallback ??= { segmentIndex, executionIndex };
+      continue;
+    }
+    fallback = { segmentIndex, executionIndex };
+    break;
+  }
+  if (fallback) {
+    const { segmentIndex, executionIndex } = fallback;
+    const segment = next[segmentIndex];
+    if (segment.kind !== "tools") return segments;
+    const executions = [...segment.executions];
+    executions[executionIndex] = {
+      ...executions[executionIndex],
+      status: event.ok ? "complete" : "error",
+      summary: event.output.slice(0, 200),
+      error: event.ok ? null : event.output,
+    };
+    next[segmentIndex] = { ...segment, executions };
+  }
   return {
     ...segments,
-    [assistantId]: (segments[assistantId] ?? []).map((segment) =>
-      segment.kind === "tools"
-        ? {
-            ...segment,
-            executions: segment.executions.map((tool) =>
-              tool.call_id === event.call_id
-                ? {
-                    ...tool,
-                    status: event.ok ? "complete" : "error",
-                    summary: event.output.slice(0, 200),
-                    error: event.ok ? null : event.output,
-                  }
-                : tool,
-            ),
-          }
-        : segment,
-    ),
+    [assistantId]: next,
   };
 }
 
@@ -853,8 +868,8 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
         kind: "tools",
         executions: item.calls.map(
           (call): AiToolExecution => ({
-            id: call.name,
-            call_id: call.name,
+            id: call.id,
+            call_id: call.id,
             tool_name: call.name,
             status: "complete",
             summary: "",

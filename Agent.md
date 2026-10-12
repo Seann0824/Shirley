@@ -8,7 +8,7 @@
 
 **一、这是什么**
 
-Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里的夏莉，`src/prompt.rs` 里的 `ROLE` 常量（system prompt）就是按她的设定写的——这既是人格测试用例，也是真实的默认人设。
+Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里的夏莉，`prompts/system.md` 里的角色设定（system prompt）就是按她的设定写的——这既是人格测试用例，也是真实的默认人设。
 
 整个仓库分成三层：
 
@@ -19,6 +19,8 @@ Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里�
 | 宏层 | `crates/shirley-agent-sdk-macros/` | `#[tool]` 属性宏，把普通 async 函数变成可被模型调用的工具 |
 
 核心设计目标写在根目录的 `plan.md` 里：SDK 只沉淀"下次做 Agent 还会用到"的能力，不掺业务。当前聚焦的场景是"Coding Agent"，也就是拿它去做 TS 后端往 Rust 迁移这类长任务。
+
+**提示词一律走 md（约定）**：所有 system prompt / 注入文案 / 压缩模板的**正文**都维护在 `prompts/*.md`（应用层）与 `crates/shirley-agent-sdk/prompts/*.md`（SDK），Rust 代码只 `include_str!` 模板并用 `{{占位符}}` 填动态值（`src/prompt_template.rs::render`，单遍扫描、未知占位符原样保留）。改文案不必改代码；新增动态内容就加占位符。当前模板：`system.md` / `project_guide.md` / `project_guide_missing.md` / `compression_instruction.md` / `todo_header.md` / `todo_nag.md` / `skills_header.md` / `curator_*.md`（应用层），`compaction_template.md`（SDK）。
 
 **`docs/` 是一组独立的技术方案文档**（和根目录的 `plan.md` 不是一回事）：
 
@@ -224,7 +226,7 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
 
 - `src/main.rs`：读 `.env`（`dotenvy`），按 `--desktop` / `SHIRLEY_INTERFACE=desktop` 选 `Mode::Tui` / `Mode::Desktop`，然后交给 `bootstrap::AgentFactory::assemble` 装配。**装配逻辑已从 `main.rs` 抽到 `src/bootstrap.rs`**——`AgentFactory` 是 TUI 与桌面界面共享的 LCA（另一个 LCA 是 SDK 的 `Agent`），两个界面拿同一份装配产物、只是渲染方式不同。`AgentFactory::assemble` 做这些事：经 `settings::Settings::load_default()` 装载配置（**不再散读 env**，见下条），构造 `ModelConfig`（`stream(true)` / `thinking(true)` / `reasoning_effort("low")`），算出 `needs_login = !settings.is_configured()`（缺配置不阻断启动），并把模型配置 / 系统提示词 / 工作目录 / 会话目录（`src/session.rs` 的 `FileSessionCatalog`，多会话布局 `.shirley/sessions/<name>.jsonl`）连同该标志交给 `interface::run`。**工厂的产物是"能造 `Agent` 的能力"而非单个 `Agent`**（决策 5）：`build_agent(messages)` 每次造一个匿名 `Agent`（工具按需重建，见下）——多会话就多造几个；会话恢复由调用方先 `store.load()` 再 `build_agent(log)`（空 `Vec` = 全新会话）。启动时**惰性开一份空会话**（而非恢复最近修改的旧会话）：此刻只定会话名、**不落盘**，发首条消息才真正建文件（`create_lazy`，Codex 的 UX）；旧的单文件 `.shirley/session.jsonl` 会被 `adopt_legacy` 收编（会话持久化，见 `docs/session.md`）。工作目录由 `prompt::workspace_root()` 决定（`SHIRLEY_WORKSPACE` 优先，否则当前目录）——它**刻意不属于 `settings`**（是"在哪个项目跑"的会话级信息，不是"用户是谁"的配置）
 - `src/settings.rs`：**配置装载（方案 A）**。把"配置从哪来"与"怎么用"解耦，纯应用层、不碰 SDK。优先级 `内置默认 < 全局 config.toml < 工作区 .shirley/config.toml < 环境变量`。配置文件为 TOML，`[provider]` 表含 `protocol` / `base_url` / `api_key` / `models_url` / `model` / `context_window_tokens`（全 `Option`，`deny_unknown_fields`）。全局路径 `<config_dir>/shirley/config.toml`，工作区路径 `<root>/.shirley/config.toml`。环境变量层（`LOCAL_*`）放在**最后**以兼容既有 `.env` 习惯——老用户零改动。`Settings::load` 的环境读取用注入闭包（测试不打全局 env），`load_default` 才用真实 `config_dir` + 进程环境。缺 `base_url` **不再报错、不阻断启动**：`finalize` 落成空串，`Settings::is_configured()` 返回 `false`，应用层据此在 TUI 里自动进入 `/login` 引导用户补齐（见下条）。**也可写**：`save_provider(path, provider)` 先读后改再写（只覆盖传入字段、不动其它键、自动建目录、写完 chmod 600 收紧权限），是 `/login` 的落盘入口
-- `src/prompt.rs`：应用侧系统提示词构造。`build(working_dir)` 返回一个 `SystemPrompt` 函数，每次解析时读取当前工作目录与工作区里的 `Agent.md`，拼成"角色 + 工作区根 + 项目指南"。工作目录明确告诉模型（`plan.md`：AI 不知道工作区就会从根目录乱找），`Agent.md` 提供项目怎么跑、代码怎么组织
+- `src/prompt.rs`：应用侧系统提示词构造。`build(working_dir)` 返回一个 `SystemPrompt` 函数，每次解析时读取当前工作目录与工作区里的 `Agent.md`，拼成"角色 + 工作区根 + 项目指南"。工作目录明确告诉模型（`plan.md`：AI 不知道工作区就会从根目录乱找），`Agent.md` 提供项目怎么跑、代码怎么组织。**文案与代码分离**：正文在 `prompts/system.md` / `project_guide.md` / `project_guide_missing.md`，`src/prompt.rs` 只 `include_str!` 模板 + 填 `{{working_dir}}` / `{{project_guide}}` 占位符（渲染器 `src/prompt_template.rs`）
 - `src/session.rs`：应用侧会话存储与**会话目录**（`docs/session.md`）。**会话契约与实现都在应用层**——`SessionStore` trait（`append` / `load` / `truncate`，同步签名）与 `SessionError`（`thiserror`，`Io` / `Backend`）定义在此，SDK 不再导出。`JsonlSessionStore` 把**原始 Message 全量日志**逐行落成 JSONL。**不含 system**（恢复时现生成）。**落库由应用层事件驱动**：SDK 只发 `MessageAdded`，`Session::apply_event` 收到即 `store.append`（TUI / desktop 共用路径）。`truncate` 先写临时文件再原子替换、并重开追加句柄（注意：内部 `rewrite_locked` 需在已持锁下调用，否则非重入锁会死锁）。多会话（`/session`）：`SessionCatalog` trait（`list` / `open` / `create` / `create_named` / `create_lazy` / `rename` / `delete`，与 `ModelCatalog` 对称；后四者带默认实现，不支持元数据的后端免改）+ `FileSessionCatalog`（一份会话 = `.shirley/sessions/<name>.jsonl`，目录扫描即列出，`adopt_legacy` 收编旧单文件）+ `SessionEntry { name, label, preview, modified_ms, turns }`（`preview` 取首条用户消息前 40 字，`modified_ms` = 文件 mtime 用于降序，`turns` = 用户轮数）+ `EmptySessionCatalog`（`App::new` 兜底）。**标题持久化为 sidecar `<name>.title`**（纯文本，不污染只存 Message 的 JSONL）；`rename` **只改标题、不改文件名 / 内容**（Codex `/rename` 语义，回避已打开句柄指向旧 inode 的问题），`delete` 删日志并 best-effort 删 sidecar。**惰性新建**：`create_lazy` 返回 `LazySessionStore`——构造时定名但**不落盘**，首次 `append`（首条消息）才物化（落 JSONL + 写标题 sidecar）；物化前 `load` / `truncate` 视为空 / 空操作。这样"打开应用没聊"不留空会话文件
 - `src/interface/selection.rs`：**鼠标选区**（`docs` 无独立文档）。左键按下记锚点、拖动延伸、松开即把选中文本写入系统剪贴板（`arboard`）——**全程只用鼠标，不需按复制键**。选区用屏幕单元格坐标表示，`highlight` 给缓冲区叠反色（渲染在一切之上），`text` 按符号显示宽度前进提取文本（跳过宽字符的续格，避免 CJK 之间插入假空格）。`Tui::draw` 在有选区时留存当帧缓冲区快照，松开左键时据此提取
 - `src/interface/tui.rs`：主循环用 `tokio::select!`，把**前台会话**的 `Agent` 通过 `SessionManager::take_agent(name)`（按会话名）移出去、`tokio::spawn` 到独立任务里跑，结果通过 `mpsc` 通道回传，完成后 `restore_agent(name, agent)` 放回来——每个会话各持一个 `Agent`，后台会话的上下文不因前台切换而丢。**直接消费 `AgentEvent`**（不再有 `AgentUpdate` 中间类型）。收到事件后统一走 `App::apply_event`（薄包装：转发到 `sessions.active_mut().apply_event` 并失效 `message_cache`）——**累加逻辑收敛到 `Session`，TUI 与 desktop 共享同一条事件处理路径**，UI 只读结果

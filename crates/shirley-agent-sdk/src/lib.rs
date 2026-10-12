@@ -7,7 +7,7 @@ pub mod token;
 mod tool;
 pub mod workspace;
 
-pub use adapter::{AdapterError, ModelConfig, ModelProtocol};
+pub use adapter::{AdapterError, ModelConfig, ModelProtocol, ToolCallingMode};
 pub use shirley_agent_sdk_macros::tool;
 pub use error::{ErrorKind, SdkError};
 pub use message::{Message, ToolCall, Usage};

@@ -49,17 +49,7 @@ impl Default for CompressionConfig {
 /// 不该由每个调用方各写一遍；调用方只负责领域相关的取舍（例如 coding agent 关心
 /// 哪些文件 / 命令值得保留）。模板里**刻意不要求"下一步"**——那会诱导模型编造
 /// 用户从未下达的计划（`docs/compaction.md` 2.2 根因 B）。
-pub(super) const COMPACTION_TEMPLATE: &str = r#"Output strictly in the format below. Do not emit any explanation outside the XML.
-
-Summarize only what has already happened in the conversation: do not speculate, do not add plans the user never proposed, and do not invent a "next step".
-Faithfully restate the instructions and constraints the user explicitly gave, preserving key wording verbatim. Do not rewrite the user's intent.
-
-<current_goal>Faithfully restate the task the user actually assigned; do not add, remove, or alter anything</current_goal>
-<hard_constraints>Constraints the user explicitly stated (forbidden actions, agreements to honor, boundary conditions)</hard_constraints>
-<decisions>Key decisions already made and the reasons behind them</decisions>
-<progress>Work completed so far and the current state</progress>
-<open_questions>Unresolved problems or open questions</open_questions>
-<compacted_range>The earlier conversation has been compacted; exact details are not in this summary. When needed: file contents and command results can be re-read or re-run</compacted_range>"#;
+pub(super) const COMPACTION_TEMPLATE: &str = include_str!("../../prompts/compaction_template.md");
 
 /// 压缩切点算出的三段内容。
 ///

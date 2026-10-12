@@ -183,6 +183,11 @@ pub struct ProviderSettings {
     /// 覆盖 / 追加请求体的逃生口（浅合并，`null` 删键）。
     /// 见 SDK `ModelConfig::extra_body`；用来填各家私有字段。
     pub extra_body: Option<toml::Value>,
+    /// 工具传输模式：`"native"`（结构化 function calling）或 `"content"`（文本协议）。
+    ///
+    /// 见 SDK `ToolCallingMode` 与 `docs/tool-calling-refactor.md`。缺省（`None`）= 未表态，
+    /// 由 `bootstrap` 按「配置 > 模型声明 > 默认 Native」解析。
+    pub tool_mode: Option<String>,
 }
 
 impl FileSettings {
@@ -248,6 +253,8 @@ pub struct Settings {
     pub reasoning_effort: String,
     /// 请求体逃生口（已转成 JSON，供 SDK 浅合并）。
     pub extra_body: Option<serde_json::Value>,
+    /// 工具传输模式（已规范化小写）：`"native"` / `"content"`。`None` = 未表态。
+    pub tool_mode: Option<String>,
     /// 压缩策略（已落定，可直接 `to_sdk()` 交给 `Agent`）。
     pub compression: CompressionSettings,
     /// 记忆系统配置（curator 模型 / 定期整理阈值）。
@@ -372,6 +379,22 @@ impl Settings {
             None => None,
         };
 
+        // 工具传输模式：只接受 `native` / `content`（大小写不敏感）；其它值视为配置错误。
+        let tool_mode = match merged.tool_mode {
+            Some(mode) => {
+                let normalized = mode.trim().to_ascii_lowercase();
+                match normalized.as_str() {
+                    "native" | "content" => Some(normalized),
+                    other => {
+                        return Err(SettingsError::Invalid(format!(
+                            "tool_mode 只能是 native 或 content，收到：{other}"
+                        )))
+                    }
+                }
+            }
+            None => None,
+        };
+
         Ok(Self {
             protocol,
             base_url,
@@ -382,6 +405,7 @@ impl Settings {
             thinking,
             reasoning_effort,
             extra_body,
+            tool_mode,
             compression,
             memory,
         })
@@ -434,6 +458,7 @@ fn env_layer(env: &dyn Fn(&str) -> Option<String>) -> ProviderSettings {
         reasoning_effort: env("LOCAL_REASONING_EFFORT"),
         // 逃生口结构复杂，只走配置文件，不提供环境变量。
         extra_body: None,
+        tool_mode: env("LOCAL_TOOL_MODE"),
     }
 }
 
@@ -464,6 +489,7 @@ fn merge_into(base: &mut ProviderSettings, over: ProviderSettings) {
         thinking,
         reasoning_effort,
         extra_body,
+        tool_mode,
     );
 }
 

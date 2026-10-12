@@ -28,6 +28,8 @@
 | `desktop-interface.md` | 桌面界面：Tauri 2 + React 迁移 shiwen 聊天 UI / 共享 LCA / 剥离 shiwen 定制逻辑（**M0–M2 已落地**） | P1 |
 | `memory.md` | 记忆系统：纯 markdown + 双层结构（常驻概览自动注入 / 按需细节检索）/ 后台 curator 异步整理 / 冲突靠时间线表达（**方案，未落地**） | P1 |
 | `skills.md` | 技能（skills）：拥抱 Agent Skills 开放标准（`SKILL.md` 目录）/ 渐进式披露（目录常驻 + 按需激活 + 资源按需读）/ `SkillContextProvider` 每轮末尾追加注入（目录 + 已激活正文，跨压缩存活、KV 友好）/ 应用层实现，SDK 零改动（**P0+P1 已落地**：发现 + 解析 + 目录 + `activate_skill` / `SkillRuntime` 激活 + `read_skill_file` 资源读取；`/skill-name` slash 等 P2） | P1 |
+| `tool-calling.md` | Content 工具调用协议：为不支持原生 tool calling 的模型声明「文本工具格式 + 解析方法」/ 正交于 `ModelProtocol` 的传输模式（`ToolCalling::{Native,Content}`）/ 内置声明式 XML 协议 / 适配层包装、循环零改动（**方案，未落地**） | P1 |
+| `tool-calling-refactor.md` | Content 工具调用协议**收口**：对外只暴露 `ToolCallingMode` / 工具说明挪进 adapter（回退 `agent.rs`）/ 模型配置一次下发 / 请求编码与解析容错修正（**Step 1–2 已落地**，Step 3–7 方案） | P1 |
 
 
 ---

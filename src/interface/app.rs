@@ -30,6 +30,7 @@ pub struct ChatMessage {
 
 #[derive(Debug, Clone)]
 pub struct ToolCallView {
+    pub id: String,
     pub name: String,
     // 原始 JSON 参数，留着是为了在 TUI 里展示读了哪个文件
     pub arguments: String,
@@ -847,10 +848,20 @@ impl App {
         self.message_cache = None;
 
         // 热更新 Agent：端点 / 密钥立即生效（模型可选，未填则沿用当前）。
+        // 协议按同一入口重判并**一次性下发**——从 content 端点换走后回配置默认，
+        // 不残留（`docs/tool-calling-refactor.md` Step 3）。
+        let config = self.sessions.factory().map(|factory| {
+            factory.model_config_for_login(flow.base_url.clone(), flow.api_key.clone(), model.clone())
+        });
         if let Some(agent) = self.agent.as_mut() {
-            agent.set_provider(flow.base_url.clone(), flow.api_key.clone());
-            if let Some(model) = model.clone() {
-                agent.set_model(model);
+            match config {
+                Some(config) => agent.set_model_config(config),
+                None => {
+                    agent.set_provider(flow.base_url.clone(), flow.api_key.clone());
+                    if let Some(model) = model.clone() {
+                        agent.set_model(model);
+                    }
+                }
             }
         }
 
@@ -871,6 +882,7 @@ impl App {
             thinking: None,
             reasoning_effort: None,
             extra_body: None,
+            tool_mode: None,
         };
         match crate::settings::save_provider(&target, provider) {
             Ok(path) => {
@@ -1064,8 +1076,18 @@ impl App {
         self.message_cache = None;
         self.command_hint = None;
         let entry = picker.entries.get(picker.selected).cloned()?;
+        // 按模型条目算一份完整 `ModelConfig`（模型值 + 工具协议），**一次性下发**——
+        // 与 desktop 的 `agent_set_model` 同语义（`docs/tool-calling-refactor.md` Step 3）。
+        // 无工厂（单会话退化 / 测试）时退化为只改模型名。
+        let config = self
+            .sessions
+            .factory()
+            .map(|factory| factory.model_config_for(&entry));
         if let Some(agent) = self.agent.as_mut() {
-            agent.set_model(entry.value.clone());
+            match config {
+                Some(config) => agent.set_model_config(config),
+                None => agent.set_model(entry.value.clone()),
+            }
         }
         self.add_system_message(format!("已切换模型：{}", entry.label));
         Some(entry.value)
@@ -1247,6 +1269,32 @@ mod tests {
         App::new(Agent::builder().model_config(config).build().unwrap())
     }
 
+    /// 带工厂的测试 App（切换模型要走 `factory.model_config_for` 一次性下发）。
+    /// 用唯一临时工作区装配工厂，避免并发测试互相污染。
+    fn app_with_factory(tag: &str) -> App {
+        let root = std::env::temp_dir().join(format!(
+            "shirley_app_{tag}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::create_dir_all(&root);
+        let factory = std::sync::Arc::new(
+            crate::bootstrap::AgentFactory::assemble(root).expect("assemble factory"),
+        );
+        let built = factory.build_agent(Vec::new()).expect("build agent");
+        let sessions = crate::interface::session::SessionManager::with_factory(
+            built.agent,
+            None,
+            factory.session_catalog.clone(),
+            factory.clone(),
+            None,
+            Some(built.memory),
+            Some(built.skills),
+        );
+        let catalog = factory.model_catalog.clone();
+        App::with_manager(sessions, catalog)
+    }
+
     /// 测试用 App：把 `/login` 落盘目标指向唯一临时文件，避免污染真实工作区
     /// （并发的测试若都写同一文件还会互相截断）。
     fn app_with_temp_config(tag: &str) -> App {
@@ -1341,6 +1389,28 @@ mod tests {
         assert_eq!(chosen.as_deref(), Some("model-b"));
         assert!(!app.is_picker_open(), "确认后应关闭面板");
         assert_eq!(app.current_model().as_deref(), Some("model-b"));
+    }
+
+    /// `/model` 切换时按模型条目算一份完整 `ModelConfig` 一次性下发
+    /// （`docs/tool-calling-refactor.md` Step 3）：
+    /// 声明 content → 切到 content 协议；未声明 → 回退配置层默认（Native）。
+    #[test]
+    fn picker_confirm_applies_model_tool_mode() {
+        let mut app = app_with_factory("model_tool_mode");
+        app.open_picker(vec![
+            ModelEntry::new("plain", "plain", "p"),
+            ModelEntry::new("tagged", "tagged", "p").with_tool_mode(Some("content".into())),
+        ]);
+        app.picker_move(1);
+        app.picker_confirm();
+        let config = app.agent.as_ref().unwrap().model_config();
+        assert!(config.tool_calling.is_content(), "声明 content 应切到 content 协议");
+
+        // 切回未声明的模型 → 回退默认（Native）。
+        app.open_picker(vec![ModelEntry::new("plain", "plain", "p")]);
+        app.picker_confirm();
+        let config = app.agent.as_ref().unwrap().model_config();
+        assert!(!config.tool_calling.is_content(), "未声明应回退默认 Native");
     }
 
     #[test]

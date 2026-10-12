@@ -2,6 +2,9 @@ mod anthropic_messages;
 mod chat_completions;
 mod responses;
 mod sse;
+mod tool_calling;
+
+pub use tool_calling::ToolCallingMode;
 
 use futures::StreamExt;
 use reqwest::header::HeaderMap;
@@ -48,6 +51,15 @@ pub struct ModelConfig {
     /// （这样应用能彻底移除 SDK 默认写入的字段）。`None` 表示不做任何覆盖。
     #[builder(into)]
     pub extra_body: Option<serde_json::Value>,
+    /// 工具传输模式：`Native`（默认，结构化 `tools` / `tool_calls`）或
+    /// `Content(协议)`（文本协议，见 [`tool_calling`]）。
+    ///
+    /// **正交于** [`ModelProtocol`]：content 可与任意底层协议组合，它是"工具怎么传"
+    /// 而非"对话怎么编码"。content 模式下 `invoke()` 会：编码前把 `Message::Tool`
+    /// 渲染成文本、编码后移除原生 `tools` 字段、解码后把文本解析回 `tool_calls`——
+    /// 三个 codec 一行不改（差异收敛在这一层）。
+    #[builder(default)]
+    pub tool_calling: tool_calling::ToolCallingMode,
 }
 
 #[derive(Debug)]
@@ -189,7 +201,34 @@ pub async fn invoke<'a>(
 ) -> Pin<Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send + 'a>> {
     Box::pin(async_stream::try_stream! {
         let (encode, decode, decode_stream) = codec(&config.protocol)?;
-        let prepared = encode(config, &input)?;
+
+        // content 工具协议（见 `tool_calling`）：协议实例由模式在内部构造，外部不感知。
+        // 编码视图：工具目录注入 system、历史重渲染成协议原文、Tool 结果转回灌文本；
+        // 同时传空 tools、清掉 tool_choice，从源头不生成原生工具字段。
+        let protocol = config.tool_calling.protocol();
+        let content_view: Option<Vec<message::Message>> = protocol.as_deref().map(|protocol| {
+            tool_calling::encode_messages_for_content(input.messages, input.tools, protocol)
+        });
+        let no_tools: [&tool::ToolDefinition; 0] = [];
+        let content_config;
+        let encode_config = if protocol.is_some() {
+            // content 模式：清掉原生工具字段。`tool_choice` 直接置 None；
+            // `parallel_tool_calls` 不在标准字段里，经 `extra_body` 置 `null` 删除
+            // （浅合并里 `null` 表示删除该键），避免端点残留原生工具行为。
+            content_config = ModelConfig {
+                tool_choice: None,
+                extra_body: Some(remove_parallel_tool_calls(config.extra_body.clone())),
+                ..config.clone()
+            };
+            &content_config
+        } else {
+            config
+        };
+        let encode_input = ModelRequest {
+            messages: content_view.as_deref().unwrap_or(input.messages),
+            tools: if protocol.is_some() { &no_tools } else { input.tools },
+        };
+        let prepared = encode(encode_config, &encode_input)?;
         let response = client
             .post(&prepared.url)
             .headers(prepared.headers)
@@ -206,13 +245,70 @@ pub async fn invoke<'a>(
             let body = serde_json::from_str::<serde_json::Value>(&text)
                 .map_err(|e| AdapterError::Decode(format!("response body is not valid JSON: {e}")))?;
 
-            let msg = decode(body)?;
+            let mut msg = decode(body)?;
+            // 3) 解码后：把文本解析回 `tool_calls`（无原生 `tool_calls` 时）。
+            if let Some(protocol) = protocol.as_deref() {
+                msg.message = tool_calling::parse_content_response(protocol, msg.message);
+            }
             yield AdapterEvent::Finished(msg)
         } else {
             let mut stream = decode_stream(response);
+            // content 模式：建一个**流式解析器**，把原始协议文本增量翻译成可见增量
+            // （thinking → ReasoningDelta、description → ContentDelta，工具块屏蔽）。
+            // 未实现流式解析的协议默认吞掉一切（不外泄），最终态仍由 Finished 给出。
+            let mut stream_parser = protocol.as_deref().map(|protocol| protocol.stream_parser());
             while let Some(event) = stream.next().await {
-                yield event?;
+                let event = event?;
+                let Some(parser) = stream_parser.as_mut() else {
+                    // native 模式：原样透传。
+                    yield event;
+                    continue;
+                };
+                match event {
+                    AdapterEvent::ContentDelta(text) => {
+                        for chunk in parser.push(&text) {
+                            yield visible_chunk_event(chunk);
+                        }
+                    }
+                    // 解码器上报的 reasoning 增量原样透传（协议无关）。
+                    AdapterEvent::ReasoningDelta(text) => {
+                        yield AdapterEvent::ReasoningDelta(text);
+                    }
+                    AdapterEvent::Finished(mut response) => {
+                        // 冲刷尾部残留增量，再解析出结构化 `tool_calls`。
+                        for chunk in parser.finish() {
+                            yield visible_chunk_event(chunk);
+                        }
+                        response.message = tool_calling::parse_content_response(
+                            protocol.as_deref().expect("content mode implies a protocol"),
+                            response.message,
+                        );
+                        yield AdapterEvent::Finished(response);
+                    }
+                }
             }
         }
     })
+}
+
+/// 在 `extra_body` 上叠一个 `parallel_tool_calls: null`（删除语义），用于 content 模式
+/// 清掉端点可能写入的原生并行工具开关。`None` 输入也会产出一个只含该删除键的对象。
+fn remove_parallel_tool_calls(extra: Option<serde_json::Value>) -> serde_json::Value {
+    let mut object = match extra {
+        Some(serde_json::Value::Object(map)) => map,
+        _ => serde_json::Map::new(),
+    };
+    object.insert(
+        "parallel_tool_calls".to_string(),
+        serde_json::Value::Null,
+    );
+    serde_json::Value::Object(object)
+}
+
+/// 把流式解析器吐出的可见增量映射成对外事件（统一抽象：UI 只认 `AdapterEvent`）。
+fn visible_chunk_event(chunk: tool_calling::VisibleChunk) -> AdapterEvent {
+    match chunk {
+        tool_calling::VisibleChunk::Thinking(text) => AdapterEvent::ReasoningDelta(text),
+        tool_calling::VisibleChunk::Content(text) => AdapterEvent::ContentDelta(text),
+    }
 }

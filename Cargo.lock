@@ -4074,6 +4074,7 @@ dependencies = [
  "shirley-agent-sdk-macros",
  "thiserror 2.0.21",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

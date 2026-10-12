@@ -657,6 +657,12 @@ async fn agent_list_models(
 }
 
 /// 热切换模型：不重建 Agent，只换 `ModelConfig::model`（与 TUI 的 `/model` 同语义）。
+///
+/// 同时按模型声明 **自动选工具协议**（`docs/tool-calling-refactor.md` Step 3）：
+/// 从模型目录按 `model` 值反查条目，经 [`crate::bootstrap::AgentFactory::model_config_for`]
+/// 算一份完整 `ModelConfig`（模型值 + 工具协议），再一次性下发
+/// （[`shirley_agent_sdk::Agent::set_model_config`]）。
+/// 前端不感知协议——它只传模型值，选择全在 Rust 侧。
 #[tauri::command]
 async fn agent_set_model(
     state: State<'_, DesktopState>,
@@ -664,12 +670,25 @@ async fn agent_set_model(
     model: String,
 ) -> Result<(), String> {
     let runtime = ensure_runtime(&state, &project).await?;
+    // 反查目录：先 clone 出 factory / catalog，再锁 sessions（避免持锁跨 await）。
+    let (factory, catalog) = {
+        let guard = runtime.lock().await;
+        (guard.factory.clone(), guard.factory.model_catalog.clone())
+    };
+    let entry = catalog.list().await.into_iter().find(|entry| entry.value == model);
+    // 按模型条目算一份完整 `ModelConfig`（模型值 + 工具协议），**一次性下发**
+    // （`docs/tool-calling-refactor.md` Step 3）。目录里查不到就只改模型名。
+    let config = entry.as_ref().map(|entry| factory.model_config_for(entry));
+
     let mut guard = runtime.lock().await;
     let agent = guard
         .sessions
         .active_agent_mut()
         .ok_or_else(|| "agent 正在运行中".to_owned())?;
-    agent.set_model(model);
+    match config {
+        Some(config) => agent.set_model_config(config),
+        None => agent.set_model(model),
+    }
     Ok(())
 }
 

@@ -24,6 +24,8 @@ use std::path::Path;
 use serde::Deserialize;
 use shirley_agent_sdk::{Agent, Message};
 
+use crate::prompt_template::render;
+
 use super::format::{Confidence, Domain, Entry, EntryStatus, EntryType, MemoryError};
 use super::store::MemoryStore;
 
@@ -259,51 +261,44 @@ pub fn render_transcript(messages: &[Message]) -> String {
     out
 }
 
+/// 增量 curator 提示词模板（`prompts/curator_incremental.md`）。
+const CURATOR_INCREMENTAL_TEMPLATE: &str = include_str!("../../prompts/curator_incremental.md");
+/// 现有相关记忆小节模板。
+const CURATOR_EXISTING_TEMPLATE: &str = include_str!("../../prompts/curator_existing.md");
+/// 整理（consolidate）提示词模板。
+const CURATOR_CONSOLIDATE_TEMPLATE: &str = include_str!("../../prompts/curator_consolidate.md");
+/// 原始证据小节模板。
+const CURATOR_EVIDENCE_TEMPLATE: &str = include_str!("../../prompts/curator_evidence.md");
+
 /// 组装 curator 提示词：边界声明 + 现有相关记忆（摘要）+ 轨迹 + 输出格式。
 pub fn build_prompt(transcript: &str, existing: &[(String, Entry)], session_ref: &str) -> String {
-    let mut prompt = String::new();
-    prompt.push_str(
-        "你是记忆整理器（curator）。读下面这段对话轨迹，产出**尽可能少而精**的记忆条目增量——条目数要少，但每条要完整，能独立支撑将来的检索与引用。\n\n\
-         **边界**：轨迹只是对环境的一次局部观察，是部分证据、不是 ground truth——\
-         一次成功不自动验证每个中间假设。只沉淀**跨会话仍然成立**的用户事实 / 偏好 / 事件 / 程序；\
-         不确定就不要写（或把 confidence 设为 low）。不要推演轨迹里没有的东西。\n\n\
-         只输出一个 JSON 数组（可为空 `[]`），每个元素字段：\n\
-         - `id`: 稳定 slug（小写字母数字与 `-`），如 `pref-rust-error-style`\n\
-         - `type`: `preference` | `fact` | `event` | `procedure`\n\
-         - `domain`: `personal` | `project`——**这条属于谁**：`personal` = 用户本人的画像 / 偏好 / 跨项目事实（落全局记忆）；`project` = 当前工作区 / 代码库专有的架构、约定、事实（落项目记忆、随仓库走）。拿不准就用 `personal`。\n\
-         - `subject`: 主题（供检索），如 `rust-error-handling`\n\
-         - `created_at`: `YYYY-MM-DD`（可省，默认今天）\n\
-         - `valid_from`: `YYYY-MM-DD`（可省）\n\
-         - `supersedes`: 若取代已有条目，填它的 id（否则省略）\n\
-         - `confidence`: `high` | `medium` | `low`\n\
-         - `scope`: 适用场景限定（可省）\n\
-         - `source`: 证据引用数组，**必填**，格式 `<会话文件>#turn:N`，本次会话填 ",
-    );
-    prompt.push_str(&format!("`{session_ref}#turn:N`"));
-    prompt.push_str(
-        "\n- `body`: 正文（Markdown）。**第一行是一句话摘要**（供索引 / 相关注入展示），\n\
-         空一行后写**跨会话可复用的具体细节**——日期 / 地点 / 人名 / 数字 / 决策 / 约束等确定\n\
-         事实，用要点列出（简明但完整，别超过约 500 字）。只写轨迹里真实出现、且将来仍然成立\n\
-         的内容；不要复述整段对话，不要推演。\n\n",
-    );
-    prompt.push_str("不要删除历史：要改旧偏好就新建条目并 `supersedes` 旧 id。\n\n");
-
-    if !existing.is_empty() {
-        prompt.push_str("## 现有相关记忆（避免重复；如需取代用其 id）\n");
+    let existing_section = if existing.is_empty() {
+        String::new()
+    } else {
+        let mut entries = String::new();
         for (_, entry) in existing {
-            prompt.push_str(&format!(
+            entries.push_str(&format!(
                 "- [{}] {} — {}\n",
                 entry.id,
                 entry.subject,
                 entry.summary()
             ));
         }
-        prompt.push('\n');
-    }
+        let mut section = render(CURATOR_EXISTING_TEMPLATE, &[("entries", &entries)]);
+        if !section.ends_with('\n') {
+            section.push('\n');
+        }
+        section
+    };
 
-    prompt.push_str("## 对话轨迹\n");
-    prompt.push_str(transcript);
-    prompt
+    render(
+        CURATOR_INCREMENTAL_TEMPLATE,
+        &[
+            ("session_ref", session_ref),
+            ("existing_section", &existing_section),
+            ("transcript", transcript),
+        ],
+    )
 }
 
 /// 会话结束触发一次增量 curation。
@@ -587,25 +582,9 @@ fn truncate(text: &str, max: usize) -> String {
 
 /// 组装整理提示词：边界声明 + 全部条目 + 原始证据 + 输出格式。
 pub fn build_consolidate_prompt(entries: &[(String, Entry)], evidence: &str) -> String {
-    let mut prompt = String::new();
-    prompt.push_str(
-        "你是记忆整理器（consolidator）。下面是**全部**记忆条目及其原始证据片段。\n\n\
-         **边界**：证据只是对环境的一次局部观察，是部分证据、不是 ground truth。只在确有依据时整理；\
-         证据不足就**保留原样**，不要强行收敛。\n\n\
-         任务：\n\
-         1. **去重 / 合并**：语义重复或过碎的条目 → `merge` 成一条；\n\
-         2. **去旧 / 取代**：被新条目取代的旧条目 → `supersede`；\n\
-         3. **冲突场景限定**：两条都成立但条件不同 → `requalify` 给它们补 `scope`，**不要二选一**。\n\n\
-         **永不删除历史**（只把旧条目置 superseded）。只输出 JSON 数组（可为空 `[]`），每项是下列之一：\n\
-         - {\"op\":\"merge\",\"sources\":[\"id1\",\"id2\"],\"target\":{...条目字段...}}\n\
-         - {\"op\":\"supersede\",\"id\":\"old-id\",\"replacement\":{...条目字段...}}\n\
-         - {\"op\":\"requalify\",\"id\":\"id\",\"scope\":\"适用场景\",\"body\":\"可选新正文\"}\n\
-         条目字段同增量 curator：id / type / domain / subject / created_at / valid_from / confidence / scope / source / body。\n\n",
-    );
-
-    prompt.push_str("## 现有条目\n");
+    let mut entries_text = String::new();
     for (_, entry) in entries {
-        prompt.push_str(&format!(
+        entries_text.push_str(&format!(
             "- [{}] ({}) {} — {}（{}）\n",
             entry.id,
             entry.entry_type,
@@ -614,14 +593,17 @@ pub fn build_consolidate_prompt(entries: &[(String, Entry)], evidence: &str) -> 
             entry.timeline_date()
         ));
     }
-    prompt.push('\n');
 
-    if !evidence.trim().is_empty() {
-        prompt.push_str("## 原始证据片段\n");
-        prompt.push_str(evidence);
-        prompt.push('\n');
-    }
-    prompt
+    let evidence_section = if evidence.trim().is_empty() {
+        String::new()
+    } else {
+        render(CURATOR_EVIDENCE_TEMPLATE, &[("evidence", evidence)])
+    };
+
+    render(
+        CURATOR_CONSOLIDATE_TEMPLATE,
+        &[("entries", &entries_text), ("evidence_section", &evidence_section)],
+    )
 }
 
 /// 确定性执行整理操作（自检不通过就拒绝，绝不默认放行）。

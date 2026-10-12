@@ -209,18 +209,14 @@ impl Default for TodoStore {
 /// 注入请求时给账本加的一行说明（模型据此知道这是什么、该怎么做）。
 ///
 /// 与 [`TodoStore::render`] 分开：工具结果里不需要重复这段说明。
-pub const TASK_STATE_HEADER: &str = "Your maintained task ledger (persists across context compaction). \
-Update it with the `todo` tool. Do not repeat work already recorded as done.";
+pub const TASK_STATE_HEADER: &str = include_str!("../prompts/todo_header.md");
 
 /// 模型连续多轮没更新账本时注入的催促提醒（nag）。
 ///
 /// 与 `TASK_STATE_HEADER` 分开：这条只在**空账本**或**久未更新**时出现，
 /// 是"冷启动护栏"——账本为空时没有 header 可注入，模型开局缺一条明确的
 /// 触发指令，靠它补上。
-pub const TODO_NAG_REMINDER: &str = "<reminder>You have gone several rounds without updating your task \
-ledger. If this is a multi-step task, call the `todo` tool now: set the goal and the step \
-checklist, mark the current step in_progress, and record what you have learned so far. Keep the \
-ledger current as you work.</reminder>";
+pub const TODO_NAG_REMINDER: &str = include_str!("../prompts/todo_nag.md");
 
 /// XML 文本转义：防止模型写入的 `<` / `&` 破坏标签结构。
 fn escape(input: &str) -> String {

@@ -230,6 +230,7 @@ impl Session {
                             calls: tool_calls
                                 .iter()
                                 .map(|call| ToolCallView {
+                                    id: call.id.clone(),
                                     name: call.name.clone(),
                                     arguments: call.arguments.clone(),
                                 })
@@ -306,6 +307,7 @@ impl Session {
                     let calls = tool_calls
                         .into_iter()
                         .map(|call| ToolCallView {
+                            id: call.id,
                             name: call.name,
                             arguments: call.arguments,
                         })
@@ -402,6 +404,7 @@ pub enum ItemWire {
 /// [`ItemWire::Tools`] 里的单次工具调用。
 #[derive(Debug, Clone)]
 pub struct ToolCallWire {
+    pub id: String,
     pub name: String,
     pub arguments: String,
 }
@@ -420,6 +423,7 @@ impl ItemWire {
                     .calls
                     .iter()
                     .map(|call| ToolCallWire {
+                        id: call.id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
                     })
@@ -515,6 +519,15 @@ impl SessionManager {
     /// 会话目录句柄（供主循环加载列表 / 新建切换）。
     pub fn catalog(&self) -> Arc<dyn SessionCatalog> {
         Arc::clone(&self.catalog)
+    }
+
+    /// 造 `Agent` 的工厂（只读句柄）。无工厂（单会话退化）时返回 `None`。
+    ///
+    /// 界面用它把「选中的模型条目」换算成一份完整 `ModelConfig`
+    /// （[`AgentFactory::model_config_for`]），再一次性下发给 `Agent`
+    /// （`docs/tool-calling-refactor.md` Step 3）。
+    pub fn factory(&self) -> Option<Arc<AgentFactory>> {
+        self.factory.clone()
     }
 
     /// 已加载会话里是否已有该名字（用于切换时复用现成 `Agent`，不重建）。
