@@ -10,8 +10,8 @@ use crate::token;
 use crate::tool;
 use futures::StreamExt;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::pin::Pin;
+use std::sync::Arc;
 
 pub struct Agent {
     model_config: adapter::ModelConfig,
@@ -26,6 +26,10 @@ pub struct Agent {
     /// 根目录开始盲目探索（`plan.md`）。`None` 表示调用方没有指定。
     working_dir: Option<PathBuf>,
     messages: Vec<message::Message>,
+    /// 流被 drop 时尚未提交的用户输入与助手增量，供驱动方收尾落库。
+    pending_user: Option<String>,
+    pending_content: String,
+    pending_reasoning: String,
     tools: tool::ToolManager,
     compression_instruction: Option<String>,
     compression_pending: bool,
@@ -37,6 +41,8 @@ pub struct Agent {
     context_provider: Option<Arc<dyn ContextProvider>>,
     // L1 估算 + L2 校准状态（见 `token` 模块）
     token_counter: token::HeuristicCounter,
+    /// 单次用户任务的模型执行步数上限（压缩不重置此计数）。
+    max_steps: usize,
 }
 
 #[bon::bon]
@@ -51,7 +57,13 @@ impl Agent {
         #[builder(into)] compression_instruction: Option<String>,
         #[builder(default)] compression_config: CompressionConfig,
         context_provider: Option<Arc<dyn ContextProvider>>,
+        #[builder(default = 64)] max_steps: usize,
     ) -> Result<Self, AgentError> {
+        if max_steps == 0 {
+            return Err(AgentError::Other(
+                "max_steps must be greater than zero".into(),
+            ));
+        }
         // 构造时就按工作目录解析一次，把 System 消息置顶（空提示词则不置顶）。
         // 恢复出的历史里不含 system，这里现生成——与压缩重建同一套规则。
         let resolved = system_prompt.resolve(&SystemPromptContext {
@@ -66,12 +78,16 @@ impl Agent {
             system_prompt,
             working_dir,
             messages,
+            pending_user: None,
+            pending_content: String::new(),
+            pending_reasoning: String::new(),
             tools,
             compression_instruction,
             compression_pending: false,
             compression_config,
             context_provider,
             token_counter: token::HeuristicCounter::new(),
+            max_steps,
         })
     }
 
@@ -144,9 +160,51 @@ impl Agent {
         &self.messages
     }
 
+    /// drop 掉 run_stream 后保存未完成消息，返回需要由应用层追加到日志的消息。
+    /// 重复调用为空；已完成的消息不会重复提交。未返回结果的工具调用补齐中断结果，
+    /// 避免下一轮携带孤立 tool_call 被端点拒绝。
+    pub fn finish_interrupted_turn(&mut self) -> Vec<message::Message> {
+        let mut added = Vec::new();
+        if let Some(content) = self.pending_user.take() {
+            added.push(message::Message::User { content });
+        }
+        let content = std::mem::take(&mut self.pending_content);
+        let reasoning = std::mem::take(&mut self.pending_reasoning);
+        if !content.is_empty() || !reasoning.is_empty() {
+            added.push(message::Message::Assistant {
+                content: (!content.is_empty()).then_some(content),
+                reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                tool_calls: Vec::new(),
+            });
+        }
+        // 只有当前消息尾部的工具组可能尚未完成。
+        if let Some(index) = self
+            .messages
+            .iter()
+            .rposition(|message| !matches!(message, message::Message::Tool { .. }))
+            && let message::Message::Assistant { tool_calls, .. } = &self.messages[index]
+        {
+            for call in tool_calls {
+                let completed = self.messages[index + 1..].iter().any(|message| {
+                    matches!(message, message::Message::Tool { tool_call_id, .. } if tool_call_id == &call.id)
+                });
+                if !completed {
+                    added.push(message::Message::Tool {
+                        tool_call_id: call.id.clone(),
+                        content: Some(
+                            "工具等待被中断；执行可能已产生副作用，请先检查实际状态。".into(),
+                        ),
+                    });
+                }
+            }
+        }
+        self.messages.extend(added.iter().cloned());
+        added
+    }
+
     /// 把对话历史尾截断到前 `len` 条，返回截断后的长度。
     ///
-    /// 这是回溯 / 打断的**原子能力**：SDK 只负责"把工作集变短"并维护内部不变量
+    /// 这是回溯的**原子能力**：SDK 只负责"把工作集变短"并维护内部不变量
     /// （不越过置顶 system、越界自动钳制），**"截到哪"是业务判定**——例如"回退最后
     /// 一轮用户消息"由上层按 [`Agent::messages`] 自行定位后调用（`docs/session.md`
     /// 一.决策 4：只截尾，不产生中间空洞）。持久化由应用层据截断后的长度自行截尾
@@ -227,6 +285,7 @@ impl Agent {
         &'a mut self,
         task: &'a str,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + Send + 'a>> {
+        self.pending_user = Some(task.to_owned());
         Box::pin(async_stream::try_stream! {
             let client = reqwest::Client::new();
             let mut total_usage = message::Usage::default();
@@ -243,12 +302,29 @@ impl Agent {
             let mut start_index = self.messages.len();
 
             let user_message = message::Message::User {
-                content: task.into(),
+                content: self.pending_user.take().expect("run_stream records the pending user"),
             };
             self.messages.push(user_message.clone());
             yield AgentEvent::MessageAdded(user_message);
 
+            let mut steps = 0usize;
             loop {
+                if steps >= self.max_steps {
+                    let notice = message::Message::Assistant {
+                        content: Some(format!("已达到本轮执行上限（{} 次模型调用），任务尚未完成。当前对话与工具结果已保留；请检查已有结论后决定是否继续。", self.max_steps)),
+                        reasoning_content: None,
+                        tool_calls: Vec::new(),
+                    };
+                    self.messages.push(notice.clone());
+                    yield AgentEvent::MessageAdded(notice);
+                    yield AgentEvent::Finished(RunResult {
+                        messages: self.messages[start_index..].to_vec(),
+                        stop_reason: StopReason::MaxStepsReached,
+                        usage: total_usage,
+                    });
+                    break;
+                }
+                steps += 1;
                 if self.compression_pending {
                     yield AgentEvent::CompressionStarted;
                     let (usage, summary) = self.compress_context(&client).await?;
@@ -269,6 +345,7 @@ impl Agent {
                 }
                 let active_messages = self.active_messages();
                 let tools = self.tools.definitions();
+                let estimated = token::count_messages(&active_messages) + token::count_tools(&tools);
                 let model_request = ModelRequest {
                     messages: &active_messages,
                     tools: &tools,
@@ -280,8 +357,14 @@ impl Agent {
 
                     match adapter_event {
                         adapter::AdapterEvent::Finished(response) => {
+                            self.token_counter.calibrate(response.usage.input_tokens, estimated);
+                            self.pending_content.clear();
+                            self.pending_reasoning.clear();
                             total_usage = total_usage + response.usage;
                             self.compression_pending = self.should_schedule_compression(&response.usage);
+                            let response_message = response.message;
+                            self.messages.push(response_message.clone());
+                            yield AgentEvent::MessageAdded(response_message.clone());
                             if let Some(limit_tokens) = self.model_config.context_window_tokens.filter(|&limit| limit > 0) {
                                 yield AgentEvent::ContextUsage {
                                     used_tokens: response.usage.input_tokens.saturating_add(response.usage.output_tokens),
@@ -291,9 +374,6 @@ impl Agent {
 
                             yield AgentEvent::Usage(response.usage);
 
-                            let response_message = response.message;
-                            self.messages.push(response_message.clone());
-                            yield AgentEvent::MessageAdded(response_message.clone());
                             let tool_messages = match &response_message {
                                 message::Message::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
                                     let mut tasks = futures::stream::FuturesUnordered::new();
@@ -325,6 +405,12 @@ impl Agent {
 
                                     let mut tool_messages = Vec::with_capacity(tool_calls.len());
                                     while let Some((call, ok, content, elapsed_ms)) = tasks.next().await {
+                                        let tool_message = message::Message::Tool {
+                                            tool_call_id: call.id.clone(),
+                                            content: Some(content.clone()),
+                                        };
+                                        self.messages.push(tool_message.clone());
+                                        yield AgentEvent::MessageAdded(tool_message.clone());
                                         yield AgentEvent::ToolFinished {
                                             call_id: call.id.clone(),
                                             name: call.name.clone(),
@@ -333,12 +419,6 @@ impl Agent {
                                             elapsed_ms,
                                         };
 
-                                        let tool_message = message::Message::Tool {
-                                            tool_call_id: call.id.clone(),
-                                            content: Some(content),
-                                        };
-                                        self.messages.push(tool_message.clone());
-                                        yield AgentEvent::MessageAdded(tool_message.clone());
                                         tool_messages.push(tool_message);
                                     }
 
@@ -358,9 +438,11 @@ impl Agent {
                             }
                         }
                         adapter::AdapterEvent::ReasoningDelta(delta) => {
+                            self.pending_reasoning.push_str(&delta);
                             yield AgentEvent::ReasoningDelta(delta);
                         }
                         adapter::AdapterEvent::ContentDelta(delta) => {
+                            self.pending_content.push_str(&delta);
                             yield AgentEvent::ContentDelta(delta);
                         }
                     }
@@ -384,9 +466,9 @@ impl Agent {
     ///
     /// 返回 `None` 的三种情况，语义都是"本轮不压缩"：
     /// 未配置上下文窗口、没有可压内容、或全部消息本来就能装进预算。
-    fn compute_cut(&self) -> Option<CutPlan> {
+    fn compute_cut(&self, messages: &[message::Message]) -> Option<CutPlan> {
         let budget = self.retain_budget()?;
-        plan_cut(&self.messages, budget, &self.token_counter)
+        plan_cut(messages, budget, &self.token_counter)
     }
 
     fn should_schedule_compression(&self, usage: &message::Usage) -> bool {
@@ -416,12 +498,14 @@ impl Agent {
         (used as u128) * 10_000 >= (limit as u128) * scaled
     }
 
-    fn active_messages(&self) -> Vec<message::Message> {
+    /// 普通执行与压缩共享同一工作集；恢复日志中已被摘要替代的消息不再参与。
+    /// 只返回副本，完整日志仍可用于界面与历史查看。
+    fn active_history(&self) -> Vec<message::Message> {
         let last_summary = self
             .messages
             .iter()
             .rposition(|msg| matches!(msg, message::Message::ContextSummary { .. }));
-        let mut active = match last_summary {
+        match last_summary {
             None => self.messages.clone(),
             Some(index) => {
                 let mut active: Vec<_> = self
@@ -433,7 +517,11 @@ impl Agent {
                 active.extend_from_slice(&self.messages[index..]);
                 active
             }
-        };
+        }
+    }
+
+    fn active_messages(&self) -> Vec<message::Message> {
+        let mut active = self.active_history();
         // 附加上下文（应用层注入，例如任务账本）作为一条 system 消息**追加在末尾**。
         //
         // 位置选末尾的理由：
@@ -465,32 +553,83 @@ impl Agent {
         client: &reqwest::Client,
     ) -> Result<(message::Usage, Option<message::Message>), AgentError> {
         // 1. 算切点并切三段。
-        let Some(plan) = self.compute_cut() else {
+        let history = self.active_history();
+        let Some(mut plan) = self.compute_cut(&history) else {
             // 没有可压内容（窗口未配置 / 只剩背景 / 本来装得下）：不压缩，直接放行。
             self.compression_pending = false;
             return Ok((message::Usage::default(), None));
         };
-        let mut parts = plan.split(&self.messages);
+        // 摘要事件只追加到日志，运行中的原始任务未必在摘要后的日志尾部。
+        // 从完整记录补回最近的用户任务，但不重新带入已压缩的工具/推理历史。
+        if plan.current_task.is_none() {
+            plan.current_task = self
+                .messages
+                .iter()
+                .rev()
+                .find(|m| matches!(m, message::Message::User { .. }))
+                .cloned();
+        }
+        let mut parts = plan.split(&history);
+        // split 只能定位 history 内的任务；从归档前缀恢复的任务也需重建保留。
+        if parts.current_task.is_some()
+            && !history
+                .iter()
+                .any(|m| matches!(m, message::Message::User { .. }))
+        {
+            parts.task_extracted = true;
+        }
 
-        // 1.5 工具输出清空：工具输出统一替换为占位标记——AI 走"重建"路径
-        //     （重新执行获取当前状态）。这是 v0 有意的技术债：不可重建的调用
-        //     （一次性快照）重跑拿不到当时结果。
-        strip_tool_outputs(&mut parts.to_compress);
-
-        // 2. 构造压缩请求：待压缩段 + 本轮任务 + 压缩指令。
-        let mut messages = parts.to_compress.clone();
+        // 2. 旧摘要不占尾部预算，但必须作为新摘要的输入；否则 rebuild
+        // 替换旧摘要时，之前已确认的结论也会被一起丢弃。
+        let mut messages: Vec<_> = history[..plan.head]
+            .iter()
+            .filter(|m| matches!(m, message::Message::ContextSummary { .. }))
+            .cloned()
+            .collect();
+        messages.extend(parts.to_compress.iter().cloned());
         // 显式告诉摘要器"本轮任务是什么"，避免它从历史里猜（猜就会编）。
         if let Some(task) = &parts.current_task {
             messages.push(task.clone());
         }
-        let instruction = self
-            .compression_instruction
-            .clone()
-            .ok_or_else(|| AgentError::Compression("compression instruction is not configured".into()))?;
+        if let Some(text) = self
+            .context_provider
+            .as_ref()
+            .and_then(|p| p.compaction_context())
+            .filter(|text| !text.trim().is_empty())
+        {
+            messages.push(message::Message::System { content: text });
+        }
+        let instruction = self.compression_instruction.clone().ok_or_else(|| {
+            AgentError::Compression("compression instruction is not configured".into())
+        })?;
         // 调用方给领域相关的取舍，SDK 追加结构模板（`docs/compaction.md` 5.3）：
         // 摘要始终是 XML 块，且禁止推演"下一步"。模板可由 `compression_config` 覆盖。
         let content = format!("{instruction}\n\n{}", self.compression_config.template);
         messages.push(message::Message::System { content });
+
+        // 触发压缩的比例不是摘要请求的容量上限。按窗口预留输出空间，
+        // 估算只决定如何缩减请求，不代替服务端的真实 token 校验。
+        if let Some(window) = self.model_config.context_window_tokens.filter(|w| *w > 0) {
+            let reserve = self
+                .model_config
+                .max_output_tokens
+                .map(u64::from)
+                .unwrap_or_else(|| (window / 10).max(1));
+            let budget = window.saturating_sub(reserve);
+            // 优先移除可重复、冗长的推理草稿，保留正文、账本和工具证据。
+            // 仅处理摘要请求的副本；原始记录和保留尾部不受影响。
+            if self.token_counter.estimate_messages(&messages) > budget {
+                for message in &mut messages {
+                    if let message::Message::Assistant {
+                        reasoning_content, ..
+                    } = message
+                    {
+                        *reasoning_content = None;
+                    }
+                }
+            }
+            trim_compaction_tool_outputs(&mut messages, budget, &self.token_counter);
+        }
 
         let model_request = ModelRequest {
             messages: &messages,
@@ -510,14 +649,19 @@ impl Agent {
                             ..
                         } if !content.trim().is_empty() && tool_calls.is_empty() => content,
                         _ => {
-                            return Err(AgentError::Compression("compression response contained no usable summary".into()));
+                            return Err(AgentError::Compression(
+                                "compression response contained no usable summary".into(),
+                            ));
                         }
                     };
 
                     // 3. 重建：[新摘要] + current_task + remain，再把系统提示词重新生成置顶。
                     //    system 不参与压缩、也不从旧消息复制，每次重建现取一条。
                     let rebuilt = parts.rebuild(summary);
-                    let summary_message = rebuilt.first().expect("rebuild always yields a summary").clone();
+                    let summary_message = rebuilt
+                        .first()
+                        .expect("rebuild always yields a summary")
+                        .clone();
                     let mut next = rebuilt;
                     if let Some(system) = self.system_message() {
                         next.insert(0, system);
@@ -540,24 +684,77 @@ impl Agent {
             }
         }
 
-        Err(AgentError::Compression("compression produced no usage report".into()))
+        Err(AgentError::Compression(
+            "compression produced no usage report".into(),
+        ))
     }
 }
 
-/// 工具结果统一清空为占位标记（压缩时节省上下文）。
-///
-/// **不能留空字符串**——模型会把空 content 误读为"执行成功但无输出"，
-/// 占位标记才是"结果被省略、可重新执行获取"的显式信号。
-/// 占位文案进 SDK 契约，措辞要稳定。
-fn strip_tool_outputs(messages: &mut [message::Message]) {
-    for msg in messages.iter_mut() {
-        if let message::Message::Tool { content, .. } = msg
-            && let Some(text) = content
-            && !text.trim().is_empty()
-        {
-            *text = "[tool result omitted to save context; re-run the call to get the current state if still needed]".to_string();
+fn trim_compaction_tool_outputs(
+    messages: &mut [message::Message],
+    budget: u64,
+    counter: &token::HeuristicCounter,
+) {
+    let raw_budget = (budget as f64 / counter.factor()) as u64;
+    let mut total = token::count_messages(messages);
+    let mut tools: Vec<_> = messages
+        .iter()
+        .enumerate()
+        .filter_map(|(i, msg)| match msg {
+            message::Message::Tool {
+                content: Some(text),
+                ..
+            } => Some((i, token::count_text(text))),
+            _ => None,
+        })
+        .collect();
+    tools.sort_unstable_by_key(|(_, cost)| std::cmp::Reverse(*cost));
+    for (i, cost) in tools {
+        if total <= raw_budget {
+            break;
+        }
+        let message::Message::Tool {
+            tool_call_id,
+            content: Some(text),
+        } = &mut messages[i]
+        else {
+            unreachable!()
+        };
+        let marker = format!(
+            "\n[tool result excerpt; middle omitted; original tool_call_id={tool_call_id}]\n"
+        );
+        // 小结果不裁剪；大结果也至少留 256 token 的片段（含省略标记）。
+        let target = cost.saturating_sub(total - raw_budget).max(256);
+        let marker_cost = token::count_text(&marker);
+        if target >= cost || target <= marker_cost {
+            continue;
+        }
+        let keep = target - marker_cost;
+        let prefix = text_prefix_for_tokens(text, keep / 2);
+        let suffix: String = text.chars().rev().collect();
+        let suffix = text_prefix_for_tokens(&suffix, keep - keep / 2);
+        let excerpt = format!(
+            "{prefix}{marker}{}",
+            suffix.chars().rev().collect::<String>()
+        );
+        let new_cost = token::count_text(&excerpt);
+        if new_cost < cost {
+            *text = excerpt;
+            total = total.saturating_sub(cost - new_cost);
         }
     }
+}
+
+fn text_prefix_for_tokens(text: &str, budget: u64) -> &str {
+    // 每字符的权重为 1/4 的整数倍，按同一启发式累计，避免切断 UTF-8。
+    let mut quarters = 0;
+    for (i, ch) in text.char_indices() {
+        quarters += (token::char_weight(ch) * 4.0) as u64;
+        if quarters > budget.saturating_mul(4) {
+            return &text[..i];
+        }
+    }
+    text
 }
 
 #[cfg(test)]
@@ -633,6 +830,50 @@ mod tests {
         };
         assert_eq!(content, "注入的任务账本");
         // 置顶的原始 system 仍在最前。
-        assert!(matches!(&active[0], message::Message::System { content } if content == "你是 Shirley"));
+        assert!(
+            matches!(&active[0], message::Message::System { content } if content == "你是 Shirley")
+        );
+    }
+
+    #[test]
+    fn oversized_tool_evidence_is_excerpted_without_destroying_small_results() {
+        let original = format!("重要开头{}关键结尾", "输出".repeat(5000));
+        let mut messages = vec![
+            message::Message::Tool {
+                tool_call_id: "large".into(),
+                content: Some(original),
+            },
+            message::Message::Tool {
+                tool_call_id: "small".into(),
+                content: Some("test failed: expected model".into()),
+            },
+        ];
+        trim_compaction_tool_outputs(&mut messages, 600, &token::HeuristicCounter::new());
+        let message::Message::Tool {
+            content: Some(excerpt),
+            ..
+        } = &messages[0]
+        else {
+            panic!()
+        };
+        assert!(excerpt.starts_with("重要开头"));
+        assert!(excerpt.ends_with("关键结尾"));
+        assert!(excerpt.contains("tool_call_id=large"));
+        assert!(token::count_messages(&messages) <= 600);
+        assert!(
+            matches!(&messages[1], message::Message::Tool { content: Some(text), .. } if text == "test failed: expected model")
+        );
+    }
+
+    #[test]
+    fn tool_evidence_within_budget_is_unchanged() {
+        let mut messages = vec![message::Message::Tool {
+            tool_call_id: "a".into(),
+            content: Some("modelName returned empty".into()),
+        }];
+        trim_compaction_tool_outputs(&mut messages, 1000, &token::HeuristicCounter::new());
+        assert!(
+            matches!(&messages[..], [message::Message::Tool { tool_call_id, content: Some(text) }] if tool_call_id == "a" && text == "modelName returned empty")
+        );
     }
 }

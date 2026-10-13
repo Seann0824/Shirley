@@ -23,8 +23,9 @@ use tokio::sync::broadcast;
 use super::app::{ChatMessage, Item, Role, ToolCallView};
 use crate::bootstrap::AgentFactory;
 use crate::memory::MemoryRuntime;
-use crate::skills::SkillRuntime;
 use crate::session::{SessionCatalog, SessionStore};
+use crate::skills::SkillRuntime;
+use crate::todo::{TaskView, TodoStore};
 
 /// 事件扇出通道容量。运行中订阅者若落后超过此数会 `Lagged`，由订阅方（desktop
 /// pump）跳过、靠重发快照重对齐（见 `docs/multi-session.md`）。
@@ -42,6 +43,14 @@ pub struct Session {
     /// 该会话独占的 `Agent`。一轮运行期间被 `take` 出去移入后台任务，结束后放回
     /// （与旧 `take_agent` / `restore_agent` 同款手法，但**每个会话各一份**）。
     pub agent: Option<Agent>,
+    /// 本会话当前模型名的**镜像**。
+    ///
+    /// `Agent` 运行期被 `take` 走后，`agent.model_config()` 就查不到了（desktop
+    /// 切到别的会话再切回来时，运行中的会话正处于此状态）。模型选择器 / 状态行
+    /// 需要**任何时刻**都能回答"本会话用什么模型"，故在会话上留一份。写入点：
+    /// [`Session::new`] 初始化、[`Session::begin_turn`] / [`Session::restore_agent`]
+    /// 与 agent 同步、切换/新建会话后由 [`Session::remember_model`] 刷新。
+    model: Option<String>,
     /// 该会话的消息条目（渲染视图）。
     pub items: Vec<Item>,
     pub waiting: bool,
@@ -55,10 +64,6 @@ pub struct Session {
     pub context_usage: Option<(u64, u64)>,
     /// 本轮流式回复起始的 `items` 下标（收尾时据此截断半截流式内容）。
     pub streaming_delta_start: Option<usize>,
-    /// 本轮回复开始时 UI `items` 的长度，打断时据此回退界面。
-    pub ui_turn_start: Option<usize>,
-    /// 本轮提交的输入，打断后退回输入框供修改重发。
-    pub turn_prompt: Option<String>,
     /// 用户按 Esc 请求打断当前回复（由主循环读取后触发取消）。
     pub interrupt_requested: bool,
     /// 该会话的事件扇出通道（多会话：UI 切到会话 → 订阅，切走 → 退订）。
@@ -87,6 +92,12 @@ pub struct Session {
     /// `/<skill-name>` slash 入口经此句柄直接激活（`docs/skills.md` 5.6），
     /// 复用 P1 的 `SkillContextProvider` 注入接缝——不新增注入路径。
     pub skills: Option<Arc<SkillRuntime>>,
+    /// 该会话的任务账本（`None` = 无账本，供测试 / 无配置场景）。
+    ///
+    /// 与 `todo` 工具 / `TodoContextProvider` **共享同一 `Arc`**（由 `build_agent`
+    /// 造出并回传），界面据此实时读取任务进度（[`TodoStore::view`]）——TUI 在每帧
+    /// `draw` 时直接读，desktop 在 pump 收到 `todo` 工具完成事件时读。
+    pub todo: Option<Arc<TodoStore>>,
 }
 
 impl Session {
@@ -100,10 +111,13 @@ impl Session {
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
         skills: Option<Arc<SkillRuntime>>,
+        todo: Option<Arc<TodoStore>>,
     ) -> Self {
+        let model = Some(agent.model_config().model.clone());
         Self {
             name,
             agent: Some(agent),
+            model,
             items: Vec::new(),
             waiting: false,
             waiting_since: None,
@@ -115,14 +129,37 @@ impl Session {
             compressing: false,
             context_usage: None,
             streaming_delta_start: None,
-            ui_turn_start: None,
-            turn_prompt: None,
             interrupt_requested: false,
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
             running: false,
             store,
             memory,
             skills,
+            todo,
+        }
+    }
+
+    /// 本会话任务账本的结构化视图（供 UI 渲染任务进度）；无账本 / 空账本返回 `None`。
+    pub fn todo_view(&self) -> Option<TaskView> {
+        self.todo.as_ref().and_then(|store| store.view())
+    }
+
+    /// 本会话当前的模型名。
+    ///
+    /// **活 `Agent` 优先、镜像回退**：`Agent` 在（空闲）时以它为准（唯一真相源），
+    /// 运行期 `Agent` 被 `take` 走后回退到 [`Session::model`] 镜像——这样切到别的
+    /// 会话再切回来时，模型选择器 / 状态行仍能显示本会话的模型，而不是空白。
+    pub fn model_name(&self) -> Option<&str> {
+        self.agent
+            .as_ref()
+            .map(|agent| agent.model_config().model.as_str())
+            .or(self.model.as_deref())
+    }
+
+    /// 刷新模型名镜像（在 `Agent` 上改过模型后调用，或从外部拿到 `Agent` 时同步）。
+    pub fn remember_model(&mut self) {
+        if let Some(agent) = self.agent.as_ref() {
+            self.model = Some(agent.model_config().model.clone());
         }
     }
 
@@ -154,8 +191,9 @@ impl Session {
                     self.add_message(message);
                 }
             }
-            Ok(AgentEvent::ContentDelta(delta)) => self.append_streaming_delta(delta, false),
-            Ok(AgentEvent::ReasoningDelta(delta)) => self.append_streaming_delta(delta, true),
+            Ok(AgentEvent::ContentDelta(delta)) => self.append_streaming_delta(delta),
+            // 思考（reasoning）不展示：程序内部消化，用户只关心行为与结果。
+            Ok(AgentEvent::ReasoningDelta(_)) => {}
             Ok(AgentEvent::Usage(usage)) => self.record_usage(usage),
             Ok(AgentEvent::CompressionStarted) => self.start_compression(),
             Ok(AgentEvent::CompressionFinished) => self.finish_compression(),
@@ -165,10 +203,21 @@ impl Session {
             }) => self.record_context_usage(used_tokens, limit_tokens),
             Err(error) => self.add_error(error),
             // Tool / run-finished 事件不产生额外条目（工具组由 MessageAdded 落库时建立）。
-            Ok(AgentEvent::ToolStarted { .. })
-            | Ok(AgentEvent::ToolFinished { .. })
-            | Ok(AgentEvent::Finished(_)) => {}
+            Ok(AgentEvent::ToolStarted { .. }) | Ok(AgentEvent::ToolFinished { .. }) => {}
+            Ok(AgentEvent::Finished(_)) => {
+                self.streaming_delta_start = None;
+                self.compressing = false;
+                // 等驱动方归还 Agent 后才解除 waiting，避免提前接受下一轮。
+            }
         }
+    }
+
+    /// 正常、取消、失败均解除流式起点，避免下一轮完成时截掉上一轮和新用户输入。
+    pub fn finish_turn(&mut self) {
+        self.streaming_delta_start = None;
+        self.compressing = false;
+        self.waiting = false;
+        self.waiting_since = None;
     }
 
     /// 当前视图快照：按 UI 条目顺序导出可重建的纯数据（`Item` → [`ItemWire`]）。
@@ -201,28 +250,17 @@ impl Session {
                 Message::User { content } => items.push(Item::Message(ChatMessage {
                     role: Role::User,
                     content: content.clone(),
-                    thinking: false,
                 })),
                 Message::Assistant {
                     content,
-                    reasoning_content,
                     tool_calls,
+                    ..
                 } => {
-                    if let Some(reasoning) = reasoning_content
-                        .as_ref()
-                        .filter(|text| !text.trim().is_empty())
-                    {
-                        items.push(Item::Message(ChatMessage {
-                            role: Role::Assistant,
-                            content: reasoning.clone(),
-                            thinking: true,
-                        }));
-                    }
+                    // 思考（reasoning_content）不投影成视图条目——UI 不展示思考。
                     if let Some(content) = content.as_ref().filter(|text| !text.is_empty()) {
                         items.push(Item::Message(ChatMessage {
                             role: Role::Assistant,
                             content: content.clone(),
-                            thinking: false,
                         }));
                     }
                     if !tool_calls.is_empty() {
@@ -238,33 +276,28 @@ impl Session {
                         }));
                     }
                 }
-                Message::ContextSummary { content } => items.push(Item::Message(ChatMessage {
-                    role: Role::Summary,
+                Message::ContextSummary { content } => items.push(Item::Compact {
                     content: content.clone(),
-                    thinking: false,
-                })),
+                    expanded: false,
+                }),
                 Message::Tool { .. } | Message::System { .. } => {}
             }
         }
         items
     }
 
-    pub(crate) fn push_message(&mut self, role: Role, content: String, thinking: bool) {
-        self.items.push(Item::Message(ChatMessage {
-            role,
-            content,
-            thinking,
-        }));
+    pub(crate) fn push_message(&mut self, role: Role, content: String) {
+        self.items
+            .push(Item::Message(ChatMessage { role, content }));
     }
 
-    fn append_streaming_delta(&mut self, delta: String, thinking: bool) {
+    fn append_streaming_delta(&mut self, delta: String) {
         if delta.is_empty() {
             return;
         }
         if self.streaming_delta_start.is_some() {
             if let Some(Item::Message(message)) = self.items.last_mut()
                 && message.role == Role::Assistant
-                && message.thinking == thinking
             {
                 message.content.push_str(&delta);
                 return;
@@ -272,7 +305,7 @@ impl Session {
         } else {
             self.streaming_delta_start = Some(self.items.len());
         }
-        self.push_message(Role::Assistant, delta, thinking);
+        self.push_message(Role::Assistant, delta);
     }
 
     fn finish_streaming_deltas(&mut self) {
@@ -285,23 +318,21 @@ impl Session {
         if calls.is_empty() {
             return;
         }
-        self.items.push(Item::Tools(super::app::ToolGroup { calls }));
+        self.items
+            .push(Item::Tools(super::app::ToolGroup { calls }));
     }
 
     pub(crate) fn add_message(&mut self, message: Message) {
         match message {
-            Message::User { content } => self.push_message(Role::User, content, false),
+            Message::User { content } => self.push_message(Role::User, content),
             Message::Assistant {
                 content,
-                reasoning_content,
                 tool_calls,
+                ..
             } => {
-                // 思考先记下来，让消息顺序保持"先想后答"。
-                if let Some(reasoning) = reasoning_content.filter(|r| !r.trim().is_empty()) {
-                    self.push_message(Role::Assistant, reasoning, true);
-                }
+                // 思考（reasoning_content）不落成视图条目——UI 不展示思考。
                 if let Some(content) = content.filter(|c| !c.is_empty()) {
-                    self.push_message(Role::Assistant, content, false);
+                    self.push_message(Role::Assistant, content);
                 }
                 if !tool_calls.is_empty() {
                     let calls = tool_calls
@@ -315,14 +346,17 @@ impl Session {
                     self.start_tool_calls(calls);
                 }
             }
-            Message::ContextSummary { content } => self.push_message(Role::Summary, content, false),
+            Message::ContextSummary { content } => self.items.push(Item::Compact {
+                content,
+                expanded: false,
+            }),
             Message::Tool { .. } | Message::System { .. } => {}
         }
     }
 
     fn add_error(&mut self, error: String) {
         self.compressing = false;
-        self.push_message(Role::Error, error, false);
+        self.push_message(Role::Error, error);
     }
 
     /// 把一条消息追加到会话日志（事件驱动落库）。
@@ -391,14 +425,18 @@ impl Session {
 /// desktop 侧再转成前端 DTO（`desktop::wire::ItemWire`）。
 #[derive(Debug, Clone)]
 pub enum ItemWire {
-    /// 一条消息条目（角色 / 正文 / 是否思考块）。
+    /// 一条消息条目（角色 / 正文）。
     Message {
         role: Role,
         content: String,
-        thinking: bool,
+    },
+    Compact {
+        content: String,
     },
     /// 一组工具调用。
-    Tools { calls: Vec<ToolCallWire> },
+    Tools {
+        calls: Vec<ToolCallWire>,
+    },
 }
 
 /// [`ItemWire::Tools`] 里的单次工具调用。
@@ -413,10 +451,12 @@ impl ItemWire {
     /// 从 UI 条目映射（`Item` → 线格式）。
     pub fn from_item(item: &Item) -> Self {
         match item {
+            Item::Compact { content, .. } => ItemWire::Compact {
+                content: content.clone(),
+            },
             Item::Message(message) => ItemWire::Message {
                 role: message.role,
                 content: message.content.clone(),
-                thinking: message.thinking,
             },
             Item::Tools(group) => ItemWire::Tools {
                 calls: group
@@ -464,9 +504,10 @@ impl SessionManager {
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
         skills: Option<Arc<SkillRuntime>>,
+        todo: Option<Arc<TodoStore>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name, store, memory, skills));
+        sessions.insert(0, Session::new(agent, name, store, memory, skills, todo));
         Self {
             sessions,
             active: 0,
@@ -477,6 +518,7 @@ impl SessionManager {
     }
 
     /// 可造 `Agent` 的 manager：交给它工厂与会话目录，支持新建 / 切换。
+    #[allow(clippy::too_many_arguments)]
     pub fn with_factory(
         agent: Agent,
         name: Option<String>,
@@ -485,9 +527,10 @@ impl SessionManager {
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
         skills: Option<Arc<SkillRuntime>>,
+        todo: Option<Arc<TodoStore>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name, store, memory, skills));
+        sessions.insert(0, Session::new(agent, name, store, memory, skills, todo));
         Self {
             sessions,
             active: 0,
@@ -546,11 +589,12 @@ impl SessionManager {
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
         skills: Option<Arc<SkillRuntime>>,
+        todo: Option<Arc<TodoStore>>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
         self.sessions
-            .insert(id, Session::new(agent, name, store, memory, skills));
+            .insert(id, Session::new(agent, name, store, memory, skills, todo));
         id
     }
 
@@ -563,11 +607,9 @@ impl SessionManager {
         // 离开前台即视为该会话"本轮结束"——切走后触发一次增量 curation
         // （`docs/memory.md` §5.1；旧会话仍留在内存，其 `Agent` 消息可读）。
         let previous = self.active().name.clone();
-        let selected_model = self
-            .active()
-            .agent
-            .as_ref()
-            .map(|agent| agent.model_config().model.clone());
+        // 用会话级查询（活 Agent 优先、镜像回退）——离开的会话若正在运行，其 `Agent`
+        // 已被 `take` 走，直接读 `agent` 会拿不到模型。
+        let selected_model = self.active().model_name().map(str::to_owned);
         if let Some(id) = self.id_of_name(name) {
             self.active = id;
             if let Some(previous) = previous.filter(|p| p != name) {
@@ -579,10 +621,7 @@ impl SessionManager {
             .factory
             .as_ref()
             .ok_or_else(|| "当前会话目录不支持切换".to_owned())?;
-        let store = self
-            .catalog
-            .open(name)
-            .map_err(|error| error.to_string())?;
+        let store = self.catalog.open(name).map_err(|error| error.to_string())?;
         // 会话持久化在应用层：先 load 日志，再交给工厂起 `Agent`（system 现生成置顶）。
         let log = store.load().map_err(|error| error.to_string())?;
         let mut built = factory
@@ -597,6 +636,7 @@ impl SessionManager {
             Some(store),
             Some(built.memory),
             Some(built.skills),
+            Some(built.todo),
         );
         // 从磁盘恢复的会话：用其历史重建视图条目，快照 / 渲染才有内容。
         if let Some(session) = self.sessions.get_mut(&id) {
@@ -615,11 +655,8 @@ impl SessionManager {
     pub fn create_new(&mut self, title: Option<&str>) -> Result<String, String> {
         // 与 `switch_to` 同理：新建并切走 = 旧会话本轮结束，触发一次 curation。
         let previous = self.active().name.clone();
-        let selected_model = self
-            .active()
-            .agent
-            .as_ref()
-            .map(|agent| agent.model_config().model.clone());
+        // 与 `switch_to` 同理：会话级查询，运行期也能拿到模型。
+        let selected_model = self.active().model_name().map(str::to_owned);
         let factory = self
             .factory
             .as_ref()
@@ -642,6 +679,7 @@ impl SessionManager {
             Some(store),
             Some(built.memory),
             Some(built.skills),
+            Some(built.todo),
         );
         self.active = id;
         if let Some(previous) = previous.filter(|p| p != entry.name.as_str()) {
@@ -727,9 +765,11 @@ impl SessionManager {
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn begin_turn(&mut self, name: &str, user_message: String) -> Option<Agent> {
         let session = self.session_mut(name)?;
+        // 先把当前模型名同步进镜像，再 `take` 走 `Agent`——运行期镜像仍可回答本会话模型。
+        session.remember_model();
         let agent = session.agent.take()?;
         session.running = true;
-        session.push_message(Role::User, user_message, false);
+        session.push_message(Role::User, user_message);
         Some(agent)
     }
 
@@ -739,6 +779,8 @@ impl SessionManager {
         if let Some(session) = self.session_mut(name) {
             session.agent = Some(agent);
             session.running = false;
+            session.remember_model();
+            session.finish_turn();
         }
     }
 
@@ -866,7 +908,9 @@ impl SessionManager {
     /// 名为 `name` 的**已加载**会话是否正在运行（`Agent` 被移入后台任务）。
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn is_running(&self, name: &str) -> bool {
-        self.session(name).map(|session| session.running).unwrap_or(false)
+        self.session(name)
+            .map(|session| session.running)
+            .unwrap_or(false)
     }
 
     /// 前台会话的 `Agent`（只读）。运行中（被移入后台任务）返回 `None`。
@@ -875,10 +919,11 @@ impl SessionManager {
         self.active().agent.as_ref()
     }
 
-    /// 前台会话的 `Agent`（可变）。运行中返回 `None`。
+    /// 前台会话当前的模型名。**运行期也可用**——经 [`Session::model_name`] 的镜像回退，
+    /// 不依赖 `Agent` 是否在场（desktop 切走再切回时前台会话可能正在运行）。
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
-    pub fn active_agent_mut(&mut self) -> Option<&mut Agent> {
-        self.active_mut().agent.as_mut()
+    pub fn active_model_name(&self) -> Option<&str> {
+        self.active().model_name()
     }
 }
 
@@ -902,6 +947,7 @@ mod tests {
             test_agent(),
             Some("s".into()),
             Arc::new(EmptySessionCatalog),
+            None,
             None,
             None,
             None,
@@ -933,6 +979,41 @@ mod tests {
 
         // 同一会话运行中不得再次发起（不并发驱动同一 Agent）。
         assert!(manager.begin_turn("s", "again".into()).is_none());
+    }
+
+    /// 回归：会话运行中（`Agent` 被 `take` 走）仍能查到本会话的模型名。
+    ///
+    /// desktop 切到别的会话再切回来时，前台会话可能正在运行——此时其 `Agent`
+    /// 不在 `Session` 里，`active_agent()` 返回 `None`。此前 `agent_model_name`
+    /// 走 `active_agent().map(...).unwrap_or_default()`，于是前端拿到空串、模型
+    /// 选择器被清空（「切走再切回模型不恢复」）。镜像字段 `Session::model` 必须
+    /// 在 `Agent` 不在场时兜住这个查询。
+    #[test]
+    fn model_name_survives_running_turn() {
+        let mut manager = manager();
+        assert_eq!(manager.active_model_name(), Some("test"), "空闲时读活 Agent");
+
+        let _agent = manager.begin_turn("s", "hi".into()).unwrap();
+        assert!(manager.is_running("s"));
+        assert_eq!(
+            manager.active_model_name(),
+            Some("test"),
+            "运行期 Agent 被 take 走，镜像仍应回答本会话模型"
+        );
+    }
+
+    /// 回归：热切换模型后镜像同步，切走再切回仍显示新模型。
+    #[test]
+    fn remember_model_tracks_hot_switch() {
+        let mut manager = manager();
+        manager
+            .active_mut()
+            .agent
+            .as_mut()
+            .unwrap()
+            .set_model("other");
+        manager.active_mut().remember_model();
+        assert_eq!(manager.active_model_name(), Some("other"));
     }
 
     /// 回归：删除**未加载**（仅存在于磁盘、从未被打开）的会话必须放行。

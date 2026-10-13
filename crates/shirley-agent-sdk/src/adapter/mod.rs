@@ -149,9 +149,10 @@ pub struct PreparedRequest {
 type Encoder = fn(&ModelConfig, &ModelRequest<'_>) -> Result<PreparedRequest, AdapterError>;
 type Decoder = fn(serde_json::Value) -> Result<ModelResponse, AdapterError>;
 /// 流式解码。也纳入 codec，避免 `invoke` 里出现"每加一个协议多一个硬分支"。
-type StreamDecoder = fn(reqwest::Response) -> Pin<
-    Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send>,
->;
+type StreamDecoder =
+    fn(
+        reqwest::Response,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send>>;
 
 /// 按协议取编解码函数三件套：请求编码 / 非流式解码 / 流式解码。
 ///
@@ -187,10 +188,50 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
     if status.is_success() {
         return Ok(response);
     }
-    let body = response.text().await.map_err(AdapterError::Transport)?;
+    // 已知的 HTTP 状态不能被读取错误体失败覆盖，否则 400 也会变成可重试错误。
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|error| error.to_string());
     Err(AdapterError::Http {
         status: status.as_u16(),
         body,
+    })
+}
+
+/// 首次请求失败后最多重试 5 次，共最多 6 次请求。
+const MAX_RETRIES: usize = 5;
+/// 退避基数：第 n 次重试前等待 `BASE_BACKOFF_MS * 2^(n-1)`，封顶 `MAX_BACKOFF_MS`。
+const BASE_BACKOFF_MS: u64 = 500;
+const MAX_BACKOFF_MS: u64 = 8_000;
+
+/// 单次请求与解码；重试边界由 invoke 按是否已发出事件决定。
+fn invoke_prepared<'a>(
+    client: &'a reqwest::Client,
+    prepared: &'a PreparedRequest,
+    streaming: bool,
+    decode: Decoder,
+    decode_stream: StreamDecoder,
+) -> Pin<Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send + 'a>> {
+    Box::pin(async_stream::try_stream! {
+        let response = client
+            .post(&prepared.url)
+            .headers(prepared.headers.clone())
+            .json(&prepared.body)
+            .send()
+            .await.map_err(AdapterError::Transport)?;
+        let response = ensure_success(response).await?;
+        if streaming {
+            let mut stream = decode_stream(response);
+            while let Some(event) = stream.next().await {
+                yield event?;
+            }
+        } else {
+            let text = response.text().await.map_err(AdapterError::Transport)?;
+            let body = serde_json::from_str(&text)
+                .map_err(|error| AdapterError::Decode(format!("response body is not valid JSON: {error}")))?;
+            yield AdapterEvent::Finished(decode(body)?);
+        }
     })
 }
 
@@ -229,49 +270,41 @@ pub async fn invoke<'a>(
             tools: if protocol.is_some() { &no_tools } else { input.tools },
         };
         let prepared = encode(encode_config, &encode_input)?;
-        let response = client
-            .post(&prepared.url)
-            .headers(prepared.headers)
-            .json(&prepared.body)
-            .send()
-            .await
-            .map_err(AdapterError::Transport)?;
-
-        // 状态检查放在这里，错误体与状态码一起保留下来。
-        let response = ensure_success(response).await?;
-
-        if !config.stream {
-            let text = response.text().await.map_err(AdapterError::Transport)?;
-            let body = serde_json::from_str::<serde_json::Value>(&text)
-                .map_err(|e| AdapterError::Decode(format!("response body is not valid JSON: {e}")))?;
-
-            let mut msg = decode(body)?;
-            // 3) 解码后：把文本解析回 `tool_calls`（无原生 `tool_calls` 时）。
-            if let Some(protocol) = protocol.as_deref() {
-                msg.message = tool_calling::parse_content_response(protocol, msg.message);
-            }
-            yield AdapterEvent::Finished(msg)
-        } else {
-            let mut stream = decode_stream(response);
+        let mut retries = 0;
+        let mut emitted = false;
+        'attempt: loop {
+            let mut stream = invoke_prepared(client, &prepared, config.stream, decode, decode_stream);
             // content 模式：建一个**流式解析器**，把原始协议文本增量翻译成可见增量
             // （thinking → ReasoningDelta、description → ContentDelta，工具块屏蔽）。
             // 未实现流式解析的协议默认吞掉一切（不外泄），最终态仍由 Finished 给出。
             let mut stream_parser = protocol.as_deref().map(|protocol| protocol.stream_parser());
             while let Some(event) = stream.next().await {
-                let event = event?;
+                let event = match event {
+                    Ok(event) => event,
+                    Err(error) if !emitted && retries < MAX_RETRIES && error.is_retryable() => {
+                        let backoff = (BASE_BACKOFF_MS << retries).min(MAX_BACKOFF_MS);
+                        retries += 1;
+                        tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
+                        continue 'attempt;
+                    }
+                    Err(error) => Err(error)?,
+                };
                 let Some(parser) = stream_parser.as_mut() else {
                     // native 模式：原样透传。
+                    emitted = true;
                     yield event;
                     continue;
                 };
                 match event {
                     AdapterEvent::ContentDelta(text) => {
                         for chunk in parser.push(&text) {
+                            emitted = true;
                             yield visible_chunk_event(chunk);
                         }
                     }
                     // 解码器上报的 reasoning 增量原样透传（协议无关）。
                     AdapterEvent::ReasoningDelta(text) => {
+                        emitted = true;
                         yield AdapterEvent::ReasoningDelta(text);
                     }
                     AdapterEvent::Finished(mut response) => {
@@ -283,10 +316,12 @@ pub async fn invoke<'a>(
                             protocol.as_deref().expect("content mode implies a protocol"),
                             response.message,
                         );
+                        emitted = true;
                         yield AdapterEvent::Finished(response);
                     }
                 }
             }
+            break;
         }
     })
 }
@@ -298,10 +333,7 @@ fn remove_parallel_tool_calls(extra: Option<serde_json::Value>) -> serde_json::V
         Some(serde_json::Value::Object(map)) => map,
         _ => serde_json::Map::new(),
     };
-    object.insert(
-        "parallel_tool_calls".to_string(),
-        serde_json::Value::Null,
-    );
+    object.insert("parallel_tool_calls".to_string(), serde_json::Value::Null);
     serde_json::Value::Object(object)
 }
 

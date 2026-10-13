@@ -1,92 +1,102 @@
-import { Brain, ChevronDown } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
+import { Archive, LoaderCircle } from "lucide-react";
 import { AiMarkdown } from "@/components/ai/AiMarkdown";
 import { AiToolActivityDisclosure } from "@/components/ai/AiToolActivityDisclosure";
-import { Button } from "@/ui/button";
-import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/ui/collapsible";
-import { cn } from "@/ui/utils";
+import { TextDisclosure } from "@/components/ai/TextDisclosure";
 import type { AiSegment } from "@/types/ai";
+import type { StopReason } from "@/types/wire";
 
-// 迁移自 shiwen FreeChatAssistantMessage，剥离 A2UI surface / 实体投影。
-// 审批（pending / approval_state === "pending"）第一期不展示：代码路径保留在
-// AiToolExecutionCard 内，但这里不把审批态执行项渲染出来。
-//
-// 对标 TUI 的线性渲染：TUI 把一轮回复渲染成有序的 `items`（思考块 → 正文 →
-// 工具组 → 正文 → 思考 → 工具 …），按事件发生顺序排列。这里用同一套 `segments`：
-// App 按 `AgentEvent` 到达顺序把一轮切成 content / reasoning / tools 三种段落，
-// 本组件**按数组顺序**渲染——谁先发生谁在前，而不是把所有工具按内容偏移归并到
-// 一处。思考段渲染成折叠区（对标 TUI 的 🧠 思考 块）。
+/** 一轮只有一个过程折叠；compact 是过程事件，不再拆分外层分组。 */
 export function AssistantMessage({
   content,
   streaming,
   segments,
+  durationMs,
+  failed = false,
+  stopReason,
 }: {
   content: string;
   streaming: boolean;
   segments: AiSegment[];
+  durationMs?: number;
+  failed?: boolean;
+  stopReason?: StopReason;
 }) {
-  // 还没有任何段落、但正在流式：给个占位提示（与旧行为一致）。
-  if (segments.length === 0) {
-    return streaming ? <span className="shimmer">正在思考并操作…</span> : null;
-  }
+  const [open, setOpen] = useState(streaming);
+  useEffect(() => {
+    // 结束时自动收起；完成后用户仍可手动展开，普通增量不重置其选择。
+    setOpen(streaming);
+  }, [streaming]);
+
+  const timeline: AiSegment[] = segments.length
+    ? segments
+    : content ? [{ kind: "content", text: content }] : [];
+  const last = timeline.at(-1);
+  // 工具之后没有正文时，不把“让我检查一下”这种中间说明冒充最终答复。
+  const hasResult = !streaming && !failed && stopReason !== "cancelled" && last?.kind === "content";
+  const result = hasResult ? last : undefined;
+  const process = hasResult ? timeline.slice(0, -1) : timeline;
+  const hasProcess = streaming || process.length > 0 || failed || stopReason === "cancelled";
+  if (!hasProcess && !result) return null;
+
+  const state = streaming ? "正在处理" : failed ? "处理失败" : stopReason === "cancelled" ? "已停止" : "处理用时";
+  const elapsed = formatDuration(durationMs);
+  const label = streaming
+    ? "正在处理…"
+    : elapsed ? `${state} ${elapsed}` : state === "处理用时" ? "处理过程" : state;
 
   return (
-    <div className="flex min-w-0 flex-col gap-3" data-ai-message-timeline>
-      {segments.map((segment, index) => {
-        if (segment.kind === "reasoning") {
-          return (
-            <ReasoningDisclosure
-              key={`reasoning:${index}`}
-              reasoning={segment.text}
-              streaming={streaming && index === segments.length - 1}
-            />
-          );
-        }
-        if (segment.kind === "tools") {
-          return (
-            <AiToolActivityDisclosure
-              key={`tools:${index}`}
-              executions={segment.executions}
-              decidingToolIds={new Set<number>()}
-              onToolDecision={() => {}}
-            />
-          );
-        }
-        return (
-          <AiMarkdown
-            key={`content:${index}`}
-            content={segment.text}
-            streaming={streaming && index === segments.length - 1}
-          />
-        );
-      })}
+    <div className="flex min-w-0 flex-col gap-4" data-ai-message-timeline>
+      {hasProcess && (
+        <TextDisclosure
+          label={label}
+          open={open}
+          onOpenChange={setOpen}
+          leading={streaming ? <LoaderCircle size={14} className="shrink-0 animate-spin" aria-hidden="true" /> : undefined}
+          className="min-w-0"
+          triggerClassName="w-full max-w-full rounded-none border-b border-line pt-1 pb-3 text-left"
+          contentClassName="flex min-w-0 flex-col gap-4 pt-4 pb-1"
+        >
+          {process.map((segment, index) => (
+            <SegmentView key={index} segment={segment} streaming={streaming && index === process.length - 1} />
+          ))}
+        </TextDisclosure>
+      )}
+      {result?.kind === "content" && (
+        <div data-ai-result>
+          <AiMarkdown content={result.text} streaming={false} />
+        </div>
+      )}
     </div>
   );
 }
 
-function ReasoningDisclosure({
-  reasoning,
-  streaming,
-}: {
-  reasoning: string;
-  streaming: boolean;
-}) {
-  const [open, setOpen] = useState(false);
-  return (
-    <Collapsible open={open} onOpenChange={setOpen}>
-      <CollapsibleTrigger asChild>
-        <Button type="button" variant="ghost" size="sm" className="text-muted">
-          <Brain data-icon="inline-start" />
-          <span>{streaming ? "正在思考" : "思考过程"}</span>
-          <ChevronDown
-            className={cn("transition-transform duration-150", open && "rotate-180")}
-            data-icon="inline-end"
-          />
-        </Button>
-      </CollapsibleTrigger>
-      <CollapsibleContent className="mt-2 border-l-2 border-line-strong pl-3 text-body-sm whitespace-pre-wrap text-muted">
-        {reasoning}
-      </CollapsibleContent>
-    </Collapsible>
-  );
+function formatDuration(durationMs?: number): string | null {
+  if (durationMs === undefined || !Number.isFinite(durationMs) || durationMs < 0) return null;
+  const seconds = Math.max(1, Math.round(durationMs / 1000));
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor(seconds % 3600 / 60);
+  const remainder = seconds % 60;
+  return hours
+    ? `${hours}小时 ${minutes}分 ${remainder}秒`
+    : minutes ? `${minutes}分 ${remainder}秒` : `${seconds}秒`;
+}
+
+function SegmentView({ segment, streaming }: { segment: AiSegment; streaming: boolean }) {
+  if (segment.kind === "compact") {
+    return (
+      <TextDisclosure
+        label="已压缩上下文"
+        leading={<Archive size={14} className="shrink-0" aria-hidden="true" />}
+        className="min-w-0"
+        contentClassName="mt-2 max-h-80 overflow-auto rounded-control bg-inset p-3"
+      >
+        <AiMarkdown content={segment.text} streaming={false} />
+      </TextDisclosure>
+    );
+  }
+  if (segment.kind === "tools") {
+    return <AiToolActivityDisclosure executions={segment.executions} decidingToolIds={new Set<number>()} onToolDecision={() => {}} />;
+  }
+  return <AiMarkdown content={segment.text} streaming={streaming} />;
 }

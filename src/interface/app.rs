@@ -1,10 +1,11 @@
-use ratatui::layout::Position;
+use ratatui::layout::{Position, Rect};
 use shirley_agent_sdk::{Agent, AgentEvent, Message, Usage};
 use std::sync::Arc;
 use std::time::Instant;
 
 use crate::models::{ModelCatalog, ModelEntry, StaticCatalog};
 use crate::session::{EmptySessionCatalog, SessionCatalog, SessionEntry};
+use crate::todo::TaskView;
 
 use super::command::{CommandManager, CommandOutcome, DEFAULT_PREFIX};
 use super::session::SessionManager;
@@ -16,7 +17,6 @@ use super::ui::MessageCache;
 pub enum Role {
     User,
     Assistant,
-    Summary,
     System,
     Error,
 }
@@ -25,7 +25,6 @@ pub enum Role {
 pub struct ChatMessage {
     pub role: Role,
     pub content: String,
-    pub thinking: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -45,6 +44,7 @@ pub struct ToolGroup {
 pub enum Item {
     Message(ChatMessage),
     Tools(ToolGroup),
+    Compact { content: String, expanded: bool },
 }
 
 /// `/model` 选择器的状态。列表已在打开时由模型目录加载完毕，
@@ -122,10 +122,10 @@ pub struct App {
     history_index: Option<usize>,
     // 进入历史浏览前暂存的未发送输入，用于向下回到末尾时恢复。
     history_draft: String,
-    show_thinking: bool,
     // 是否展开工具调用的完整参数（默认收起，只显示一行摘要）。
     show_tool_args: bool,
     pub(crate) message_cache: Option<MessageCache>,
+    pub(crate) compact_hit_regions: Vec<(Rect, usize)>,
     /// 快捷指令解析器。只作用于 TUI，不参与任何发送给 AI 的上下文。
     commands: CommandManager,
     /// `/` 触发的模糊指令候选（如 `/inti` → `init`）。空表示当前无候选。
@@ -205,7 +205,7 @@ impl App {
         session_catalog: Arc<dyn SessionCatalog>,
     ) -> Self {
         Self::with_manager(
-            SessionManager::single(agent, None, session_catalog, None, None, None),
+            SessionManager::single(agent, None, session_catalog, None, None, None, None),
             catalog,
         )
     }
@@ -220,9 +220,9 @@ impl App {
             history: Vec::new(),
             history_index: None,
             history_draft: String::new(),
-            show_thinking: true,
             show_tool_args: false,
             message_cache: None,
+            compact_hit_regions: Vec::new(),
             commands: CommandManager::new(DEFAULT_PREFIX),
             suggestions: Vec::new(),
             suggestion_index: 0,
@@ -345,17 +345,35 @@ impl App {
         self.waiting_since.map(|since| since.elapsed().as_secs())
     }
 
-    pub fn show_thinking(&self) -> bool {
-        self.show_thinking
-    }
-
-    pub fn toggle_thinking(&mut self) {
-        self.show_thinking = !self.show_thinking;
-        self.message_cache = None;
-    }
-
     pub fn show_tool_args(&self) -> bool {
         self.show_tool_args
+    }
+
+    pub fn toggle_latest_compact(&mut self) {
+        if let Some(index) = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, Item::Compact { .. }))
+        {
+            self.toggle_compact(index);
+        }
+    }
+
+    pub fn toggle_compact_at(&mut self, position: Position) {
+        if let Some(index) = self
+            .compact_hit_regions
+            .iter()
+            .find_map(|(area, index)| area.contains(position).then_some(*index))
+        {
+            self.toggle_compact(index);
+        }
+    }
+
+    fn toggle_compact(&mut self, index: usize) {
+        if let Some(Item::Compact { expanded, .. }) = self.items.get_mut(index) {
+            *expanded = !*expanded;
+            self.message_cache = None;
+        }
     }
 
     pub fn toggle_tool_args(&mut self) {
@@ -455,9 +473,7 @@ impl App {
                 self.input.clear();
                 self.input_cursor = 0;
                 self.suggestions.clear();
-                self.command_hint = Some(
-                    " ↑↓ 选择 · Enter 确认 · Esc 取消 ".to_owned(),
-                );
+                self.command_hint = Some(" ↑↓ 选择 · Enter 确认 · Esc 取消 ".to_owned());
                 self.picker_requested = true;
                 return None;
             }
@@ -476,8 +492,7 @@ impl App {
                 self.input.clear();
                 self.input_cursor = 0;
                 self.suggestions.clear();
-                self.command_hint =
-                    Some(" ↑↓ 选择 · Enter 切换 · Esc 取消 ".to_owned());
+                self.command_hint = Some(" ↑↓ 选择 · Enter 切换 · Esc 取消 ".to_owned());
                 self.session_picker_requested = true;
                 return None;
             }
@@ -543,10 +558,8 @@ impl App {
         self.history_index = None;
         self.history_draft.clear();
         // 记录本轮起点：打断时据此把界面与上下文一起回退。
-        self.ui_turn_start = Some(self.items.len());
-        self.turn_prompt = Some(prompt.clone());
         self.interrupt_requested = false;
-        self.push_message(Role::User, prompt.clone(), false);
+        self.push_message(Role::User, prompt.clone());
         self.suggestions.clear();
         Some(prompt)
     }
@@ -602,33 +615,13 @@ impl App {
 
     /// 本轮回复结束（正常完成或被用户打断）后的收尾。
     ///
-    /// 若本轮被用户打断，把 Agent 与界面一起回退到本轮用户消息之前，
-    /// 并把该条输入退回输入框，供用户修改后重发；会话状态不丢。
+    /// 被用户打断时**保留**本轮已产生的消息（用户消息 + 半截流式回复），
+    /// 作为下一轮发给模型的上下文参考，不再回退删除（需求 2）。
+    /// 保留等待期间已输入的草稿，等待用户发起下一轮。
     pub fn complete_turn(&mut self) {
-        self.waiting = false;
-        self.waiting_since = None;
-
-        if self.interrupt_requested {
-            self.interrupt_requested = false;
-            // Agent 侧：丢掉本轮用户消息及其后可能已完成的 assistant/tool 链。
-            // 会话日志同步截尾（`docs/session.md` 一.决策 4），失败则记录但不阻断收尾。
-            if let Some(prompt) = self.rewind_last_user_turn() {
-                self.turn_prompt = Some(prompt);
-            }
-            // 界面侧：回退到本轮开始前（清掉半截流式回复）。
-            if let Some(start) = self.ui_turn_start.take() {
-                self.items.truncate(start);
-            }
-            self.streaming_delta_start = None;
-            self.message_cache = None;
-            // 把本轮输入退回输入框。
-            if let Some(prompt) = self.turn_prompt.take() {
-                self.set_input(prompt);
-            }
-        }
-
-        self.ui_turn_start = None;
-        self.turn_prompt = None;
+        self.sessions.active_mut().finish_turn();
+        self.interrupt_requested = false;
+        self.message_cache = None;
     }
 
     // ---- 打断当前回复 ----
@@ -661,22 +654,19 @@ impl App {
             return;
         };
         // Agent 侧最后一条用户消息的原文。
-        let Some(content) = agent
-            .messages()
-            .iter()
-            .rev()
-            .find_map(|m| match m {
-                Message::User { content } => Some(content.clone()),
-                _ => None,
-            })
-        else {
+        let Some(content) = agent.messages().iter().rev().find_map(|m| match m {
+            Message::User { content } => Some(content.clone()),
+            _ => None,
+        }) else {
             self.add_system_message("没有可回溯的消息。".to_owned());
             return;
         };
         // UI 侧最后一条用户条目下标：与 Agent 用户消息一一对应（每次提交各产生一条）。
-        let Some(ui_index) = self.items.iter().rposition(|item| {
-            matches!(item, Item::Message(m) if m.role == Role::User)
-        }) else {
+        let Some(ui_index) = self
+            .items
+            .iter()
+            .rposition(|item| matches!(item, Item::Message(m) if m.role == Role::User))
+        else {
             self.add_system_message("没有可回溯的消息。".to_owned());
             return;
         };
@@ -851,7 +841,11 @@ impl App {
         // 协议按同一入口重判并**一次性下发**——从 content 端点换走后回配置默认，
         // 不残留（`docs/tool-calling-refactor.md` Step 3）。
         let config = self.sessions.factory().map(|factory| {
-            factory.model_config_for_login(flow.base_url.clone(), flow.api_key.clone(), model.clone())
+            factory.model_config_for_login(
+                flow.base_url.clone(),
+                flow.api_key.clone(),
+                model.clone(),
+            )
         });
         if let Some(agent) = self.agent.as_mut() {
             match config {
@@ -886,9 +880,7 @@ impl App {
         };
         match crate::settings::save_provider(&target, provider) {
             Ok(path) => {
-                let model_note = model
-                    .map(|m| format!("，模型 {m}"))
-                    .unwrap_or_default();
+                let model_note = model.map(|m| format!("，模型 {m}")).unwrap_or_default();
                 self.add_system_message(format!(
                     "已登录：{}（已写入 {}）{}",
                     flow.base_url,
@@ -916,8 +908,8 @@ impl App {
     }
 
     /// 追加一条消息条目（并失效渲染缓存）。
-    fn push_message(&mut self, role: Role, content: String, thinking: bool) {
-        self.sessions.active_mut().push_message(role, content, thinking);
+    fn push_message(&mut self, role: Role, content: String) {
+        self.sessions.active_mut().push_message(role, content);
         self.message_cache = None;
     }
 
@@ -929,7 +921,7 @@ impl App {
 
     /// TUI 本地系统提示（如指令反馈），不进入发送给 AI 的上下文。
     pub fn add_system_message(&mut self, content: String) {
-        self.push_message(Role::System, content, false);
+        self.push_message(Role::System, content);
     }
 
     /// 根据当前输入刷新模糊指令候选。仅在输入以 prefix 开头且未精确命中时给出。
@@ -969,12 +961,15 @@ impl App {
             .skills
             .as_ref()
             .ok_or_else(|| "当前会话未启用技能".to_owned())?;
-        runtime.activate(name).map(|_| ()).map_err(|error| match error {
-            crate::skills::runtime::ActivateError::UnknownSkill(name) => {
-                format!("未知技能 `{name}`")
-            }
-            crate::skills::runtime::ActivateError::ReadFailed(reason) => reason,
-        })
+        runtime
+            .activate(name)
+            .map(|_| ())
+            .map_err(|error| match error {
+                crate::skills::runtime::ActivateError::UnknownSkill(name) => {
+                    format!("未知技能 `{name}`")
+                }
+                crate::skills::runtime::ActivateError::ReadFailed(reason) => reason,
+            })
     }
 
     /// 当前指令候选（按匹配度排序）。
@@ -1007,7 +1002,9 @@ impl App {
     /// Tab / Enter 补全：采纳**当前高亮**的候选，把输入替换为 `/<name> ` 并清空候选，
     /// 继续编辑参数。
     pub fn accept_suggestion(&mut self) {
-        let index = self.suggestion_index.min(self.suggestions.len().saturating_sub(1));
+        let index = self
+            .suggestion_index
+            .min(self.suggestions.len().saturating_sub(1));
         if let Some(name) = self.suggestions.get(index).cloned() {
             self.input = format!("{}{} ", DEFAULT_PREFIX, name);
             self.input_cursor = self.input.len();
@@ -1050,7 +1047,9 @@ impl App {
 
     /// 当前模型值（来自 Agent 配置）。
     pub fn current_model(&self) -> Option<String> {
-        self.agent.as_ref().map(|agent| agent.model_config().model.clone())
+        self.agent
+            .as_ref()
+            .map(|agent| agent.model_config().model.clone())
     }
 
     pub fn picker(&self) -> Option<&ModelPicker> {
@@ -1129,6 +1128,11 @@ impl App {
     /// 当前（前台）会话名（供状态展示）。
     pub fn current_session(&self) -> Option<&str> {
         self.sessions.active_name()
+    }
+
+    /// 当前（前台）会话的任务账本视图（供状态行渲染任务进度）；无 / 空账本返回 `None`。
+    pub fn task_view(&self) -> Option<TaskView> {
+        self.sessions.active().todo_view()
     }
 
     /// 用加载好的会话列表打开选择器，高亮当前会话。
@@ -1290,6 +1294,7 @@ mod tests {
             None,
             Some(built.memory),
             Some(built.skills),
+            Some(built.todo),
         );
         let catalog = factory.model_catalog.clone();
         App::with_manager(sessions, catalog)
@@ -1344,14 +1349,34 @@ mod tests {
     fn session_picker_move_does_not_wrap() {
         let mut app = app();
         app.open_session_picker(vec![
-            SessionEntry { name: "a".into(), label: "a".into(), preview: String::new(), modified_ms: 0, turns: 0 },
-            SessionEntry { name: "b".into(), label: "b".into(), preview: String::new(), modified_ms: 0, turns: 0 },
+            SessionEntry {
+                name: "a".into(),
+                label: "a".into(),
+                preview: String::new(),
+                modified_ms: 0,
+                turns: 0,
+            },
+            SessionEntry {
+                name: "b".into(),
+                label: "b".into(),
+                preview: String::new(),
+                modified_ms: 0,
+                turns: 0,
+            },
         ]);
         // 共 3 项（新建 + a + b）。
         app.session_picker_move(-1);
-        assert_eq!(app.session_picker().unwrap().selected, 0, "到顶应停住，不绕回");
+        assert_eq!(
+            app.session_picker().unwrap().selected,
+            0,
+            "到顶应停住，不绕回"
+        );
         app.session_picker_move(5);
-        assert_eq!(app.session_picker().unwrap().selected, 2, "到底应停住，不绕回");
+        assert_eq!(
+            app.session_picker().unwrap().selected,
+            2,
+            "到底应停住，不绕回"
+        );
     }
 
     #[test]
@@ -1404,7 +1429,10 @@ mod tests {
         app.picker_move(1);
         app.picker_confirm();
         let config = app.agent.as_ref().unwrap().model_config();
-        assert!(config.tool_calling.is_content(), "声明 content 应切到 content 协议");
+        assert!(
+            config.tool_calling.is_content(),
+            "声明 content 应切到 content 协议"
+        );
 
         // 切回未声明的模型 → 回退默认（Native）。
         app.open_picker(vec![ModelEntry::new("plain", "plain", "p")]);
@@ -1512,7 +1540,8 @@ mod tests {
         assert!(app.input().is_empty(), "取消应清空输入");
         let agent = app.take_agent().unwrap();
         assert_eq!(
-            agent.model_config().base_url, "http://localhost",
+            agent.model_config().base_url,
+            "http://localhost",
             "取消不应改变配置"
         );
     }
@@ -1536,11 +1565,15 @@ mod tests {
             .base_url("http://localhost")
             .model("test")
             .build();
-        Agent::builder().model_config(config).messages(messages).build().unwrap()
+        Agent::builder()
+            .model_config(config)
+            .messages(messages)
+            .build()
+            .unwrap()
     }
 
     #[test]
-    fn interrupt_reverts_turn_and_restores_input() {
+    fn interrupt_preserves_turn_as_reference() {
         // Agent 已有一条用户消息（模拟 run_stream 已把本轮 User 落库）。
         let mut app = App::new(agent_with_users(vec![Message::User {
             content: "hello".into(),
@@ -1556,26 +1589,48 @@ mod tests {
         app.complete_turn();
 
         assert!(!app.is_waiting(), "打断后应结束等待");
-        assert_eq!(app.input(), "hello", "本轮输入应退回输入框");
-        // 界面回退到本轮之前：不应残留本轮用户条目。
-        assert!(app.items().is_empty(), "打断后应清掉本轮的界面条目");
-        // Agent 侧本轮用户消息也被回退。
+        // 需求 2：打断**保留**本轮消息作为下一轮参考，不回退、不退回输入框。
+        assert!(
+            app.input().is_empty(),
+            "打断后输入框应清空（turn 被保留而非重发）"
+        );
+        // 界面保留本轮用户条目（不 truncate items）。
+        assert!(!app.items().is_empty(), "打断后应保留本轮的界面条目");
+        assert!(
+            app.items().iter().any(|item| matches!(
+                item,
+                Item::Message(m) if m.role == Role::User
+            )),
+            "打断后界面应仍含本轮用户消息"
+        );
+        // Agent 侧本轮用户消息也保留（不 truncate agent / 不截尾日志）。
         let agent = app.take_agent().unwrap();
         assert!(
-            agent.messages().iter().all(|m| !matches!(m, Message::User { .. })),
-            "Agent 侧本轮用户消息应被回退"
+            agent
+                .messages()
+                .iter()
+                .any(|m| matches!(m, Message::User { .. })),
+            "Agent 侧本轮用户消息应被保留"
         );
     }
 
     #[test]
     fn rewind_command_fills_last_user_message() {
         let mut app = App::new(agent_with_users(vec![
-            Message::User { content: "first".into() },
-            Message::User { content: "second".into() },
+            Message::User {
+                content: "first".into(),
+            },
+            Message::User {
+                content: "second".into(),
+            },
         ]));
         // 让 UI 也有对应的两条用户条目。
-        app.add_message(Message::User { content: "first".into() });
-        app.add_message(Message::User { content: "second".into() });
+        app.add_message(Message::User {
+            content: "first".into(),
+        });
+        app.add_message(Message::User {
+            content: "second".into(),
+        });
 
         app.start_rewind_last_turn();
         // 只回退最新一条：输入框应填 "second"，编辑点指向第 1 条 UI 条目。
@@ -1588,11 +1643,19 @@ mod tests {
     #[test]
     fn submit_after_rewind_rolls_back_agent_and_ui() {
         let mut app = App::new(agent_with_users(vec![
-            Message::User { content: "first".into() },
-            Message::User { content: "second".into() },
+            Message::User {
+                content: "first".into(),
+            },
+            Message::User {
+                content: "second".into(),
+            },
         ]));
-        app.add_message(Message::User { content: "first".into() });
-        app.add_message(Message::User { content: "second".into() });
+        app.add_message(Message::User {
+            content: "first".into(),
+        });
+        app.add_message(Message::User {
+            content: "second".into(),
+        });
 
         app.start_rewind_last_turn(); // 回退 "second"
         // 编辑后提交。
@@ -1624,7 +1687,9 @@ mod tests {
         let mut app = App::new(agent_with_users(vec![Message::User {
             content: "only".into(),
         }]));
-        app.add_message(Message::User { content: "only".into() });
+        app.add_message(Message::User {
+            content: "only".into(),
+        });
         for ch in "/rewind".chars() {
             app.push_input(ch);
         }
@@ -1640,7 +1705,9 @@ mod tests {
         let mut app = App::new(agent_with_users(vec![Message::User {
             content: "first".into(),
         }]));
-        app.add_message(Message::User { content: "first".into() });
+        app.add_message(Message::User {
+            content: "first".into(),
+        });
         for ch in "/rewind".chars() {
             app.push_input(ch);
         }
@@ -1657,7 +1724,11 @@ mod tests {
         app.start_rewind_last_turn();
         app.push_input('!');
         assert!(app.command_hint().is_some(), "编辑态应保留重发提示");
-        assert_eq!(app.submit().as_deref(), Some("first!"), "回车应重发编辑后的内容");
+        assert_eq!(
+            app.submit().as_deref(),
+            Some("first!"),
+            "回车应重发编辑后的内容"
+        );
         assert!(app.is_waiting(), "重发应进入等待回复状态");
     }
 

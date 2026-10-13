@@ -29,17 +29,26 @@ impl MessageCache {
         let mut lines = Vec::new();
         // 每个条目在 `lines` 里的起始行下标，稍后换算成屏幕行号。
         let mut item_line_offsets = Vec::with_capacity(app.items().len());
-        // 一整轮 AI 回复只在块首出一次名字，之后才是 思考 / 工具调用 / 正文。
+        // 一整轮 AI 回复只在块首出一次名字，之后才是 工具调用 / 正文。
         // 连续的 Assistant 消息与工具调用同属一轮，遇到非 AI 条目才收束。
         let mut turn_open = false;
         for item in app.items() {
             item_line_offsets.push(lines.len());
             match item {
+                Item::Compact { content, expanded } => {
+                    turn_open = false;
+                    let arrow = if *expanded { "▾" } else { "▸" };
+                    lines.push(Line::from(Span::styled(
+                        format!("{arrow} 已压缩上下文"),
+                        Style::default().fg(Color::Yellow),
+                    )));
+                    if *expanded {
+                        lines.extend(markdown::render(content, Style::default(), width));
+                    }
+                    lines.push(Line::from(""));
+                }
                 Item::Message(message) => {
                     if message.role == Role::Assistant {
-                        if message.thinking && !app.show_thinking() {
-                            continue;
-                        }
                         if !turn_open {
                             lines.push(assistant_name_line());
                             turn_open = true;
@@ -105,6 +114,7 @@ impl MessageCache {
 }
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
+    app.compact_hit_regions.clear();
     let prompt = "❯ ";
     let prompt_width = prompt.width();
     let area = frame.area();
@@ -166,6 +176,33 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             app.scroll().min(max_scroll)
         };
         let cache = app.message_cache.as_ref().unwrap();
+        let hit_regions = app
+            .items()
+            .iter()
+            .enumerate()
+            .filter_map(|(index, item)| {
+                if !matches!(item, Item::Compact { .. })
+                    || app.is_picker_open()
+                    || app.is_session_picker_open()
+                    || !app.suggestions().is_empty()
+                {
+                    return None;
+                }
+                let row = cache.row_offsets[cache.item_line_offsets[index]];
+                if row < scroll || row >= scroll + visible_height {
+                    return None;
+                }
+                Some((
+                    ratatui::layout::Rect::new(
+                        messages_area.x,
+                        messages_area.y + (row - scroll) as u16,
+                        messages_area.width.min("▸ 已压缩上下文".width() as u16),
+                        1,
+                    ),
+                    index,
+                ))
+            })
+            .collect();
         let (lines, inner_scroll) = cache.visible_lines(scroll, visible_height);
         frame.render_widget(
             Paragraph::new(lines)
@@ -173,6 +210,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                 .scroll((inner_scroll, 0)),
             messages_area,
         );
+        app.compact_hit_regions = hit_regions;
 
         let first = cursor_line.saturating_add(1).saturating_sub(content_lines);
         let visible = input_view_lines(&input_lines, first, content_lines, prompt);
@@ -331,7 +369,11 @@ fn edit_input_block(app: &App) -> Block<'static> {
         .border_style(Style::default().fg(Color::Cyan))
         .title_top(
             Line::from(hint)
-                .style(Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD))
+                .style(
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                )
                 .right_aligned(),
         )
 }
@@ -350,7 +392,6 @@ fn input_block(app: &App) -> Block<'static> {
         .title_top(Line::from(input_hint(app)).right_aligned())
         .title_bottom(footer_line(app))
 }
-
 
 /// 渲染 `/model` 的模型选择器。
 ///
@@ -376,7 +417,12 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) 
     let height = (picker.entries.len() as u16 + 3).min(area.height);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let popup_area = ratatui::layout::Rect { x, y, width, height };
+    let popup_area = ratatui::layout::Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     // 清除底下内容，做出模态感。
     frame.render_widget(ratatui::widgets::Clear, popup_area);
@@ -446,7 +492,12 @@ fn draw_session_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
     let width = (area.width.saturating_sub(2)).clamp(24, 72).min(area.width);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let popup_area = ratatui::layout::Rect { x, y, width, height };
+    let popup_area = ratatui::layout::Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     frame.render_widget(ratatui::widgets::Clear, popup_area);
 
@@ -524,7 +575,9 @@ fn draw_command_suggestions(frame: &mut Frame, app: &App, area: ratatui::layout:
     let block = Block::bordered()
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
-        .title_top(Line::from("指令建议 (↑↓←→ 选择 · Tab/Enter 补全)".to_owned()).style(title_style));
+        .title_top(
+            Line::from("指令建议 (↑↓←→ 选择 · Tab/Enter 补全)".to_owned()).style(title_style),
+        );
     let selected = app.suggestion_index();
     let lines: Vec<Line> = suggestions
         .iter()
@@ -544,12 +597,8 @@ fn draw_command_suggestions(frame: &mut Frame, app: &App, area: ratatui::layout:
             Line::from(Span::styled(format!("{tag}/{name}"), style))
         })
         .collect();
-    frame.render_widget(
-        Paragraph::new(lines).block(block),
-        popup_area,
-    );
+    frame.render_widget(Paragraph::new(lines).block(block), popup_area);
 }
-
 
 /// 把输入按显示宽度软换行，并保留硬换行（粘贴进来的 `\n`）。
 /// 返回每行的可见文本、光标所在行号与光标在该行内的显示列。
@@ -607,7 +656,7 @@ fn wrap_input(
     (lines, cursor_line, cursor_col)
 }
 
-/// 一轮 AI 回复的名字头，先于 思考 / 工具调用 / 正文 出现。
+/// 一轮 AI 回复的名字头，先于 工具调用 / 正文 出现。
 fn assistant_name_line() -> Line<'static> {
     Line::from(Span::styled(
         "夏莉：".to_owned(),
@@ -618,43 +667,24 @@ fn assistant_name_line() -> Line<'static> {
 }
 
 fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
-    let is_thinking = message.thinking;
-
-    // Assistant 正文不再单独打名字（名字由块首统一给出），只保留 思考 的子标签。
-    let (label, label_style, base_style): (Option<String>, Style, Style) = if is_thinking {
-        (
-            Some("🧠 思考".to_owned()),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-            Style::default()
-                .fg(Color::DarkGray)
-                .add_modifier(Modifier::ITALIC),
-        )
-    } else {
-        match message.role {
-            Role::User => (
-                Some("你：".to_owned()),
-                Style::default().fg(Color::Cyan),
-                Style::default(),
-            ),
-            Role::Assistant => (None, Style::default(), Style::default()),
-            Role::Summary => (
-                Some("上下文摘要：".to_owned()),
-                Style::default().fg(Color::Yellow),
-                Style::default(),
-            ),
-            Role::System => (
-                Some("指令：".to_owned()),
-                Style::default().fg(Color::Green),
-                Style::default().fg(Color::Green),
-            ),
-            Role::Error => (
-                Some("错误：".to_owned()),
-                Style::default().fg(Color::Red),
-                Style::default().fg(Color::Red),
-            ),
-        }
+    // Assistant 正文不再单独打名字（名字由块首统一给出）。
+    let (label, label_style, base_style): (Option<String>, Style, Style) = match message.role {
+        Role::User => (
+            Some("你：".to_owned()),
+            Style::default().fg(Color::Cyan),
+            Style::default(),
+        ),
+        Role::Assistant => (None, Style::default(), Style::default()),
+        Role::System => (
+            Some("指令：".to_owned()),
+            Style::default().fg(Color::Green),
+            Style::default().fg(Color::Green),
+        ),
+        Role::Error => (
+            Some("错误：".to_owned()),
+            Style::default().fg(Color::Red),
+            Style::default().fg(Color::Red),
+        ),
     };
 
     if let Some(label) = label {
@@ -663,7 +693,7 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
 
     // 消息正文走 Markdown → Block → Line/Span 渲染；错误消息保持原样，避免把报错里的
     // 反引号/星号当成语法吃掉。
-    if message.role == Role::Error && !is_thinking {
+    if message.role == Role::Error {
         for raw in message.content.lines() {
             lines.push(Line::from(Span::styled(raw.to_owned(), base_style)));
         }
@@ -864,8 +894,28 @@ fn input_hint(app: &App) -> String {
     } else if app.is_waiting() {
         " 可继续输入 · Esc 打断 ".to_owned()
     } else {
-        " Enter 发送 · ↑↓ 历史 · Ctrl+T 思考 · Ctrl+O 参数 · Esc 退出 ".to_owned()
+        " Enter 发送 · ↑↓ 历史 · Ctrl+O 参数 · Ctrl+S 压缩 · Esc 退出 ".to_owned()
     }
+}
+
+/// 按显示宽度截断（CJK 记 2 列），超出加省略号——状态行空间有限，长目标不能撑爆。
+fn truncate(text: &str, max_width: usize) -> String {
+    if text.width() <= max_width {
+        return text.to_owned();
+    }
+    let budget = max_width.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0;
+    for ch in text.chars() {
+        let w = unicode_width::UnicodeWidthChar::width(ch).unwrap_or(0);
+        if used + w > budget {
+            break;
+        }
+        out.push(ch);
+        used += w;
+    }
+    out.push('…');
+    out
 }
 
 /// 底部信息统一右对齐，只保留 KV 形式的数字，够扫一眼即可。
@@ -874,21 +924,32 @@ fn footer_line(app: &App) -> Line<'static> {
     let sep = || Span::styled(" · ", dim);
     let mut spans: Vec<Span> = Vec::new();
 
-    // 思考：显 / 隐
-    if !app.is_compressing() {
-        spans.push(Span::styled("思考 ", dim));
-        spans.push(Span::styled(
-            if app.show_thinking() { "显" } else { "隐" },
-            dim,
-        ));
-        spans.push(sep());
-    }
-
     // 当前会话名（多会话切换后让用户知道自己在哪份会话里）。
     if let Some(name) = app.current_session() {
         spans.push(Span::styled("会话 ", dim));
         spans.push(Span::styled(name.to_owned(), dim));
         spans.push(sep());
+    }
+
+    // 任务进度（todo 账本）：让「任务在推进」这一最直接信号对用户可见。
+    // 显示「目标 · 3/7」，进行中一步用青色锚点。空账本不占位。
+    if let Some(task) = app.task_view() {
+        if let Some(goal) = task.goal.as_deref() {
+            spans.push(Span::styled("任务 ", dim));
+            spans.push(Span::styled(truncate(goal, 24), dim));
+            spans.push(sep());
+        }
+        if task.total > 0 {
+            let progress = format!("{}/{}", task.completed, task.total);
+            let color = if task.completed == task.total {
+                Color::Green
+            } else {
+                Color::Cyan
+            };
+            spans.push(Span::styled("进度 ", dim));
+            spans.push(Span::styled(progress, Style::default().fg(color)));
+            spans.push(sep());
+        }
     }
 
     // 上下文占用率
@@ -998,18 +1059,27 @@ mod tests {
             .model("test")
             .build();
         let mut app = App::new(Agent::builder().model_config(config).build().unwrap());
-        app.add_message(shirley_agent_sdk::Message::User { content: "hi".into() });
-        app.add_message(shirley_agent_sdk::Message::User { content: "bye".into() });
+        app.add_message(shirley_agent_sdk::Message::User {
+            content: "hi".into(),
+        });
+        app.add_message(shirley_agent_sdk::Message::User {
+            content: "bye".into(),
+        });
 
         // 非编辑态：视口从第 0 行开始。
         assert_eq!(MessageCache::new(&app, 40).start_row, 0);
 
         // 编辑态：视口顶到被编辑条目，头部行数即该条目的屏幕行号。
-        app.add_message(shirley_agent_sdk::Message::User { content: "edit me".into() });
+        app.add_message(shirley_agent_sdk::Message::User {
+            content: "edit me".into(),
+        });
         app.set_rewind_edit_for_test(2);
         let cache = MessageCache::new(&app, 40);
         assert_eq!(cache.item_line_offsets.len(), 3);
-        assert_eq!(cache.start_row, cache.row_offsets[cache.item_line_offsets[2]]);
+        assert_eq!(
+            cache.start_row,
+            cache.row_offsets[cache.item_line_offsets[2]]
+        );
         assert!(cache.start_row > 0, "第三个条目不从第 0 行开始");
     }
 
@@ -1017,10 +1087,10 @@ mod tests {
     fn cache_row_count_matches_paragraph_word_wrap() {
         // 回归：`row_offsets` 必须与 ratatui `Paragraph` 的换行一致（按词边界，
         // 而非按字符数取整），否则 `max_scroll` 偏小，最新消息会被输入框遮挡。
-        use shirley_agent_sdk::{Agent, Message, ModelConfig, ModelProtocol};
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         use ratatui::widgets::{Paragraph, Wrap};
+        use shirley_agent_sdk::{Agent, Message, ModelConfig, ModelProtocol};
         let config = ModelConfig::builder()
             .protocol(ModelProtocol::ChatCompletions)
             .base_url("http://localhost")

@@ -1,4 +1,4 @@
-import type { Key, ReactNode } from "react";
+import type { Key, ReactNode, RefObject } from "react";
 import {
   Bubble,
   Message,
@@ -6,10 +6,10 @@ import {
   MessageScrollerContent,
   useMessageAutoScroll,
 } from "@/ui/chat";
-import { AiConversationMinimap } from "@/components/ai/AiConversationMinimap";
 import { AiAssistantAvatar } from "./AiAssistantAvatar";
 import { AiMarkdown } from "@/components/ai/AiMarkdown";
 import type { FileReference } from "@/lib/file-mentions/types";
+import type { StopReason } from "@/types/wire";
 
 export type AiTranscriptMessage = {
   id: Key;
@@ -18,6 +18,9 @@ export type AiTranscriptMessage = {
   status?: "streaming" | "complete" | "error";
   /** 用户消息上引用的工作区文件/目录（`@` 引用回显用）。 */
   references?: FileReference[];
+  /** 本轮助手回复的处理用时（毫秒）；用于「处理用时 Ns」折叠标题。 */
+  durationMs?: number;
+  stopReason?: StopReason;
 };
 
 export function AiConversationTranscript({
@@ -25,7 +28,7 @@ export function AiConversationTranscript({
   conversationKey,
   extraContentKey = "",
   pendingLabel,
-  showTurnMinimap = false,
+  viewportRef: externalViewportRef,
   emptyContent,
   renderMessageContent,
   renderAfterMessage,
@@ -34,7 +37,8 @@ export function AiConversationTranscript({
   conversationKey: string;
   extraContentKey?: string;
   pendingLabel?: string;
-  showTurnMinimap?: boolean;
+  /** 外部滚动视口 ref（上层要把 minimap 等兄弟组件挂到同一视口时传入）。 */
+  viewportRef?: RefObject<HTMLDivElement>;
   emptyContent?: ReactNode;
   renderMessageContent?: (message: AiTranscriptMessage, index: number) => ReactNode;
   renderAfterMessage?: (message: AiTranscriptMessage, index: number) => ReactNode;
@@ -49,9 +53,8 @@ export function AiConversationTranscript({
   const { viewportRef } = useMessageAutoScroll({
     forceKey: conversationKey,
     contentKey,
+    viewportRef: externalViewportRef,
   });
-  const turnCount = messages.filter((message) => message.role === "user").length;
-  const minimapVisible = showTurnMinimap && turnCount > 0;
 
   return (
     <div className="relative min-h-0 flex-1">
@@ -92,7 +95,7 @@ export function AiConversationTranscript({
                         message.content
                       )
                     ) : message.status === "streaming" ? (
-                      <span className="shimmer">正在思考并操作…</span>
+                      <span className="shimmer">正在操作…</span>
                     ) : null}
                   </Bubble>
                 </Message>
@@ -110,7 +113,6 @@ export function AiConversationTranscript({
           )}
         </MessageScrollerContent>
       </MessageScroller>
-      {minimapVisible && <AiConversationMinimap messages={messages} viewportRef={viewportRef} />}
     </div>
   );
 }

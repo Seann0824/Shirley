@@ -41,9 +41,12 @@ function findMessageElement(viewport: HTMLDivElement, messageId: string) {
 export function AiConversationMinimap({
   messages,
   viewportRef,
+  className,
 }: {
   messages: AiTranscriptMessage[];
   viewportRef: RefObject<HTMLDivElement | null>;
+  /** 定位覆写：宿主可把它钉到父容器的左侧边缘（缺省相对最近定位祖先 `-left-5`）。 */
+  className?: string;
 }) {
   const turns = useMemo(() => buildConversationTurns(messages), [messages]);
   const [activeTurnId, setActiveTurnId] = useState(() => turns.at(-1)?.id || "");
@@ -89,7 +92,7 @@ export function AiConversationMinimap({
   const focusedTurnId = previewTurnId || activeTurnId;
   const focusedTurnIndex = turns.findIndex((turn) => turn.id === focusedTurnId);
   const isInteracting = previewTurnId !== null;
-  const markerStackHeight = turns.length * 6;
+  const markerStackHeight = turns.length * 8;
 
   function jumpToTurn(turn: ConversationTurn) {
     const viewport = viewportRef.current;
@@ -123,7 +126,10 @@ export function AiConversationMinimap({
 
   return (
     <nav
-      className="absolute inset-y-0 -left-5 z-20 flex w-10 items-center"
+      className={cn(
+        "absolute inset-y-0 z-20 flex w-10 items-center",
+        className ?? "-left-5",
+      )}
       aria-label="对话轮次导航"
       data-ai-turn-minimap
     >
@@ -186,7 +192,7 @@ export function AiConversationMinimap({
                 key={turn.id}
                 type="button"
                 className="group pointer-events-none absolute left-2 flex h-1.5 w-8 items-center outline-none"
-                style={{ top: `${index * 6}px` }}
+                style={{ top: `${index * 8}px` }}
                 aria-label={`跳到第 ${index + 1} 轮：${turn.question}`}
                 aria-current={turn.id === activeTurnId ? "true" : undefined}
                 title={turn.question}

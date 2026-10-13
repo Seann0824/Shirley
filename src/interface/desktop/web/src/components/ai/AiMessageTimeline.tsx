@@ -69,7 +69,7 @@ export function AiMessageTimeline({
       })}
       {characters.length > cursor && renderChunk(characters.slice(cursor).join(""), streaming)}
       {!content && items.length === 0 && streaming && (
-        <span className="shimmer">正在思考并操作…</span>
+        <span className="shimmer">正在操作…</span>
       )}
     </div>
   );

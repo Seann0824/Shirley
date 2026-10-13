@@ -32,9 +32,9 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::{Mutex, oneshot};
 
-use crate::interface::session::SessionManager;
-use super::wire::{AgentEventWire, SessionSnapshotWire};
+use super::wire::{AgentEventWire, SessionSnapshotWire, TaskViewWire};
 use crate::bootstrap::AgentFactory;
+use crate::interface::session::SessionManager;
 use crate::project::{ProjectEntry, ProjectRegistry};
 use crate::session::{
     SessionCatalog, SessionEntry, first_user_message, sanitize_title, title_prompt,
@@ -111,6 +111,7 @@ fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime, St
         Some(store),
         Some(built.memory),
         Some(built.skills),
+        Some(built.todo),
     );
     // 从磁盘恢复的会话：其 `Agent` 已带全量历史，但视图条目还是空的——重建一次，
     // 快照 / 渲染才有内容（与 `SessionManager::switch_to` 的恢复路径一致）。
@@ -308,11 +309,10 @@ async fn agent_add_project(
     state: State<'_, DesktopState>,
 ) -> Result<Option<ProjectEntryWire>, String> {
     // 原生对话框是阻塞调用，移到阻塞线程池（内部会切回主线程显示）。
-    let picked = tauri::async_runtime::spawn_blocking(move || {
-        app.dialog().file().blocking_pick_folder()
-    })
-    .await
-    .map_err(|e| e.to_string())?;
+    let picked =
+        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+            .await
+            .map_err(|e| e.to_string())?;
     let Some(path) = picked.and_then(|file| file.into_path().ok()) else {
         return Ok(None);
     };
@@ -433,19 +433,26 @@ async fn agent_send(
     let cancels = state.cancels.clone();
 
     tauri::async_runtime::spawn(async move {
-        if let Some(memory) = memory.as_ref() {
-            let _ = memory.prefetch_query_vector().await;
-        }
+        let mut cancel_rx = cancel_rx;
+        let cancelled_before_start = if let Some(memory) = memory.as_ref() {
+            tokio::select! {
+                biased;
+                _ = &mut cancel_rx => true,
+                _ = memory.prefetch_query_vector() => false,
+            }
+        } else {
+            false
+        };
 
         // 驱动本轮：`tokio::select!` 在「流的下一个事件」与「取消信号」之间竞争。
         // 取消分支 `break` 后 `stream` 被 drop —— SDK 的 `run_stream` 是 async-stream
         // 生成的流，**drop 即停止**（与 TUI `run_agent` 同款手法）。没有这条路径时
         // 后台会一直把 ReAct 循环跑到底（点 stop 只改了前端 `busy`，从未真正打断）。
-        let cancelled = {
+        let mut terminal_update = None;
+        let mut cancelled = {
             let mut stream = agent.run_stream(&prompt);
-            let mut cancel_rx = cancel_rx;
-            let mut cancelled = false;
-            loop {
+            let mut cancelled = cancelled_before_start;
+            while !cancelled {
                 tokio::select! {
                     biased;
                     // `&mut` 借用：`select!` 每轮都会 poll 它，若按值移动会在第二轮报
@@ -460,6 +467,10 @@ async fn agent_send(
                             Ok(event) => Ok(event),
                             Err(error) => Err(error.to_string()),
                         };
+                        if matches!(&update, Ok(AgentEvent::Finished(_)) | Err(_)) {
+                            terminal_update = Some(update);
+                            break;
+                        }
                         runtime_for_task
                             .lock()
                             .await
@@ -471,40 +482,42 @@ async fn agent_send(
             cancelled
         };
 
-        if cancelled {
-            // 回退本轮：丢掉本轮用户消息及其后已完成的 assistant / tool 链，并同步
-            // 截尾会话日志（与 TUI `App::complete_turn` 的打断语义一致）。`truncate_messages`
-            // 会自行维护不变量（不越过置顶 system），这里只负责定位最后一条用户消息。
-            if let Some(index) = agent
-                .messages()
-                .iter()
-                .rposition(|m| matches!(m, Message::User { .. }))
-            {
-                agent.truncate_messages(index);
-            }
-            // 以 `Finished(Cancelled)` 收尾：让前端把本轮 assistant 标记为完成、
-            // 清掉 `busy`，并让订阅者知道本轮真的结束了。
-            let finished = AgentEvent::Finished(RunResult {
-                messages: Vec::new(),
-                stop_reason: StopReason::Cancelled,
-                usage: Default::default(),
-            });
+        // 流已 drop：把半截助手回复真正写进 Agent 与日志，供下一轮参考。
+        for message in agent.finish_interrupted_turn() {
             runtime_for_task
                 .lock()
                 .await
                 .sessions
-                .apply_event(&session_name, Ok(finished));
-        } else {
-            // 正常结束才生成标题（`complete` 会再发一次模型请求，取消时必须跳过）。
-            auto_title_session(&agent, &catalog, &session_name).await;
+                .apply_event(&session_name, Ok(AgentEvent::MessageAdded(message)));
+        }
+        if !cancelled && matches!(&terminal_update, Some(Ok(AgentEvent::Finished(_)))) {
+            // 标题生成也属于本轮等待，可随停止信号取消。
+            cancelled = tokio::select! {
+                biased;
+                _ = &mut cancel_rx => true,
+                _ = auto_title_session(&agent, &catalog, &session_name) => false,
+            };
+        }
+        if cancelled {
+            // 需求 2：打断**保留**本轮消息（用户消息 + 半截流式回复）作为下一轮参考，
+            // 不再回退删除——与 TUI `App::complete_turn` 的打断语义对齐。
+            // 因此这里**不** truncate agent / 不截尾日志。
+            // 仍以 `Finished(Cancelled)` 收尾：让前端把本轮 assistant 标记为完成、
+            // 清掉 `busy`，并让订阅者知道本轮真的结束了。
+            terminal_update = Some(Ok(AgentEvent::Finished(RunResult {
+                messages: Vec::new(),
+                stop_reason: StopReason::Cancelled,
+                usage: Default::default(),
+            })));
         }
 
-        runtime_for_task
-            .lock()
-            .await
-            .sessions
-            .restore_agent(&session_name, agent);
+        // 收尾事件意味着可以立即发下一轮，因此先归还 Agent，再解锁前端。
         cancels.lock().await.remove(&key);
+        let mut runtime = runtime_for_task.lock().await;
+        runtime.sessions.restore_agent(&session_name, agent);
+        if let Some(update) = terminal_update {
+            runtime.sessions.apply_event(&session_name, update);
+        }
     });
 
     Ok(())
@@ -540,10 +553,8 @@ async fn auto_title_session(agent: &Agent, catalog: &Arc<dyn SessionCatalog>, na
 
     let write_catalog = catalog.clone();
     let write_name = name.to_owned();
-    let _ = tauri::async_runtime::spawn_blocking(move || {
-        write_catalog.rename(&write_name, &title)
-    })
-    .await;
+    let _ = tauri::async_runtime::spawn_blocking(move || write_catalog.rename(&write_name, &title))
+        .await;
 }
 
 /// 订阅一个会话：返回其视图快照，并起一个 per-会话 pump 把后续事件转线格式 emit。
@@ -562,7 +573,7 @@ async fn agent_subscribe(
     }
     // **同一把锁内**先订阅再取快照：`apply_event` 也要拿这把锁，故两者之间不会
     // 插入任何事件——快照覆盖订阅前、通道覆盖订阅后，既不丢也不重。
-    let (mut rx, items, running) = {
+    let (mut rx, items, running, todo) = {
         let guard = runtime.lock().await;
         let rx = guard
             .sessions
@@ -573,20 +584,51 @@ async fn agent_subscribe(
             .snapshot(&session)
             .ok_or_else(|| format!("会话不存在：{session}"))?;
         let running = guard.sessions.is_running(&session);
-        (rx, items, running)
+        // 同一把锁内连同任务账本快照一起取——切到会话时任务卡立即可见，不必等下一次
+        // `todo` 工具完成。
+        let todo = guard
+            .sessions
+            .session(&session)
+            .and_then(|session| session.todo_view());
+        (rx, items, running, todo)
     };
 
     let pumps = state.pumps.clone();
     let pump_project = project.clone();
     let pump_session = session.clone();
     let pump_key = key.clone();
+    let pump_runtime = runtime.clone();
     let handle = tauri::async_runtime::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(Ok(event)) => {
-                    let wire = AgentEventWire::from_event(event)
-                        .with_route(&pump_project, &pump_session);
-                    let _ = app.emit(EVENT_NAME, wire);
+                    // `todo` 工具完成 = 任务账本变更。SDK 不发专门事件，故这里在转发
+                    // 工具事件之外，额外读一次账本快照发一条 `TodoUpdated` 给前端——
+                    // 让「任务在推进」对用户可见（账本不解析注入 XML，取结构化视图）。
+                    let is_todo = matches!(
+                        &event,
+                        AgentEvent::ToolFinished { name, .. } if name == "todo"
+                    );
+                    if let Some(wire) = AgentEventWire::from_event(event)
+                        .map(|wire| wire.with_route(&pump_project, &pump_session))
+                    {
+                        let _ = app.emit(EVENT_NAME, wire);
+                    }
+                    if is_todo {
+                        let todo = {
+                            let guard = pump_runtime.lock().await;
+                            guard
+                                .sessions
+                                .session(&pump_session)
+                                .and_then(|session| session.todo_view())
+                        };
+                        let wire = AgentEventWire::TodoUpdated {
+                            project: Some(pump_project.clone()),
+                            session: Some(pump_session.clone()),
+                            todo: todo.map(TaskViewWire::from),
+                        };
+                        let _ = app.emit(EVENT_NAME, wire);
+                    }
                 }
                 Ok(Err(message)) => {
                     let wire = AgentEventWire::Error {
@@ -602,7 +644,7 @@ async fn agent_subscribe(
         }
         pumps.lock().await.remove(&pump_key);
     });
-    let snapshot = SessionSnapshotWire::new(session.clone(), items, running);
+    let snapshot = SessionSnapshotWire::new(session.clone(), items, running, todo);
     state.pumps.lock().await.insert(key, handle);
 
     Ok(snapshot)
@@ -622,7 +664,11 @@ async fn agent_unsubscribe(
     Ok(())
 }
 
-/// 当前模型名（取该项目前台会话的 Agent）。
+/// 当前模型名（该项目前台会话）。
+///
+/// 走会话级查询（[`SessionManager::active_model_name`]），**运行期也可用**：前台
+/// 会话正在跑一轮时其 `Agent` 被 `take` 走，直接读 `active_agent()` 会拿到空串，
+/// 前端就会把模型选择器清空——这正是「切走再切回模型不恢复」的表现。
 #[tauri::command]
 async fn agent_model_name(
     state: State<'_, DesktopState>,
@@ -632,8 +678,8 @@ async fn agent_model_name(
     let guard = runtime.lock().await;
     Ok(guard
         .sessions
-        .active_agent()
-        .map(|agent| agent.model_config().model.clone())
+        .active_model_name()
+        .map(str::to_owned)
         .unwrap_or_default())
 }
 
@@ -675,20 +721,27 @@ async fn agent_set_model(
         let guard = runtime.lock().await;
         (guard.factory.clone(), guard.factory.model_catalog.clone())
     };
-    let entry = catalog.list().await.into_iter().find(|entry| entry.value == model);
+    let entry = catalog
+        .list()
+        .await
+        .into_iter()
+        .find(|entry| entry.value == model);
     // 按模型条目算一份完整 `ModelConfig`（模型值 + 工具协议），**一次性下发**
     // （`docs/tool-calling-refactor.md` Step 3）。目录里查不到就只改模型名。
     let config = entry.as_ref().map(|entry| factory.model_config_for(entry));
 
     let mut guard = runtime.lock().await;
-    let agent = guard
-        .sessions
-        .active_agent_mut()
+    let session = guard.sessions.active_mut();
+    let agent = session
+        .agent
+        .as_mut()
         .ok_or_else(|| "agent 正在运行中".to_owned())?;
     match config {
         Some(config) => agent.set_model_config(config),
         None => agent.set_model(model),
     }
+    // 同步会话的模型名镜像，运行期切走再切回时仍能显示新模型。
+    session.remember_model();
     Ok(())
 }
 
@@ -764,12 +817,15 @@ async fn agent_activate_skill(
         .skills
         .as_ref()
         .ok_or_else(|| "当前会话不支持技能".to_owned())?;
-    skills.activate(&name).map(|_| ()).map_err(|error| match error {
-        crate::skills::runtime::ActivateError::UnknownSkill(name) => {
-            format!("未知技能：{name}")
-        }
-        crate::skills::runtime::ActivateError::ReadFailed(reason) => reason,
-    })
+    skills
+        .activate(&name)
+        .map(|_| ())
+        .map_err(|error| match error {
+            crate::skills::runtime::ActivateError::UnknownSkill(name) => {
+                format!("未知技能：{name}")
+            }
+            crate::skills::runtime::ActivateError::ReadFailed(reason) => reason,
+        })
 }
 
 /// 列出某项目的全部会话（按最近修改降序）。
@@ -819,11 +875,7 @@ async fn agent_new_session(
     title: Option<String>,
 ) -> Result<SessionEntryWire, String> {
     let runtime = ensure_runtime(&state, &project).await?;
-    let name = runtime
-        .lock()
-        .await
-        .sessions
-        .create_new(title.as_deref())?;
+    let name = runtime.lock().await.sessions.create_new(title.as_deref())?;
     Ok(SessionEntryWire {
         name: name.clone(),
         label: name,
@@ -919,15 +971,17 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
     let working_dir = factory.working_dir.clone();
 
     // 把当前工作区登记为默认项目（幂等：已登记则只刷新打开时间）。
-    let mut registry = ProjectRegistry::load_default()
-        .map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mut registry =
+        ProjectRegistry::load_default().map_err(|e| std::io::Error::other(e.to_string()))?;
     let default_entry = registry
         .add(working_dir, None)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
-    eprintln!("[desktop] 默认项目：{}（{}）", default_entry.name, default_entry.id);
+    eprintln!(
+        "[desktop] 默认项目：{}（{}）",
+        default_entry.name, default_entry.id
+    );
 
-    let runtime = runtime_from_factory(factory)
-        .map_err(std::io::Error::other)?;
+    let runtime = runtime_from_factory(factory).map_err(std::io::Error::other)?;
     let mut runtimes = HashMap::new();
     runtimes.insert(default_entry.id.clone(), Arc::new(Mutex::new(runtime)));
 

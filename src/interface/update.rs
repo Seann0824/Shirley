@@ -6,9 +6,7 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
     match event {
         // 模型选择器打开时，按键先交给面板处理（上/下选择、Enter 确认、Esc 取消）。
         // 其余按键吞掉，避免在面板上层继续编辑输入框造成状态错乱。
-        Event::Key(key_event)
-            if key_event.kind == KeyEventKind::Press && app.is_picker_open() =>
-        {
+        Event::Key(key_event) if key_event.kind == KeyEventKind::Press && app.is_picker_open() => {
             match key_event.code {
                 KeyCode::Up => app.picker_move(-1),
                 KeyCode::Down => app.picker_move(1),
@@ -42,8 +40,13 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
                 && !app.suggestions().is_empty()
                 && matches!(
                     key_event.code,
-                    KeyCode::Up | KeyCode::Down | KeyCode::Left | KeyCode::Right
-                        | KeyCode::Tab | KeyCode::Enter | KeyCode::Esc
+                    KeyCode::Up
+                        | KeyCode::Down
+                        | KeyCode::Left
+                        | KeyCode::Right
+                        | KeyCode::Tab
+                        | KeyCode::Enter
+                        | KeyCode::Esc
                 ) =>
         {
             match key_event.code {
@@ -72,11 +75,11 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
                 }
             }
             KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => app.exit(),
-            KeyCode::Char('t') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.toggle_thinking()
-            }
             KeyCode::Char('o') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.toggle_tool_args()
+            }
+            KeyCode::Char('s') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
+                app.toggle_latest_compact()
             }
             // Tab：采纳第一个模糊指令候选（如 /inti → /init ）。
             KeyCode::Tab => app.accept_suggestion(),

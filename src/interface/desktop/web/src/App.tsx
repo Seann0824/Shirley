@@ -1,13 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { LoaderCircle, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import {
   AiConversationTranscript,
   type AiTranscriptMessage,
 } from "@/components/ai/AiConversationTranscript";
 import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { AssistantMessage } from "@/components/AssistantMessage";
+import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
 import { AiConversationSkeleton } from "@/components/ai/AiConversationSkeleton";
+import { AiConversationMinimap } from "@/components/ai/AiConversationMinimap";
 import { InlineReferences } from "@/lib/file-mentions/FileChips";
 import { FileMentionPopover } from "@/lib/file-mentions/FileMentionPopover";
 import {
@@ -20,11 +23,34 @@ import { SkillSlashPopover } from "@/lib/slash/SkillSlashPopover";
 import { CHIP_TOKEN, stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
 import { agentBridge, type ProjectEntry, type SessionSubscription } from "@/lib/bridge";
-import type { AgentEventWire, SessionSnapshot } from "@/types/wire";
+import type { AgentEventWire, SessionSnapshot, TaskViewWire, UsageWire } from "@/types/wire";
 import type { AiSegment, AiToolExecution } from "@/types/ai";
 
 let messageSeq = 0;
 const nextId = () => `m${++messageSeq}`;
+
+/** 侧边栏折叠偏好（仅本地 UI 状态，不跨端 / 不落库）。 */
+const SIDEBAR_STORAGE_KEY = "shirley.desktop.sidebar-collapsed";
+
+function readBool(key: string, fallback: boolean): boolean {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw === null ? fallback : raw === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function writeBool(key: string, value: boolean) {
+  try {
+    window.localStorage.setItem(key, value ? "1" : "0");
+  } catch {
+    // localStorage 不可用（隐私模式等）时静默降级：状态仅当次会话有效。
+  }
+}
+
+/** 视口窄于该宽度时自动收起侧边栏（sidebar 256px + 内容 760px 已放不下）。 */
+const SIDEBAR_AUTO_COLLAPSE_PX = 900;
 
 /**
  * 单个会话的视图状态（transcript + 每轮段落 + busy / 错误）。
@@ -40,14 +66,68 @@ type SessionView = {
   error: string;
   /** 历史快照尚未到达：先乐观展示，渲染骨架屏。 */
   loading: boolean;
+  /** 任务账本快照（`null` = 空账本 / 无账本）。驱动任务卡与状态行。 */
+  todo: TaskViewWire | null;
+  /** 正在压缩上下文（`compression_started` → `compression_finished`）。 */
+  compressing: boolean;
+  /** 上下文占用（used / limit tokens），来自 `context_usage` 事件。 */
+  contextUsage: { used: number; limit: number } | null;
+  /** 最近一次上报的用量，来自 `usage` 事件。 */
+  usage: UsageWire | null;
 };
 
 function emptyView(): SessionView {
-  return { messages: [], turnSegments: {}, busy: false, error: "", loading: false };
+  return {
+    messages: [],
+    turnSegments: {},
+    busy: false,
+    error: "",
+    loading: false,
+    todo: null,
+    compressing: false,
+    contextUsage: null,
+    usage: null,
+  };
 }
 
 /** 视图键：跨项目不重名。 */
 const viewKey = (project: string, session: string) => `${project}::${session}`;
+
+/**
+ * 运行态状态行：压缩中 / 上下文占用。放在输入框上方、任务卡下方。
+ *
+ * 对标 TUI footer 的上下文占用提示：desktop 此前完全不处理 `compression_*` /
+ * `context_usage` 事件，压缩期间界面静默、用户不知道发生了什么。这里给一个
+ * 轻量、不抢戏的反馈——没有可展示信息时整行不占位。
+ */
+function SessionStatusLine({
+  compressing,
+  contextUsage,
+}: {
+  compressing: boolean;
+  contextUsage: { used: number; limit: number } | null;
+}) {
+  const percent =
+    contextUsage && contextUsage.limit > 0
+      ? Math.round((contextUsage.used / contextUsage.limit) * 100)
+      : null;
+  if (!compressing && percent === null) return null;
+  return (
+    <div className="mx-3 mb-1 flex items-center gap-2 text-caption text-muted">
+      {compressing && (
+        <span className="inline-flex items-center gap-1.5">
+          <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
+          正在压缩上下文
+        </span>
+      )}
+      {percent !== null && (
+        <span className="font-utility">
+          上下文 {percent}%
+        </span>
+      )}
+    </div>
+  );
+}
 
 export function App() {
   // 每个会话一份视图（后台会话也保留，切回不丢），键为 `project::session`。
@@ -61,18 +141,42 @@ export function App() {
   const [model, setModel] = useState("");
   // UI 级错误（项目 / 会话 / 模型切换失败）；运行期错误进各会话视图的 `error`。
   const [uiError, setUiError] = useState("");
+  // 侧边栏折叠：用户手动偏好（持久化）。窗口过窄时自动置为收起，之后仍可手动展开。
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    readBool(SIDEBAR_STORAGE_KEY, false),
+  );
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      writeBool(SIDEBAR_STORAGE_KEY, next);
+      return next;
+    });
+  }, []);
+
+  // 窗口放不下时自动收起：跨入窄视口即折叠（不自动弹回，尊重用户之后的显式选择）。
+  useEffect(() => {
+    const query = window.matchMedia(`(max-width: ${SIDEBAR_AUTO_COLLAPSE_PX}px)`);
+    const apply = (matches: boolean) => {
+      if (matches) setSidebarCollapsed(true);
+    };
+    apply(query.matches);
+    const onChange = (event: MediaQueryListEvent) => apply(event.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
 
   const mentionSearch = useFileMentionSearch(activeProject);
   const slashSearch = useSkillSlashSearch(activeProject);
   const editorRef = useRef<MentionEditorHandle>(null);
+  // 对话轨迹（minimap）要挂到 parent content（section）的左侧边缘，需要共享滚动视口。
+  const transcriptViewportRef = useRef<HTMLDivElement>(null);
   // 当前订阅句柄（切走时退订）。
   const subRef = useRef<SessionSubscription | null>(null);
   // 每个会话当前在跑的 assistant 轮次 id（事件按它落点），键为 `project::session`。
   const turnRef = useRef<Map<string, string>>(new Map());
-  // 每个会话本轮提交的输入（停止 / 打断时回退到输入框），键为 `project::session`。
-  const turnInputRef = useRef<Map<string, { display: string; refs: FileReference[] }>>(
-    new Map(),
-  );
+  // 每个会话本轮的起始时间戳（算「处理用时 Ns」），键为 `project::session`。
+  const turnStartRef = useRef<Map<string, number>>(new Map());
   // 快照应用前缓冲事件（订阅与快照之间到达的增量不丢）。
   const readyRef = useRef<Set<string>>(new Set());
   const bufferRef = useRef<Map<string, AgentEventWire[]>>(new Map());
@@ -91,52 +195,57 @@ export function App() {
 
   // 把一个事件应用到指定会话的视图（纯函数式更新，避免闭包过期）。
   const applyEvent = useCallback((key: string, event: AgentEventWire) => {
-    // 用户点击停止：后端会回退本轮（丢掉本轮用户消息及其后内容）并以
-    // `finished(cancelled)` 收尾。这里同步回退前端本轮——移除乐观记入的用户消息
-    // 与其后的半截流式内容，并把本轮输入退回输入框（与 TUI 打断语义一致）。
+    // 用户点击停止：后端**保留**本轮（用户消息 + 半截流式回复）作为下一轮参考，
+    // 不再回退删除（需求 2），并以 `finished(cancelled)` 收尾。这里只把本轮
+    // assistant 从 streaming 标记为 complete、清掉 `busy`——**不丢弃条目、不回退输入**
+    // （与 TUI `App::complete_turn` 的打断语义一致）。
     if (event.type === "finished" && event.stop_reason === "cancelled") {
-      const stored = turnInputRef.current.get(key);
-      turnInputRef.current.delete(key);
+      const startedAt = turnStartRef.current.get(key);
+      const durationMs = startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : undefined;
       turnRef.current.delete(key);
+      turnStartRef.current.delete(key);
       setViews((prev) => {
         const view = prev[key] ?? emptyView();
-        // 本轮乐观记入的用户消息是最后一条用户消息：丢弃它及其后的所有条目。
-        let cut = view.messages.length;
-        for (let i = view.messages.length - 1; i >= 0; i -= 1) {
-          if (view.messages[i].role === "user") {
-            cut = i;
-            break;
-          }
-        }
-        const droppedIds = view.messages.slice(cut).map((message) => message.id);
-        const turnSegments = { ...view.turnSegments };
-        for (const id of droppedIds) delete turnSegments[String(id)];
         return {
           ...prev,
           [key]: {
             ...view,
-            messages: view.messages.slice(0, cut),
-            turnSegments,
+            messages: view.messages.map((message) =>
+              message.status === "streaming" ? { ...message, status: "complete", durationMs, stopReason: "cancelled" } : message,
+            ),
+            turnSegments: Object.fromEntries(Object.entries(view.turnSegments).map(([id, segments]) => [
+              id,
+              segments.map((segment) => segment.kind === "tools" ? {
+                ...segment,
+                executions: segment.executions.map((execution) => execution.status === "running" ? {
+                  ...execution, status: "error" as const, error: "已中断，执行状态需确认",
+                } : execution),
+              } : segment),
+            ])),
             busy: false,
+            compressing: false,
             error: "",
           },
         };
       });
-      if (stored) {
-        setInput(stored.display);
-        setReferences(stored.refs);
-      }
       return;
     }
     const needsTurn =
       event.type === "content_delta" ||
-      event.type === "reasoning_delta" ||
+      event.type === "compact" ||
       event.type === "tool_started" ||
       event.type === "tool_finished";
     let assistantId = turnRef.current.get(key) ?? null;
     if (needsTurn && !assistantId) {
       assistantId = nextId();
       turnRef.current.set(key, assistantId);
+    }
+    const finishing = event.type === "finished" || event.type === "error";
+    const startedAt = turnStartRef.current.get(key);
+    const durationMs = finishing && startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : undefined;
+    if (finishing) {
+      turnRef.current.delete(key);
+      turnStartRef.current.delete(key);
     }
     setViews((prev) => {
       const view = prev[key] ?? emptyView();
@@ -155,7 +264,19 @@ export function App() {
           turnSegments: { ...view.turnSegments, [assistantId]: [] },
         };
       }
-      return { ...prev, [key]: applyWireEvent(next, event, assistantId) };
+      let updated = applyWireEvent(next, event, assistantId);
+      // 轮次收尾（完成 / 出错）：把本轮耗时写到 assistant 消息上，供「处理用时 Ns」折叠。
+      if (finishing && assistantId) {
+        if (durationMs !== undefined) {
+          updated = {
+            ...updated,
+            messages: updated.messages.map((message) =>
+              message.id === assistantId ? { ...message, durationMs } : message,
+            ),
+          };
+        }
+      }
+      return { ...prev, [key]: updated };
     });
   }, []);
 
@@ -210,7 +331,43 @@ export function App() {
       subRef.current = sub;
       const { view, lastAssistantId } = viewFromSnapshot(sub.snapshot);
       if (lastAssistantId) turnRef.current.set(key, lastAssistantId);
-      setViews((prev) => ({ ...prev, [key]: view }));
+      if (!sub.snapshot.running) turnStartRef.current.delete(key);
+      setViews((prev) => {
+        const cached = prev[key];
+        const turnSegments = { ...view.turnSegments };
+        const messages = view.messages.map((message, index) => {
+          const previous = cached?.messages[index];
+          if (message.role !== "assistant" || previous?.role !== "assistant" || !message.content.startsWith(previous.content)) return message;
+          const cachedTools = new Map(
+            (cached.turnSegments[String(previous.id)] ?? []).flatMap((segment) =>
+              segment.kind === "tools" ? segment.executions.map((execution) => [execution.id, execution] as const) : [],
+            ),
+          );
+          turnSegments[String(message.id)] = (turnSegments[String(message.id)] ?? []).map((segment) =>
+            segment.kind === "tools" ? {
+              ...segment,
+              executions: segment.executions.map((execution) => {
+                const old = cachedTools.get(execution.id);
+                return old && old.tool_name === execution.tool_name && old.status !== "running" && old.status !== "pending"
+                  && JSON.stringify(old.input) === JSON.stringify(execution.input) ? old : execution;
+              }),
+            } : segment,
+          );
+          return {
+            ...message,
+            durationMs: previous.durationMs,
+            stopReason: previous.stopReason,
+          };
+        });
+        return {
+          ...prev,
+          [key]: {
+            ...view,
+            messages,
+            turnSegments,
+          },
+        };
+      });
       readyRef.current.add(key);
       const buffered = bufferRef.current.get(key) ?? [];
       bufferRef.current.delete(key);
@@ -394,7 +551,7 @@ export function App() {
       if (views[key]?.busy ?? false) return;
       const assistantId = nextId();
       turnRef.current.set(key, assistantId);
-      turnInputRef.current.set(key, { display, refs });
+      turnStartRef.current.set(key, Date.now());
       setViews((prev) => {
         const view = prev[key] ?? emptyView();
         return {
@@ -413,18 +570,15 @@ export function App() {
         };
       });
 
-      const bridge = await agentBridge();
       try {
+        const bridge = await agentBridge();
         await bridge.send(project, session, text, sendPaths);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        setViews((prev) => {
-          const view = prev[key] ?? emptyView();
-          return { ...prev, [key]: { ...view, busy: false, error: message } };
-        });
+        applyEvent(key, { type: "error", message, project, session });
       }
     },
-    [views],
+    [views, applyEvent],
   );
 
   const send = useCallback(async () => {
@@ -530,9 +684,23 @@ export function App() {
   const error = uiError || view.error;
 
   return (
-    <div className="flex h-screen w-full min-h-0 bg-canvas">
+    <div className="relative flex h-screen w-full min-h-0 bg-canvas">
+      {/* 折叠态：主区左上角浮出「展开」按钮，让 sidebar 收起后仍可唤回。 */}
+      {sidebarCollapsed && (
+        <button
+          type="button"
+          aria-label="展开侧边栏"
+          title="展开侧边栏"
+          className="absolute left-3 top-3 z-30 flex size-7 items-center justify-center rounded-control border border-line bg-overlay text-muted shadow-overlay transition-colors hover:bg-selected hover:text-ink"
+          onClick={toggleSidebar}
+        >
+          <PanelLeftOpen className="size-4" />
+        </button>
+      )}
       {/* 左侧 sidebar：NewChat / 置顶 / 项目（多项目 + 会话导航）。 */}
       <SessionSidebar
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={toggleSidebar}
         projects={projects}
         activeProject={activeProject}
         current={sessionName}
@@ -546,7 +714,7 @@ export function App() {
       />
       {/* 右侧主区：固定宽度居中（对齐 shiwen AiConversationSurface 的 max-w-190 = 760px）。
           聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}
-      <main className="flex min-h-0 flex-1 flex-col">
+      <main className="relative flex min-h-0 flex-1 flex-col">
         <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
         {view.loading ? (
           // 历史快照尚未到达：先渲染骨架屏，给用户「正在加载消息记录」的即时反馈。
@@ -557,6 +725,7 @@ export function App() {
         <AiConversationTranscript
           messages={view.messages}
           conversationKey={activeProject && sessionName ? viewKey(activeProject, sessionName) : "main"}
+          viewportRef={transcriptViewportRef}
           extraContentKey={busy ? "busy" : ""}
           emptyContent={
             <div className="flex flex-col items-center gap-4 px-4 py-6 text-center sm:py-10">
@@ -582,6 +751,9 @@ export function App() {
                 content={message.content}
                 streaming={message.status === "streaming"}
                 segments={view.turnSegments[String(message.id)] ?? []}
+                durationMs={message.durationMs}
+                failed={message.status === "error"}
+                stopReason={message.stopReason}
               />
             ) : (
               <InlineReferences content={message.content} references={message.references ?? []} />
@@ -594,6 +766,13 @@ export function App() {
             {error}
           </p>
         )}
+        {/* 任务账本：模型自维护的任务进度，常驻在输入框上方——「任务在推进」最直接的信号。 */}
+        {view.todo && <TaskCard task={view.todo} />}
+        {/* 运行态状态行：压缩中 / 上下文占用。让「过程」有可见反馈，而不是界面静默。 */}
+        <SessionStatusLine
+          compressing={view.compressing}
+          contextUsage={view.contextUsage}
+        />
         <div className="relative shrink-0 px-3 pb-3">
           {slashSearch.open && (
             <div className="absolute inset-x-3 bottom-full z-30 mb-1">
@@ -656,6 +835,14 @@ export function App() {
           />
         </div>
         </section>
+        {/* 对话轨迹：挂在聊天区最外层容器（main）的左侧边缘，hover 预览历史用户轮次。 */}
+        {view.messages.some((message) => message.role === "user") && (
+          <AiConversationMinimap
+            messages={view.messages}
+            viewportRef={transcriptViewportRef}
+            className="left-6"
+          />
+        )}
       </main>
     </div>
   );
@@ -673,6 +860,15 @@ function applyWireEvent(
   assistantId: string | null,
 ): SessionView {
   switch (event.type) {
+    case "compact": {
+      if (!assistantId) return view;
+      return {
+        ...view,
+        turnSegments: appendSegment(view.turnSegments, assistantId, {
+          kind: "compact", text: event.content,
+        }),
+      };
+    }
     case "content_delta": {
       if (!assistantId) return view;
       return {
@@ -684,16 +880,6 @@ function applyWireEvent(
         ),
         turnSegments: appendSegment(view.turnSegments, assistantId, {
           kind: "content",
-          text: event.text,
-        }),
-      };
-    }
-    case "reasoning_delta": {
-      if (!assistantId) return view;
-      return {
-        ...view,
-        turnSegments: appendSegment(view.turnSegments, assistantId, {
-          kind: "reasoning",
           text: event.text,
         }),
       };
@@ -724,11 +910,33 @@ function applyWireEvent(
         turnSegments: updateTool(view.turnSegments, assistantId, event),
       };
     }
+    case "todo_updated": {
+      // 任务账本变更：只更新结构化视图，不进消息流——任务卡是独立于 transcript 的
+      // 「当前进度」指示，模型每次调用 `todo` 工具都会刷新它。
+      return { ...view, todo: event.todo };
+    }
+    case "compression_started": {
+      // 压缩期间给状态行一个明确信号（对标 TUI 的「正在压缩上下文」）。
+      return { ...view, compressing: true };
+    }
+    case "compression_finished": {
+      return { ...view, compressing: false };
+    }
+    case "usage": {
+      return { ...view, usage: event.usage };
+    }
+    case "context_usage": {
+      return {
+        ...view,
+        contextUsage: { used: event.used_tokens, limit: event.limit_tokens },
+      };
+    }
     case "error": {
       return {
         ...view,
         error: event.message,
         busy: false,
+        compressing: false,
         messages: view.messages.map((message) =>
           message.id === assistantId ? { ...message, status: "error" } : message,
         ),
@@ -738,8 +946,9 @@ function applyWireEvent(
       return {
         ...view,
         busy: false,
+        compressing: false,
         messages: view.messages.map((message) =>
-          message.id === assistantId ? { ...message, status: "complete" } : message,
+          message.id === assistantId ? { ...message, status: "complete", stopReason: event.stop_reason } : message,
         ),
       };
     }
@@ -756,12 +965,6 @@ function appendSegment(
   const current = segments[assistantId] ?? [];
   const last = current.at(-1);
   if (segment.kind === "content" && last?.kind === "content") {
-    return {
-      ...segments,
-      [assistantId]: [...current.slice(0, -1), { ...last, text: last.text + segment.text }],
-    };
-  }
-  if (segment.kind === "reasoning" && last?.kind === "reasoning") {
     return {
       ...segments,
       [assistantId]: [...current.slice(0, -1), { ...last, text: last.text + segment.text }],
@@ -811,6 +1014,7 @@ function updateTool(
       ...executions[executionIndex],
       status: event.ok ? "complete" : "error",
       summary: event.output.slice(0, 200),
+      result_json: event.output,
       error: event.ok ? null : event.output,
     };
     next[segmentIndex] = { ...segment, executions };
@@ -846,25 +1050,44 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
     return currentAssistantId;
   };
 
+  // 保序 + 相邻同类合并：连续 content / tools 段并成一段，与实时流
+  // （appendSegment）同一口径。跨类不合并，时间顺序不变。
+  const pushSegment = (id: string, segment: AiSegment): void => {
+    const list = turnSegments[id];
+    const last = list.at(-1);
+    if (segment.kind === "content" && last?.kind === "content") {
+      list[list.length - 1] = { ...last, text: last.text + segment.text };
+      return;
+    }
+    if (segment.kind === "tools" && last?.kind === "tools") {
+      list[list.length - 1] = { ...last, executions: [...last.executions, ...segment.executions] };
+      return;
+    }
+    list.push(segment);
+  };
+
   for (const item of snapshot.items) {
+    if (item.kind === "compact" || (item.kind === "message" && item.role === "summary")) {
+      // 与实时 compact 事件保持相同投影；兼容旧 summary 快照。
+      const id = ensureAssistant();
+      pushSegment(id, { kind: "compact", text: item.content });
+      continue;
+    }
     if (item.kind === "message") {
       if (item.role === "user") {
         messages.push({ id: nextId(), role: "user", content: item.content, status: "complete" });
         currentAssistantId = null;
         continue;
       }
-      // assistant / summary / system / error 一律落到 assistant 轮次。
+      // assistant / system / error 落到 assistant 轮次。
       const id = ensureAssistant();
-      if (item.thinking) {
-        turnSegments[id].push({ kind: "reasoning", text: item.content });
-      } else {
-        turnSegments[id].push({ kind: "content", text: item.content });
-        const message = messages.find((m) => m.id === id);
-        if (message) message.content += item.content;
-      }
+      pushSegment(id, { kind: "content", text: item.content });
+      const message = messages.find((m) => m.id === id);
+      if (message) message.content += item.content;
+      if (message && item.role === "error") message.status = "error";
     } else {
       const id = ensureAssistant();
-      turnSegments[id].push({
+      pushSegment(id, {
         kind: "tools",
         executions: item.calls.map(
           (call): AiToolExecution => ({
@@ -880,8 +1103,24 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
     }
   }
 
+  if (snapshot.running) {
+    const id = ensureAssistant();
+    const current = messages.find((message) => message.id === id);
+    if (current) current.status = "streaming";
+  }
+
   return {
-    view: { messages, turnSegments, busy: snapshot.running, error: "", loading: false },
+    view: {
+      messages,
+      turnSegments,
+      busy: snapshot.running,
+      error: "",
+      loading: false,
+      todo: snapshot.todo,
+      compressing: false,
+      contextUsage: null,
+      usage: null,
+    },
     lastAssistantId: currentAssistantId,
   };
 }

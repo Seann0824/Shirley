@@ -24,4 +24,11 @@
 pub trait ContextProvider: Send + Sync {
     /// 产出本轮要追加的 system 文本；`None` 表示不注入。
     fn context(&self) -> Option<String>;
+
+    /// 压缩时必须继承的状态快照。默认不注入；提供者应只返回任务状态等
+    /// 必要内容，避免把完整技能/检索记忆重复塞进摘要请求。
+    /// 此方法不应推进正常请求的轮次计数。
+    fn compaction_context(&self) -> Option<String> {
+        None
+    }
 }

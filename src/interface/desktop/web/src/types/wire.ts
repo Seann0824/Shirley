@@ -4,6 +4,21 @@
 
 export type StopReason = "completed" | "max_steps_reached" | "cancelled";
 
+/** 任务账本一步的状态（与 Rust `TodoStatus` 序列化对齐）。 */
+export type TodoStatus = "pending" | "in_progress" | "completed";
+
+/** 任务账本一步（与 Rust 侧 `TaskStepWire` 对齐）。 */
+export type TaskStepWire = { text: string; status: TodoStatus };
+
+/** 任务账本结构化视图（与 Rust 侧 `TaskViewWire` 对齐）。 */
+export type TaskViewWire = {
+  goal: string | null;
+  steps: TaskStepWire[];
+  completed: number;
+  total: number;
+  current: string | null;
+};
+
 export type UsageWire = {
   input_tokens: number;
   output_tokens: number;
@@ -16,8 +31,8 @@ type SessionTag = { project: string | null; session: string | null };
 
 export type AgentEventWire =
   | ({ type: "content_delta"; text: string } & SessionTag)
-  | ({ type: "reasoning_delta"; text: string } & SessionTag)
   | ({ type: "message_added"; role: "user" | "assistant" | "tool" } & SessionTag)
+  | ({ type: "compact"; content: string } & SessionTag)
   | ({ type: "tool_started"; call_id: string; name: string; arguments: string } & SessionTag)
   | ({
       type: "tool_finished";
@@ -31,12 +46,14 @@ export type AgentEventWire =
   | ({ type: "context_usage"; used_tokens: number; limit_tokens: number } & SessionTag)
   | ({ type: "compression_started" } & SessionTag)
   | ({ type: "compression_finished" } & SessionTag)
+  | ({ type: "todo_updated"; todo: TaskViewWire | null } & SessionTag)
   | ({ type: "error"; message: string } & SessionTag)
   | ({ type: "finished"; stop_reason: StopReason } & SessionTag);
 
 /** 快照里一条 UI 条目（与 Rust 侧 `desktop/wire.rs` 的 `ItemWire` 对齐）。 */
 export type ItemWire =
-  | { kind: "message"; role: string; content: string; thinking: boolean }
+  | { kind: "message"; role: string; content: string }
+  | { kind: "compact"; content: string }
   | { kind: "tools"; calls: { id: string; name: string; arguments: string }[] };
 
 /** 订阅某会话时下发的完整视图快照（与 Rust 侧 `SessionSnapshotWire` 对齐）。 */
@@ -45,4 +62,6 @@ export type SessionSnapshot = {
   items: ItemWire[];
   /** 该会话当前是否在跑一轮（决定前端 busy 门）。 */
   running: boolean;
+  /** 该会话当前的任务账本快照（`null` = 空账本 / 无账本）。 */
+  todo: TaskViewWire | null;
 };

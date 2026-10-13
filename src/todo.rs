@@ -19,7 +19,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
-use shirley_agent_sdk::{ContextProvider, Tool, ToolContext, ToolDefinition, ToolError, ToolFuture};
+use shirley_agent_sdk::{
+    ContextProvider, Tool, ToolContext, ToolDefinition, ToolError, ToolFuture,
+};
 
 /// 账本渲染成注入文本时的字符上限。
 ///
@@ -38,9 +40,10 @@ pub const TODO_NAG_AFTER_ROUNDS: usize = 3;
 /// 持久化留空（进程结束即失，与会话日志无关）。
 pub struct TodoStore {
     inner: Mutex<TaskState>,
+    revision: AtomicUsize,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct TaskState {
     goal: Option<String>,
     steps: Vec<Step>,
@@ -61,7 +64,7 @@ pub enum TodoStatus {
     Completed,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct Step {
     text: String,
     status: TodoStatus,
@@ -98,10 +101,33 @@ pub struct TodoStep {
     pub status: TodoStatus,
 }
 
+/// 供 UI 渲染的任务账本结构化视图（与注入给模型的 XML 无关）。
+///
+/// `TodoStore` 是纯内存状态，UI 侧需要「目标 + 步骤进度」这类可序列化的只读快照，
+/// 而不是解析注入文本。空账本（无 goal 且无 steps）返回 `None`，UI 据此不显示任务卡。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskView {
+    pub goal: Option<String>,
+    pub steps: Vec<TaskStepView>,
+    /// 已完成步数（供「3/7」进度显示）。
+    pub completed: usize,
+    pub total: usize,
+    /// 当前进行中的那一步（至多一条）。
+    pub current: Option<String>,
+}
+
+/// 视图里的一步。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskStepView {
+    pub text: String,
+    pub status: TodoStatus,
+}
+
 impl TodoStore {
     pub fn new() -> Self {
         Self {
             inner: Mutex::new(TaskState::default()),
+            revision: AtomicUsize::new(0),
         }
     }
 
@@ -123,6 +149,7 @@ impl TodoStore {
         }
         {
             let mut state = self.inner.lock().expect("todo lock poisoned");
+            let before = state.clone();
             if update.clear == Some(true) {
                 *state = TaskState::default();
             }
@@ -140,14 +167,13 @@ impl TodoStore {
                     .collect();
             }
             if let Some(findings) = update.add_findings {
-                state
-                    .findings
-                    .extend(findings.into_iter().filter(|f| !f.trim().is_empty()));
+                append_unique(&mut state.findings, findings);
             }
             if let Some(questions) = update.add_open_questions {
-                state
-                    .open_questions
-                    .extend(questions.into_iter().filter(|q| !q.trim().is_empty()));
+                append_unique(&mut state.open_questions, questions);
+            }
+            if *state != before {
+                self.revision.fetch_add(1, Ordering::Release);
             }
         }
         Ok(self.render())
@@ -197,6 +223,49 @@ impl TodoStore {
             rendered.push_str("\n... (task ledger truncated; keep it concise)");
         }
         Some(rendered)
+    }
+
+    /// 结构化只读视图（供 UI 渲染任务进度）。空账本（无 goal 且无 steps）返回 `None`。
+    ///
+    /// findings / open_questions 不进视图：UI 的任务卡只关心「目标 + 步骤进度」，
+    /// 结论与待决问题已由模型在正文里交代，堆进状态行只会稀释信号。
+    pub fn view(&self) -> Option<TaskView> {
+        let state = self.inner.lock().expect("todo lock poisoned");
+        if state.goal.is_none() && state.steps.is_empty() {
+            return None;
+        }
+        let steps: Vec<TaskStepView> = state
+            .steps
+            .iter()
+            .map(|step| TaskStepView {
+                text: step.text.clone(),
+                status: step.status,
+            })
+            .collect();
+        let completed = steps
+            .iter()
+            .filter(|step| step.status == TodoStatus::Completed)
+            .count();
+        let current = steps
+            .iter()
+            .find(|step| step.status == TodoStatus::InProgress)
+            .map(|step| step.text.clone());
+        Some(TaskView {
+            goal: state.goal.clone(),
+            total: steps.len(),
+            completed,
+            current,
+            steps,
+        })
+    }
+}
+
+fn append_unique(target: &mut Vec<String>, values: Vec<String>) {
+    for value in values {
+        let value = value.trim();
+        if !value.is_empty() && !target.iter().any(|existing| existing == value) {
+            target.push(value.to_string());
+        }
     }
 }
 
@@ -320,34 +389,49 @@ impl Tool for TodoTool {
 
 /// 每轮请求末尾注入任务账本的提供者。
 ///
-/// 实现 SDK 的 [`ContextProvider`]：账本非空 → 注入 `header + 账本`；账本为空且
-/// 连续多轮未建 → 注入一条 nag（冷启动护栏）。内部计数走 `AtomicUsize`（`context`
-/// 取 `&self`）。
+/// 非空账本每轮注入；空账本或已有账本连续多轮无有效更新时提醒。
+/// 摘要快照只读账本，不影响正常请求计数。
 pub struct TodoContextProvider {
     store: Arc<TodoStore>,
-    /// 距上次注入非空账本已过多少轮（每轮 = 一次组装请求）。
-    rounds_since_todo: AtomicUsize,
+    /// 上次观察到的 revision 与距上次有效更新的正常请求数。
+    progress: Mutex<(usize, usize)>,
 }
 
 impl TodoContextProvider {
     pub fn new(store: Arc<TodoStore>) -> Self {
         Self {
             store,
-            rounds_since_todo: AtomicUsize::new(0),
+            progress: Mutex::new((0, 0)),
         }
     }
 }
 
 impl ContextProvider for TodoContextProvider {
     fn context(&self) -> Option<String> {
-        if let Some(ledger) = self.store.render() {
-            self.rounds_since_todo.store(0, Ordering::Relaxed);
-            Some(format!("{TASK_STATE_HEADER}\n\n{ledger}"))
-        } else if self.rounds_since_todo.fetch_add(1, Ordering::Relaxed) >= TODO_NAG_AFTER_ROUNDS {
-            Some(TODO_NAG_REMINDER.to_string())
-        } else {
-            None
+        let revision = self.store.revision.load(Ordering::Acquire);
+        let nag = {
+            let mut progress = self.progress.lock().expect("todo progress lock poisoned");
+            if progress.0 != revision {
+                *progress = (revision, 0);
+            } else {
+                progress.1 = progress.1.saturating_add(1);
+            }
+            progress.1 >= TODO_NAG_AFTER_ROUNDS
+        };
+        let mut text = self.compaction_context().unwrap_or_default();
+        if nag {
+            if !text.is_empty() {
+                text.push_str("\n\n");
+            }
+            text.push_str(TODO_NAG_REMINDER);
         }
+        (!text.is_empty()).then_some(text)
+    }
+
+    fn compaction_context(&self) -> Option<String> {
+        self.store
+            .render()
+            .map(|ledger| format!("{TASK_STATE_HEADER}\n\n{ledger}"))
     }
 }
 
@@ -485,5 +569,55 @@ mod tests {
             }
         }
         assert!(nagged, "空账本久未更新应触发 nag");
+    }
+
+    #[test]
+    fn nonempty_stale_ledger_nags_and_only_new_evidence_resets_it() {
+        let store = Arc::new(TodoStore::new());
+        store
+            .apply(TodoUpdate {
+                goal: Some("修复 session 切换".into()),
+                add_findings: Some(vec!["active_agent 在运行中为空".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+        let provider = TodoContextProvider::new(store.clone());
+        assert!(!provider.context().unwrap().contains("<reminder>"));
+        for _ in 0..TODO_NAG_AFTER_ROUNDS {
+            // 摘要快照不应推进/重置正常请求计数。
+            assert!(
+                !provider
+                    .compaction_context()
+                    .unwrap()
+                    .contains("<reminder>")
+            );
+            provider.context();
+        }
+        assert!(provider.context().unwrap().contains("<reminder>"));
+        store
+            .apply(TodoUpdate {
+                add_findings: Some(vec![" active_agent 在运行中为空 ".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(
+            provider.context().unwrap().contains("<reminder>"),
+            "重复结论不算推进"
+        );
+        assert_eq!(
+            store
+                .render()
+                .unwrap()
+                .matches("active_agent 在运行中为空")
+                .count(),
+            1
+        );
+        store
+            .apply(TodoUpdate {
+                add_findings: Some(vec!["modelName 返回空字符串".into()]),
+                ..Default::default()
+            })
+            .unwrap();
+        assert!(!provider.context().unwrap().contains("<reminder>"));
     }
 }

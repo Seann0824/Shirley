@@ -27,8 +27,8 @@
 
 use std::path::{Path, PathBuf};
 
-use shirley_agent_sdk::{CompressionConfig, ModelProtocol};
 use serde::{Deserialize, Serialize};
+use shirley_agent_sdk::{CompressionConfig, ModelProtocol};
 
 /// 全局配置相对 `config_dir` 的位置。
 const GLOBAL_CONFIG_REL: &str = "shirley/config.toml";
@@ -55,6 +55,15 @@ pub struct FileSettings {
     pub compression: CompressionSettings,
     /// 记忆系统配置（配置文件里的 `[memory]` 表）。
     pub memory: MemorySettings,
+    /// 单次任务的执行限制。
+    pub runtime: RuntimeSettings,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RuntimeSettings {
+    /// 每轮用户任务的模型调用上限。默认 64；必须大于 0。
+    pub max_steps: Option<usize>,
 }
 
 /// 压缩策略配置（配置文件里的 `[compression]` 表）。
@@ -259,6 +268,7 @@ pub struct Settings {
     pub compression: CompressionSettings,
     /// 记忆系统配置（curator 模型 / 定期整理阈值）。
     pub memory: MemorySettings,
+    pub max_steps: usize,
 }
 
 /// 配置装载错误。
@@ -312,13 +322,25 @@ impl Settings {
             memory.merge_into(layer.memory.clone());
         }
 
-        Self::finalize(merged, compression, memory)
+        let max_steps = workspace
+            .as_ref()
+            .and_then(|s| s.runtime.max_steps)
+            .or_else(|| global.as_ref().and_then(|s| s.runtime.max_steps))
+            .unwrap_or(64);
+        if max_steps == 0 {
+            return Err(SettingsError::Invalid(
+                "runtime.max_steps 必须大于 0".into(),
+            ));
+        }
+        Self::finalize(merged, compression, memory, max_steps)
     }
 
     /// 便捷入口：使用真实的 `config_dir` 与进程环境变量。
     pub fn load_default(workspace_root: &Path) -> Result<Self, SettingsError> {
         let global = dirs::config_dir().map(|dir| dir.join(GLOBAL_CONFIG_REL));
-        Self::load(workspace_root, global.as_deref(), &|key| std::env::var(key).ok())
+        Self::load(workspace_root, global.as_deref(), &|key| {
+            std::env::var(key).ok()
+        })
     }
 
     /// 是否已完成模型服务配置（即 `base_url` 非空）。
@@ -339,6 +361,7 @@ impl Settings {
         merged: ProviderSettings,
         compression: CompressionSettings,
         memory: MemorySettings,
+        max_steps: usize,
     ) -> Result<Self, SettingsError> {
         let base_url = merged
             .base_url
@@ -354,7 +377,7 @@ impl Settings {
             Some(0) => {
                 return Err(SettingsError::Invalid(
                     "context_window_tokens 必须大于 0".into(),
-                ))
+                ));
             }
             Some(n) => n,
             None => DEFAULT_CONTEXT_WINDOW_TOKENS,
@@ -388,7 +411,7 @@ impl Settings {
                     other => {
                         return Err(SettingsError::Invalid(format!(
                             "tool_mode 只能是 native 或 content，收到：{other}"
-                        )))
+                        )));
                     }
                 }
             }
@@ -408,6 +431,7 @@ impl Settings {
             tool_mode,
             compression,
             memory,
+            max_steps,
         })
     }
 }
@@ -429,10 +453,7 @@ fn restrict_permissions(path: &Path) {
 /// 这是 `/login` 落盘的入口。路径由调用方给出：默认是工作区
 /// `<root>/.shirley/config.toml`（`/login` 的语义是"当前项目用哪个模型服务"，
 /// 落到项目里可随项目走），测试可注入临时路径。需要全局生效时换一个路径即可。
-pub fn save_provider(
-    path: &Path,
-    provider: ProviderSettings,
-) -> Result<PathBuf, SettingsError> {
+pub fn save_provider(path: &Path, provider: ProviderSettings) -> Result<PathBuf, SettingsError> {
     let mut existing = FileSettings::load_file(path)?.unwrap_or_default();
     merge_into(&mut existing.provider, provider);
     existing.save(path)?;
@@ -520,12 +541,7 @@ mod tests {
             .iter()
             .map(|(k, v)| ((*k).to_owned(), (*v).to_owned()))
             .collect();
-        move |key| {
-            pairs
-                .iter()
-                .find(|(k, _)| k == key)
-                .map(|(_, v)| v.clone())
-        }
+        move |key| pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())
     }
 
     fn temp_root(tag: &str) -> PathBuf {
@@ -538,14 +554,51 @@ mod tests {
     #[test]
     fn env_supplies_base_url_and_defaults_fill_rest() {
         let root = temp_root("env_only");
-        let settings =
-            Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x/v1/chat/completions")]))
-                .unwrap();
+        let settings = Settings::load(
+            &root,
+            None,
+            &env_of(&[("LOCAL_BASE_URL", "http://x/v1/chat/completions")]),
+        )
+        .unwrap();
         assert_eq!(settings.base_url, "http://x/v1/chat/completions");
         assert_eq!(settings.protocol, ModelProtocol::ChatCompletions);
         assert_eq!(settings.model, DEFAULT_MODEL);
         assert_eq!(settings.context_window_tokens, DEFAULT_CONTEXT_WINDOW_TOKENS);
         assert_eq!(settings.api_key, None);
+        assert_eq!(settings.max_steps, 64);
+    }
+
+    #[test]
+    fn runtime_limit_inherits_global_overrides_per_workspace_and_rejects_zero() {
+        let root = temp_root("runtime_budget");
+        let global = root.join("global.toml");
+        std::fs::write(&global, "[runtime]\nmax_steps = 128\n").unwrap();
+        let ws = root.join(".shirley");
+        std::fs::create_dir_all(&ws).unwrap();
+        std::fs::write(
+            ws.join("config.toml"),
+            "[compression]\nretain_ratio = 0.3\n",
+        )
+        .unwrap();
+        assert_eq!(
+            Settings::load(&root, Some(&global), &env_of(&[]))
+                .unwrap()
+                .max_steps,
+            128
+        );
+        std::fs::write(ws.join("config.toml"), "[runtime]\nmax_steps = 12\n").unwrap();
+        assert_eq!(
+            Settings::load(&root, Some(&global), &env_of(&[]))
+                .unwrap()
+                .max_steps,
+            12
+        );
+        std::fs::write(ws.join("config.toml"), "[runtime]\nmax_steps = 0\n").unwrap();
+        assert!(matches!(
+            Settings::load(&root, Some(&global), &env_of(&[])),
+            Err(SettingsError::Invalid(_))
+        ));
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -667,10 +720,7 @@ mod tests {
         let err = Settings::load(
             &root,
             None,
-            &env_of(&[
-                ("LOCAL_BASE_URL", "http://x"),
-                ("LOCAL_PROTOCOL", "gemini"),
-            ]),
+            &env_of(&[("LOCAL_BASE_URL", "http://x"), ("LOCAL_PROTOCOL", "gemini")]),
         )
         .unwrap_err();
         assert!(matches!(err, SettingsError::Invalid(_)));

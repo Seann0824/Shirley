@@ -7,6 +7,7 @@ import {
   useState,
   type ComponentPropsWithoutRef,
   type HTMLAttributes,
+  type RefObject,
 } from "react";
 import { cn } from "./utils";
 import { ScrollArea } from "./scroll-area";
@@ -86,11 +87,15 @@ export function Marker({ className, ...props }: HTMLAttributes<HTMLDivElement>) 
 export function useMessageAutoScroll({
   forceKey,
   contentKey,
+  viewportRef: externalViewportRef,
 }: {
   forceKey: string;
   contentKey: string;
+  /** 外部传入的视口 ref（如上层要把滚动容器暴露给兄弟组件时）；缺省自持。 */
+  viewportRef?: RefObject<HTMLDivElement>;
 }) {
-  const viewportRef = useRef<HTMLDivElement>(null);
+  const internalRef = useRef<HTMLDivElement>(null);
+  const viewportRef = externalViewportRef ?? internalRef;
   const followingRef = useRef(true);
   const [followingLatest, setFollowingLatest] = useState(true);
 
