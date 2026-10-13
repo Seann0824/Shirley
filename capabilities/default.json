@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Shirley 桌面窗口默认能力：事件监听（消费 AgentEvent）。",
+  "description": "Shirley 桌面窗口能力：AgentEvent 事件监听、标题栏拖动与双击缩放。",
   "windows": ["main"],
-  "permissions": ["core:default", "dialog:default"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "dialog:default"]
 }

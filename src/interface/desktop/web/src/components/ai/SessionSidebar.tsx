@@ -5,7 +5,7 @@ import {
   FolderPlus,
   Loader2,
   MoreHorizontal,
-  PanelLeftClose,
+  MessageSquarePlus,
   Pencil,
   Pin,
   PinOff,
@@ -82,7 +82,7 @@ export function SessionSidebar({
   onRename,
   onDelete,
   collapsed = false,
-  onToggleCollapse,
+  onCurrentTitleChange,
   className,
 }: {
   /** 活跃项目（非归档），按最近打开降序。 */
@@ -101,10 +101,9 @@ export function SessionSidebar({
   onRename: (project: string, name: string, title: string) => void;
   /** 删除会话（按项目 + 名定位）。 */
   onDelete: (project: string, name: string) => void;
-  /** 折叠态：整体隐藏（宽度归零），由外层在左上角浮出「展开」按钮。 */
+  /** 折叠态：整体隐藏（宽度归零），通过顶部工具栏展开。 */
   collapsed?: boolean;
-  /** 切换折叠（手动）。 */
-  onToggleCollapse?: () => void;
+  onCurrentTitleChange: (title: string) => void;
   className?: string;
 }) {
   // 每个项目的会话列表（按项目 id 缓存，App 不持有）。所有已加载项目共享同一轮询。
@@ -127,6 +126,8 @@ export function SessionSidebar({
     entry,
     sessions: sessionsByProject[entry.id] ?? [],
   }));
+  const currentTitle = (sessionsByProject[activeProject ?? ""] ?? []).find((entry) => entry.name === current)?.label ?? "";
+  useEffect(() => onCurrentTitleChange(currentTitle), [currentTitle, onCurrentTitleChange]);
 
   // 拉取「每个项目」的会话；轮询刷新各项目后台会话的 `running`。这样每个项目都能
   // 独立展开并看到自己的会话，而不是只有当前激活项目才有内容。
@@ -345,23 +346,17 @@ export function SessionSidebar({
       aria-hidden={collapsed || undefined}
       className={cn(
         "flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-sidebar transition-[width] duration-200 ease-product",
-        collapsed ? "w-0 border-r-0" : "w-64",
+        collapsed ? "invisible w-0 border-r-0" : "w-64",
         className,
       )}
     >
-      {/* 顶部操作行：折叠按钮常驻在右上角，始终可点。 */}
-      <div className="flex items-center justify-end px-2 pt-2">
-        <button
-          type="button"
-          aria-label="收起侧边栏"
-          title="收起侧边栏"
-          className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
-          onClick={() => onToggleCollapse?.()}
-        >
-          <PanelLeftClose className="size-4" />
-        </button>
+      <div className="flex h-12 shrink-0 items-center px-4 text-body-sm font-semibold">
+        Shirley
       </div>
       <ScrollArea type="scroll" className="min-h-0 flex-1" viewportClassName="px-2 pb-3">
+        <button type="button" className="mb-4 flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm hover:bg-selected" onClick={() => activeProject ? onNew(activeProject) : onAddProject()}>
+          <MessageSquarePlus className="size-4 text-muted" />新建会话
+        </button>
         {/* Pinned：手动置顶（仅本地）。无置顶时不显示该分组。 */}
         {pinnedEntries.length > 0 && (
           <section className="mb-3">

@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LoaderCircle, PanelLeftClose, PanelLeftOpen } from "lucide-react";
+import { LoaderCircle } from "lucide-react";
+import { DesktopChrome } from "@/components/DesktopChrome";
 import {
   AiConversationTranscript,
   type AiTranscriptMessage,
@@ -93,6 +94,15 @@ function emptyView(): SessionView {
 /** 视图键：跨项目不重名。 */
 const viewKey = (project: string, session: string) => `${project}::${session}`;
 
+type SessionLocation = { project: string; session: string };
+type NavigationHistory = { entries: SessionLocation[]; index: number };
+
+function removeLocations(history: NavigationHistory, remove: (entry: SessionLocation) => boolean): NavigationHistory {
+  const entries = history.entries.filter((entry) => !remove(entry));
+  const index = history.entries.slice(0, history.index + 1).filter((entry) => !remove(entry)).length - 1;
+  return { entries, index };
+}
+
 /**
  * 运行态状态行：压缩中 / 上下文占用。放在输入框上方、任务卡下方。
  *
@@ -141,6 +151,25 @@ export function App() {
   const [model, setModel] = useState("");
   // UI 级错误（项目 / 会话 / 模型切换失败）；运行期错误进各会话视图的 `error`。
   const [uiError, setUiError] = useState("");
+  const [navigationHistory, setNavigationHistory] = useState<NavigationHistory>({ entries: [], index: -1 });
+  const [navigationBusy, setNavigationBusy] = useState(false);
+  const [sessionTitles, setSessionTitles] = useState<Record<string, string>>({});
+  const updateCurrentTitle = useCallback((title: string) => {
+    if (activeProject && sessionName) {
+      const key = viewKey(activeProject, sessionName);
+      setSessionTitles((prev) => prev[key] === title ? prev : { ...prev, [key]: title });
+    }
+  }, [activeProject, sessionName]);
+
+  useEffect(() => {
+    if (!activeProject || !sessionName) return;
+    setNavigationHistory((prev) => {
+      const current = prev.entries[prev.index];
+      if (current?.project === activeProject && current.session === sessionName) return prev;
+      const entries = [...prev.entries.slice(0, prev.index + 1), { project: activeProject, session: sessionName }].slice(-100);
+      return { entries, index: entries.length - 1 };
+    });
+  }, [activeProject, sessionName]);
   // 侧边栏折叠：用户手动偏好（持久化）。窗口过窄时自动置为收起，之后仍可手动展开。
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     readBool(SIDEBAR_STORAGE_KEY, false),
@@ -299,9 +328,9 @@ export function App() {
   // 订阅一个会话：退订旧的，拿快照重建视图，再叠加之后的事件。
   const openSession = useCallback(
     async (project: string, session: string) => {
-      const bridge = await agentBridge();
       const key = viewKey(project, session);
       beginSessionLoad(project, session);
+      const bridge = await agentBridge();
       subRef.current?.unsubscribe();
       subRef.current = null;
       readyRef.current.delete(key);
@@ -442,6 +471,7 @@ export function App() {
       try {
         setUiError("");
         await (await agentBridge()).archiveProject(project);
+        setNavigationHistory((prev) => removeLocations(prev, (entry) => entry.project === project));
         // 归档的是当前项目：清空前台，切到下一个可用项目（可能为空）。
         if (project === activeProject) {
           subRef.current?.unsubscribe();
@@ -465,11 +495,10 @@ export function App() {
     async (project: string, name: string) => {
       try {
         setUiError("");
-        // 先响应交互：立刻切前台 + 骨架屏，再等后端把 active 指针挪过去。
+        // 跨项目直达目标会话，避免中途打开该项目的旧会话、污染导航历史。
+        setActiveProject(project);
         beginSessionLoad(project, name);
         const bridge = await agentBridge();
-        // 会话名只在项目内唯一——若点的是别的项目，先把它切到前台，再切会话。
-        if (project !== activeProject) await selectProject(project);
         await bridge.switchSession(project, name);
         await openSession(project, name);
         await bridge.modelName(project).then(setModel);
@@ -477,8 +506,30 @@ export function App() {
         setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [activeProject, openSession, beginSessionLoad, selectProject],
+    [openSession, beginSessionLoad],
   );
+
+  const navigateHistory = useCallback(async (offset: number) => {
+    const index = navigationHistory.index + offset;
+    const target = navigationHistory.entries[index];
+    if (!target || navigationBusy) return;
+    setNavigationBusy(true);
+    try {
+      const bridge = await agentBridge();
+      // 直接交给后端查找：未发送消息的惰性会话只在内存里，不会出现在磁盘列表。
+      // 切换成功后才移动历史游标；失败时仍留在原会话，可重试。
+      await bridge.switchSession(target.project, target.session);
+      setNavigationHistory((prev) => ({ ...prev, index }));
+      setActiveProject(target.project);
+      await openSession(target.project, target.session);
+      await bridge.modelName(target.project).then(setModel).catch(() => setModel(""));
+      setUiError("");
+    } catch (error) {
+      setUiError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setNavigationBusy(false);
+    }
+  }, [navigationHistory, navigationBusy, openSession]);
 
   // 在指定项目下新建会话（项目行上的「＋」可直接作用于任意项目，不限于前台）。
   const newSession = useCallback(
@@ -488,8 +539,8 @@ export function App() {
         const bridge = await agentBridge();
         // 不带标题：名字在首条消息后由 AI 自动生成，用户想改再手动重命名。
         const entry = await bridge.newSession(project, null);
-        // 若在非当前项目下新建，先把该项目切到前台，再打开新会话。
-        if (project !== activeProject) await selectProject(project);
+        setActiveProject(project);
+        beginSessionLoad(project, entry.name);
         await openSession(project, entry.name);
         await bridge.modelName(project).then(setModel);
         // 直接聚焦输入框——新建会话的意图是"马上开始聊"，而不是先做管理。
@@ -498,7 +549,7 @@ export function App() {
         setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [activeProject, selectProject, openSession],
+    [openSession, beginSessionLoad],
   );
 
   const renameSession = useCallback(
@@ -519,6 +570,7 @@ export function App() {
         setUiError("");
         const bridge = await agentBridge();
         await bridge.deleteSession(project, name);
+        setNavigationHistory((prev) => removeLocations(prev, (entry) => entry.project === project && entry.session === name));
         // 删的若是前台会话，重新打开后端选中的会话（可能为空）。
         if (project === activeProject && name === sessionName) {
           const current = await bridge.currentSession(project).catch(() => null);
@@ -684,23 +736,27 @@ export function App() {
   const error = uiError || view.error;
 
   return (
-    <div className="relative flex h-screen w-full min-h-0 bg-canvas">
-      {/* 折叠态：主区左上角浮出「展开」按钮，让 sidebar 收起后仍可唤回。 */}
-      {sidebarCollapsed && (
-        <button
-          type="button"
-          aria-label="展开侧边栏"
-          title="展开侧边栏"
-          className="absolute left-3 top-3 z-30 flex size-7 items-center justify-center rounded-control border border-line bg-overlay text-muted shadow-overlay transition-colors hover:bg-selected hover:text-ink"
-          onClick={toggleSidebar}
-        >
-          <PanelLeftOpen className="size-4" />
-        </button>
-      )}
+    <DesktopChrome
+      title={(activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "新建会话" : "Shirley")}
+      projectName={projects.find((entry) => entry.id === activeProject)?.name}
+      sidebarCollapsed={sidebarCollapsed}
+      canGoBack={navigationHistory.index > 0}
+      canGoForward={navigationHistory.index < navigationHistory.entries.length - 1}
+      navigationBusy={navigationBusy}
+      onBack={() => void navigateHistory(-1)}
+      onForward={() => void navigateHistory(1)}
+      onToggleSidebar={toggleSidebar}
+      onHome={() => {
+        setSidebarCollapsed(false);
+        writeBool(SIDEBAR_STORAGE_KEY, false);
+      }}
+      onNewChat={() => activeProject ? void newSession(activeProject) : void addProject()}
+      onAddProject={() => void addProject()}
+    >
       {/* 左侧 sidebar：NewChat / 置顶 / 项目（多项目 + 会话导航）。 */}
       <SessionSidebar
         collapsed={sidebarCollapsed}
-        onToggleCollapse={toggleSidebar}
+        onCurrentTitleChange={updateCurrentTitle}
         projects={projects}
         activeProject={activeProject}
         current={sessionName}
@@ -714,7 +770,7 @@ export function App() {
       />
       {/* 右侧主区：固定宽度居中（对齐 shiwen AiConversationSurface 的 max-w-190 = 760px）。
           聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}
-      <main className="relative flex min-h-0 flex-1 flex-col">
+      <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
         {view.loading ? (
           // 历史快照尚未到达：先渲染骨架屏，给用户「正在加载消息记录」的即时反馈。
@@ -844,7 +900,7 @@ export function App() {
           />
         )}
       </main>
-    </div>
+    </DesktopChrome>
   );
 }
 
