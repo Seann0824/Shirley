@@ -44,6 +44,7 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         Some(store),
         Some(built.memory),
         Some(built.skills),
+        Some(built.todo),
     );
 
     let mut terminal = ratatui::init();

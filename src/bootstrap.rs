@@ -211,7 +211,7 @@ impl AgentFactory {
         // SDK 的 `Agent` 只接受**单个** `context_provider`，而这里要注入多份
         // （任务账本 + 记忆 + 技能）——用 `CompositeContextProvider` 顺序拼接。
         let provider = CompositeContextProvider::new(vec![
-            Arc::new(TodoContextProvider::new(todo_store)) as Arc<dyn ContextProvider>,
+            Arc::new(TodoContextProvider::new(todo_store.clone())) as Arc<dyn ContextProvider>,
             Arc::new(MemoryContextProvider::new(memory.clone())) as Arc<dyn ContextProvider>,
             // 技能（Tier1 目录 + Tier2 已激活正文）：每轮末尾追加注入，KV 友好。
             Arc::new(SkillContextProvider::new(skill_runtime.clone())) as Arc<dyn ContextProvider>,
@@ -227,7 +227,12 @@ impl AgentFactory {
             .tools(tool_manager)
             .messages(messages)
             .build()?;
-        Ok(BuiltAgent { agent, memory, skills: skill_runtime })
+        Ok(BuiltAgent {
+            agent,
+            todo: todo_store,
+            memory,
+            skills: skill_runtime,
+        })
     }
 
     /// 按模型条目算一份完整 [`ModelConfig`]（`docs/tool-calling-refactor.md` Step 3）。
@@ -450,6 +455,9 @@ fn build_embedder(settings: &Settings) -> Option<Arc<Embedder>> {
 /// [`AgentFactory::build_agent`] 的产物：`Agent` 及其配套的记忆运行时句柄。
 pub struct BuiltAgent {
     pub agent: Agent,
+    /// 任务账本（每会话一份）：与 `todo` 工具 / `TodoContextProvider` 共享同一 `Arc`，
+    /// 界面据此实时读取任务进度（`TodoStore::view`）并渲染任务卡。
+    pub todo: Arc<TodoStore>,
     /// 记忆运行时（每会话一份）：驱动方在发起一轮前 `set_query`，会话结束交给 curator。
     pub memory: Arc<MemoryRuntime>,
     /// 技能运行时（每会话一份）：TUI 的 `/<skill-name>` slash 入口经此句柄直接激活
@@ -545,6 +553,7 @@ mod tests {
             Some("s".into()),
             catalog,
             Arc::new(factory(root.clone())),
+            None,
             None,
             None,
             None,
@@ -670,6 +679,7 @@ mod tests {
             Some("s".into()),
             catalog,
             Arc::new(factory(root.clone())),
+            None,
             None,
             None,
             None,

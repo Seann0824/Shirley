@@ -16,6 +16,7 @@ use shirley_agent_sdk::AgentEvent;
 use shirley_agent_sdk::Usage;
 
 use crate::interface::session::{ItemWire as CoreItemWire, ToolCallWire};
+use crate::todo::TaskView;
 
 /// 前端消费的事件 DTO。`#[serde(tag = "type", rename_all = "snake_case")]`
 /// 与 `web/src/types/wire.ts` 的判别联合一一对应。
@@ -30,15 +31,15 @@ pub enum AgentEventWire {
         session: Option<String>,
         text: String,
     },
-    ReasoningDelta {
-        project: Option<String>,
-        session: Option<String>,
-        text: String,
-    },
     MessageAdded {
         project: Option<String>,
         session: Option<String>,
         role: &'static str,
+    },
+    Compact {
+        project: Option<String>,
+        session: Option<String>,
+        content: String,
     },
     ToolStarted {
         project: Option<String>,
@@ -75,6 +76,15 @@ pub enum AgentEventWire {
         project: Option<String>,
         session: Option<String>,
     },
+    /// 任务账本（todo）变更后的结构化快照。`todo: None` = 账本已清空。
+    ///
+    /// 账本只在模型调用 `todo` 工具时变化，故后端在 `todo` 工具完成时发一条；
+    /// 前端据此渲染/更新任务卡，而不是解析注入给模型的 XML。
+    TodoUpdated {
+        project: Option<String>,
+        session: Option<String>,
+        todo: Option<TaskViewWire>,
+    },
     Finished {
         project: Option<String>,
         session: Option<String>,
@@ -107,21 +117,65 @@ impl From<Usage> for UsageWire {
     }
 }
 
+/// 任务账本的结构化线格式（与 `web/src/types/wire.ts` 的 `TaskViewWire` 对齐）。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskViewWire {
+    pub goal: Option<String>,
+    pub steps: Vec<TaskStepWire>,
+    pub completed: usize,
+    pub total: usize,
+    pub current: Option<String>,
+}
+
+/// 任务账本里的一步。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskStepWire {
+    pub text: String,
+    /// `pending` / `in_progress` / `completed`（由 `TodoStatus` 序列化）。
+    pub status: crate::todo::TodoStatus,
+}
+
+impl From<TaskView> for TaskViewWire {
+    fn from(view: TaskView) -> Self {
+        Self {
+            goal: view.goal,
+            steps: view
+                .steps
+                .into_iter()
+                .map(|step| TaskStepWire {
+                    text: step.text,
+                    status: step.status,
+                })
+                .collect(),
+            completed: view.completed,
+            total: view.total,
+            current: view.current,
+        }
+    }
+}
+
 impl AgentEventWire {
     /// 把内部事件翻译成线格式。`MessageAdded` 只透出角色（前端不消费正文，
     /// 正文已由增量事件推送）。`project` / `session` 先留空，由 [`Self::with_route`] 打标。
-    pub fn from_event(event: AgentEvent) -> Self {
-        match event {
+    ///
+    /// **思考（`ReasoningDelta`）返回 `None`**：思考过程程序内部消化，不展示给用户，
+    /// 故不进线格式、不发给前端。返回 `Option` 让调用方直接丢弃。
+    pub fn from_event(event: AgentEvent) -> Option<Self> {
+        let wire = match event {
+            // 思考不进 UI：直接吞掉（SDK 仍会产出该事件，供内部观测）。
+            AgentEvent::ReasoningDelta(_) => return None,
             AgentEvent::ContentDelta(text) => Self::ContentDelta {
                 project: None,
                 session: None,
                 text,
             },
-            AgentEvent::ReasoningDelta(text) => Self::ReasoningDelta {
-                project: None,
-                session: None,
-                text,
-            },
+            AgentEvent::MessageAdded(shirley_agent_sdk::Message::ContextSummary { content }) => {
+                Self::Compact {
+                    project: None,
+                    session: None,
+                    content,
+                }
+            }
             AgentEvent::MessageAdded(message) => Self::MessageAdded {
                 project: None,
                 session: None,
@@ -167,8 +221,14 @@ impl AgentEventWire {
                 used_tokens,
                 limit_tokens,
             },
-            AgentEvent::CompressionStarted => Self::CompressionStarted { project: None, session: None },
-            AgentEvent::CompressionFinished => Self::CompressionFinished { project: None, session: None },
+            AgentEvent::CompressionStarted => Self::CompressionStarted {
+                project: None,
+                session: None,
+            },
+            AgentEvent::CompressionFinished => Self::CompressionFinished {
+                project: None,
+                session: None,
+            },
             AgentEvent::Finished(result) => Self::Finished {
                 project: None,
                 session: None,
@@ -178,7 +238,8 @@ impl AgentEventWire {
                     shirley_agent_sdk::StopReason::Cancelled => "cancelled",
                 },
             },
-        }
+        };
+        Some(wire)
     }
 
     /// 给事件打上来源项目 + 会话（多项目多会话下前端据此路由）。
@@ -187,17 +248,38 @@ impl AgentEventWire {
     /// 前端的路由键（与后端 pump 的 `project::session` 键对应）。
     pub fn with_route(mut self, project: &str, session: &str) -> Self {
         let (project_slot, session_slot) = match &mut self {
-            Self::ContentDelta { project, session, .. }
-            | Self::ReasoningDelta { project, session, .. }
-            | Self::MessageAdded { project, session, .. }
-            | Self::ToolStarted { project, session, .. }
-            | Self::ToolFinished { project, session, .. }
-            | Self::Usage { project, session, .. }
-            | Self::ContextUsage { project, session, .. }
+            Self::ContentDelta {
+                project, session, ..
+            }
+            | Self::MessageAdded {
+                project, session, ..
+            }
+            | Self::Compact {
+                project, session, ..
+            }
+            | Self::ToolStarted {
+                project, session, ..
+            }
+            | Self::ToolFinished {
+                project, session, ..
+            }
+            | Self::Usage {
+                project, session, ..
+            }
+            | Self::ContextUsage {
+                project, session, ..
+            }
             | Self::CompressionStarted { project, session }
             | Self::CompressionFinished { project, session }
-            | Self::Finished { project, session, .. }
-            | Self::Error { project, session, .. } => (project, session),
+            | Self::TodoUpdated {
+                project, session, ..
+            }
+            | Self::Finished {
+                project, session, ..
+            }
+            | Self::Error {
+                project, session, ..
+            } => (project, session),
         };
         *project_slot = Some(project.to_owned());
         *session_slot = Some(session.to_owned());
@@ -223,14 +305,9 @@ fn message_role(message: &shirley_agent_sdk::Message) -> &'static str {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ItemWire {
-    Message {
-        role: String,
-        content: String,
-        thinking: bool,
-    },
-    Tools {
-        calls: Vec<ToolCallWireDto>,
-    },
+    Message { role: String, content: String },
+    Compact { content: String },
+    Tools { calls: Vec<ToolCallWireDto> },
 }
 
 /// 快照里单次工具调用的 DTO。
@@ -244,19 +321,25 @@ pub struct ToolCallWireDto {
 impl From<CoreItemWire> for ItemWire {
     fn from(item: CoreItemWire) -> Self {
         match item {
-            CoreItemWire::Message {
-                role,
-                content,
-                thinking,
-            } => ItemWire::Message {
+            CoreItemWire::Compact { content } => ItemWire::Compact { content },
+            CoreItemWire::Message { role, content } => ItemWire::Message {
                 role: role_wire(role).to_owned(),
                 content,
-                thinking,
             },
             CoreItemWire::Tools { calls } => ItemWire::Tools {
                 calls: calls
                     .into_iter()
-                    .map(|ToolCallWire { id, name, arguments }| ToolCallWireDto { id, name, arguments })
+                    .map(
+                        |ToolCallWire {
+                             id,
+                             name,
+                             arguments,
+                         }| ToolCallWireDto {
+                            id,
+                            name,
+                            arguments,
+                        },
+                    )
                     .collect(),
             },
         }
@@ -269,7 +352,6 @@ fn role_wire(role: crate::interface::app::Role) -> &'static str {
     match role {
         Role::User => "user",
         Role::Assistant => "assistant",
-        Role::Summary => "summary",
         Role::System => "system",
         Role::Error => "error",
     }
@@ -282,15 +364,23 @@ pub struct SessionSnapshotWire {
     pub items: Vec<ItemWire>,
     /// 该会话当前是否在跑一轮（前端据此决定 busy 门）。
     pub running: bool,
+    /// 该会话当前的任务账本快照（`None` = 空账本 / 无账本）。
+    pub todo: Option<TaskViewWire>,
 }
 
 impl SessionSnapshotWire {
-    /// 由核心层条目构造（会话名 + 条目序列）。
-    pub fn new(session: String, items: Vec<CoreItemWire>, running: bool) -> Self {
+    /// 由核心层条目构造（会话名 + 条目序列 + 任务账本快照）。
+    pub fn new(
+        session: String,
+        items: Vec<CoreItemWire>,
+        running: bool,
+        todo: Option<TaskView>,
+    ) -> Self {
         Self {
             session,
             items: items.into_iter().map(ItemWire::from).collect(),
             running,
+            todo: todo.map(TaskViewWire::from),
         }
     }
 }

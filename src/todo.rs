@@ -98,6 +98,28 @@ pub struct TodoStep {
     pub status: TodoStatus,
 }
 
+/// 供 UI 渲染的任务账本结构化视图（与注入给模型的 XML 无关）。
+///
+/// `TodoStore` 是纯内存状态，UI 侧需要「目标 + 步骤进度」这类可序列化的只读快照，
+/// 而不是解析注入文本。空账本（无 goal 且无 steps）返回 `None`，UI 据此不显示任务卡。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskView {
+    pub goal: Option<String>,
+    pub steps: Vec<TaskStepView>,
+    /// 已完成步数（供「3/7」进度显示）。
+    pub completed: usize,
+    pub total: usize,
+    /// 当前进行中的那一步（至多一条）。
+    pub current: Option<String>,
+}
+
+/// 视图里的一步。
+#[derive(Debug, Clone, Serialize)]
+pub struct TaskStepView {
+    pub text: String,
+    pub status: TodoStatus,
+}
+
 impl TodoStore {
     pub fn new() -> Self {
         Self {
@@ -197,6 +219,40 @@ impl TodoStore {
             rendered.push_str("\n... (task ledger truncated; keep it concise)");
         }
         Some(rendered)
+    }
+
+    /// 结构化只读视图（供 UI 渲染任务进度）。空账本（无 goal 且无 steps）返回 `None`。
+    ///
+    /// findings / open_questions 不进视图：UI 的任务卡只关心「目标 + 步骤进度」，
+    /// 结论与待决问题已由模型在正文里交代，堆进状态行只会稀释信号。
+    pub fn view(&self) -> Option<TaskView> {
+        let state = self.inner.lock().expect("todo lock poisoned");
+        if state.goal.is_none() && state.steps.is_empty() {
+            return None;
+        }
+        let steps: Vec<TaskStepView> = state
+            .steps
+            .iter()
+            .map(|step| TaskStepView {
+                text: step.text.clone(),
+                status: step.status,
+            })
+            .collect();
+        let completed = steps
+            .iter()
+            .filter(|step| step.status == TodoStatus::Completed)
+            .count();
+        let current = steps
+            .iter()
+            .find(|step| step.status == TodoStatus::InProgress)
+            .map(|step| step.text.clone());
+        Some(TaskView {
+            goal: state.goal.clone(),
+            total: steps.len(),
+            completed,
+            current,
+            steps,
+        })
     }
 }
 

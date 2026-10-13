@@ -20,18 +20,23 @@ async fn run_agent(
     // 记忆 V2.5：把本轮用户输入作为 query，并**预取 query 向量**（embedding 是异步
     // HTTP，而 `ContextProvider::context()` 是同步的，只能在这里先算好）。未配置
     // embedding / 预取失败时是空操作——相关腿退化为纯 BM25，绝不打断对话。
-    if let Some(memory) = memory.as_ref() {
+    let mut cancelled = if let Some(memory) = memory.as_ref() {
         memory.set_query(prompt.as_str());
-        let _ = memory.prefetch_query_vector().await;
-    }
+        tokio::select! {
+            biased;
+            _ = &mut cancel => true,
+            _ = memory.prefetch_query_vector() => false,
+        }
+    } else {
+        false
+    };
     let mut stream = agent.run_stream(&prompt);
-    loop {
+    let mut failure = None;
+    while !cancelled {
         tokio::select! {
             biased;
             // 用户打断：优先响应取消信号，drop 掉 stream 让本轮回复立即停止。
-            // 助手消息只在 `Finished` 时才写入 agent，因此中断后 agent 干净地停在
-            // 本轮用户消息之后，由 `App::complete_turn` 再回退掉这条用户消息。
-            _ = &mut cancel => break,
+            _ = &mut cancel => cancelled = true,
             event = stream.next() => {
                 match event {
                     Some(Ok(event)) => {
@@ -40,7 +45,7 @@ async fn run_agent(
                         }
                     }
                     Some(Err(error)) => {
-                        let _ = updates.send(Err(error.to_string()));
+                        failure = Some(error.to_string());
                         break;
                     }
                     None => break,
@@ -49,6 +54,12 @@ async fn run_agent(
         }
     }
     drop(stream);
+    for message in agent.finish_interrupted_turn() {
+        let _ = updates.send(Ok(AgentEvent::MessageAdded(message)));
+    }
+    if let Some(error) = failure {
+        let _ = updates.send(Err(error));
+    }
     agent
 }
 
@@ -126,6 +137,7 @@ impl<'a> Tui<'a> {
             return;
         };
         if selection.is_click() {
+            self.app.toggle_compact_at(selection.anchor);
             return;
         }
         let Some(buffer) = self.last_buffer.as_ref() else {
@@ -152,7 +164,8 @@ impl<'a> Tui<'a> {
             },
         };
         if let Err(error) = result {
-            self.app.add_system_message(format!("复制到剪贴板失败：{error}"));
+            self.app
+                .add_system_message(format!("复制到剪贴板失败：{error}"));
         }
     }
 
@@ -259,13 +272,21 @@ impl<'a> Tui<'a> {
                     self.cancel = None;
                     let agent = completed.map_err(std::io::Error::other)?;
                     self.app.restore_agent(agent);
-                    // 收尾：正常完成或被用户打断。打断时回退本轮，把输入退回输入框。
+                    // 收尾保留本轮内容，解除流式状态。
                     self.app.complete_turn();
                 }
             }
         }
         if let Some(task) = response {
-            task.abort();
+            if let Some(cancel) = self.cancel.take() {
+                let _ = cancel.send(());
+            }
+            let agent = task.await.map_err(std::io::Error::other)?;
+            while let Ok(update) = updates_rx.try_recv() {
+                self.apply(update);
+            }
+            self.app.restore_agent(agent);
+            self.app.complete_turn();
         }
         // 退出前对前台会话跑一次记忆 curation（`docs/memory.md` §5.1）：单会话聊到底、
         // 直接退出时切换路径永不发生，这里是「本轮结束」唯一能触发 curation 的时机。

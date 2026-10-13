@@ -18,6 +18,8 @@ export type AiTranscriptMessage = {
   status?: "streaming" | "complete" | "error";
   /** 用户消息上引用的工作区文件/目录（`@` 引用回显用）。 */
   references?: FileReference[];
+  /** 本轮助手回复的处理用时（毫秒）；用于「处理用时 Ns」折叠标题。 */
+  durationMs?: number;
 };
 
 export function AiConversationTranscript({
@@ -92,7 +94,7 @@ export function AiConversationTranscript({
                         message.content
                       )
                     ) : message.status === "streaming" ? (
-                      <span className="shimmer">正在思考并操作…</span>
+                      <span className="shimmer">正在操作…</span>
                     ) : null}
                   </Bubble>
                 </Message>

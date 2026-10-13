@@ -10,8 +10,8 @@ use crate::token;
 use crate::tool;
 use futures::StreamExt;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::pin::Pin;
+use std::sync::Arc;
 
 pub struct Agent {
     model_config: adapter::ModelConfig,
@@ -26,6 +26,10 @@ pub struct Agent {
     /// 根目录开始盲目探索（`plan.md`）。`None` 表示调用方没有指定。
     working_dir: Option<PathBuf>,
     messages: Vec<message::Message>,
+    /// 流被 drop 时尚未提交的用户输入与助手增量，供驱动方收尾落库。
+    pending_user: Option<String>,
+    pending_content: String,
+    pending_reasoning: String,
     tools: tool::ToolManager,
     compression_instruction: Option<String>,
     compression_pending: bool,
@@ -66,6 +70,9 @@ impl Agent {
             system_prompt,
             working_dir,
             messages,
+            pending_user: None,
+            pending_content: String::new(),
+            pending_reasoning: String::new(),
             tools,
             compression_instruction,
             compression_pending: false,
@@ -144,9 +151,51 @@ impl Agent {
         &self.messages
     }
 
+    /// drop 掉 run_stream 后保存未完成消息，返回需要由应用层追加到日志的消息。
+    /// 重复调用为空；已完成的消息不会重复提交。未返回结果的工具调用补齐中断结果，
+    /// 避免下一轮携带孤立 tool_call 被端点拒绝。
+    pub fn finish_interrupted_turn(&mut self) -> Vec<message::Message> {
+        let mut added = Vec::new();
+        if let Some(content) = self.pending_user.take() {
+            added.push(message::Message::User { content });
+        }
+        let content = std::mem::take(&mut self.pending_content);
+        let reasoning = std::mem::take(&mut self.pending_reasoning);
+        if !content.is_empty() || !reasoning.is_empty() {
+            added.push(message::Message::Assistant {
+                content: (!content.is_empty()).then_some(content),
+                reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
+                tool_calls: Vec::new(),
+            });
+        }
+        // 只有当前消息尾部的工具组可能尚未完成。
+        if let Some(index) = self
+            .messages
+            .iter()
+            .rposition(|message| !matches!(message, message::Message::Tool { .. }))
+            && let message::Message::Assistant { tool_calls, .. } = &self.messages[index]
+        {
+            for call in tool_calls {
+                let completed = self.messages[index + 1..].iter().any(|message| {
+                    matches!(message, message::Message::Tool { tool_call_id, .. } if tool_call_id == &call.id)
+                });
+                if !completed {
+                    added.push(message::Message::Tool {
+                        tool_call_id: call.id.clone(),
+                        content: Some(
+                            "工具等待被中断；执行可能已产生副作用，请先检查实际状态。".into(),
+                        ),
+                    });
+                }
+            }
+        }
+        self.messages.extend(added.iter().cloned());
+        added
+    }
+
     /// 把对话历史尾截断到前 `len` 条，返回截断后的长度。
     ///
-    /// 这是回溯 / 打断的**原子能力**：SDK 只负责"把工作集变短"并维护内部不变量
+    /// 这是回溯的**原子能力**：SDK 只负责"把工作集变短"并维护内部不变量
     /// （不越过置顶 system、越界自动钳制），**"截到哪"是业务判定**——例如"回退最后
     /// 一轮用户消息"由上层按 [`Agent::messages`] 自行定位后调用（`docs/session.md`
     /// 一.决策 4：只截尾，不产生中间空洞）。持久化由应用层据截断后的长度自行截尾
@@ -227,6 +276,7 @@ impl Agent {
         &'a mut self,
         task: &'a str,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + Send + 'a>> {
+        self.pending_user = Some(task.to_owned());
         Box::pin(async_stream::try_stream! {
             let client = reqwest::Client::new();
             let mut total_usage = message::Usage::default();
@@ -243,7 +293,7 @@ impl Agent {
             let mut start_index = self.messages.len();
 
             let user_message = message::Message::User {
-                content: task.into(),
+                content: self.pending_user.take().expect("run_stream records the pending user"),
             };
             self.messages.push(user_message.clone());
             yield AgentEvent::MessageAdded(user_message);
@@ -280,8 +330,13 @@ impl Agent {
 
                     match adapter_event {
                         adapter::AdapterEvent::Finished(response) => {
+                            self.pending_content.clear();
+                            self.pending_reasoning.clear();
                             total_usage = total_usage + response.usage;
                             self.compression_pending = self.should_schedule_compression(&response.usage);
+                            let response_message = response.message;
+                            self.messages.push(response_message.clone());
+                            yield AgentEvent::MessageAdded(response_message.clone());
                             if let Some(limit_tokens) = self.model_config.context_window_tokens.filter(|&limit| limit > 0) {
                                 yield AgentEvent::ContextUsage {
                                     used_tokens: response.usage.input_tokens.saturating_add(response.usage.output_tokens),
@@ -291,9 +346,6 @@ impl Agent {
 
                             yield AgentEvent::Usage(response.usage);
 
-                            let response_message = response.message;
-                            self.messages.push(response_message.clone());
-                            yield AgentEvent::MessageAdded(response_message.clone());
                             let tool_messages = match &response_message {
                                 message::Message::Assistant { tool_calls, .. } if !tool_calls.is_empty() => {
                                     let mut tasks = futures::stream::FuturesUnordered::new();
@@ -325,6 +377,12 @@ impl Agent {
 
                                     let mut tool_messages = Vec::with_capacity(tool_calls.len());
                                     while let Some((call, ok, content, elapsed_ms)) = tasks.next().await {
+                                        let tool_message = message::Message::Tool {
+                                            tool_call_id: call.id.clone(),
+                                            content: Some(content.clone()),
+                                        };
+                                        self.messages.push(tool_message.clone());
+                                        yield AgentEvent::MessageAdded(tool_message.clone());
                                         yield AgentEvent::ToolFinished {
                                             call_id: call.id.clone(),
                                             name: call.name.clone(),
@@ -333,12 +391,6 @@ impl Agent {
                                             elapsed_ms,
                                         };
 
-                                        let tool_message = message::Message::Tool {
-                                            tool_call_id: call.id.clone(),
-                                            content: Some(content),
-                                        };
-                                        self.messages.push(tool_message.clone());
-                                        yield AgentEvent::MessageAdded(tool_message.clone());
                                         tool_messages.push(tool_message);
                                     }
 
@@ -358,9 +410,11 @@ impl Agent {
                             }
                         }
                         adapter::AdapterEvent::ReasoningDelta(delta) => {
+                            self.pending_reasoning.push_str(&delta);
                             yield AgentEvent::ReasoningDelta(delta);
                         }
                         adapter::AdapterEvent::ContentDelta(delta) => {
+                            self.pending_content.push_str(&delta);
                             yield AgentEvent::ContentDelta(delta);
                         }
                     }
@@ -483,10 +537,9 @@ impl Agent {
         if let Some(task) = &parts.current_task {
             messages.push(task.clone());
         }
-        let instruction = self
-            .compression_instruction
-            .clone()
-            .ok_or_else(|| AgentError::Compression("compression instruction is not configured".into()))?;
+        let instruction = self.compression_instruction.clone().ok_or_else(|| {
+            AgentError::Compression("compression instruction is not configured".into())
+        })?;
         // 调用方给领域相关的取舍，SDK 追加结构模板（`docs/compaction.md` 5.3）：
         // 摘要始终是 XML 块，且禁止推演"下一步"。模板可由 `compression_config` 覆盖。
         let content = format!("{instruction}\n\n{}", self.compression_config.template);
@@ -510,14 +563,19 @@ impl Agent {
                             ..
                         } if !content.trim().is_empty() && tool_calls.is_empty() => content,
                         _ => {
-                            return Err(AgentError::Compression("compression response contained no usable summary".into()));
+                            return Err(AgentError::Compression(
+                                "compression response contained no usable summary".into(),
+                            ));
                         }
                     };
 
                     // 3. 重建：[新摘要] + current_task + remain，再把系统提示词重新生成置顶。
                     //    system 不参与压缩、也不从旧消息复制，每次重建现取一条。
                     let rebuilt = parts.rebuild(summary);
-                    let summary_message = rebuilt.first().expect("rebuild always yields a summary").clone();
+                    let summary_message = rebuilt
+                        .first()
+                        .expect("rebuild always yields a summary")
+                        .clone();
                     let mut next = rebuilt;
                     if let Some(system) = self.system_message() {
                         next.insert(0, system);
@@ -540,7 +598,9 @@ impl Agent {
             }
         }
 
-        Err(AgentError::Compression("compression produced no usage report".into()))
+        Err(AgentError::Compression(
+            "compression produced no usage report".into(),
+        ))
     }
 }
 
@@ -633,6 +693,8 @@ mod tests {
         };
         assert_eq!(content, "注入的任务账本");
         // 置顶的原始 system 仍在最前。
-        assert!(matches!(&active[0], message::Message::System { content } if content == "你是 Shirley"));
+        assert!(
+            matches!(&active[0], message::Message::System { content } if content == "你是 Shirley")
+        );
     }
 }

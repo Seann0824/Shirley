@@ -291,7 +291,7 @@ function createMockBridge(): AgentBridge {
     async openSession(project, session, onEvent) {
       const key = routeKey(project, session);
       handlers.set(key, onEvent);
-      const snapshot: SessionSnapshot = { session, items: [], running: false };
+      const snapshot: SessionSnapshot = { session, items: [], running: false, todo: null };
       return {
         snapshot,
         unsubscribe: () => {
