@@ -107,7 +107,7 @@ Shirley 现在只有一个界面：`src/interface/` 下的 ratatui TUI。本方�
 | **OCR / 素材上传**（`fetchMaterialOcrStatuses` / `handleMaterialUploaded`） | shiwen 桌面应用 | 删 |
 | **桌面工作区切换器**（`useDesktopWorkspaces` / `DesktopScreen`） | shiwen 桌面登录/工作区（绑定其账号体系） | 删 shiwen 实现；**Shirley 自建多项目 UX**（见 4.5） |
 | **SSE 线格式**（`packages/ai-session` 的 `parseAiStreamEvent` / `streamAiMessage`） | shiwen 服务端协议 | **重绑**到 Shirley 的 `AgentEvent`（见第六节） |
-| `AiConversationMinimap`（轮次缩略图） | 聊天区左侧一排小短线，hover 预览 / 点击跳转历史用户轮次 | copy（已启用：挂在**聊天区最外层容器 `<main>`**（撑开内容、不含 sidebar 的那块）的**左边缘**——`App.tsx` 持 `transcriptViewportRef` 经 transcript 透传给 `MessageScroller`，再把 minimap 以 `className="left-6"`（距 `main` 左边缘 24px）定位到 `main` 内、`section` 之外） |
+| `AiConversationMinimap`（轮次缩略图） | 聊天区左侧一排小短线，hover 预览 / 点击跳转历史用户轮次 | copy（已启用：挂在**聊天区最外层容器 `<main>`**（撑开内容、不含 sidebar 的那块）的**左边缘**——`App.tsx` 持 `transcriptViewportRef` 经 transcript 透传给 `MessageScroller`，再把 minimap 以 `className="left-3"`（距 `main` 左边缘 12px）定位到 `main` 内、`section` 之外；并**按可用留白宽度自适应显隐**——`App.tsx` 用 `ResizeObserver` 量 `main` 宽，左侧留白 `(main 宽 - 760) / 2` 放不下 12 + 40px 时直接隐藏，绝不与聊天内容重合） |
 | `lucide-react` 之外的 shiwen 依赖（tiptap / blocknote / pdfjs / tesseract 等） | shiwen 文档/OCR 栈 | 不引入 |
 
 > **确认点**：上表每一条都需用户签字。

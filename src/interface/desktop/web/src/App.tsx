@@ -53,6 +53,13 @@ function writeBool(key: string, value: boolean) {
 /** 视口窄于该宽度时自动收起侧边栏（sidebar 256px + 内容 760px 已放不下）。 */
 const SIDEBAR_AUTO_COLLAPSE_PX = 900;
 
+/** 聊天区固定宽度（`max-w-190` = 190 × 4px = 760px），用于算对话轨迹可用的左侧留白。 */
+const CHAT_MAX_WIDTH_PX = 760;
+/** 对话轨迹定位：距 `main` 左边缘 12px（`left-3`）。 */
+const MINIMAP_LEFT_PX = 12;
+/** 对话轨迹宽度：40px（`w-10`）。 */
+const MINIMAP_WIDTH_PX = 40;
+
 /**
  * 单个会话的视图状态（transcript + 每轮段落 + busy / 错误）。
  *
@@ -198,8 +205,24 @@ export function App() {
   const mentionSearch = useFileMentionSearch(activeProject);
   const slashSearch = useSkillSlashSearch(activeProject);
   const editorRef = useRef<MentionEditorHandle>(null);
-  // 对话轨迹（minimap）要挂到 parent content（section）的左侧边缘，需要共享滚动视口。
+  // 对话轨迹（minimap）要挂到聊天区最外层容器（main）的左侧边缘，需要共享滚动视口。
   const transcriptViewportRef = useRef<HTMLDivElement>(null);
+  // 对话轨迹只在左侧留白放得下时显示——放不下直接隐藏，绝不与聊天内容重合。
+  const mainRef = useRef<HTMLElement>(null);
+  const [minimapFits, setMinimapFits] = useState(false);
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    const measure = () => {
+      // section 居中且最大 760px：左侧留白 = (main 宽 - 760) / 2（main 宽不足 760 时为 0）。
+      const gutter = Math.max(0, (el.clientWidth - CHAT_MAX_WIDTH_PX) / 2);
+      setMinimapFits(gutter >= MINIMAP_LEFT_PX + MINIMAP_WIDTH_PX);
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
   // 当前订阅句柄（切走时退订）。
   const subRef = useRef<SessionSubscription | null>(null);
   // 每个会话当前在跑的 assistant 轮次 id（事件按它落点），键为 `project::session`。
@@ -770,7 +793,7 @@ export function App() {
       />
       {/* 右侧主区：固定宽度居中（对齐 shiwen AiConversationSurface 的 max-w-190 = 760px）。
           聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}
-      <main className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      <main ref={mainRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
         {view.loading ? (
           // 历史快照尚未到达：先渲染骨架屏，给用户「正在加载消息记录」的即时反馈。
@@ -891,12 +914,13 @@ export function App() {
           />
         </div>
         </section>
-        {/* 对话轨迹：挂在聊天区最外层容器（main）的左侧边缘，hover 预览历史用户轮次。 */}
-        {view.messages.some((message) => message.role === "user") && (
+        {/* 对话轨迹：挂在聊天区最外层容器（main）的左侧边缘，hover 预览历史用户轮次。
+            只在左侧留白放得下时显示——窗口放不下就直接隐藏，绝不与聊天内容重合。 */}
+        {minimapFits && view.messages.some((message) => message.role === "user") && (
           <AiConversationMinimap
             messages={view.messages}
             viewportRef={transcriptViewportRef}
-            className="left-6"
+            className="left-3"
           />
         )}
       </main>
