@@ -892,6 +892,15 @@ enum VisibleChannel {
 
 fn parse_tagged(text: &str, cfg: TagConfig) -> ParsedDocument {
     if !starts_with_protocol_tag(text.trim_start(), &cfg) {
+        if has_unfenced_tool_tag(text, &cfg.tool) {
+            return ParsedDocument {
+                errors: vec![error_message(
+                    "leading_text",
+                    &[("tool", &cfg.tool), ("description", &cfg.description)],
+                )],
+                ..ParsedDocument::default()
+            };
+        }
         return ParsedDocument {
             description: Some(text.to_string()),
             ..ParsedDocument::default()
@@ -902,6 +911,33 @@ fn parse_tagged(text: &str, cfg: TagConfig) -> ParsedDocument {
         parser.feed(ch);
     }
     parser.finish()
+}
+
+fn has_unfenced_tool_tag(text: &str, tool_tag: &str) -> bool {
+    let opening = format!("<{tool_tag}>");
+    let mut fence = None;
+    for line in text.lines() {
+        let trimmed = line.trim_start();
+        let marker = if trimmed.starts_with("```") {
+            Some("```")
+        } else if trimmed.starts_with("~~~") {
+            Some("~~~")
+        } else {
+            None
+        };
+        if let Some(marker) = marker {
+            match fence {
+                None => fence = Some(marker),
+                Some(open) if open == marker => fence = None,
+                _ => {}
+            }
+            continue;
+        }
+        if fence.is_none() && line.len() - trimmed.len() < 4 && trimmed.starts_with(&opening) {
+            return true;
+        }
+    }
+    false
 }
 
 fn starts_with_protocol_tag(text: &str, cfg: &TagConfig) -> bool {
@@ -1450,6 +1486,38 @@ mod tests {
         let doc = protocol().parse("<description>answer directly, no tool call</description>");
         assert_eq!(doc.description.as_deref(), Some("answer directly, no tool call"));
         assert!(doc.calls.is_empty());
+    }
+
+    #[test]
+    fn parses_multiple_independent_top_level_calls() {
+        let doc = protocol().parse(concat!(
+            "<description>Checking both files</description>",
+            "<tool><name>read_file</name><params>{\"path\":\"a.rs\"}</params></tool>",
+            "<tool><name>read_file</name><params>{\"path\":\"b.rs\"}</params></tool>",
+        ));
+        assert!(doc.errors.is_empty());
+        assert_eq!(doc.calls.len(), 2);
+        assert_eq!(doc.calls[0].arguments, r#"{"path":"a.rs"}"#);
+        assert_eq!(doc.calls[1].arguments, r#"{"path":"b.rs"}"#);
+    }
+
+    #[test]
+    fn leading_prose_before_tool_requests_reformat_without_running_it() {
+        let response = Message::Assistant {
+            content: Some(concat!(
+                "I'll note the task.\n\n",
+                "<tool>\n<name>todo</name>\n",
+                "<params>{\"goal\":\"design sub-agent\"}</params>\n</tool>",
+            ).into()),
+            reasoning_content: None,
+            tool_calls: Vec::new(),
+        };
+        let Message::Assistant { tool_calls, .. } = parse_content_response(&protocol(), response) else {
+            panic!("expected assistant");
+        };
+        assert_eq!(tool_calls.len(), 1);
+        assert_eq!(tool_calls[0].name, crate::tool::PROTOCOL_ERROR_TOOL);
+        assert!(tool_calls[0].arguments.contains("preceded by plain text"));
     }
 
     #[test]

@@ -523,7 +523,7 @@ async fn agent_send(
     Ok(())
 }
 
-/// 首轮结束后为会话自动生成标题（AI 命名）。
+/// 首轮结束后为会话自动生成标题；网页模型直接截取首条消息。
 async fn auto_title_session(agent: &Agent, catalog: &Arc<dyn SessionCatalog>, name: &str) {
     let probe_catalog = catalog.clone();
     let probe_name = name.to_owned();
@@ -544,8 +544,15 @@ async fn auto_title_session(agent: &Agent, catalog: &Arc<dyn SessionCatalog>, na
     let Some(first) = first_user_message(agent.messages()) else {
         return;
     };
-    let Ok(raw) = agent.complete(&title_prompt(&first)).await else {
-        return;
+    // 网页模型的一次性补全会在 DeepSeek 侧新建独立对话。标题取首条消息，
+    // 避免一次 Shirley 发言在网页侧产生第二个会话。
+    let raw = if agent.model_config().model == "deepseek-web" {
+        first.chars().take(20).collect::<String>()
+    } else {
+        let Ok(raw) = agent.complete(&title_prompt(&first)).await else {
+            return;
+        };
+        raw
     };
     let Some(title) = sanitize_title(&raw) else {
         return;
