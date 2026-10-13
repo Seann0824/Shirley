@@ -12,11 +12,19 @@ The user subsequently requested removal of the desktop wallpaper. The app now us
 | --- | --- | --- |
 | `shirley-app-icon.png` | `../web/public/brand/shirley-logo.png` (256 × 256) | Header and favicon |
 | `shirley-app-icon.png` | `../web/public/brand/shirley-avatar.png` (256 × 256) | Chat avatar |
-| `shirley-app-icon.png` | Root `icons/` | Native desktop icons |
+| `shirley-app-icon.png` | Root `icons/` | Native desktop icons (masked, see below) |
 | `shirley-character.png` | `../web/public/brand/shirley-character.png` (768 × 1152) | Original welcome illustration |
 | `shirley-desktop-background.png` | Not exported | Retained artwork (1672 × 941), unused by the app |
 
-The icon source has an opaque light background with no border. Exports use RGBA PNGs with alpha fixed at 255 to satisfy Tauri's format requirement without a generated transparency mask. The character illustration retains transparency. Native icons include 32px, 128px, 256px and 1024px PNGs, macOS ICNS, and Windows ICO entries at 16/24/32/48/64/128/256px.
+The icon source has an opaque light background with no border. Web exports use RGBA PNGs with alpha fixed at 255 to satisfy Tauri's format requirement without a generated transparency mask. The character illustration retains transparency.
+
+**Native icons are masked, web artwork is not.** `scripts/render-desktop-icon.swift` renders the native set by clipping the artwork to Apple's continuous-corner rounded square on the macOS icon grid — an 824/1024 body inset 100 pt on every side, corner radius 185.4 pt, corner smoothing 0.6. The Dock and Finder therefore show rounded corners and the same optical size as system icons; without this the artwork fills the whole square and reads larger and squarer than its neighbours.
+
+The artwork is also scaled **1.10** inside that mask (the script's optional third argument, set in `generate-desktop-brand.mjs`), cropping the edges. The mask itself always stays on the grid, so the icon's footprint never changes — only how much of it the subject fills. The source keeps a wide margin around the portrait, and at Dock size the pale background made the icon read lighter and smaller than its neighbours even though the body was already grid-correct.
+
+Native icons include 32px, 128px, 256px and 1024px PNGs plus macOS ICNS. The Windows ICO keeps the full-bleed square artwork, because Windows does not mask app icons.
+
+On macOS the Dock icon comes from `icons/icon.icns`: Tauri embeds it into the binary for dev builds and applies it at launch, so **rebuild (`cargo desktop`) after re-exporting**. Tauri 2.7 only emits `rerun-if-changed` for `tauri.conf.json` and `capabilities`, never for `bundle.icon`, so `build.rs` adds `cargo:rerun-if-changed=icons` itself — without it a re-exported icon would never reach the Dock.
 
 Re-export on macOS from the repository root: `node scripts/generate-desktop-brand.mjs`. It uses Swift, sips and iconutil, with no image-service calls. The existing `bundle.active: false` setting still applies; exporting does not create an installable app bundle.
 
@@ -25,7 +33,7 @@ Re-export on macOS from the repository root: `node scripts/generate-desktop-bran
 1. Run `npm --prefix src/interface/desktop/web run build`, then `cargo desktop`. Expect the corrected portrait in the header, with both eyes visible, no green border, and no background holes.
 2. Create a conversation. Expect the original solid light background and welcome illustration. Chat and input remain centered, capped at the original 760px width. At the 480 × 360 minimum window size, input and scrolled content should remain accessible. There should be no wallpaper or new panel, blur, border or shadow.
 3. Send a message. Expect the corrected avatar. While streaming, a small neutral status dot should pulse at its bottom right, with no green spinning ring; the dot should disappear on completion.
-4. Build and restart the relevant native app bundle; inspect Dock/Finder or Explorer/taskbar. Expect a borderless portrait with no transparent blocks in its background. UI appearance and native platform effects require user verification.
+4. Build and restart the relevant native app bundle; inspect Dock/Finder or Explorer/taskbar. Expect a rounded portrait on the standard macOS grid, matching the size and corner shape of the neighbouring icons. UI appearance and native platform effects require user verification.
 5. Send a long message and scroll through a long reply containing a code block. The background should remain solid. Open model/session selectors and the `@` file popover: menus should remain visible and clickable. UI appearance has not been manually accepted by the user.
 
 ## Final built-in generation prompts
