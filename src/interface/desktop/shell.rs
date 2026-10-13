@@ -664,7 +664,11 @@ async fn agent_unsubscribe(
     Ok(())
 }
 
-/// 当前模型名（取该项目前台会话的 Agent）。
+/// 当前模型名（该项目前台会话）。
+///
+/// 走会话级查询（[`SessionManager::active_model_name`]），**运行期也可用**：前台
+/// 会话正在跑一轮时其 `Agent` 被 `take` 走，直接读 `active_agent()` 会拿到空串，
+/// 前端就会把模型选择器清空——这正是「切走再切回模型不恢复」的表现。
 #[tauri::command]
 async fn agent_model_name(
     state: State<'_, DesktopState>,
@@ -674,8 +678,8 @@ async fn agent_model_name(
     let guard = runtime.lock().await;
     Ok(guard
         .sessions
-        .active_agent()
-        .map(|agent| agent.model_config().model.clone())
+        .active_model_name()
+        .map(str::to_owned)
         .unwrap_or_default())
 }
 
@@ -727,14 +731,17 @@ async fn agent_set_model(
     let config = entry.as_ref().map(|entry| factory.model_config_for(entry));
 
     let mut guard = runtime.lock().await;
-    let agent = guard
-        .sessions
-        .active_agent_mut()
+    let session = guard.sessions.active_mut();
+    let agent = session
+        .agent
+        .as_mut()
         .ok_or_else(|| "agent 正在运行中".to_owned())?;
     match config {
         Some(config) => agent.set_model_config(config),
         None => agent.set_model(model),
     }
+    // 同步会话的模型名镜像，运行期切走再切回时仍能显示新模型。
+    session.remember_model();
     Ok(())
 }
 

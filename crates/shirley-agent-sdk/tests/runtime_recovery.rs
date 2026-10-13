@@ -2,7 +2,8 @@
 use futures::StreamExt;
 use serde_json::{Value, json};
 use shirley_agent_sdk::{
-    Agent, AgentEvent, ErrorKind, Message, ModelConfig, ModelProtocol, SdkError, ToolCall,
+    Agent, AgentEvent, ContextProvider, ErrorKind, Message, ModelConfig, ModelProtocol, SdkError,
+    StopReason, Tool, ToolCall, ToolContext, ToolDefinition, ToolFuture, ToolManager,
 };
 use std::io::{Read, Write};
 use std::net::TcpListener;
@@ -333,4 +334,362 @@ fn interrupted_tools_get_paired_results_without_overwriting_finished_tools() {
         matches!(&agent.messages()[2], Message::Tool { content: Some(content), .. } if content == "finished")
     );
     assert!(agent.finish_interrupted_turn().is_empty());
+}
+
+struct EvidenceTool(ToolDefinition);
+
+impl Tool for EvidenceTool {
+    fn definition(&self) -> &ToolDefinition {
+        &self.0
+    }
+
+    fn invoke(&self, _: Value, _: ToolContext) -> ToolFuture<'_> {
+        Box::pin(async { Ok(json!("execution evidence ".repeat(250))) })
+    }
+}
+
+struct Ledger;
+impl ContextProvider for Ledger {
+    fn context(&self) -> Option<String> {
+        Some("normal-request-context".into())
+    }
+    fn compaction_context(&self) -> Option<String> {
+        Some("<task_state>confirmed: running agent model name is empty</task_state>".into())
+    }
+}
+
+fn reply(content: Option<&str>, call_id: Option<&str>, input_tokens: u64) -> Response {
+    let mut message = json!({"role": "assistant", "content": content});
+    if let Some(id) = call_id {
+        message["tool_calls"] = json!([{
+            "id": id, "type": "function", "function": {"name": "evidence", "arguments": "{}"}
+        }]);
+    }
+    Response::new(200, json!({
+        "choices": [{"message": message, "finish_reason": if call_id.is_some() { "tool_calls" } else { "stop" }}],
+        "usage": {"prompt_tokens": input_tokens, "completion_tokens": 1, "total_tokens": input_tokens + 1}
+    }).to_string())
+}
+
+fn evidence_tools() -> ToolManager {
+    let mut tools = ToolManager::new();
+    tools
+        .register(EvidenceTool(ToolDefinition {
+            name: "evidence".into(),
+            description: "Read fixture evidence".into(),
+            parameters: json!({"type": "object", "properties": {}}),
+        }))
+        .unwrap();
+    tools
+}
+
+/// 20261013-142807 badcase：在同一任务内连续 compact，捕获真实 HTTP 请求，
+/// 验证旧结论、工具证据和账本全部进入下一份摘要，而非只检查 XML 标签。
+#[tokio::test]
+async fn successive_compactions_inherit_findings_evidence_and_ledger() {
+    let server = Server::new(vec![
+        reply(None, Some("run-a"), 8000),
+        reply(Some("summary-one: model name loss confirmed"), None, 0),
+        reply(None, Some("run-b"), 8000),
+        reply(Some("summary-two: model name loss confirmed"), None, 0),
+        reply(Some("done"), None, 5),
+    ]);
+    let mut model = config(&server.url, false);
+    model.context_window_tokens = Some(10_000);
+    let history = vec![
+        Message::ContextSummary {
+            content: "prior-confirmed-finding: active_agent is absent while running".into(),
+        },
+        Message::User {
+            content: "fix session switch; preserve user constraints".into(),
+        },
+        Message::Assistant {
+            content: None,
+            reasoning_content: None,
+            tool_calls: vec![ToolCall {
+                id: "history".into(),
+                name: "evidence".into(),
+                arguments: "{}".into(),
+            }],
+        },
+        Message::Tool {
+            tool_call_id: "history".into(),
+            content: Some(format!(
+                "modelName returned empty; {}",
+                "code evidence ".repeat(1000)
+            )),
+        },
+    ];
+    let mut agent = Agent::builder()
+        .model_config(model)
+        .messages(history)
+        .compression_instruction("Preserve findings and evidence")
+        .context_provider(Arc::new(Ledger) as Arc<dyn ContextProvider>)
+        .tools(evidence_tools())
+        .max_steps(3)
+        .build()
+        .unwrap();
+    let result = agent.run("continue diagnosis").await.unwrap();
+    assert!(matches!(result.stop_reason, StopReason::Completed));
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 5);
+    let first_summary = requests[1]["messages"].to_string();
+    assert!(first_summary.contains("prior-confirmed-finding"));
+    assert!(first_summary.contains("modelName returned empty"));
+    assert!(first_summary.contains("<task_state>confirmed:"));
+    assert!(first_summary.contains("continue diagnosis"));
+    assert!(first_summary.contains("preserve user constraints"));
+    assert!(!first_summary.contains("normal-request-context"));
+    assert!(!first_summary.contains("tool result omitted"));
+    let second_summary = requests[3]["messages"].to_string();
+    assert!(second_summary.contains("summary-one: model name loss confirmed"));
+    assert!(second_summary.contains("execution evidence"));
+    assert!(second_summary.contains("<task_state>confirmed:"));
+    let execution = requests[4]["messages"].to_string();
+    assert!(execution.contains("summary-two: model name loss confirmed"));
+    assert!(!execution.contains("summary-one: model name loss confirmed"));
+    assert!(execution.contains("normal-request-context"));
+    assert_eq!(
+        agent
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, Message::ContextSummary { .. }))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn endless_tool_calls_stop_at_budget_with_complete_tool_results_and_can_resume() {
+    let server = Server::new(vec![reply(None, Some("repeated"), 3)]);
+    let mut agent = Agent::builder()
+        .model_config(config(&server.url, false))
+        .tools(evidence_tools())
+        .max_steps(2)
+        .build()
+        .unwrap();
+    for task in ["investigate", "continue"] {
+        let result = agent.run(task).await.unwrap();
+        assert!(matches!(result.stop_reason, StopReason::MaxStepsReached));
+        assert_eq!(
+            result
+                .messages
+                .iter()
+                .filter(|m| matches!(m, Message::Tool { .. }))
+                .count(),
+            2
+        );
+        assert!(
+            matches!(result.messages.last(), Some(Message::Assistant { content: Some(text), tool_calls, .. }) if text.contains("任务尚未完成") && tool_calls.is_empty())
+        );
+        assert!(agent.finish_interrupted_turn().is_empty());
+    }
+    assert_eq!(server.count(), 4);
+}
+
+#[test]
+fn rejects_zero_execution_budget() {
+    assert!(
+        Agent::builder()
+            .model_config(config("http://127.0.0.1:1", false))
+            .max_steps(0)
+            .build()
+            .is_err()
+    );
+}
+
+#[tokio::test]
+async fn compaction_does_not_reset_execution_budget() {
+    let server = Server::new(vec![
+        reply(None, Some("first"), 8000),
+        reply(Some("confirmed finding"), None, 0),
+        reply(None, Some("second"), 8000),
+    ]);
+    let mut model = config(&server.url, false);
+    model.context_window_tokens = Some(10_000);
+    let mut agent = Agent::builder()
+        .model_config(model)
+        .compression_instruction("Preserve progress")
+        .messages(vec![Message::User {
+            content: "prior task ".repeat(400),
+        }])
+        .tools(evidence_tools())
+        .max_steps(2)
+        .build()
+        .unwrap();
+    let result = agent.run("diagnose").await.unwrap();
+    assert!(matches!(result.stop_reason, StopReason::MaxStepsReached));
+    assert_eq!(
+        server.count(),
+        3,
+        "two execution requests plus one compaction"
+    );
+    assert!(
+        agent
+            .messages()
+            .iter()
+            .any(|m| matches!(m, Message::ContextSummary { .. }))
+    );
+    assert!(
+        matches!(agent.messages().iter().rev().nth(1), Some(Message::Tool { tool_call_id, .. }) if tool_call_id == "second")
+    );
+}
+
+#[tokio::test]
+async fn provider_rejection_keeps_original_context_without_local_estimate_gate() {
+    let server = Server::new(vec![
+        reply(Some("investigating"), None, 8000),
+        Response::new(400, "provider context limit exceeded"),
+    ]);
+    let mut model = config(&server.url, false);
+    model.context_window_tokens = Some(10_000);
+    let mut agent = Agent::builder()
+        .model_config(model)
+        .compression_instruction("Preserve progress")
+        .messages(vec![Message::User {
+            content: "constraint ".repeat(5000),
+        }])
+        .build()
+        .unwrap();
+    agent.run("diagnose").await.unwrap();
+    let original = serde_json::to_value(agent.messages()).unwrap();
+    let error = agent.run("continue").await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("provider context limit exceeded")
+    );
+    assert_eq!(serde_json::to_value(agent.messages()).unwrap(), original);
+    assert_eq!(
+        server.count(),
+        2,
+        "heuristic estimate is not a hard rejection gate"
+    );
+    assert!(
+        matches!(&agent.finish_interrupted_turn()[..], [Message::User { content }] if content == "continue")
+    );
+}
+
+#[tokio::test]
+async fn restored_archive_compacts_only_latest_working_set() {
+    let server = Server::new(vec![
+        reply(None, Some("run"), 8000),
+        reply(Some("inherited confirmed finding"), None, 0),
+        reply(Some("done"), None, 5),
+    ]);
+    let mut model = config(&server.url, false);
+    model.context_window_tokens = Some(10_000);
+    let mut history = vec![
+        Message::User {
+            content: "obsolete archived task".into(),
+        },
+        Message::Assistant {
+            content: Some("obsolete archived response".into()),
+            reasoning_content: Some("obsolete archived reasoning ".repeat(100_000)),
+            tool_calls: vec![],
+        },
+        Message::ContextSummary {
+            content: "latest summary: running agent has no model name".into(),
+        },
+    ];
+    for i in 0..3 {
+        history.push(Message::Assistant {
+            content: Some("read source".into()),
+            reasoning_content: None,
+            tool_calls: vec![ToolCall {
+                id: format!("history-{i}"),
+                name: "evidence".into(),
+                arguments: "{}".into(),
+            }],
+        });
+        history.push(Message::Tool {
+            tool_call_id: format!("history-{i}"),
+            content: Some("source evidence ".repeat(300)),
+        });
+    }
+    let mut agent = Agent::builder()
+        .model_config(model)
+        .messages(history)
+        .compression_instruction("Preserve findings")
+        .tools(evidence_tools())
+        .build()
+        .unwrap();
+    agent.run("continue current fix").await.unwrap();
+    let requests = server.requests.lock().unwrap();
+    assert_eq!(requests.len(), 3);
+    for request in requests.iter() {
+        assert!(
+            !request["messages"]
+                .to_string()
+                .contains("obsolete archived")
+        );
+    }
+    let compaction = requests[1]["messages"].to_string();
+    assert!(compaction.contains("latest summary: running agent has no model name"));
+    assert!(compaction.contains("source evidence"));
+    assert!(compaction.contains("continue current fix"));
+}
+
+#[tokio::test]
+async fn over_budget_scratchpad_is_removed_before_tool_evidence() {
+    let server = Server::new(vec![
+        reply(None, Some("run"), 8000),
+        reply(Some("confirmed finding"), None, 0),
+        reply(Some("done"), None, 5),
+    ]);
+    let mut model = config(&server.url, false);
+    model.context_window_tokens = Some(10_000);
+    let history = vec![
+        Message::User {
+            content: "original task".into(),
+        },
+        Message::Assistant {
+            content: Some("confirmed conclusion".into()),
+            reasoning_content: Some("scratchpad ".repeat(20_000)),
+            tool_calls: vec![ToolCall {
+                id: "history".into(),
+                name: "evidence".into(),
+                arguments: "{}".into(),
+            }],
+        },
+        Message::Tool {
+            tool_call_id: "history".into(),
+            content: Some("important evidence must remain".into()),
+        },
+        // 尾部另留完整工具组，使带推理的 history 组落入待压缩区。
+        Message::Assistant {
+            content: None,
+            reasoning_content: None,
+            tool_calls: vec![ToolCall {
+                id: "recent".into(),
+                name: "evidence".into(),
+                arguments: "{}".into(),
+            }],
+        },
+        Message::Tool {
+            tool_call_id: "recent".into(),
+            content: Some("recent result ".repeat(700)),
+        },
+    ];
+    let mut agent = Agent::builder()
+        .model_config(model)
+        .messages(history)
+        .compression_instruction("Preserve findings")
+        .tools(evidence_tools())
+        .build()
+        .unwrap();
+    agent.run("continue").await.unwrap();
+    let requests = server.requests.lock().unwrap();
+    let summary = requests[1]["messages"].as_array().unwrap();
+    assert!(summary.iter().all(|m| m.get("reasoning_content").is_none()));
+    assert!(
+        requests[1]["messages"]
+            .to_string()
+            .contains("important evidence must remain")
+    );
+    assert!(
+        requests[1]["messages"]
+            .to_string()
+            .contains("confirmed conclusion")
+    );
 }

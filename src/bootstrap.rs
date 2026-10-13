@@ -50,6 +50,7 @@ pub struct AgentFactory {
     system_prompt: SystemPrompt,
     /// 压缩策略（触发阈值 / 保留比例 / 摘要模板）。来自配置，所有会话共用。
     compression_config: CompressionConfig,
+    max_steps: usize,
     /// 工作目录（工作区根）。桌面界面用它做 `@` 文件检索（`workspace_search`）；
     /// TUI-only 构建下没人读，故放行 dead_code。
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
@@ -153,6 +154,7 @@ impl AgentFactory {
             model_config,
             system_prompt: prompt::build(working_dir.clone()),
             compression_config,
+            max_steps: settings.max_steps,
             working_dir: working_dir.clone(),
             model_catalog,
             session_catalog,
@@ -223,6 +225,7 @@ impl AgentFactory {
             .working_dir(self.working_dir.clone())
             .compression_instruction(COMPRESSION_INSTRUCTION)
             .compression_config(self.compression_config.clone())
+            .max_steps(self.max_steps)
             .context_provider(Arc::new(provider) as Arc<dyn ContextProvider>)
             .tools(tool_manager)
             .messages(messages)
@@ -484,6 +487,15 @@ impl ContextProvider for CompositeContextProvider {
         let parts: Vec<String> = self.providers.iter().filter_map(|p| p.context()).collect();
         (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
+
+    fn compaction_context(&self) -> Option<String> {
+        let parts: Vec<String> = self
+            .providers
+            .iter()
+            .filter_map(|p| p.compaction_context())
+            .collect();
+        (!parts.is_empty()).then(|| parts.join("\n\n"))
+    }
 }
 
 /// 造一份注册好全部工具的 `ToolManager`（bash / read_file 总是注册；
@@ -524,6 +536,7 @@ mod tests {
                 .build(),
             system_prompt: SystemPrompt::from("test"),
             compression_config: CompressionConfig::default(),
+            max_steps: 64,
             working_dir: root.clone(),
             model_catalog: Arc::new(StaticCatalog::builtin()) as Arc<dyn ModelCatalog>,
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
@@ -607,6 +620,34 @@ mod tests {
         }
     }
 
+    struct TaskProvider;
+    impl ContextProvider for TaskProvider {
+        fn context(&self) -> Option<String> {
+            Some("normal task state".into())
+        }
+        fn compaction_context(&self) -> Option<String> {
+            Some("task checkpoint".into())
+        }
+    }
+
+    #[test]
+    fn composite_compaction_context_only_includes_opted_in_state() {
+        let provider = CompositeContextProvider::new(vec![
+            Arc::new(StaticProvider(Some("full skills and memory"))),
+            Arc::new(TaskProvider),
+        ]);
+        assert_eq!(
+            provider.compaction_context().as_deref(),
+            Some("task checkpoint")
+        );
+        assert!(
+            provider
+                .context()
+                .unwrap()
+                .contains("full skills and memory")
+        );
+    }
+
     /// 回归：CompositeContextProvider 顺序拼接多个 provider 的 `context()`；
     /// 全空（或空列表）时返回 `None`，不注入空内容。
     #[test]
@@ -626,7 +667,7 @@ mod tests {
 
         // 全空 / 空列表：返回 `None`，绝不注入空串。
         let none = CompositeContextProvider::new(vec![
-            Arc::new(StaticProvider(None)) as Arc<dyn ContextProvider>,
+            Arc::new(StaticProvider(None)) as Arc<dyn ContextProvider>
         ]);
         assert_eq!(none.context(), None);
         assert_eq!(CompositeContextProvider::new(vec![]).context(), None);

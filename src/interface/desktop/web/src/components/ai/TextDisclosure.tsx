@@ -13,30 +13,42 @@ import { cn } from "@/ui/utils";
 export function TextDisclosure({
   label,
   defaultOpen = false,
+  open: controlledOpen,
+  onOpenChange,
   leading,
   trailing,
   className,
+  triggerClassName,
   contentClassName,
   children,
 }: {
   /** 折叠标题（一行文字）。 */
   label: ReactNode;
   defaultOpen?: boolean;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
   /** 标题左侧图标（可选，尺寸自控）。 */
   leading?: ReactNode;
   /** 标题右侧、chevron 之前的内容（可选，如计数）。 */
   trailing?: ReactNode;
   className?: string;
+  triggerClassName?: string;
   contentClassName?: string;
   children: ReactNode;
 }) {
-  const [open, setOpen] = useState(defaultOpen);
+  const [internalOpen, setInternalOpen] = useState(defaultOpen);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = (next: boolean) => {
+    if (controlledOpen === undefined) setInternalOpen(next);
+    onOpenChange?.(next);
+  };
   return (
     <Collapsible open={open} onOpenChange={setOpen} className={className}>
       <CollapsibleTrigger
         className={cn(
           "group inline-flex items-center gap-1.5 rounded-control text-body-sm text-muted",
           "transition-colors hover:text-ink focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring",
+          triggerClassName,
         )}
       >
         {leading}
@@ -48,7 +60,9 @@ export function TextDisclosure({
           className={cn("shrink-0 transition-transform duration-150", open && "rotate-90")}
         />
       </CollapsibleTrigger>
-      <CollapsibleContent className={contentClassName}>{children}</CollapsibleContent>
+      <CollapsibleContent className={cn("data-[state=closed]:hidden", contentClassName)}>
+        {children}
+      </CollapsibleContent>
     </Collapsible>
   );
 }

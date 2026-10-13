@@ -310,11 +310,8 @@ function FlightMapView({ spec, expanded, onExpand, onClose }: {
     };
     relayoutRef.current = relayout;
 
-    try {
-      chart = echarts.init(host, undefined, { renderer: "canvas" });
-      chartRef.current = chart;
-      chart.setOption(buildOption(spec, readTheme()));
-      relayout();
+    const attachChartEvents = () => {
+      if (!chart) return;
       chart.on("georoam", relayout);
       chart.on("click", (params: { seriesIndex?: number; dataIndex?: number }) => {
         if (params.seriesIndex === 0 && typeof params.dataIndex === "number") {
@@ -330,34 +327,56 @@ function FlightMapView({ spec, expanded, onExpand, onClose }: {
           setSelectedRoute(null);
         }
       });
+    };
+    // Initialize only once the host actually has a box. The expanded copy mounts
+    // inside a <dialog> that is still display:none until the parent effect calls
+    // showModal(); at that first paint clientWidth/Height are 0, and ECharts
+    // throws ("drawImage ... canvas element with a width or height of 0"), so
+    // the map would never render. Defer to the ResizeObserver until a non-zero
+    // box exists, then init/resize. Collapsed maps are already laid out, so this
+    // initializes synchronously.
+    const ensureChart = () => {
+      if (chart && !chart.isDisposed()) return true;
+      if (!host.clientWidth || !host.clientHeight) return false;
+      try {
+        chart = echarts.init(host, undefined, { renderer: "canvas" });
+        chartRef.current = chart;
+        chart.setOption(buildOption(spec, readTheme()));
+        attachChartEvents();
+        relayout();
+        return true;
+      } catch (error) {
+        fail(error);
+        return false;
+      }
+    };
+    ensureChart();
 
-      ro = new ResizeObserver(() => {
-        try {
-          if (chart && !chart.isDisposed()) { chart.resize(); relayout(); }
-        } catch (error) {
-          fail(error);
-        }
-      });
-      ro.observe(host);
+    ro = new ResizeObserver(() => {
+      try {
+        if (!ensureChart()) return;
+        if (chart && !chart.isDisposed()) { chart.resize(); relayout(); }
+      } catch (error) {
+        fail(error);
+      }
+    });
+    ro.observe(host);
 
-      // 跟随明暗主题：data-theme 变化时重画。
-      mo = new MutationObserver(() => {
-        try {
-          if (chart && !chart.isDisposed()) {
-            const currentGeo = (chart.getOption().geo as { center?: number[]; zoom?: number }[])[0];
-            const option = buildOption(spec, readTheme());
-            option.geo = { ...option.geo as object, center: currentGeo.center, zoom: currentGeo.zoom };
-            chart.setOption(option, true);
-            relayout();
-          }
-        } catch (error) {
-          fail(error);
+    // 跟随明暗主题：data-theme 变化时重画。
+    mo = new MutationObserver(() => {
+      try {
+        if (chart && !chart.isDisposed()) {
+          const currentGeo = (chart.getOption().geo as { center?: number[]; zoom?: number }[])[0];
+          const option = buildOption(spec, readTheme());
+          option.geo = { ...option.geo as object, center: currentGeo.center, zoom: currentGeo.zoom };
+          chart.setOption(option, true);
+          relayout();
         }
-      });
-      mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
-    } catch (error) {
-      fail(error);
-    }
+      } catch (error) {
+        fail(error);
+      }
+    });
+    mo.observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
 
     return cleanup;
   }, [spec]);

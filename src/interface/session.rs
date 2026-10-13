@@ -43,6 +43,14 @@ pub struct Session {
     /// 该会话独占的 `Agent`。一轮运行期间被 `take` 出去移入后台任务，结束后放回
     /// （与旧 `take_agent` / `restore_agent` 同款手法，但**每个会话各一份**）。
     pub agent: Option<Agent>,
+    /// 本会话当前模型名的**镜像**。
+    ///
+    /// `Agent` 运行期被 `take` 走后，`agent.model_config()` 就查不到了（desktop
+    /// 切到别的会话再切回来时，运行中的会话正处于此状态）。模型选择器 / 状态行
+    /// 需要**任何时刻**都能回答"本会话用什么模型"，故在会话上留一份。写入点：
+    /// [`Session::new`] 初始化、[`Session::begin_turn`] / [`Session::restore_agent`]
+    /// 与 agent 同步、切换/新建会话后由 [`Session::remember_model`] 刷新。
+    model: Option<String>,
     /// 该会话的消息条目（渲染视图）。
     pub items: Vec<Item>,
     pub waiting: bool,
@@ -105,9 +113,11 @@ impl Session {
         skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
     ) -> Self {
+        let model = Some(agent.model_config().model.clone());
         Self {
             name,
             agent: Some(agent),
+            model,
             items: Vec::new(),
             waiting: false,
             waiting_since: None,
@@ -132,6 +142,25 @@ impl Session {
     /// 本会话任务账本的结构化视图（供 UI 渲染任务进度）；无账本 / 空账本返回 `None`。
     pub fn todo_view(&self) -> Option<TaskView> {
         self.todo.as_ref().and_then(|store| store.view())
+    }
+
+    /// 本会话当前的模型名。
+    ///
+    /// **活 `Agent` 优先、镜像回退**：`Agent` 在（空闲）时以它为准（唯一真相源），
+    /// 运行期 `Agent` 被 `take` 走后回退到 [`Session::model`] 镜像——这样切到别的
+    /// 会话再切回来时，模型选择器 / 状态行仍能显示本会话的模型，而不是空白。
+    pub fn model_name(&self) -> Option<&str> {
+        self.agent
+            .as_ref()
+            .map(|agent| agent.model_config().model.as_str())
+            .or(self.model.as_deref())
+    }
+
+    /// 刷新模型名镜像（在 `Agent` 上改过模型后调用，或从外部拿到 `Agent` 时同步）。
+    pub fn remember_model(&mut self) {
+        if let Some(agent) = self.agent.as_ref() {
+            self.model = Some(agent.model_config().model.clone());
+        }
     }
 
     /// 订阅本会话的事件流（多会话：UI 切到该会话时订阅，切走时丢弃句柄退订）。
@@ -578,11 +607,9 @@ impl SessionManager {
         // 离开前台即视为该会话"本轮结束"——切走后触发一次增量 curation
         // （`docs/memory.md` §5.1；旧会话仍留在内存，其 `Agent` 消息可读）。
         let previous = self.active().name.clone();
-        let selected_model = self
-            .active()
-            .agent
-            .as_ref()
-            .map(|agent| agent.model_config().model.clone());
+        // 用会话级查询（活 Agent 优先、镜像回退）——离开的会话若正在运行，其 `Agent`
+        // 已被 `take` 走，直接读 `agent` 会拿不到模型。
+        let selected_model = self.active().model_name().map(str::to_owned);
         if let Some(id) = self.id_of_name(name) {
             self.active = id;
             if let Some(previous) = previous.filter(|p| p != name) {
@@ -628,11 +655,8 @@ impl SessionManager {
     pub fn create_new(&mut self, title: Option<&str>) -> Result<String, String> {
         // 与 `switch_to` 同理：新建并切走 = 旧会话本轮结束，触发一次 curation。
         let previous = self.active().name.clone();
-        let selected_model = self
-            .active()
-            .agent
-            .as_ref()
-            .map(|agent| agent.model_config().model.clone());
+        // 与 `switch_to` 同理：会话级查询，运行期也能拿到模型。
+        let selected_model = self.active().model_name().map(str::to_owned);
         let factory = self
             .factory
             .as_ref()
@@ -741,6 +765,8 @@ impl SessionManager {
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn begin_turn(&mut self, name: &str, user_message: String) -> Option<Agent> {
         let session = self.session_mut(name)?;
+        // 先把当前模型名同步进镜像，再 `take` 走 `Agent`——运行期镜像仍可回答本会话模型。
+        session.remember_model();
         let agent = session.agent.take()?;
         session.running = true;
         session.push_message(Role::User, user_message);
@@ -753,6 +779,7 @@ impl SessionManager {
         if let Some(session) = self.session_mut(name) {
             session.agent = Some(agent);
             session.running = false;
+            session.remember_model();
             session.finish_turn();
         }
     }
@@ -892,10 +919,11 @@ impl SessionManager {
         self.active().agent.as_ref()
     }
 
-    /// 前台会话的 `Agent`（可变）。运行中返回 `None`。
+    /// 前台会话当前的模型名。**运行期也可用**——经 [`Session::model_name`] 的镜像回退，
+    /// 不依赖 `Agent` 是否在场（desktop 切走再切回时前台会话可能正在运行）。
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
-    pub fn active_agent_mut(&mut self) -> Option<&mut Agent> {
-        self.active_mut().agent.as_mut()
+    pub fn active_model_name(&self) -> Option<&str> {
+        self.active().model_name()
     }
 }
 
@@ -951,6 +979,41 @@ mod tests {
 
         // 同一会话运行中不得再次发起（不并发驱动同一 Agent）。
         assert!(manager.begin_turn("s", "again".into()).is_none());
+    }
+
+    /// 回归：会话运行中（`Agent` 被 `take` 走）仍能查到本会话的模型名。
+    ///
+    /// desktop 切到别的会话再切回来时，前台会话可能正在运行——此时其 `Agent`
+    /// 不在 `Session` 里，`active_agent()` 返回 `None`。此前 `agent_model_name`
+    /// 走 `active_agent().map(...).unwrap_or_default()`，于是前端拿到空串、模型
+    /// 选择器被清空（「切走再切回模型不恢复」）。镜像字段 `Session::model` 必须
+    /// 在 `Agent` 不在场时兜住这个查询。
+    #[test]
+    fn model_name_survives_running_turn() {
+        let mut manager = manager();
+        assert_eq!(manager.active_model_name(), Some("test"), "空闲时读活 Agent");
+
+        let _agent = manager.begin_turn("s", "hi".into()).unwrap();
+        assert!(manager.is_running("s"));
+        assert_eq!(
+            manager.active_model_name(),
+            Some("test"),
+            "运行期 Agent 被 take 走，镜像仍应回答本会话模型"
+        );
+    }
+
+    /// 回归：热切换模型后镜像同步，切走再切回仍显示新模型。
+    #[test]
+    fn remember_model_tracks_hot_switch() {
+        let mut manager = manager();
+        manager
+            .active_mut()
+            .agent
+            .as_mut()
+            .unwrap()
+            .set_model("other");
+        manager.active_mut().remember_model();
+        assert_eq!(manager.active_model_name(), Some("other"));
     }
 
     /// 回归：删除**未加载**（仅存在于磁盘、从未被打开）的会话必须放行。

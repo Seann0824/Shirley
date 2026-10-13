@@ -82,7 +82,7 @@ Shirley 现在只有一个界面：`src/interface/` 下的 ratatui TUI。本方�
 | shiwen 源 | 作用 | 处置 |
 | --- | --- | --- |
 | `apps/web/src/lib/components/ai/AiConversationSurface.tsx` | 会话外壳（transcript + composer） | copy |
-| `apps/web/src/lib/components/ai/AiConversationTranscript.tsx` | 消息列表 + 自动滚动 + 头像 | copy（去掉 minimap） |
+| `apps/web/src/lib/components/ai/AiConversationTranscript.tsx` | 消息列表 + 自动滚动 + 头像 | copy（含 minimap） |
 | `apps/web/src/lib/components/ai/AiChatComposer.tsx` | 输入框（自适应 / Enter 发送 / 停止） | copy |
 | `apps/web/src/lib/components/ai/AiMessageTimeline.tsx` | 文本块与工具卡按 `content_offset` 交错 | copy |
 | `apps/web/src/lib/components/ai/AiMarkdown.tsx` | 流式 markdown（基于 `streamdown`） | copy（去掉 citation 插件） |
@@ -107,7 +107,7 @@ Shirley 现在只有一个界面：`src/interface/` 下的 ratatui TUI。本方�
 | **OCR / 素材上传**（`fetchMaterialOcrStatuses` / `handleMaterialUploaded`） | shiwen 桌面应用 | 删 |
 | **桌面工作区切换器**（`useDesktopWorkspaces` / `DesktopScreen`） | shiwen 桌面登录/工作区（绑定其账号体系） | 删 shiwen 实现；**Shirley 自建多项目 UX**（见 4.5） |
 | **SSE 线格式**（`packages/ai-session` 的 `parseAiStreamEvent` / `streamAiMessage`） | shiwen 服务端协议 | **重绑**到 Shirley 的 `AgentEvent`（见第六节） |
-| `AiConversationMinimap`（轮次缩略图） | 依赖 shiwen 消息结构，非核心 | 可删（第一步先删，后续想要再加） |
+| `AiConversationMinimap`（轮次缩略图） | 聊天区左侧一排小短线，hover 预览 / 点击跳转历史用户轮次 | copy（已启用：`AiConversationTranscript` 传 `showTurnMinimap`） |
 | `lucide-react` 之外的 shiwen 依赖（tiptap / blocknote / pdfjs / tesseract 等） | shiwen 文档/OCR 栈 | 不引入 |
 
 > **确认点**：上表每一条都需用户签字。
@@ -239,43 +239,41 @@ shiwen 的 `AiConversationSurface` 把**转写区 + 输入框**一起包在
 > 不依赖 `twMerge` 的先后顺序。改 `AiMarkdown.tsx` 的 `BASE_COMPONENTS` 时记得：
 > 组件层字号会被这里的 CSS 再盖一次，两者要一起看。
 
-### 4.3.4 一轮回复按事件顺序线性渲染 + 思考折叠（**已落地**）
+### 4.3.4 线性段落与整轮过程折叠（代码已实现，UI 待用户验证）
 
-对标 TUI 的**线性消息流**。TUI（`app.rs`）把一轮回复拆成有序的 `Item`：思考块 → 正文 →
-工具组（`Item::Tools`），**按事件发生顺序**排列，可以出现「思考 → 正文 → 工具 → 正文 →
-思考 → 工具」这种交错。desktop 原先相反：`AssistantMessage.tsx` 把该轮**所有** `executions`
-合成**一个** `AiToolActivityDisclosure`，挂在 `contentOffset = executions[0]?.content_offset`
-上——而 `content_offset` 根本没被填充（恒 `undefined` → 0），于是**所有工具调用都堆在正文
-顶部**；`reasoning_delta` 更是被 `App.tsx` 直接 `break` 丢弃。
+`AiSegment` 保存按事件顺序排列的 `content`、`tools`、`compact`。相邻同类型增量合并，
+工具完成事件原地更新对应执行项。原始 thinking 不进入可见段落流。
 
-> **走过的弯路**：第一次修只是给 `tool_started` 补上 `content_offset`（正文码点偏移），
-> 让 `AiMessageTimeline` ���偏移把工具插进正文。但用户实测仍「所有工具堆在一处」——
-> 因为一轮里多个 `tool_started` 是**连续**发生的，它们的 offset 相同，于是又归并到同一
-> 折叠区；而且「思考块 / 工具块本身是流中的独立段落」这件事，**偏移模型根本表达不了**。
-> 结论：不要用「正文偏移」去定位工具，而要把一轮回复直接切成**线性段落数组**。
+对照用户提供的 Codex 截图，一轮助手消息只渲染一个过程折叠：
 
-**最终模型：线性 segments（对标 TUI 的 items 数组）。** `types/ai.ts` 定义
-`AiSegment = { kind:"content"; text } | { kind:"reasoning"; text } | { kind:"tools"; executions }`。
+- 执行中显示「正在处理…」，过程默认展开；用户可手动收起，后续增量不会反复打开它。
+- 完成时自动收起，标题显示「处理用时 1分 11秒」等实际前端计时；没有计时数据的历史显示
+  「处理过程」，不伪造耗时。分隔线固定在折叠标题行下方，展开内容在线下增长，
+  不再把分隔线挂在整个折叠容器底部。最终答复在外部显示。
+- compact 记录归入整轮过程，保持原有时序，可单独展开摘要。compact 不再把外层拆成多组。
+- 工具组以「读取文件、搜索网页 · N 项」等文字概括，展开过程后默认展示简洁活动行。
+  每行可展开参数与输出，失败显示明确状态；长内容局部滚动，普通工具不再铺满大卡片。
+- 本地缓存保留已收到的工具输出、失败状态和已知耗时；历史快照没有输出时如实说明。
+  窗口重启后没有持久化的耗时/工具输出不会被补造。
+- 停止或失败显示对应标题，不把工具执行前的中间说明当最终答复。
 
-- **`App.tsx`** 持有 `turnSegments: Record<assistantId, AiSegment[]>`。每个事件到达时
-  `appendSegment`：**连续同类型的增量并进同一段，类型一换就新开一段**（对标 TUI
-  `append_streaming_delta`）。于是数组顺序天然是事件顺序：
-  `reasoning_delta` → reasoning 段、`content_delta` → content 段、`tool_started` → tools 段。
-  `tool_finished` 只**原地更新**已有 tools 段里的对应执行项（不新开段）。
-- **`AssistantMessage.tsx`** 拿到 `segments` 后**按数组顺序**渲染，`gap-3` 分隔：
-  `content` → `AiMarkdown`；`reasoning` → `ReasoningDisclosure`（折叠区）；`tools` →
-  `AiToolActivityDisclosure`（折叠区）。`streaming` 只标给**最后一段**（正在增长的那段）。
+耗时在 React 状态更新函数外取样和清理，避免 StrictMode 重放更新函数时丢失。
+切回仍在执行的会话时，最后一轮恢复流式展示；本次进程中已有起始计时会保留。
 
-**思考折叠区**：`@/ui/collapsible` + `Brain`/`ChevronDown` 图标，收起时一行「思考过程」
-（流式中显示「正在思考」），展开显示完整思考文本（`border-l-2` 竖线 + muted 色，呼应 TUI 的
-暗色斜体思考块）。默认**收起**，不喧宾夺主。
+**手动验收（尚未由用户实际验证）：**
 
-**连续工具收集**仍保留（见 4.3.2）：同一 tools 段内的执行项收进一个
-`AiToolActivityDisclosure`，渲染成一行「查看处理过程 · N 项」。
+1. 打开包含多次 compact 的旧会话：每轮仅有一个「处理过程」，最终正文在其下方；
+   展开后可按时序找到原来的工具与所有压缩摘要。
+2. 发起需要读文件、执行命令的任务：运行时展开过程，结束后自动收起并显示真实耗时；
+   手动重新展开可看见说明和工具活动行，逐项可展开参数与输出。
+3. 执行中手动收起过程：新事件不自动抢回展开状态；仍能看到运行指示，完成后最终正文出现。
+4. 展开工具详情后切换会话再切回：已接收的输出与失败状态保留；运行中的会话仍显示处理中。
+5. 停止或制造工具/请求错误：停止与失败状态明确，过程可回看，中间说明不冒充最终答复。
+6. 窄窗口与键盘操作：标题截断不撑宽聊天区，Tab 可聚焦折叠标题，Enter/Space 可展开收起。
+7. 反复展开/收起过程，并展开工具详情和压缩摘要：分隔线始终紧跟标题，
+   与标题的间距、左右边界保持不变；收起后隐藏内容的 padding 不残留空白。
 
-> 旧的偏移模型 `AiMessageTimeline` 现已无引用（`App.tsx` / `AssistantMessage.tsx` 都不再用），
-> 保留文件未删（Vite tree-shake 掉，不影响 bundle）。它若将来还要用，需先把 `content_offset`
-> 真正填对——但线性 segment 模型已经能覆盖「交错」需求，`AiMessageTimeline` 大概率不再需要。
+不编写 UI 单元测试。静态验证仅执行前端 typecheck 与 production build，不能代替上述人工验收。
 
 ### 4.3.5 聊天航线地图（代码已实现，UI 待用户验收）
 
@@ -333,6 +331,7 @@ Shirley 是独立 app，不绑定单一目录。左侧栏把**多个工作区登
 - **恢复项目**：右键归档分组里的项目行 → 「恢复」，项目回到「项目」分组，下次打开懒加载。
 - **展开 / 折叠项目**：点项目名只切换该分组的展开 / 折叠，**不切换当前会话**——只要用户没有主动切换 / 操作 session，切项目不应改变选中的 session（点项目名不再自动打开该项目"当前会话"）。切到别的项目（及其会话）只由**显式动作**触发：点会话行、点项目行的「＋ 新建会话」。项目内会话的置顶 / 折叠状态用 `localStorage` 记忆。
 - **会话行操作**（右键）：置顶 / 取消置顶、重命名（内联编辑）、删除（菜单内二次确认）。
+- **侧边栏折叠 / 展开**：右上角常驻「收起」按钮（`PanelLeftClose`）把整栏宽度收到 0（`transition-[width]` 平滑过渡）；折叠后主区左上角浮出「展开」按钮（`PanelLeftOpen`，绝对定位，不占布局）。偏好存 `localStorage`（`shirley.desktop.sidebar-collapsed`）。**窗口放不下时自动收起**：`matchMedia('(max-width: 900px)')` 跨入窄视口即折叠（900 = sidebar 256 + 内容 760 已放不下），只单向收、不自动弹回——尊重用户之后的显式展开。
 
 前端视图键 = `project::session`（会话名只在项目内唯一，跨项目会重名）；事件带 `project` + `session` 两个字段供路由。
 注册表与命令契约见第六节。

@@ -5,6 +5,7 @@ import {
   FolderPlus,
   Loader2,
   MoreHorizontal,
+  PanelLeftClose,
   Pencil,
   Pin,
   PinOff,
@@ -80,6 +81,8 @@ export function SessionSidebar({
   onNew,
   onRename,
   onDelete,
+  collapsed = false,
+  onToggleCollapse,
   className,
 }: {
   /** 活跃项目（非归档），按最近打开降序。 */
@@ -98,6 +101,10 @@ export function SessionSidebar({
   onRename: (project: string, name: string, title: string) => void;
   /** 删除会话（按项目 + 名定位）。 */
   onDelete: (project: string, name: string) => void;
+  /** 折叠态：整体隐藏（宽度归零），由外层在左上角浮出「展开」按钮。 */
+  collapsed?: boolean;
+  /** 切换折叠（手动）。 */
+  onToggleCollapse?: () => void;
   className?: string;
 }) {
   // 每个项目的会话列表（按项目 id 缓存，App 不持有）。所有已加载项目共享同一轮询。
@@ -105,7 +112,7 @@ export function SessionSidebar({
   const aliveRef = useRef(true);
   const [pinned, setPinned] = useState<string[]>(() => readStringArray(PINNED_STORAGE_KEY));
   // 折叠的项目 id（默认全部展开）。
-  const [collapsed, setCollapsed] = useState<string[]>(() => readStringArray(COLLAPSED_STORAGE_KEY));
+  const [collapsedProjects, setCollapsedProjects] = useState<string[]>(() => readStringArray(COLLAPSED_STORAGE_KEY));
   // 正在重命名的目标（项目 id 或会话名）与草稿值。
   const [editingProject, setEditingProject] = useState<string | null>(null);
   const [editingSession, setEditingSession] = useState<string | null>(null);
@@ -166,7 +173,7 @@ export function SessionSidebar({
   };
 
   const toggleCollapsed = (project: string) => {
-    setCollapsed((prev) => {
+    setCollapsedProjects((prev) => {
       const next = prev.includes(project)
         ? prev.filter((item) => item !== project)
         : [...prev, project];
@@ -335,11 +342,25 @@ export function SessionSidebar({
 
   return (
     <aside
+      aria-hidden={collapsed || undefined}
       className={cn(
-        "flex h-full w-64 shrink-0 flex-col border-r border-line bg-sidebar",
+        "flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-sidebar transition-[width] duration-200 ease-product",
+        collapsed ? "w-0 border-r-0" : "w-64",
         className,
       )}
     >
+      {/* 顶部操作行：折叠按钮常驻在右上角，始终可点。 */}
+      <div className="flex items-center justify-end px-2 pt-2">
+        <button
+          type="button"
+          aria-label="收起侧边栏"
+          title="收起侧边栏"
+          className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
+          onClick={() => onToggleCollapse?.()}
+        >
+          <PanelLeftClose className="size-4" />
+        </button>
+      </div>
       <ScrollArea type="auto" className="min-h-0 flex-1" viewportClassName="px-2 pb-3">
         {/* Pinned：手动置顶（仅本地）。无置顶时不显示该分组。 */}
         {pinnedEntries.length > 0 && (
@@ -384,7 +405,7 @@ export function SessionSidebar({
               <p className="px-2 py-1.5 text-caption text-muted">还没有项目，右键「项目」新建。</p>
             )}
             {groups.map(({ entry, sessions: projectSessions }) => {
-              const isCollapsed = collapsed.includes(entry.id);
+              const isCollapsed = collapsedProjects.includes(entry.id);
               const isEditing = editingProject === entry.id;
               const isConfirming = confirmingArchive === entry.id;
               const projectMenu = (

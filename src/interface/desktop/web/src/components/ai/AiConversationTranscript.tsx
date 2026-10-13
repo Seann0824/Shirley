@@ -10,6 +10,7 @@ import { AiConversationMinimap } from "@/components/ai/AiConversationMinimap";
 import { AiAssistantAvatar } from "./AiAssistantAvatar";
 import { AiMarkdown } from "@/components/ai/AiMarkdown";
 import type { FileReference } from "@/lib/file-mentions/types";
+import type { StopReason } from "@/types/wire";
 
 export type AiTranscriptMessage = {
   id: Key;
@@ -20,6 +21,7 @@ export type AiTranscriptMessage = {
   references?: FileReference[];
   /** 本轮助手回复的处理用时（毫秒）；用于「处理用时 Ns」折叠标题。 */
   durationMs?: number;
+  stopReason?: StopReason;
 };
 
 export function AiConversationTranscript({

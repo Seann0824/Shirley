@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LoaderCircle } from "lucide-react";
+import { LoaderCircle, PanelLeftClose, PanelLeftOpen } from "lucide-react";
 import {
   AiConversationTranscript,
   type AiTranscriptMessage,
@@ -27,6 +27,29 @@ import type { AiSegment, AiToolExecution } from "@/types/ai";
 
 let messageSeq = 0;
 const nextId = () => `m${++messageSeq}`;
+
+/** 侧边栏折叠偏好（仅本地 UI 状态，不跨端 / 不落库）。 */
+const SIDEBAR_STORAGE_KEY = "shirley.desktop.sidebar-collapsed";
+
+function readBool(key: string, fallback: boolean): boolean {
+  try {
+    const raw = window.localStorage.getItem(key);
+    return raw === null ? fallback : raw === "1";
+  } catch {
+    return fallback;
+  }
+}
+
+function writeBool(key: string, value: boolean) {
+  try {
+    window.localStorage.setItem(key, value ? "1" : "0");
+  } catch {
+    // localStorage 不可用（隐私模式等）时静默降级：状态仅当次会话有效。
+  }
+}
+
+/** 视口窄于该宽度时自动收起侧边栏（sidebar 256px + 内容 760px 已放不下）。 */
+const SIDEBAR_AUTO_COLLAPSE_PX = 900;
 
 /**
  * 单个会话的视图状态（transcript + 每轮段落 + busy / 错误）。
@@ -117,6 +140,30 @@ export function App() {
   const [model, setModel] = useState("");
   // UI 级错误（项目 / 会话 / 模型切换失败）；运行期错误进各会话视图的 `error`。
   const [uiError, setUiError] = useState("");
+  // 侧边栏折叠：用户手动偏好（持久化）。窗口过窄时自动置为收起，之后仍可手动展开。
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
+    readBool(SIDEBAR_STORAGE_KEY, false),
+  );
+
+  const toggleSidebar = useCallback(() => {
+    setSidebarCollapsed((prev) => {
+      const next = !prev;
+      writeBool(SIDEBAR_STORAGE_KEY, next);
+      return next;
+    });
+  }, []);
+
+  // 窗口放不下时自动收起：跨入窄视口即折叠（不自动弹回，尊重用户之后的显式选择）。
+  useEffect(() => {
+    const query = window.matchMedia(`(max-width: ${SIDEBAR_AUTO_COLLAPSE_PX}px)`);
+    const apply = (matches: boolean) => {
+      if (matches) setSidebarCollapsed(true);
+    };
+    apply(query.matches);
+    const onChange = (event: MediaQueryListEvent) => apply(event.matches);
+    query.addEventListener("change", onChange);
+    return () => query.removeEventListener("change", onChange);
+  }, []);
 
   const mentionSearch = useFileMentionSearch(activeProject);
   const slashSearch = useSkillSlashSearch(activeProject);
@@ -151,7 +198,7 @@ export function App() {
     // （与 TUI `App::complete_turn` 的打断语义一致）。
     if (event.type === "finished" && event.stop_reason === "cancelled") {
       const startedAt = turnStartRef.current.get(key);
-      const durationMs = startedAt ? Date.now() - startedAt : undefined;
+      const durationMs = startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : undefined;
       turnRef.current.delete(key);
       turnStartRef.current.delete(key);
       setViews((prev) => {
@@ -161,7 +208,7 @@ export function App() {
           [key]: {
             ...view,
             messages: view.messages.map((message) =>
-              message.status === "streaming" ? { ...message, status: "complete", durationMs } : message,
+              message.status === "streaming" ? { ...message, status: "complete", durationMs, stopReason: "cancelled" } : message,
             ),
             turnSegments: Object.fromEntries(Object.entries(view.turnSegments).map(([id, segments]) => [
               id,
@@ -190,6 +237,13 @@ export function App() {
       assistantId = nextId();
       turnRef.current.set(key, assistantId);
     }
+    const finishing = event.type === "finished" || event.type === "error";
+    const startedAt = turnStartRef.current.get(key);
+    const durationMs = finishing && startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : undefined;
+    if (finishing) {
+      turnRef.current.delete(key);
+      turnStartRef.current.delete(key);
+    }
     setViews((prev) => {
       const view = prev[key] ?? emptyView();
       let next = view;
@@ -209,10 +263,8 @@ export function App() {
       }
       let updated = applyWireEvent(next, event, assistantId);
       // 轮次收尾（完成 / 出错）：把本轮耗时写到 assistant 消息上，供「处理用时 Ns」折叠。
-      if ((event.type === "finished" || event.type === "error") && assistantId) {
-        const startedAt = turnStartRef.current.get(key);
-        if (startedAt) {
-          const durationMs = Date.now() - startedAt;
+      if (finishing && assistantId) {
+        if (durationMs !== undefined) {
           updated = {
             ...updated,
             messages: updated.messages.map((message) =>
@@ -220,7 +272,6 @@ export function App() {
             ),
           };
         }
-        turnStartRef.current.delete(key);
       }
       return { ...prev, [key]: updated };
     });
@@ -253,7 +304,6 @@ export function App() {
       readyRef.current.delete(key);
       bufferRef.current.delete(key);
       turnRef.current.delete(key);
-      turnStartRef.current.delete(key);
       let sub;
       try {
         sub = await bridge.openSession(project, session, (event) => {
@@ -278,7 +328,43 @@ export function App() {
       subRef.current = sub;
       const { view, lastAssistantId } = viewFromSnapshot(sub.snapshot);
       if (lastAssistantId) turnRef.current.set(key, lastAssistantId);
-      setViews((prev) => ({ ...prev, [key]: view }));
+      if (!sub.snapshot.running) turnStartRef.current.delete(key);
+      setViews((prev) => {
+        const cached = prev[key];
+        const turnSegments = { ...view.turnSegments };
+        const messages = view.messages.map((message, index) => {
+          const previous = cached?.messages[index];
+          if (message.role !== "assistant" || previous?.role !== "assistant" || !message.content.startsWith(previous.content)) return message;
+          const cachedTools = new Map(
+            (cached.turnSegments[String(previous.id)] ?? []).flatMap((segment) =>
+              segment.kind === "tools" ? segment.executions.map((execution) => [execution.id, execution] as const) : [],
+            ),
+          );
+          turnSegments[String(message.id)] = (turnSegments[String(message.id)] ?? []).map((segment) =>
+            segment.kind === "tools" ? {
+              ...segment,
+              executions: segment.executions.map((execution) => {
+                const old = cachedTools.get(execution.id);
+                return old && old.tool_name === execution.tool_name && old.status !== "running" && old.status !== "pending"
+                  && JSON.stringify(old.input) === JSON.stringify(execution.input) ? old : execution;
+              }),
+            } : segment,
+          );
+          return {
+            ...message,
+            durationMs: previous.durationMs,
+            stopReason: previous.stopReason,
+          };
+        });
+        return {
+          ...prev,
+          [key]: {
+            ...view,
+            messages,
+            turnSegments,
+          },
+        };
+      });
       readyRef.current.add(key);
       const buffered = bufferRef.current.get(key) ?? [];
       bufferRef.current.delete(key);
@@ -481,18 +567,15 @@ export function App() {
         };
       });
 
-      const bridge = await agentBridge();
       try {
+        const bridge = await agentBridge();
         await bridge.send(project, session, text, sendPaths);
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
-        setViews((prev) => {
-          const view = prev[key] ?? emptyView();
-          return { ...prev, [key]: { ...view, busy: false, error: message } };
-        });
+        applyEvent(key, { type: "error", message, project, session });
       }
     },
-    [views],
+    [views, applyEvent],
   );
 
   const send = useCallback(async () => {
@@ -598,9 +681,23 @@ export function App() {
   const error = uiError || view.error;
 
   return (
-    <div className="flex h-screen w-full min-h-0 bg-canvas">
+    <div className="relative flex h-screen w-full min-h-0 bg-canvas">
+      {/* 折叠态：主区左上角浮出「展开」按钮，让 sidebar 收起后仍可唤回。 */}
+      {sidebarCollapsed && (
+        <button
+          type="button"
+          aria-label="展开侧边栏"
+          title="展开侧边栏"
+          className="absolute left-3 top-3 z-30 flex size-7 items-center justify-center rounded-control border border-line bg-overlay text-muted shadow-overlay transition-colors hover:bg-selected hover:text-ink"
+          onClick={toggleSidebar}
+        >
+          <PanelLeftOpen className="size-4" />
+        </button>
+      )}
       {/* 左侧 sidebar：NewChat / 置顶 / 项目（多项目 + 会话导航）。 */}
       <SessionSidebar
+        collapsed={sidebarCollapsed}
+        onToggleCollapse={toggleSidebar}
         projects={projects}
         activeProject={activeProject}
         current={sessionName}
@@ -625,6 +722,7 @@ export function App() {
         <AiConversationTranscript
           messages={view.messages}
           conversationKey={activeProject && sessionName ? viewKey(activeProject, sessionName) : "main"}
+          showTurnMinimap
           extraContentKey={busy ? "busy" : ""}
           emptyContent={
             <div className="flex flex-col items-center gap-4 px-4 py-6 text-center sm:py-10">
@@ -651,6 +749,8 @@ export function App() {
                 streaming={message.status === "streaming"}
                 segments={view.turnSegments[String(message.id)] ?? []}
                 durationMs={message.durationMs}
+                failed={message.status === "error"}
+                stopReason={message.stopReason}
               />
             ) : (
               <InlineReferences content={message.content} references={message.references ?? []} />
@@ -837,7 +937,7 @@ function applyWireEvent(
         busy: false,
         compressing: false,
         messages: view.messages.map((message) =>
-          message.id === assistantId ? { ...message, status: "complete" } : message,
+          message.id === assistantId ? { ...message, status: "complete", stopReason: event.stop_reason } : message,
         ),
       };
     }
@@ -903,6 +1003,7 @@ function updateTool(
       ...executions[executionIndex],
       status: event.ok ? "complete" : "error",
       summary: event.output.slice(0, 200),
+      result_json: event.output,
       error: event.ok ? null : event.output,
     };
     next[segmentIndex] = { ...segment, executions };
@@ -972,6 +1073,7 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
       pushSegment(id, { kind: "content", text: item.content });
       const message = messages.find((m) => m.id === id);
       if (message) message.content += item.content;
+      if (message && item.role === "error") message.status = "error";
     } else {
       const id = ensureAssistant();
       pushSegment(id, {
@@ -988,6 +1090,12 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
         ),
       });
     }
+  }
+
+  if (snapshot.running) {
+    const id = ensureAssistant();
+    const current = messages.find((message) => message.id === id);
+    if (current) current.status = "streaming";
   }
 
   return {

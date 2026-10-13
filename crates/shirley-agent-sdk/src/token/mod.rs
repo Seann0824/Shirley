@@ -45,7 +45,7 @@ pub fn count_text(text: &str) -> u64 {
 }
 
 /// 单个字符的 token 权重。分档依据见 [`count_text`]。
-fn char_weight(ch: char) -> f64 {
+pub(crate) fn char_weight(ch: char) -> f64 {
     let code = ch as u32;
     if is_cjk(code) {
         1.0
