@@ -10,6 +10,7 @@ import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
 import { AiConversationSkeleton } from "@/components/ai/AiConversationSkeleton";
+import { AiConversationMinimap } from "@/components/ai/AiConversationMinimap";
 import { InlineReferences } from "@/lib/file-mentions/FileChips";
 import { FileMentionPopover } from "@/lib/file-mentions/FileMentionPopover";
 import {
@@ -168,6 +169,8 @@ export function App() {
   const mentionSearch = useFileMentionSearch(activeProject);
   const slashSearch = useSkillSlashSearch(activeProject);
   const editorRef = useRef<MentionEditorHandle>(null);
+  // 对话轨迹（minimap）要挂到 parent content（section）的左侧边缘，需要共享滚动视口。
+  const transcriptViewportRef = useRef<HTMLDivElement>(null);
   // 当前订阅句柄（切走时退订）。
   const subRef = useRef<SessionSubscription | null>(null);
   // 每个会话当前在跑的 assistant 轮次 id（事件按它落点），键为 `project::session`。
@@ -711,7 +714,7 @@ export function App() {
       />
       {/* 右侧主区：固定宽度居中（对齐 shiwen AiConversationSurface 的 max-w-190 = 760px）。
           聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}
-      <main className="flex min-h-0 flex-1 flex-col">
+      <main className="relative flex min-h-0 flex-1 flex-col">
         <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
         {view.loading ? (
           // 历史快照尚未到达：先渲染骨架屏，给用户「正在加载消息记录」的即时反馈。
@@ -722,7 +725,7 @@ export function App() {
         <AiConversationTranscript
           messages={view.messages}
           conversationKey={activeProject && sessionName ? viewKey(activeProject, sessionName) : "main"}
-          showTurnMinimap
+          viewportRef={transcriptViewportRef}
           extraContentKey={busy ? "busy" : ""}
           emptyContent={
             <div className="flex flex-col items-center gap-4 px-4 py-6 text-center sm:py-10">
@@ -832,6 +835,14 @@ export function App() {
           />
         </div>
         </section>
+        {/* 对话轨迹：挂在聊天区最外层容器（main）的左侧边缘，hover 预览历史用户轮次。 */}
+        {view.messages.some((message) => message.role === "user") && (
+          <AiConversationMinimap
+            messages={view.messages}
+            viewportRef={transcriptViewportRef}
+            className="left-6"
+          />
+        )}
       </main>
     </div>
   );
