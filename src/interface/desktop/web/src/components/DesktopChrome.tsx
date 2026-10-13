@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowLeft, ArrowRight, Folder, FolderPlus, House,
-  MessageSquarePlus, Moon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Sun,
+  MessageSquarePlus, Moon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, SquarePen, Sun,
 } from "lucide-react";
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from "@/ui/context-menu";
 import { cn } from "@/ui/utils";
@@ -66,6 +66,8 @@ export function DesktopChrome({
 
   return (
     <div className="flex h-dvh min-h-0 w-full flex-col overflow-hidden bg-canvas">
+      {/* 48px 标题栏与 tauri.conf.json 的 trafficLightPosition.y=26 配套；
+          原生 y 是容器 inset，并不是按钮中心，20 会让红黄绿按钮偏高约 6px。 */}
       <header
         className={cn("flex h-12 shrink-0 items-center gap-1 border-b border-line bg-sidebar pr-3 select-none", isMacDesktop ? "pl-[88px]" : "pl-3")}
         data-tauri-drag-region
@@ -79,6 +81,7 @@ export function DesktopChrome({
         <IconButton label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} aria-expanded={!sidebarCollapsed} onClick={onToggleSidebar}>
           {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
         </IconButton>
+        <IconButton label="新建会话" onClick={onNewChat}><SquarePen className="size-4" /></IconButton>
         <div className="mx-2 h-5 w-px shrink-0 bg-line" />
         <div className="flex min-w-0 flex-1 items-center gap-2 self-stretch" data-tauri-drag-region>
           <Folder className="size-4 shrink-0 text-muted pointer-events-none" />

@@ -13,7 +13,7 @@
         "title": "Shirley",
         "titleBarStyle": "Overlay",
         "hiddenTitle": true,
-        "trafficLightPosition": { "x": 16, "y": 20 },
+        "trafficLightPosition": { "x": 16, "y": 26 },
         "width": 1000,
         "height": 760,
         "minWidth": 480,

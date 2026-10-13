@@ -7,7 +7,7 @@ mod tool_calling;
 pub use tool_calling::ToolCallingMode;
 
 use futures::StreamExt;
-use reqwest::header::HeaderMap;
+use reqwest::header::{HeaderMap, HeaderValue};
 use std::{format, pin::Pin};
 
 use crate::error::{ErrorKind, SdkError};
@@ -124,6 +124,55 @@ impl SdkError for AdapterError {
 pub struct ModelRequest<'a> {
     pub messages: &'a [message::Message],
     pub tools: &'a [&'a tool::ToolDefinition],
+    /// Optional application conversation key for a local stateful proxy.
+    pub session_id: Option<&'a str>,
+}
+
+/// Local proxies may keep a browser conversation for one application session. Never send this
+/// app identity to remote model providers.
+pub(crate) fn attach_local_session_header(
+    headers: &mut HeaderMap,
+    base_url: &str,
+    session_id: Option<&str>,
+) -> Result<(), AdapterError> {
+    let Some(session_id) = session_id else {
+        return Ok(());
+    };
+    let is_loopback = reqwest::Url::parse(base_url)
+        .ok()
+        .and_then(|url| {
+            url.host_str().map(|host| {
+                host.eq_ignore_ascii_case("localhost")
+                    || host
+                        .parse::<std::net::IpAddr>()
+                        .is_ok_and(|address| address.is_loopback())
+            })
+        })
+        .unwrap_or(false);
+    if !is_loopback {
+        return Ok(());
+    }
+    let value = HeaderValue::from_str(session_id).map_err(|error| {
+        AdapterError::Encode(format!("session id is not a valid header value: {error}"))
+    })?;
+    headers.insert("x-shirley-session-id", value);
+    Ok(())
+}
+
+#[cfg(test)]
+mod session_header_tests {
+    use super::*;
+
+    #[test]
+    fn sends_session_identity_only_to_loopback_endpoints() {
+        let mut local = HeaderMap::new();
+        attach_local_session_header(&mut local, "http://127.0.0.1:8788/v1/chat/completions", Some("session-1")).unwrap();
+        assert_eq!(local.get("x-shirley-session-id").unwrap(), "session-1");
+
+        let mut remote = HeaderMap::new();
+        attach_local_session_header(&mut remote, "https://api.example.com/v1/chat/completions", Some("session-1")).unwrap();
+        assert!(remote.get("x-shirley-session-id").is_none());
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -280,6 +329,7 @@ pub async fn invoke<'a>(
         let encode_input = ModelRequest {
             messages: content_view.as_deref().unwrap_or(input.messages),
             tools: if protocol.is_some() { &no_tools } else { input.tools },
+            session_id: input.session_id,
         };
         let prepared = encode(encode_config, &encode_input)?;
         let mut retries = 0;

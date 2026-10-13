@@ -150,6 +150,7 @@ pub fn encode_request(
         authorization.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, authorization);
     }
+    super::attach_local_session_header(&mut headers, &config.base_url, input.session_id)?;
 
     let items = encode_input(input.messages);
     let mut body = serde_json::json!({
@@ -462,7 +463,7 @@ mod tests {
         messages: &'a [message::Message],
         tools: &'a [&'a tool::ToolDefinition],
     ) -> ModelRequest<'a> {
-        ModelRequest { messages, tools }
+        ModelRequest { messages, tools, session_id: None }
     }
 
     fn body(config: &ModelConfig, messages: &[message::Message]) -> Value {
@@ -969,6 +970,7 @@ mod tests {
         let request = ModelRequest {
             messages: &messages,
             tools: &tools,
+            session_id: None,
         };
 
         let client = reqwest::Client::new();
@@ -1043,6 +1045,7 @@ mod tests {
         let request = ModelRequest {
             messages: &messages,
             tools: &tools,
+            session_id: None,
         };
 
         let client = reqwest::Client::new();
@@ -1154,7 +1157,7 @@ mod tests {
         tools: &[&tool::ToolDefinition],
     ) -> ModelResponse {
         use futures::StreamExt;
-        let request = ModelRequest { messages, tools };
+        let request = ModelRequest { messages, tools, session_id: None };
         let mut stream = crate::adapter::invoke(client, config, request).await;
         while let Some(event) = stream.next().await {
             if let AdapterEvent::Finished(response) = event.expect("the request should not error") {
@@ -1209,6 +1212,7 @@ mod tests {
         let request = ModelRequest {
             messages: &messages,
             tools: &tools,
+            session_id: None,
         };
 
         use futures::StreamExt;

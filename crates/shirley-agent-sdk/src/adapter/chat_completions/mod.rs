@@ -118,6 +118,7 @@ pub fn encode_request(
         authorization.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, authorization);
     }
+    super::attach_local_session_header(&mut headers, &config.base_url, input.session_id)?;
     let mut body = serde_json::json!({
         "model": &config.model,
         // This should convert, right? But it depends: we currently treat ChatCompletions as the
@@ -437,7 +438,7 @@ mod tests {
         messages: &'a [message::Message],
         tools: &'a [&'a tool::ToolDefinition],
     ) -> ModelRequest<'a> {
-        ModelRequest { messages, tools }
+        ModelRequest { messages, tools, session_id: None }
     }
 
     fn body(config: &ModelConfig) -> Value {

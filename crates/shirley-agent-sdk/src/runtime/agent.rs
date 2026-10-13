@@ -29,6 +29,8 @@ pub struct Agent {
     /// caller did not specify one.
     working_dir: Option<PathBuf>,
     messages: Vec<message::Message>,
+    /// App-owned session identity, sent only to local model proxies for conversation reuse.
+    request_session_id: Option<String>,
     /// User input and assistant deltas not yet committed when the stream is dropped, for the
     /// driver to flush into storage.
     pending_user: Option<String>,
@@ -86,6 +88,7 @@ impl Agent {
             system_prompt,
             working_dir,
             messages,
+            request_session_id: None,
             pending_user: None,
             pending_content: String::new(),
             pending_reasoning: String::new(),
@@ -123,6 +126,11 @@ impl Agent {
     /// other config when switching.
     pub fn model_config(&self) -> &adapter::ModelConfig {
         &self.model_config
+    }
+
+    /// Attach the application session identity without changing the model configuration.
+    pub fn set_request_session_id(&mut self, session_id: Option<String>) {
+        self.request_session_id = session_id;
     }
 
     /// Switch model: replace only the `model` field; the rest of the config (protocol /
@@ -284,6 +292,7 @@ impl Agent {
         let request = ModelRequest {
             messages: &messages,
             tools: &tools,
+            session_id: None,
         };
 
         let mut stream = adapter::invoke(&client, &config, request).await;
@@ -375,6 +384,7 @@ impl Agent {
                 let model_request = ModelRequest {
                     messages: &active_messages,
                     tools: &tools,
+                    session_id: self.request_session_id.as_deref(),
                 };
                 let mut is_finished = false;
                 let mut stream = adapter::invoke(&client, &self.model_config, model_request).await;
@@ -679,6 +689,7 @@ impl Agent {
         let model_request = ModelRequest {
             messages: &messages,
             tools: &[],
+            session_id: None,
         };
 
         let mut stream = adapter::invoke(client, &self.model_config, model_request).await;

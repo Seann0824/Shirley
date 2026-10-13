@@ -14,11 +14,13 @@
 //! 里一个 id"两个真相源。
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use shirley_agent_sdk::{Agent, AgentEvent, Message, Usage};
 use tokio::sync::broadcast;
+use uuid::Uuid;
 
 use super::app::{ChatMessage, Item, Role, ToolCallView};
 use crate::bootstrap::AgentFactory;
@@ -30,6 +32,12 @@ use crate::todo::{TaskView, TodoStore};
 /// 事件扇出通道容量。运行中订阅者若落后超过此数会 `Lagged`，由订阅方（desktop
 /// pump）跳过、靠重发快照重对齐（见 `docs/multi-session.md`）。
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+fn proxy_session_id(workspace: &Path, name: Option<&str>) -> Option<String> {
+    let name = name?;
+    let identity = format!("{}::{name}", workspace.display());
+    Some(Uuid::new_v5(&Uuid::NAMESPACE_URL, identity.as_bytes()).to_string())
+}
 
 /// 一个会话 = 一个运行时容器。
 ///
@@ -106,13 +114,15 @@ impl Session {
     /// `store` 是该会话的持久化存储（`None` = 不落盘）；落库走
     /// [`Session::apply_event`] 的事件驱动路径。
     pub fn new(
-        agent: Agent,
+        mut agent: Agent,
         name: Option<String>,
+        request_session_id: Option<String>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
         skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
     ) -> Self {
+        agent.set_request_session_id(request_session_id);
         let model = Some(agent.model_config().model.clone());
         Self {
             name,
@@ -507,7 +517,10 @@ impl SessionManager {
         todo: Option<Arc<TodoStore>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name, store, memory, skills, todo));
+        sessions.insert(
+            0,
+            Session::new(agent, name, None, store, memory, skills, todo),
+        );
         Self {
             sessions,
             active: 0,
@@ -530,7 +543,11 @@ impl SessionManager {
         todo: Option<Arc<TodoStore>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        sessions.insert(0, Session::new(agent, name, store, memory, skills, todo));
+        let request_session_id = proxy_session_id(&factory.working_dir, name.as_deref());
+        sessions.insert(
+            0,
+            Session::new(agent, name, request_session_id, store, memory, skills, todo),
+        );
         Self {
             sessions,
             active: 0,
@@ -593,8 +610,14 @@ impl SessionManager {
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
-        self.sessions
-            .insert(id, Session::new(agent, name, store, memory, skills, todo));
+        let request_session_id = self
+            .factory
+            .as_ref()
+            .and_then(|factory| proxy_session_id(&factory.working_dir, name.as_deref()));
+        self.sessions.insert(
+            id,
+            Session::new(agent, name, request_session_id, store, memory, skills, todo),
+        );
         id
     }
 
@@ -933,6 +956,14 @@ mod tests {
     use crate::session::EmptySessionCatalog;
     use shirley_agent_sdk::{ModelConfig, ModelProtocol};
 
+    #[test]
+    fn proxy_session_identity_is_stable_and_project_scoped() {
+        let first = proxy_session_id(Path::new("/repo/first"), Some("chat-1"));
+        assert_eq!(first, proxy_session_id(Path::new("/repo/first"), Some("chat-1")));
+        assert_ne!(first, proxy_session_id(Path::new("/repo/second"), Some("chat-1")));
+        assert_ne!(first, proxy_session_id(Path::new("/repo/first"), Some("chat-2")));
+    }
+
     fn test_agent() -> Agent {
         let config = ModelConfig::builder()
             .protocol(ModelProtocol::ChatCompletions)
@@ -991,7 +1022,11 @@ mod tests {
     #[test]
     fn model_name_survives_running_turn() {
         let mut manager = manager();
-        assert_eq!(manager.active_model_name(), Some("test"), "空闲时读活 Agent");
+        assert_eq!(
+            manager.active_model_name(),
+            Some("test"),
+            "空闲时读活 Agent"
+        );
 
         let _agent = manager.begin_turn("s", "hi".into()).unwrap();
         assert!(manager.is_running("s"));
