@@ -15,7 +15,8 @@ use crate::{
     message, tool,
 };
 
-// 说实话我感觉这个应该是个 message 侧做的转换逻辑，而不是我们写在适配层对于这个消息处理。
+// Honestly this conversion logic feels like it belongs on the message side, rather than being
+// written here in the adapter layer for message handling.
 fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
     let encode_message = |msg: &message::Message| {
         match msg {
@@ -84,7 +85,7 @@ fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
     messages.iter().map(encode_message).collect()
 }
 
-// 这里把工具转换成 API 所需要的格式
+// Convert the tools into the format the API requires
 fn encode_tools(tools: &[&tool::ToolDefinition]) -> Vec<Value> {
     let encode_tool = |tool: &&tool::ToolDefinition| {
         serde_json::json!({
@@ -104,7 +105,7 @@ pub fn encode_request(
     config: &ModelConfig,
     input: &ModelRequest<'_>,
 ) -> Result<PreparedRequest, AdapterError> {
-    // 处理消息列表，转换逻辑
+    // Handle the message list; conversion logic
     let mut headers = reqwest::header::HeaderMap::new();
     headers.insert(
         reqwest::header::CONTENT_TYPE,
@@ -119,18 +120,19 @@ pub fn encode_request(
     }
     let mut body = serde_json::json!({
         "model": &config.model,
-        // 这里应该转换对吧，但是看情况，我们现在主要以ChatCompletion 为唯一协议，其他协议都是根据这个协议适配过去的
+        // This should convert, right? But it depends: we currently treat ChatCompletions as the
+        // sole protocol, and the others are adapted from it.
         "messages": encode_messages(input.messages),
         "tools": encode_tools(input.tools),
         "stream": &config.stream,
     });
 
-    // 可选字段：只在 Some 时才写入，避免向严格校验的端点发送 null。
+    // Optional fields: only written when Some, avoiding sending null to strictly validating endpoints.
     if let Some(temperature) = config.temperature {
         body["temperature"] = serde_json::json!(temperature);
     }
-    // 注意线上键名是 ChatCompletions 的 `max_tokens`，而非 Responses 的
-    // `max_output_tokens`。需要 `max_completion_tokens` 等变体时走 extra_body。
+    // Note the wire key is ChatCompletions' `max_tokens`, not Responses'
+    // `max_output_tokens`. For variants like `max_completion_tokens`, use extra_body.
     if let Some(max_output_tokens) = config.max_output_tokens {
         body["max_tokens"] = serde_json::json!(max_output_tokens);
     }
@@ -140,13 +142,14 @@ pub fn encode_request(
     if let Some(tool_choice) = &config.tool_choice {
         body["tool_choice"] = tool_choice.clone();
     }
-    // thinking 只有开启时才写。`{"type":"enabled"}` 是部分厂商的私有约定，
-    // 关闭时发 `disabled` 多数端点不接受，所以关闭就完全省略。
+    // thinking is written only when enabled. `{"type":"enabled"}` is a private convention of some
+    // vendors; sending `disabled` when off is rejected by most endpoints, so off omits it entirely.
     if config.thinking {
         body["thinking"] = serde_json::json!({ "type": "enabled" });
     }
 
-    // 逃生口最后应用：应用能覆盖标准字段、补厂商私有字段，或删除字段。
+    // The escape hatch is applied last: the app can override standard fields, add vendor-private
+    // fields, or delete fields.
     if let Some(extra) = &config.extra_body {
         apply_extra_body(&mut body, extra);
     }
@@ -158,11 +161,11 @@ pub fn encode_request(
     })
 }
 
-/// 把 `extra` 浅合并进请求体。
+/// Shallow-merge `extra` into the request body.
 ///
-/// - 应用键覆盖标准键；
-/// - 值为 `null` 表示**删除**该键（让应用能移除 SDK 默认写入的字段）；
-/// - `extra` 不是对象时忽略（保持请求体不变）。
+/// - App keys override standard keys;
+/// - A `null` value **deletes** that key (so the app can remove a field the SDK writes by default);
+/// - A non-object `extra` is ignored (the request body stays unchanged).
 fn apply_extra_body(body: &mut Value, extra: &Value) {
     let Value::Object(extra) = extra else {
         return;
@@ -183,7 +186,7 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adapter
     let response = serde_json::from_value::<dto::ModelResponse>(body.clone())
         .map_err(|err| AdapterError::Decode(format!("failed to parse response: {err}")))?;
 
-    // 开始转换 Message::Assistant and Message::Tool and finish_reason
+    // Start converting Message::Assistant and Message::Tool and finish_reason
     let choice = response
         .choices
         .first()
@@ -198,7 +201,7 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adapter
     }
     let content = &msg.content;
     let reasoning_content = msg.reasoning_content.clone();
-    // 我需要在这判断如果为空则返回 [], 否者就处理成 Message::Tool
+    // Here I need to check: if empty, return [], otherwise process into Message::Tool
     let tool_calls = msg
         .tool_calls
         .as_ref()
@@ -225,7 +228,7 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adapter
         })
         .unwrap_or(ModelFinishReason::Other("unknown".to_owned()));
 
-    // usage 需要转换成 message::Usage
+    // usage needs converting into message::Usage
     let cached_input_tokens = response
         .usage
         .prompt_tokens_details
@@ -311,27 +314,28 @@ pub fn decode_stream_response(
         let mut usage = message::Usage::default();
         let mut finish_reason = None;
         while let Some(chunk) = byte_stream.next().await {
-            // 读取中断不能 unwrap：它是网络错误，应该走 Transport 分类让上层决定重试。
+            // A read interruption must not be unwrapped: it's a network error and should go
+            // through the Transport classification so the upper layer decides on retry.
             let chunk = chunk.map_err(AdapterError::Transport)?;
             let text = String::from_utf8_lossy(&chunk);
             buffer.push_str(&text);
 
             while let Some(pos) = buffer.find("\n\n") {
-                // 我觉得这个json结构应该一样的吧？
+                // I think this json structure should be the same, right?
                 let section = buffer[..pos].to_string();
-                // 去掉当前读取后的事件 和 两个换行符号
+                // Remove the event just read and the two newlines
                 buffer.drain(..pos + 2);
 
                 let mut data = String::new();
-                // 解析每行的数据
+                // Parse the data of each line
                 for line in section.lines() {
                     if let Some(rest) = line.strip_prefix("data:") {
                         data.push_str(rest.trim());
                     }
-                    // `event:` / `id:` 目前没有消费方（后者多用于断线续传），
-                    // 先忽略而不是 panic；等真正实现断线重连时再保留 last_event_id。
+                    // `event:` / `id:` currently have no consumer (the latter is mostly used for
+                    // resume after disconnect), so ignore them rather than panic; keep last_event_id
                 }
-                // 为啥会出现
+                // Why would this appear
                 let payload = data.trim();
                 if payload.is_empty() || payload == "[DONE]" {
                     continue;
@@ -369,7 +373,7 @@ pub fn decode_stream_response(
                     content.push_str(&content_delta);
                     yield AdapterEvent::ContentDelta(content_delta);
                 }
-                // tool_calls 保存
+                // Save tool_calls
                 merge_tool_call_deltas(
                     &mut tool_calls,
                     delta.tool_calls.clone().unwrap_or_default(),
@@ -383,7 +387,7 @@ pub fn decode_stream_response(
                         other => ModelFinishReason::Other(other.to_owned()),
                     });
                 }
-                // 这里必然返回 assistant， 所以接下来我们就是要把数据向外yield
+                // This always returns assistant, so next we yield the data outward
             }
         }
         if let Some(finish_reason) = finish_reason {
@@ -409,16 +413,16 @@ mod tests {
     #[test]
     fn response_ids_can_be_omitted() {
         let stream: dto::ModelStreamResponse = serde_json::from_value(serde_json::json!({
-            "choices": [{"index": 0, "delta": {"content": "你好"}, "finish_reason": null}]
+            "choices": [{"index": 0, "delta": {"content": "hi"}, "finish_reason": null}]
         }))
-        .expect("流式响应不应强制要求顶层 id");
+        .expect("a streaming response should not require a top-level id");
         assert!(stream.id.is_empty());
 
         let response = decode_response(serde_json::json!({
-            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "你好"}}],
+            "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
         }));
-        assert!(response.is_ok(), "非流式响应不应强制要求顶层 id: {response:?}");
+        assert!(response.is_ok(), "a non-streaming response should not require a top-level id: {response:?}");
     }
 
     fn config() -> ModelConfig {
@@ -440,7 +444,7 @@ mod tests {
         let empty: Vec<message::Message> = vec![];
         let tools: Vec<&tool::ToolDefinition> = vec![];
         encode_request(config, &request(&empty, &tools))
-            .expect("编码应成功")
+            .expect("encoding should succeed")
             .body
     }
 
@@ -451,7 +455,7 @@ mod tests {
         assert!(body.get("max_tokens").is_none());
         assert!(body.get("reasoning_effort").is_none());
         assert!(body.get("tool_choice").is_none());
-        // thinking 默认 false → 不写该字段（不发 disabled）
+        // thinking defaults to false → the field is not written (no `disabled` sent)
         assert!(body.get("thinking").is_none());
     }
 
@@ -507,7 +511,7 @@ mod tests {
         let body = body(&config);
         assert!(
             body.get("thinking").is_none(),
-            "null 应删除 thinking 键，实际: {body}"
+            "null should delete the thinking key, actual: {body}"
         );
     }
 
@@ -521,7 +525,7 @@ mod tests {
             .build();
 
         let body = body(&config);
-        // 非对象忽略，标准字段保持完好
+        // A non-object is ignored; standard fields stay intact
         assert_eq!(body["model"], serde_json::json!("test-model"));
     }
 }

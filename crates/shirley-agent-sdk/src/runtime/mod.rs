@@ -1,12 +1,12 @@
-//! ReAct 运行时：Agent 主循环、事件、错误与上下文压缩。
+//! ReAct runtime: the Agent main loop, events, errors, and context compaction.
 //!
-//! 按职责拆成几个子模块，`mod.rs` 只负责接线与再导出：
+//! Split into submodules by responsibility; `mod.rs` only wires them up and re-exports:
 //!
-//! - [`agent`]：`Agent` 本体（构造、主循环、压缩调度）。
-//! - [`compaction`]：压缩切点计算与重建（`CutPlan` / `CompactParts` / `plan_cut`）。
-//! - [`event`]：对外事件与运行结果（`AgentEvent` / `RunResult` / `StopReason`）。
-//! - [`error`]：顶层错误收敛（`AgentError`）。
-//! - [`prompt`]：系统提示词（静态字符串或按运行时上下文动态生成）。
+//! - [`agent`]: the `Agent` itself (construction, main loop, compaction scheduling).
+//! - [`compaction`]: compaction cut-point computation and rebuild (`CutPlan` / `CompactParts` / `plan_cut`).
+//! - [`event`]: public events and run results (`AgentEvent` / `RunResult` / `StopReason`).
+//! - [`error`]: top-level error convergence (`AgentError`).
+//! - [`prompt`]: the system prompt (a fixed string, or one generated from runtime context).
 
 mod agent;
 mod compaction;

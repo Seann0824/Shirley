@@ -1,11 +1,12 @@
 use crate::adapter;
 use crate::tool;
 
-/// SDK 对外暴露的顶层错误。
+/// The top-level error the SDK exposes.
 ///
-/// 它只做"收敛"：每一层的错误保留自己的类型与分类，
-/// 这里通过 `#[from]` 把它们收进来，不再自己发明 `String` 变体。
-/// 上层只需要问 [`AgentError::is_retryable`]，不必关心错误来自哪一层。
+/// It only "converges": each layer keeps its own error type and classification, and this
+/// one collects them via `#[from]` instead of inventing its own `String` variants. The
+/// upper layer only needs to ask [`AgentError::is_retryable`] and need not care which
+/// layer the error came from.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
     #[error(transparent)]
@@ -23,11 +24,13 @@ pub enum AgentError {
     #[error("[compression failed]: {0}")]
     Compression(String),
 
-    /// 兜底变体：收纳无法归入上面各层的错误（例如应用层的配置 / IO 错误）。
+    /// Fallback variant: collects errors that don't fit the layers above (e.g. an
+    /// application-level config / IO error).
     ///
-    /// 刻意持有 `Box<dyn Error>` 而不是 `String`：这样 [`std::error::Error::source`]
-    /// 链条不断，外部调用方可以 `downcast_ref` 拿到原始错误类型并结构化处理，
-    /// 而不是只能对着 `to_string()` 的文本猜。
+    /// It deliberately holds a `Box<dyn Error>` instead of a `String`: this keeps the
+    /// [`std::error::Error::source`] chain intact, so an external caller can
+    /// `downcast_ref` to recover the original error type and handle it structurally,
+    /// rather than guessing from the `to_string()` text.
     #[error("{0}")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
@@ -38,10 +41,12 @@ impl crate::error::SdkError for AgentError {
         match self {
             Self::Tool(e) => e.kind(),
             Self::Adapter(e) => e.kind(),
-            // 沙盒不可用 / 不支持该约束 —— 换配置才有意义，重试无用。
+            // Sandbox unavailable / constraint unsupported — changing the config is the
+            // only thing that helps; retrying is pointless.
             Self::Sandbox(_) => ErrorKind::Unsupported,
             Self::Workspace(_) => ErrorKind::BadRequest,
-            // 压缩失败会中断整轮任务，但重试同一份上下文通常不会变好。
+            // A compression failure aborts the whole turn, but retrying the same context
+            // usually won't help.
             Self::Compression(_) => ErrorKind::Internal,
             Self::Other(_) => ErrorKind::Internal,
         }

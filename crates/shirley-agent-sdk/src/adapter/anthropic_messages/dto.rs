@@ -1,15 +1,15 @@
-// Anthropic Messages 协议 DTO。字段按 `POST /v1/messages` 契约定义。
+// Anthropic Messages protocol DTO. Fields follow the `POST /v1/messages` contract.
 //
-// 依据（真实抓包，见 `docs/anthropic-messages-api.md`）：
-// - 端点 `https://api.deepseek.com/anthropic/v1/messages`
-// - 请求头 `x-api-key` + `anthropic-version`
+// References (from real captured traffic, see `docs/anthropic-messages-api.md`):
+// - endpoint `https://api.deepseek.com/anthropic/v1/messages`
+// - headers `x-api-key` + `anthropic-version`
 //
-// 未消费的字段保留是协议完整性的一部分，不是死代码。
+// Keeping unconsumed fields is part of protocol completeness, not dead code.
 #![allow(dead_code)]
 
 use serde::Deserialize;
 
-/// 顶层消息对象（`type: "message"`）。
+/// Top-level message object (`type: "message"`).
 #[derive(Debug, Clone, Deserialize)]
 pub struct MessageResponse {
     #[serde(default)]
@@ -27,7 +27,7 @@ pub struct MessageResponse {
     pub usage: Option<Usage>,
 }
 
-/// 响应里的 content block。
+/// A content block in the response.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ContentBlock {
@@ -35,14 +35,14 @@ pub enum ContentBlock {
         #[serde(default)]
         text: String,
     },
-    /// 思考块。`signature` 是完整性凭据，回传时必须带上。
+    /// Thinking block. `signature` is an integrity token and must be included when echoing back.
     Thinking {
         #[serde(default)]
         thinking: String,
         #[serde(default)]
         signature: Option<String>,
     },
-    /// 工具调用。`input` 是 **JSON 对象**（不是字符串）。
+    /// Tool call. `input` is a **JSON object** (not a string).
     ToolUse {
         #[serde(default)]
         id: String,
@@ -51,14 +51,14 @@ pub enum ContentBlock {
         #[serde(default)]
         input: serde_json::Value,
     },
-    /// 其余块类型（`tool_result` 出现在请求侧、`redacted_thinking` 等）忽略。
+    /// Other block types (`tool_result` appears on the request side, `redacted_thinking`, etc.) are ignored.
     #[serde(other)]
     Other,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct Usage {
-    /// **不含缓存读取**（真实抓包：`134 + 2301 = 2435`）。
+    /// **Does not include cache reads** (real captured traffic: `134 + 2301 = 2435`).
     #[serde(default)]
     pub input_tokens: u64,
     #[serde(default)]
@@ -69,28 +69,28 @@ pub struct Usage {
     pub cache_read_input_tokens: Option<u64>,
 }
 
-/// 流式事件。无 `data: [DONE]`，以 `message_stop` 结束。
+/// Streaming event. No `data: [DONE]`; ends with `message_stop`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
-    /// 携带初始 usage（input 侧）。
+    /// Carries the initial usage (input side).
     MessageStart { message: MessageStartPayload },
-    /// 块开始。`content_block` 携带初始内容（tool_use 的 id/name 在这里）。
+    /// Block start. `content_block` carries the initial content (a tool_use's id/name is here).
     ContentBlockStart {
         index: usize,
         content_block: ContentBlock,
     },
-    /// 块增量。
+    /// Block delta.
     ContentBlockDelta { index: usize, delta: Delta },
     ContentBlockStop { index: usize },
-    /// **收尾的 stop_reason 与 output usage 在这里。**
+    /// **The terminal stop_reason and output usage are here.**
     MessageDelta {
         delta: MessageDeltaPayload,
         #[serde(default)]
         usage: Option<Usage>,
     },
     MessageStop,
-    /// `ping` 及其余事件忽略。
+    /// `ping` and other events are ignored.
     #[serde(other)]
     Other,
 }
@@ -125,7 +125,7 @@ pub enum Delta {
         #[serde(default)]
         signature: String,
     },
-    /// 工具参数的 JSON 分片，需按 index 拼接。
+    /// A JSON fragment of tool arguments; must be concatenated by index.
     #[serde(rename = "input_json_delta")]
     InputJson {
         #[serde(default)]

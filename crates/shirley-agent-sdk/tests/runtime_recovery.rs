@@ -1,4 +1,4 @@
-//! 网络重试与中断后上下文保留的运行时契约；不涉及 UI。
+//! Runtime contract for network retries and context retention after interruption; no UI involved.
 use futures::StreamExt;
 use serde_json::{Value, json};
 use shirley_agent_sdk::{
@@ -38,7 +38,7 @@ impl Response {
     }
 }
 
-/// 本地 HTTP fixture：记录完整请求，按序返回响应，最后一条响应可重复。
+/// A local HTTP fixture: records full requests, returns responses in order, and repeats the last response.
 struct Server {
     url: String,
     requests: Arc<Mutex<Vec<Value>>>,
@@ -201,7 +201,7 @@ async fn stops_after_five_retries_and_keeps_the_last_error() {
 #[tokio::test]
 async fn permanent_http_and_decode_errors_are_not_retried() {
     for status in [400, 401, 403] {
-        // 即使错误体读取失败，也必须按原始 HTTP 状态判定。
+        // Even if reading the error body fails, the decision must still be based on the original HTTP status.
         let mut response = Response::new(status, "bad request");
         response.truncated = true;
         let server = Server::new(vec![response]);
@@ -383,8 +383,8 @@ fn evidence_tools() -> ToolManager {
     tools
 }
 
-/// 20261013-142807 badcase：在同一任务内连续 compact，捕获真实 HTTP 请求，
-/// 验证旧结论、工具证据和账本全部进入下一份摘要，而非只检查 XML 标签。
+/// 20261013-142807 badcase: successive compactions within the same task; capture the real HTTP request
+/// and verify that prior conclusions, tool evidence, and the ledger all make it into the next summary, not just that the XML tags are checked.
 #[tokio::test]
 async fn successive_compactions_inherit_findings_evidence_and_ledger() {
     let server = Server::new(vec![
@@ -480,7 +480,7 @@ async fn endless_tool_calls_stop_at_budget_with_complete_tool_results_and_can_re
             2
         );
         assert!(
-            matches!(result.messages.last(), Some(Message::Assistant { content: Some(text), tool_calls, .. }) if text.contains("任务尚未完成") && tool_calls.is_empty())
+            matches!(result.messages.last(), Some(Message::Assistant { content: Some(text), tool_calls, .. }) if text.contains("not yet complete") && tool_calls.is_empty())
         );
         assert!(agent.finish_interrupted_turn().is_empty());
     }
@@ -656,7 +656,7 @@ async fn over_budget_scratchpad_is_removed_before_tool_evidence() {
             tool_call_id: "history".into(),
             content: Some("important evidence must remain".into()),
         },
-        // 尾部另留完整工具组，使带推理的 history 组落入待压缩区。
+        // Keep another complete tool group at the tail so the reasoning-bearing history group falls into the to-compress region.
         Message::Assistant {
             content: None,
             reasoning_content: None,

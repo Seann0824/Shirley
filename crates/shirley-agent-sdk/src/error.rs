@@ -1,38 +1,43 @@
-//! SDK 统一错误契约。
+//! The SDK's unified error contract.
 //!
-//! 设计意图（与 `docs/runtime-hardening.md` 第二节一致）：
+//! Design intent (consistent with section 2 of `docs/runtime-hardening.md`):
 //!
-//! 1. **错误定义在拥有它的模块里。** 这里只放"跨层共享的契约"——
-//!    [`ErrorKind`] 与 [`SdkError`]；具体错误类型（`AdapterError` / `ToolError` /
-//!    `SandboxError` / `AgentError`）各自留在自己的模块，和 `SandboxError` 的做法一致。
-//! 2. **决策看分类，不看文案。** 上层要做"重试还是冒泡"的判断时，
-//!    只依赖 [`SdkError::is_retryable`]，绝不 `match` 错误字符串。
-//! 3. **分类要稳定。** [`ErrorKind`] 是给日志 / 指标 / 审计用的稳定枚举，
-//!    文案可以改，kind 不能随便改。
+//! 1. **Errors are defined in the module that owns them.** Only the "cross-layer shared
+//!    contract" lives here — [`ErrorKind`] and [`SdkError`]; concrete error types
+//!    (`AdapterError` / `ToolError` / `SandboxError` / `AgentError`) each stay in their own
+//!    module, just like `SandboxError` does.
+//! 2. **Decisions look at the kind, not the text.** When the upper layer must decide
+//!    "retry or bubble up", it depends only on [`SdkError::is_retryable`], never matching
+//!    on the error string.
+//! 3. **Kinds must be stable.** [`ErrorKind`] is a stable enum for logging / metrics /
+//!    audit; the text may change, the kind must not change casually.
 
 use std::fmt;
 
-/// 错误的稳定分类。用于日志、指标与重试决策，不随展示文案变化。
+/// A stable classification of an error. Used for logging, metrics, and retry decisions;
+/// it does not change with the display text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ErrorKind {
-    /// 网络层失败：连不上、连接被重置、DNS 失败等。通常是瞬时的。
+    /// Network-layer failure: can't connect, connection reset, DNS failure, etc. Usually transient.
     Transport,
-    /// 被限流（HTTP 429）。可退避后重试。
+    /// Rate limited (HTTP 429). Retryable after backoff.
     RateLimited,
-    /// 服务端错误（HTTP 5xx）。通常可重试。
+    /// Server error (HTTP 5xx). Usually retryable.
     ServerError,
-    /// 请求本身有问题（HTTP 4xx，429 除外）。重试没有意义。
+    /// The request itself is bad (HTTP 4xx, except 429). Retrying is pointless.
     BadRequest,
-    /// 能力未实现或后端不可用。重试没有意义，需要换配置或换实现。
+    /// Capability unimplemented or backend unavailable. Retrying is pointless; change the
+    /// config or the implementation.
     Unsupported,
-    /// 工具执行失败。重试同一份参数通常不会变好，需要模型换策略。
+    /// Tool execution failure. Retrying the same arguments usually won't help; the model
+    /// needs a different strategy.
     ToolFailure,
-    /// SDK 内部错误（解析、编码、IO 等）。默认不重试。
+    /// SDK-internal error (parsing, encoding, IO, etc.). Not retried by default.
     Internal,
 }
 
 impl ErrorKind {
-    /// 这一类错误默认能不能重试。
+    /// Whether this class of error is retryable by default.
     pub fn is_retryable(self) -> bool {
         matches!(
             self,
@@ -56,16 +61,17 @@ impl fmt::Display for ErrorKind {
     }
 }
 
-/// SDK 内所有错误类型共同实现的契约。
+/// The contract implemented by every error type in the SDK.
 ///
-/// 有了它，运行时（重试 / 降级 / 取消）与展示层都只需要面对一个接口，
-/// 不必逐个 `match` 每一层的 enum。
+/// With it, the runtime (retry / degrade / cancel) and the presentation layer only face a
+/// single interface, instead of matching each layer's enum one by one.
 pub trait SdkError: std::error::Error + Send + Sync {
-    /// 稳定分类。日志与指标用这个，不要用 `to_string()`。
+    /// Stable classification. Use this for logs and metrics, not `to_string()`.
     fn kind(&self) -> ErrorKind;
 
-    /// 能不能重试。默认由 [`ErrorKind::is_retryable`] 推导，
-    /// 具体错误类型可以在语义更细时覆盖它（例如"这个 5xx 其实是确定性的"）。
+    /// Whether it can be retried. Defaults to deriving from [`ErrorKind::is_retryable`];
+    /// a concrete error type may override it when the semantics are finer (e.g. "this 5xx
+    /// is actually deterministic").
     fn is_retryable(&self) -> bool {
         self.kind().is_retryable()
     }

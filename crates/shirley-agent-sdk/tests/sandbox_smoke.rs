@@ -1,5 +1,6 @@
-//! 沙盒链路冒烟测试：验证 spec → backend → output 全链路可跑。
-//! 注意：这里用 ProcessBackend（无隔离），只验证编排逻辑，不验证隔离强度。
+//! Sandbox pipeline smoke tests: verify the whole spec -> backend -> output chain runs.
+//! Note: this uses ProcessBackend (no isolation); it only verifies the orchestration logic, not
+//! the isolation strength.
 
 use shirley_agent_sdk::sandbox::{backend::ProcessBackend, NetworkPolicy, Sandbox, SandboxSpec};
 use std::time::Duration;
@@ -11,7 +12,7 @@ async fn runs_and_captures_stdout() {
     let out = sandbox.run(&spec).await.unwrap();
     assert_eq!(out.stdout, "hello");
     assert!(out.success());
-    // 裸进程后端必须如实上报降级。
+    // The bare-process backend must faithfully report degradation.
     assert!(!out.is_fully_isolated());
 }
 
@@ -39,7 +40,7 @@ async fn enforces_timeout() {
 
 #[tokio::test]
 async fn env_not_inherited_by_default() {
-    // 宿主设一个变量，沙盒内不应看到（除非显式注入）。
+    // The host sets a variable; it should not be visible inside the sandbox (unless injected explicitly).
     unsafe { std::env::set_var("SANDBOX_LEAK_TEST", "secret") };
     let sandbox = Sandbox::new(ProcessBackend);
     let spec = SandboxSpec::new("sh")

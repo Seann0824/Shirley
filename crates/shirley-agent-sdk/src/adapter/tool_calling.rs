@@ -1,16 +1,21 @@
-//! Content 工具调用协议：为**不支持原生 tool calling** 的模型声明「文本工具格式 + 解析方法」。
+//! Content tool-calling protocol: declares a "text tool format + parsing method" for models
+//! that **do not support native tool calling**.
 //!
-//! 背景：Shirley 的 ReAct 循环完全由 [`crate::message::Message::Assistant`] 的
-//! `tool_calls` 驱动。只要能把模型输出的**纯文本**解析成 `tool_calls`，循环就无需改动。
-//! 本模块提供这一层的可插拔抽象：
+//! Background: Shirley's ReAct loop is driven entirely by the `tool_calls` field of
+//! [`crate::message::Message::Assistant`]. As long as the model's **plain text** output can be
+//! parsed into `tool_calls`, the loop needs no change. This module provides the pluggable
+//! abstraction for that layer:
 //!
-//! - [`ToolCalling`]：挂在 [`crate::ModelConfig`] 上的「工具传输模式」——
-//!   `Native`（现状，结构化 `tools` / `tool_calls`）或 `Content(协议)`。
-//! - [`ContentToolProtocol`]：协议接口——声明如何渲染工具目录、如何解析文本、如何回灌结果。
-//! - [`TaggedToolProtocol`]：内置的**声明式** XML 标签协议（可换标签名 / 回灌模板）。
+//! - [`ToolCalling`]: the "tool transport mode" attached to [`crate::ModelConfig`] —
+//!   `Native` (the status quo, structured `tools` / `tool_calls`) or `Content(protocol)`.
+//! - [`ContentToolProtocol`]: the protocol interface — declares how to render the tool catalog,
+//!   how to parse text, and how to feed results back.
+//! - [`TaggedToolProtocol`]: the built-in **declarative** XML tag protocol (configurable tag
+//!   names / feedback template).
 //!
-//! 它**正交于** [`crate::ModelProtocol`]：content 可与任意底层协议组合，是传输模式而非协议。
-//! 协议差异全部收敛在适配层，`Message` 模型与 runtime 主循环不改。
+//! It is **orthogonal to** [`crate::ModelProtocol`]: content can combine with any underlying
+//! protocol — it is a transport mode, not a protocol. All protocol differences are contained in
+//! the adapter layer; the `Message` model and the runtime main loop are unchanged.
 
 use std::sync::Arc;
 
@@ -20,28 +25,51 @@ use uuid::Uuid;
 use crate::message::{Message, ToolCall};
 use crate::tool::{PROTOCOL_ERROR_TOOL, ToolDefinition};
 
-/// 工具传输模式。挂在 `ModelConfig` 上，默认 [`ToolCallingMode::Native`]。
+/// The **body template** for the tool catalog + output contract (the `prompts/*.md` convention,
+/// see `Agent.md`).
 ///
-/// 这是 SDK 对外**唯一**的工具协议抽象：调用方只声明模式，协议实例、解析器、
-/// 回放渲染全部在 adapter 内部按模式构造，外部不感知。
+/// Body and code are separated: changing the wording only touches the md, and Rust just
+/// `include_str!`s it and fills `{{placeholders}}`. For a non-English locale, ship another
+/// template and swap this `include_str!` source (this is the minimal i18n seam for this layer).
+const INSTRUCTIONS_TEMPLATE: &str = include_str!("../../prompts/tool_calling_instructions.md");
+
+/// **Message templates** for correctable parse errors (`key=template` line format; lines
+/// starting with `#` are comments).
+const ERRORS_TEMPLATE: &str = include_str!("../../prompts/tool_calling_errors.md");
+
+/// Injection character limit for the tool catalog (the "Available tools" section).
+///
+/// The fixed contract text is bounded and always emitted in full; only the catalog section,
+/// which **grows with the number of tools**, gets truncated — with many tools (bash / read_file /
+/// web_search / todo / skills …) it can expand significantly and crowd out the front of the
+/// context. Over the limit it is truncated at a char boundary and **explicitly flagged** (not
+/// silent), the same strategy as `todo`'s `MAX_RENDER_CHARS`.
+const MAX_INSTRUCTIONS_CHARS: usize = 12_000;
+
+/// Tool transport mode. Attached to `ModelConfig`, defaulting to [`ToolCallingMode::Native`].
+///
+/// This is the SDK's **only** public tool-protocol abstraction: callers just declare the mode;
+/// the protocol instance, parser, and replay rendering are all constructed inside the adapter
+/// from the mode, invisible to the outside.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ToolCallingMode {
-    /// 原生 function calling：请求带结构化 `tools`，响应解析结构化 `tool_calls`。
+    /// Native function calling: the request carries structured `tools`, and the response is
+    /// parsed into structured `tool_calls`.
     #[default]
     Native,
-    /// 内置 XML 标签文本协议：不发 `tools`，工具目录写进请求视图的 system；
-    /// 从模型文本里解析出 `tool_calls`。
+    /// Built-in XML-tag text protocol: no `tools` are sent; the tool catalog is written into the
+    /// request view's system prompt, and `tool_calls` are parsed out of the model's text.
     Tagged,
 }
 
 impl ToolCallingMode {
-    /// 是否走文本协议。
+    /// Whether the text protocol is used.
     pub fn is_content(self) -> bool {
         !matches!(self, Self::Native)
     }
 
-    /// 按模式构造内部协议实例（原生模式返回 `None`）。
+    /// Build the internal protocol instance for the mode (native mode returns `None`).
     pub(crate) fn protocol(self) -> Option<Arc<dyn ContentToolProtocol>> {
         match self {
             Self::Native => None,
@@ -50,42 +78,46 @@ impl ToolCallingMode {
     }
 }
 
-/// 解析出的一次工具调用。`arguments` 是**原始 JSON 字符串**（与
-/// [`ToolCall::arguments`] 同义），不在这里做类型约束——自研协议无法保证模型传参正确，
-/// 参数错误交给工具层以 `ArgumentsError` 反馈（见 `docs/tool-calling.md` 决策 4）。
+/// A single parsed tool call. `arguments` is the **raw JSON string** (synonymous with
+/// [`ToolCall::arguments`]); no type constraints are imposed here — a custom protocol cannot
+/// guarantee the model passes correct arguments, so argument errors are fed back by the tool
+/// layer as `ArgumentsError` (see decision 4 in `docs/tool-calling.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ParsedToolCall {
     pub name: String,
     pub arguments: String,
 }
 
-/// 一次解析的完整产物：思考 / 展示文本 / 工具调用（0..n）。
+/// The full product of one parse: thinking / display text / tool calls (0..n).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ParsedDocument {
     pub thinking: Option<String>,
     pub description: Option<String>,
     pub calls: Vec<ParsedToolCall>,
-    /// 解析中发现的**可纠正问题**（工具块缺 name / 未闭合 params / 非法 JSON）。
-    /// 非空时 [`parse_content_response`] 不执行任何调用，而是合成一条
-    /// `__protocol__` 回灌，请模型重发（Step 5）。
+    /// **Correctable problems** found during parsing (tool block missing name / unclosed params /
+    /// invalid JSON). When non-empty, [`parse_content_response`] executes no call; instead it
+    /// synthesizes a `__protocol__` feedback asking the model to resend (Step 5).
     pub errors: Vec<String>,
 }
 
-/// 可插拔的内容工具解析协议。
+/// A pluggable content tool-calling protocol.
 ///
-/// 实现必须是 `Send + Sync`（`run_stream` 返回的流是 `Send`，且协议随 `ModelConfig` 共享）。
+/// Implementations must be `Send + Sync` (the stream returned by `run_stream` is `Send`, and the
+/// protocol is shared along with `ModelConfig`).
 pub(crate) trait ContentToolProtocol: Send + Sync {
-    /// 渲染「工具目录 + 输出契约」，由应用层拼进 system prompt 前部。
+    /// Render the "tool catalog + output contract", which the application layer prepends to the
+    /// system prompt.
     fn render_instructions(&self, tools: &[&ToolDefinition]) -> String;
 
-    /// 从 assistant 的完整文本里解析工具调用 / 思考 / 展示文本。
+    /// Parse tool calls / thinking / display text from the assistant's full text.
     fn parse(&self, text: &str) -> ParsedDocument;
 
-    /// 把一条 assistant 消息重新渲染成协议文本。
+    /// Re-render an assistant message as protocol text.
     ///
-    /// 回放历史时用：`Message::Assistant` 把结构化字段（`reasoning_content` /
-    /// `content` / `tool_calls`）拆开了，而模型需要看到它**自己上一轮输出的原文**，
-    /// 否则工具调用链会断（模型看到"有结果、无调用"）。
+    /// Used when replaying history: `Message::Assistant` splits the structured fields
+    /// (`reasoning_content` / `content` / `tool_calls`) apart, but the model needs to see the
+    /// **original text of its own previous turn**; otherwise the tool-call chain breaks (the model
+    /// sees "a result but no call").
     fn render_assistant(
         &self,
         thinking: Option<&str>,
@@ -93,47 +125,55 @@ pub(crate) trait ContentToolProtocol: Send + Sync {
         calls: &[ToolCall],
     ) -> String;
 
-    /// 把一次工具结果渲染成**回灌消息**（模型不认 `role=tool`，故通常回成 user 文本）。
+    /// Render one tool result as a **feedback message** (models don't understand `role=tool`, so
+    /// it is usually fed back as user text).
     fn render_result(&self, call: &ToolCall, output: &str) -> Message;
 
-    /// 创建一个**流式解析器**：逐块吃原始协议文本、只吐可见增量（思考 / 展示文本，
-    /// 工具块屏蔽）。见 [`ContentStreamParser`]。
+    /// Create a **streaming parser**: it consumes raw protocol text chunk by chunk and emits only
+    /// visible increments (thinking / display text; tool blocks are suppressed). See
+    /// [`ContentStreamParser`].
     ///
-    /// 默认返回「吞掉一切」的空解析器——协议作者未实现流式解析时，增量不外泄
-    /// （最终态仍由 [`Self::parse`] 在 `Finished` 给出）。即「不实现」是安全的保守
-    /// 默认，而非把协议原文泄漏给 UI。
+    /// By default it returns a "swallow everything" no-op parser — if a protocol author does not
+    /// implement streaming parsing, no increment leaks out (the final state is still produced by
+    /// [`Self::parse`] at `Finished`). That is, "not implementing" is a safe conservative default,
+    /// rather than leaking the raw protocol text to the UI.
     fn stream_parser(&self) -> Box<dyn ContentStreamParser> {
         Box::new(NoopStreamParser)
     }
 }
 
-/// 流式解析吐出的**可见增量**——只含该给用户看的部分，绝不含协议标记。
+/// A **visible increment** emitted by streaming parsing — only the part meant for the user, never
+/// protocol markers.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum VisibleChunk {
-    /// 思考 / 推理增量 → 映射为 `AdapterEvent::ReasoningDelta`。
+    /// Thinking / reasoning increment -> mapped to `AdapterEvent::ReasoningDelta`.
     Thinking(String),
-    /// 展示文本增量 → 映射为 `AdapterEvent::ContentDelta`。
+    /// Display-text increment -> mapped to `AdapterEvent::ContentDelta`.
     Content(String),
 }
 
-/// **流式**协议解析器：把模型吐出的原始协议文本**增量**翻译成 [`VisibleChunk`]。
+/// **Streaming** protocol parser: translates the model's raw protocol text **incrementally** into
+/// [`VisibleChunk`]s.
 ///
-/// 与 [`ContentToolProtocol::parse`]（整段解析、产出结构化 `tool_calls`）互补：
-/// - `parse` 决定**控制流**（这轮有没有工具调用）；
-/// - `stream_parser` 决定**显示流**（把 `thinking` / `description` 实时吐给 UI，
-///   工具块 `<tool>` 屏蔽）。
+/// Complementary to [`ContentToolProtocol::parse`] (whole-segment parsing that produces
+/// structured `tool_calls`):
+/// - `parse` decides **control flow** (whether this turn has a tool call);
+/// - `stream_parser` decides the **display stream** (streaming `thinking` / `description` to the
+///   UI in real time, with `<tool>` blocks suppressed).
 ///
-/// 实现必须能接受**任意分片**（一个 token 被切成几块也要对）——与
-/// [`TaggedToolProtocol`] 底层的字符级状态机同源。`Send` 是为了随 `invoke` 的流跨线程。
+/// Implementations must accept **arbitrary fragments** (a single token split across several
+/// chunks must still work) — the same origin as the char-level state machine underlying
+/// [`TaggedToolProtocol`]. `Send` is required so the parser can travel with `invoke`'s stream
+/// across threads.
 pub(crate) trait ContentStreamParser: Send {
-    /// 喂入一块原始文本，返回本次新产生的可见增量（可能为空）。
+    /// Feed one raw text chunk and return the newly produced visible increments (possibly empty).
     fn push(&mut self, chunk: &str) -> Vec<VisibleChunk>;
 
-    /// 输入结束，冲刷尾部残留（如未闭合标签被还原的噪音）。
+    /// Input ends; flush any trailing residue (e.g. noise restored from an unclosed tag).
     fn finish(&mut self) -> Vec<VisibleChunk>;
 }
 
-/// 默认流式解析器：吞掉一切，不外泄任何增量。
+/// Default streaming parser: swallow everything, leaking no increment.
 struct NoopStreamParser;
 
 impl ContentStreamParser for NoopStreamParser {
@@ -149,39 +189,39 @@ fn default_result_template() -> String {
     r#"{"tool":"{tool}"}"#.to_string()
 }
 
-/// 内置的**声明式** XML 标签协议（源自 figmaagent 的 content 协议）。
+/// The built-in **declarative** XML tag protocol (derived from figmaagent's content protocol).
 ///
-/// 一次 assistant 回复是一个 XML-like 文档：
+/// One assistant reply is an XML-like document:
 ///
 /// ```text
-/// <thinking>内部推理（可选）</thinking>
-/// <description>给用户的回答</description>
+/// <thinking>internal reasoning (optional)</thinking>
+/// <description>reply to the user</description>
 /// <tool>
-///   <name>工具名</name>
-///   <params>合法 JSON</params>
+///   <name>tool name</name>
+///   <params>valid JSON</params>
 /// </tool>
 /// ```
 ///
-/// 标签名与回灌模板都可经 builder 覆盖；要完全自定义（fenced-JSON / 正则等），
-/// 自己 `impl ContentToolProtocol` 即可。
+/// Tag names and the feedback template can be overridden via the builder; for a fully custom
+/// scheme (fenced-JSON / regex, etc.), just `impl ContentToolProtocol` yourself.
 #[derive(bon::Builder, Clone)]
 pub(crate) struct TaggedToolProtocol {
-    /// 思考标签名（默认 `thinking`）。
+    /// Thinking tag name (default `thinking`).
     #[builder(into, default = "thinking".to_string())]
     thinking_tag: String,
-    /// 展示文本标签名（默认 `description`）。
+    /// Display-text tag name (default `description`).
     #[builder(into, default = "description".to_string())]
     description_tag: String,
-    /// 工具块标签名（默认 `tool`）。
+    /// Tool block tag name (default `tool`).
     #[builder(into, default = "tool".to_string())]
     tool_tag: String,
-    /// 工具名标签名（默认 `name`）。
+    /// Tool name tag name (default `name`).
     #[builder(into, default = "name".to_string())]
     name_tag: String,
-    /// 工具参数标签名（默认 `params`）。
+    /// Tool arguments tag name (default `params`).
     #[builder(into, default = "params".to_string())]
     params_tag: String,
-    /// 工具结果回灌模板，`{tool}` 会被替换成工具名。
+    /// Tool-result feedback template; `{tool}` is replaced with the tool name.
     #[builder(into, default = default_result_template())]
     result_template: String,
 }
@@ -200,74 +240,23 @@ impl TaggedToolProtocol {
 
 impl ContentToolProtocol for TaggedToolProtocol {
     fn render_instructions(&self, tools: &[&ToolDefinition]) -> String {
-        let thinking_tag = &self.thinking_tag;
-        let description_tag = &self.description_tag;
-        let tool_tag = &self.tool_tag;
-        let name_tag = &self.name_tag;
-        let params_tag = &self.params_tag;
-
-        let mut out = String::new();
-
-        // 一、运行机制（ReAct 循环）——让模型知道「输出 → 执行 → 回灌」是一个闭环。
-        out.push_str("# 工具调用协议\n\n");
-        out.push_str("你可以调用工具来完成任务。工具调用是一个多轮循环：\n");
-        out.push_str("1. 用户发来一条消息；\n");
-        out.push_str(&format!(
-            "2. 你输出一段回复——**需要动手时**按下面的 XML 格式输出（含恰好一个 `<{tool_tag}>`）；**不需要工具时直接输出纯文本**即可；\n"
-        ));
-        out.push_str("3. 系统执行工具，并把结果作为新的 user 消息回灌给你；\n");
-        out.push_str(&format!(
-            "4. 你据结果判断任务是否完成——未完成就继续发 `<{tool_tag}>`，完成则直接给出最终回答（纯文本或 `<{description_tag}>` 皆可）。\n\n"
-        ));
-
-        // 二、输出格式契约。
-        out.push_str("# 输出格式（务必严格遵守）\n\n");
-        out.push_str(&format!(
-            "<{thinking_tag}>内部推理（可选）</{thinking_tag}>\n<{description_tag}>给用户的回答</{description_tag}>\n<{tool_tag}>\n  <{name_tag}>工具名</{name_tag}>\n  <{params_tag}>合法的 JSON 对象</{params_tag}>\n</{tool_tag}>\n\n"
-        ));
-        out.push_str("约束：\n");
-        out.push_str(&format!(
-            "- **需要调用工具时**：每条回复**恰好一个** `<{tool_tag}>`，且标签之外不要输出任何字符（含空行、说明文字）。\n"
-        ));
-        out.push_str("- 工具调用必须写在回复顶层，完整闭合所有标签；不要把工具调用放进 Markdown 代码块或展示文本中。展示 XML 示例时请使用代码块，它只会作为文字显示。\n");
-        out.push_str(&format!(
-            "- `<{params_tag}>` 内必须是合法 JSON（双引号、转义字符，无注释）。\n"
-        ));
-        out.push_str("- 命令复杂时先拆成短调用；不要输出半截 JSON。字符串内的双引号和反斜杠必须按 JSON 转义。\n");
-        out.push_str(&format!(
-            "- 示例：`<{tool_tag}><{name_tag}>bash</{name_tag}><{params_tag}>{{\"command\":\"git status --short\"}}</{params_tag}></{tool_tag}>`。发送前检查 JSON 和所有标签都已闭合。\n"
-        ));
-        out.push_str(&format!(
-            "- **不需要工具时**：直接输出纯文本回答即可，无需任何标签（也可用 `<{thinking_tag}>` / `<{description_tag}>` 包一层）。\n"
-        ));
-        out.push_str(&format!(
-            "- **不发 `<{tool_tag}>` 就表示本轮结束**；想继续做事就必须发工具块。\n\n"
-        ));
-
-        // 三、工具目录（参数渲染成紧凑可读文档，而非原始 JSON Schema）。
-        out.push_str("# 可用工具\n\n");
-        out.push_str("每个工具的「参数」描述了 JSON 字段的类型与含义；请严格按描述传参，未列出的字段不要传。\n\n");
-        for (index, tool) in tools.iter().enumerate() {
-            out.push_str(&format!("## {}. {}\n\n", index + 1, tool.name));
-            if !tool.description.is_empty() {
-                out.push_str(&format!("描述：{}\n\n", tool.description));
-            }
-            out.push_str("参数：\n```\n");
-            out.push_str(&render_schema_doc(&tool.parameters));
-            out.push_str("\n```\n\n");
-        }
-
-        // 四、回灌识别规则——告诉模型「以结果头开头的 user 消息 = 工具返回值」。
-        let sample_header = self.result_template.replace("{tool}", "工具名");
-        out.push_str("# 工具结果回灌\n\n");
-        out.push_str(&format!(
-            "当你看到的最新 user 消息以 `{sample_header}` 开头时，这是上一次工具调用的返回值，**不是**用户的新指令；请据此判断下一步：成功则核对任务是否全部完成，失败则调整参数重试或说明原因。\n"
-        ));
-        // 只保留**通用**语义；「不要把模型服务自身的工作区当成用户项目环境」这类
-        // 针对特定模型的判断属于业务，移到应用层 `src/prompt.rs`（Step 7）。
-        out.push_str("只有收到对应的工具结果，才能说工具已执行。参数无效时命令没有执行，应重新发送完整、合法的调用。\n");
-
-        out
+        // The body lives in `prompts/tool_calling_instructions.md`; here we only fill placeholders.
+        // The catalog section is rendered separately (with a length limit); the rest is the fixed
+        // contract.
+        let catalog = render_tool_catalog(tools);
+        let result_header = self.result_template.replace("{tool}", "tool name");
+        render_placeholders(
+            INSTRUCTIONS_TEMPLATE,
+            &[
+                ("thinking", &self.thinking_tag),
+                ("description", &self.description_tag),
+                ("tool", &self.tool_tag),
+                ("name", &self.name_tag),
+                ("params", &self.params_tag),
+                ("catalog", &catalog),
+                ("result_header", &result_header),
+            ],
+        )
     }
 
     fn parse(&self, text: &str) -> ParsedDocument {
@@ -286,8 +275,10 @@ impl ContentToolProtocol for TaggedToolProtocol {
     ) -> String {
         let _ = thinking;
         let mut out = String::new();
-        // **不回放 `<thinking>`**（Step 6）：原生模式历史 reasoning 本就不回传，content
-        // 模式也不该每轮带上——否则上下文膨胀、更早触发压缩。仅回放正文与工具块。
+        // **Do not replay `<thinking>`** (Step 6): native mode never sends back historical
+        // reasoning anyway, and content mode should not carry it every turn either — otherwise the
+        // context bloats and compression triggers earlier. Only the body and tool blocks are
+        // replayed.
         if let Some(content) = content.filter(|text| !text.trim().is_empty()) {
             out.push_str(&format!(
                 "<{d}>{content}</{d}>\n",
@@ -295,9 +286,10 @@ impl ContentToolProtocol for TaggedToolProtocol {
                 content = escape_xml(content),
             ));
         }
-        // 注意：`name` / `arguments` **不转义**——`arguments` 是 JSON 原文，转义会破坏往返
-        // 解析（parse 侧无法反转义 params，它必须保持合法 JSON）。字符串内的 `<...>` 由
-        // 解析器的 `params_json_in_string` + 噪音回退原样还原。
+        // Note: `name` / `arguments` are **not escaped** — `arguments` is raw JSON, and escaping
+        // would break round-trip parsing (the parse side cannot unescape params; they must stay
+        // valid JSON). `<...>` inside strings is restored verbatim by the parser's
+        // `params_json_in_string` + noise fallback.
         for call in calls {
             out.push_str(&format!(
                 "<{tool}>\n<{name}>{n}</{name}>\n<{p}>{args}</{p}>\n</{tool}>\n",
@@ -319,17 +311,90 @@ impl ContentToolProtocol for TaggedToolProtocol {
     }
 }
 
-/// 把 JSON Schema 渲染成给 LLM 看的紧凑「JSON-Schema-ish 文档」。
+/// Single-pass placeholder rendering: replace `{{key}}` with its value, leaving unknown
+/// placeholders as-is.
 ///
-/// 移植自 figmaagent 的 `zod-to-doc.ts`：**可读、token 友好优先于 schema 完整**。
-/// 做法是递归遍历 schema，把每个字段渲染成 `key?: type  // 注释`：
-/// `enum` → `a | b`；`number` 带 `>= / <=`；`string` 带 `len / format`；对象 / 数组递归。
-/// 非常规结构回退到 `any`，保证不 panic。
+/// Same semantics as `src/prompt_template.rs::render` (a minimal SDK-side implementation that
+/// avoids an application-layer dependency). Only `{{...}}` is recognized; a single `{` (such as in
+/// the JSON example `{"command":...}`) is emitted verbatim.
+fn render_placeholders(template: &str, pairs: &[(&str, &str)]) -> String {
+    let mut out = String::with_capacity(template.len());
+    let bytes = template.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] == b'{' && index + 1 < bytes.len() && bytes[index + 1] == b'{' {
+            if let Some(offset) = template[index + 2..].find("}}") {
+                let key = &template[index + 2..index + 2 + offset];
+                if let Some((_, value)) = pairs.iter().find(|(name, _)| *name == key) {
+                    out.push_str(value);
+                    index += 2 + offset + 2;
+                    continue;
+                }
+            }
+        }
+        let ch = template[index..].chars().next().expect("index is on a char boundary");
+        out.push(ch);
+        index += ch.len_utf8();
+    }
+    out
+}
+
+/// Look up an error message template by `key` (a `key=template` line in `ERRORS_TEMPLATE`;
+/// lines starting with `#` are comments).
+fn error_template(key: &str) -> &'static str {
+    ERRORS_TEMPLATE
+        .lines()
+        .filter(|line| !line.trim_start().starts_with('#') && !line.trim().is_empty())
+        .find_map(|line| {
+            let (name, template) = line.split_once('=')?;
+            (name.trim() == key).then(|| template.trim())
+        })
+        .unwrap_or("")
+}
+
+/// Render a correctable error: fetch the template and fill placeholders (`{{tool}}` / `{{name}}` /
+/// `{{params}}` / `{{tool_name}}`).
+fn error_message(key: &str, pairs: &[(&str, &str)]) -> String {
+    render_placeholders(error_template(key), pairs)
+}
+
+/// Render the "Available tools" catalog (parameters rendered as a compact doc rather than raw JSON
+/// Schema) and apply the [`MAX_INSTRUCTIONS_CHARS`] limit.
+fn render_tool_catalog(tools: &[&ToolDefinition]) -> String {
+    let mut out = String::new();
+    for (index, tool) in tools.iter().enumerate() {
+        out.push_str(&format!("## {}. {}\n\n", index + 1, tool.name));
+        if !tool.description.is_empty() {
+            out.push_str(&format!("Description: {}\n\n", tool.description));
+        }
+        out.push_str("Parameters:\n```\n");
+        out.push_str(&render_schema_doc(&tool.parameters));
+        out.push_str("\n```\n\n");
+    }
+    if out.chars().count() <= MAX_INSTRUCTIONS_CHARS {
+        return out;
+    }
+    // Over the limit: truncate at a char boundary and flag it explicitly (not silent), telling the
+    // model the catalog is incomplete.
+    let truncated: String = out.chars().take(MAX_INSTRUCTIONS_CHARS).collect();
+    format!(
+        "{truncated}\n…(tool catalog truncated: {} tools total, only the first part shown)\n",
+        tools.len()
+    )
+}
+
+/// Render a JSON Schema as a compact "JSON-Schema-ish doc" for the LLM.
+///
+/// Ported from figmaagent's `zod-to-doc.ts`: **readability and token friendliness take priority
+/// over schema completeness**. It recursively walks the schema and renders each field as
+/// `key?: type  // comment`: `enum` -> `a | b`; `number` with `>= / <=`; `string` with
+/// `len / format`; objects / arrays recurse. Unusual structures fall back to `any`, guaranteed not
+/// to panic.
 fn render_schema_doc(schema: &Value) -> String {
     render_schema_node(schema, 0).join("\n")
 }
 
-/// 缩进宽度（空格数）。与 figmaagent 一致取 2。
+/// Indent width (number of spaces). Set to 2, matching figmaagent.
 const SCHEMA_INDENT: usize = 2;
 
 fn schema_pad(level: usize) -> String {
@@ -476,7 +541,7 @@ fn type_label(node: &Value) -> String {
             let min_items = node
                 .get("minItems")
                 .and_then(|value| value.as_u64())
-                .map(|count| format!(", >={count} 个"))
+                .map(|count| format!(", >={count} items"))
                 .unwrap_or_default();
             format!("{item}[]{min_items}")
         }
@@ -485,8 +550,8 @@ fn type_label(node: &Value) -> String {
     }
 }
 
-// schemars 会给 `int()` 类字段注入 ±Number.MAX_SAFE_INTEGER 之类的哨兵值，
-// 对 LLM 无指导意义、纯属噪音，故忽略掉接近该边界的约束。
+// schemars injects sentinel values like +/-Number.MAX_SAFE_INTEGER into `int()`-style fields;
+// these are noise with no guidance value for the LLM, so bounds near this boundary are ignored.
 const NUMBER_SENTINEL: f64 = 9_007_199_254_740_991.0;
 
 fn meaningful_bound(value: f64) -> bool {
@@ -525,17 +590,20 @@ fn string_constraints(node: &Value) -> String {
     parts.join(", ")
 }
 
-/// **编码前**：把工作集映射成 content 协议文本视图。
+/// **Before encoding**: map the working set into the content protocol's text view.
 ///
-/// - **所有** `Assistant`（含无工具调用的普通回答）→ [`ContentToolProtocol::render_assistant`]
-///   重新渲染成协议原文（`<thinking>` / `<description>` / `<tool>` 标签**保留**）。模型
-///   看不到结构化 `tool_calls`，必须看到它自己上一轮输出的**带标签原文**——一是工具调用链
-///   不断，二是标签本身是 KV 缓存前缀的一部分：确定性重渲染保证跨轮前缀逐字节稳定；
-/// - `Message::Tool` → [`ContentToolProtocol::render_result`] 渲染成回灌消息
-///   （模型不认 `role=tool`，通常是 user 文本）。
+/// - **Every** `Assistant` (including plain replies with no tool calls) -> re-render via
+///   [`ContentToolProtocol::render_assistant`] into the protocol's original text (the
+///   `<thinking>` / `<description>` / `<tool>` tags are **preserved**). The model cannot see
+///   structured `tool_calls`; it must see the **tagged original text** of its own previous turn —
+///   first so the tool-call chain is not broken, second because the tags are themselves part of
+///   the KV cache prefix: deterministic re-rendering keeps the cross-turn prefix byte-stable;
+/// - `Message::Tool` -> rendered via [`ContentToolProtocol::render_result`] into a feedback
+///   message (models don't understand `role=tool`; usually user text).
 ///
-/// 工具名需要从**前一条 assistant** 的 `tool_calls` 里按 `id` 反查——`Message::Tool`
-/// 只带 `tool_call_id`，不带名字。找不到时退化为空名（回灌模板里体现为空）。
+/// The tool name must be looked up by `id` from the **previous assistant**'s `tool_calls` —
+/// `Message::Tool` only carries `tool_call_id`, not the name. When not found it degrades to an
+/// empty name (which shows up as empty in the feedback template).
 pub(crate) fn encode_messages_for_content(
     messages: &[Message],
     tools: &[&ToolDefinition],
@@ -545,8 +613,9 @@ pub(crate) fn encode_messages_for_content(
 
     let mut id_to_name: HashMap<&str, &str> = HashMap::new();
     let mut out = Vec::with_capacity(messages.len() + 1);
-    // 工具目录拼到首条 system 之后（工具集按名排序且会话内稳定 → 前缀稳定）。
-    // 只作用于请求视图，不写进 `self.messages`。
+    // The tool catalog is appended after the first system message (the tool set is sorted by name
+    // and stable within a session -> stable prefix). It only affects the request view and is not
+    // written into `self.messages`.
     let instructions = if tools.is_empty() { String::new() } else { protocol.render_instructions(tools) };
     let mut messages = messages;
     if !instructions.trim().is_empty() {
@@ -562,7 +631,8 @@ pub(crate) fn encode_messages_for_content(
     while index < messages.len() {
         let message = &messages[index];
         match message {
-            // 所有 assistant 都重渲染成协议原文（保留标签），不再只处理带工具调用的那条。
+            // Every assistant is re-rendered into protocol text (preserving tags), not just the
+            // one carrying tool calls.
             Message::Assistant {
                 content,
                 reasoning_content,
@@ -576,7 +646,8 @@ pub(crate) fn encode_messages_for_content(
                     content.as_deref(),
                     tool_calls,
                 );
-                // 全空的 assistant（无 thinking / content / 调用）保持原样，避免回放出一段空白。
+                // A fully empty assistant (no thinking / content / calls) is left as-is, avoiding
+                // replaying a blank segment.
                 if text.is_empty() {
                     out.push(message.clone());
                 } else {
@@ -588,9 +659,11 @@ pub(crate) fn encode_messages_for_content(
                 }
                 index += 1;
             }
-            // **同一轮相邻的 `Message::Tool` 合并成一条 user 消息**（各结果块 `\n\n` 分隔）。
-            // 一轮 assistant 可能并发调用多个工具，runtime 会落成多条连续 Tool 消息；若逐条
-            // 回成 user，会连续出现多条 user 消息——Anthropic 等要求角色交替的协议会报错。
+            // **Adjacent `Message::Tool` entries from the same turn are merged into a single user
+            // message** (result blocks separated by `\n\n`). One assistant turn may call several
+            // tools concurrently, and the runtime writes several consecutive Tool messages; if each
+            // were fed back as its own user message, multiple consecutive user messages would
+            // appear — protocols requiring alternating roles (e.g. Anthropic) would error.
             Message::Tool { .. } => {
                 let mut blocks: Vec<String> = Vec::new();
                 let mut passthrough: Vec<Message> = Vec::new();
@@ -602,7 +675,8 @@ pub(crate) fn encode_messages_for_content(
                     else {
                         break;
                     };
-                    // 工具名缺失时用显式占位符（而非空串），避免回灌成 `{"tool":""}`（Step 5）。
+                    // When the tool name is missing, use an explicit placeholder (not an empty
+                    // string) to avoid feeding back `{"tool":""}` (Step 5).
                     let name = id_to_name
                         .get(tool_call_id.as_str())
                         .copied()
@@ -613,7 +687,8 @@ pub(crate) fn encode_messages_for_content(
                         arguments: String::new(),
                     };
                     let rendered = protocol.render_result(&call, content.as_deref().unwrap_or(""));
-                    // 内置协议回灌的是 user 文本；非文本渲染（自定义协议）退化为逐条透传。
+                    // The built-in protocol feeds back user text; non-text rendering (a custom
+                    // protocol) degrades to passing each entry through individually.
                     match rendered {
                         Message::User { content } | Message::System { content } => blocks.push(content),
                         other => passthrough.push(other),
@@ -636,19 +711,23 @@ pub(crate) fn encode_messages_for_content(
     out
 }
 
-/// **解码后**：把模型返回的 `Assistant` 消息按 content 协议规整化。
+/// **After decoding**: normalize the `Assistant` message returned by the model per the content
+/// protocol.
 ///
-/// 若解码器已经产出结构化 `tool_calls`（不应发生，但保持幂等）则原样返回；
-/// 否则从 `content` 解析出 `thinking` / `description` / `calls`：
-/// - `description` → `content`（展示给用户的纯文本，剥掉 XML 外壳）；
-/// - `thinking` → `reasoning_content`（**仅当原生 reasoning 为空时**，见下）；
-/// - `calls` → `tool_calls`（`id` 用 uuid 生成，协议本身无 id）。
+/// If the decoder already produced structured `tool_calls` (which should not happen, but keep it
+/// idempotent) it is returned as-is; otherwise `thinking` / `description` / `calls` are parsed out
+/// of `content`:
+/// - `description` -> `content` (the plain text shown to the user, with the XML shell stripped);
+/// - `thinking` -> `reasoning_content` (**only when native reasoning is empty**, see below);
+/// - `calls` -> `tool_calls` (`id` is generated with uuid; the protocol itself has no id).
 ///
-/// 无标签的普通回复（无 `description` 也无 `calls`）**保留原文**，避免把正常回答吃掉。
+/// A plain reply with no tags (neither `description` nor `calls`) **keeps its original text**, so a
+/// normal answer is not eaten.
 ///
-/// **解析错误回灌**（Step 5）：`document.errors` 非空时，不执行任何调用，改为合成
-/// 一条对保留工具 [`PROTOCOL_ERROR_TOOL`] 的调用——runtime 无需改动即可把它当作一次
-/// 工具结果回灌给模型（见 `docs/tool-calling-refactor.md` Step 5）。
+/// **Parse-error feedback** (Step 5): when `document.errors` is non-empty, no call is executed;
+/// instead a call to the reserved tool [`PROTOCOL_ERROR_TOOL`] is synthesized — the runtime can
+/// treat it as a tool result and feed it back to the model with no change (see Step 5 in
+/// `docs/tool-calling-refactor.md`).
 pub(crate) fn parse_content_response(
     protocol: &dyn ContentToolProtocol,
     message: Message,
@@ -677,7 +756,7 @@ pub(crate) fn parse_content_response(
     };
     let document = protocol.parse(text);
 
-    // 解析失败：合成一条可纠正的回灌调用，不执行任何真实工具。
+    // Parse failure: synthesize one correctable feedback call; execute no real tool.
     if !document.errors.is_empty() {
         let detail = document.errors.join("；");
         return Message::Assistant {
@@ -697,21 +776,21 @@ pub(crate) fn parse_content_response(
         })
         .collect();
     let content = if calls.is_empty() {
-        // 普通回复：优先 description，缺失则保留原文。
+        // Plain reply: prefer description; if absent, keep the original text.
         document.description.or(content)
     } else {
-        // 工具轮：只把 description 当正文，避免把 XML 外壳泄露给 UI。
+        // Tool turn: only description becomes the body, avoiding leaking the XML shell to the UI.
         document.description
     };
     Message::Assistant {
         content,
-        // 思考来源优先级（Step 5）：原生 reasoning 优先，`<thinking>` 仅补空。
+        // Thinking-source priority (Step 5): native reasoning wins; `<thinking>` only fills a gap.
         reasoning_content: merge_reasoning(reasoning_content, document.thinking),
         tool_calls: calls,
     }
 }
 
-/// 原生 reasoning 优先；仅在它为空时采用协议 `<thinking>`。
+/// Native reasoning wins; the protocol `<thinking>` is used only when it is empty.
 fn merge_reasoning(native: Option<String>, tagged: Option<String>) -> Option<String> {
     match native.filter(|text| !text.trim().is_empty()) {
         Some(native) => Some(native),
@@ -719,11 +798,12 @@ fn merge_reasoning(native: Option<String>, tagged: Option<String>) -> Option<Str
     }
 }
 
-/// 构造一条指向保留工具 [`PROTOCOL_ERROR_TOOL`] 的合成调用，把错误细节回灌给模型。
+/// Build a synthetic call to the reserved tool [`PROTOCOL_ERROR_TOOL`] to feed the error details
+/// back to the model.
 fn protocol_error_call(detail: &str) -> ToolCall {
     let message = format!(
-        "工具调用无法解析：{detail}。请重新发送**完整、合法**的调用：一个 `<tool>` 块，\
-包含 `<name>` 与合法的 `<params>` JSON，并闭合所有标签。"
+        "The tool call could not be parsed: {detail}. Please resend a **complete, valid** call: one `<tool>` block, \
+containing `<name>` and valid `<params>` JSON, with all tags closed."
     );
     ToolCall {
         id: format!("content_call_{}", Uuid::new_v4()),
@@ -732,7 +812,7 @@ fn protocol_error_call(detail: &str) -> ToolCall {
     }
 }
 
-/// 标签名配置（owned，便于随流式解析器装箱成 `'static`）。
+/// Tag-name configuration (owned, so it can be boxed as `'static` along with the streaming parser).
 #[derive(Clone)]
 struct TagConfig {
     thinking: String,
@@ -751,23 +831,25 @@ impl TagConfig {
             || name == self.params.as_str()
     }
 
-    /// `parent` 能否直接包含 `child`：只有 `tool` 能包含 `name` / `params`。
+    /// Whether `parent` may directly contain `child`: only `tool` can contain `name` / `params`.
     fn can_contain(&self, parent: &str, child: &str) -> bool {
         parent == self.tool.as_str() && (child == self.name.as_str() || child == self.params.as_str())
     }
 }
 
-/// 字符级解析状态机：支持任意分片（`feed` 逐字符喂入，状态跨调用保持）。
+/// Char-level parse state machine: supports arbitrary fragments (`feed` is fed char by char, state
+/// persists across calls).
 ///
-/// v1 只在最终态解析（`parse` 对完整文本跑一次），但按状态机实现，为后续流式解析留接缝。
+/// v1 parses only at the terminal state (`parse` runs once over the full text), but it is
+/// implemented as a state machine to leave a seam for later streaming parsing.
 struct TagParser {
     cfg: TagConfig,
     mode: Mode,
-    /// 正在构建的标签 token（`<` 与 `>` 之间的内容）。
+    /// The tag token currently being built (the content between `<` and `>`).
     token: String,
-    /// 打开标签栈（含各自的内容缓冲）。
+    /// The stack of open tags (each with its own content buffer).
     stack: Vec<OpenTag>,
-    /// 标签之外的散落文本（噪音回退用）。
+    /// Stray text outside tags (used for noise fallback).
     outside: String,
     thinking: Option<String>,
     description: Option<String>,
@@ -778,12 +860,13 @@ struct TagParser {
     in_code_fence: bool,
     backtick_run: usize,
     calls: Vec<ParsedToolCall>,
-    /// 解析中发现的**可纠正错误**（缺 name / 未闭合 params / 非法 JSON）。
+    /// **Correctable errors** found during parsing (missing name / unclosed params / invalid JSON).
     errors: Vec<String>,
-    /// 流式可见增量（逐字符累积；`parse_tagged` 路径忽略之）。
+    /// Streaming visible increments (accumulated char by char; the `parse_tagged` path ignores them).
     emitted: Vec<VisibleChunk>,
-    /// 暂存的尾随空白：仅当后面紧跟非空白时才吐出，遇标签边界 / 结束时丢弃——
-    /// 使流式可见文本与最终解析的 `trim()` 结果一致（不把标签间的换行当正文）。
+    /// Buffered trailing whitespace: emitted only when immediately followed by non-whitespace, and
+    /// dropped at a tag boundary / at the end — so the streamed visible text matches the final
+    /// parse's `trim()` result (newlines between tags are not treated as body text).
     pending_ws: String,
 }
 
@@ -794,12 +877,13 @@ struct OpenTag {
 
 enum Mode {
     Text,
-    /// 刚读到 `<`，尚未确定它是否真的是标签开头（决定噪音回退还是进入标签）。
+    /// A `<` was just read; whether it truly starts a tag is not yet decided (determines noise
+    /// fallback vs. entering a tag).
     TagOpen,
     Tag,
 }
 
-/// 可见增量通道：`Thinking`（→ ReasoningDelta）/ `Content`（→ ContentDelta）。
+/// Visible-increment channel: `Thinking` (-> ReasoningDelta) / `Content` (-> ContentDelta).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VisibleChannel {
     Thinking,
@@ -852,9 +936,10 @@ impl TagParser {
     fn feed(&mut self, ch: char) {
         match self.mode {
             Mode::Text => {
-                // 注意：这里**不**因 `params_json_in_string` 而短路 `'<'`——否则字符串里
-                // 未配对的引号会让 `</params>` 永远进不了标签解析（Step 5 的引号兜底依赖它）。
-                // 字符串内部的 `<` 由 `resolve_tag` 的引号兜底还原为文本。
+                // Note: this does **not** short-circuit `'<'` on `params_json_in_string` —
+                // otherwise an unmatched quote inside the string would keep `</params>` from ever
+                // entering tag parsing (Step 5's quote fallback depends on it). A `<` inside a
+                // string is restored as text by `resolve_tag`'s quote fallback.
                 if ch == '<' && !self.in_code_fence {
                     self.mode = Mode::TagOpen;
                     self.token.clear();
@@ -862,11 +947,12 @@ impl TagParser {
                     self.push_text(ch);
                 }
             }
-            // `<` 之后的第一字符决定去向：
-            //   - 合法标签起始字符（或 `/` 收尾）→ 进入标签 token；
-            //   - `>` → 空标签 `<>`，跳过；
-            //   - 又一个 `<` → 前一个 `<` 是噪音，重开标签；
-            //   - 其它（空格、数字、标点…）→ `<` 是普通文本，整段回退。
+            // The first char after `<` decides the destination:
+            //   - a valid tag-start char (or a closing `/`) -> enter the tag token;
+            //   - `>` -> empty tag `<>`, skip;
+            //   - another `<` -> the previous `<` was noise, restart the tag;
+            //   - anything else (space, digit, punctuation …) -> `<` is plain text, roll back the
+            //     whole thing.
             Mode::TagOpen => {
                 if ch == '>' {
                     self.mode = Mode::Text;
@@ -894,7 +980,8 @@ impl TagParser {
         }
     }
 
-    /// 把普通字符追加到「当前打开标签的内容」或「标签外缓冲」。
+    /// Append a plain char to "the content of the currently open tag" or the "outside-tags
+    /// buffer".
     fn push_text(&mut self, ch: char) {
         if self.stack.last().is_none_or(|tag| tag.name == self.cfg.description || tag.name == self.cfg.thinking) {
             if ch == '`' {
@@ -922,7 +1009,7 @@ impl TagParser {
         self.emit_char(ch);
     }
 
-    /// 把一段噪音（无法识别的标签）原样还原为文本。
+    /// Restore a piece of noise (an unrecognized tag) verbatim as text.
     fn push_noise(&mut self, text: &str) {
         match self.stack.last_mut() {
             Some(top) => top.buf.push_str(text),
@@ -933,10 +1020,11 @@ impl TagParser {
         }
     }
 
-    /// 当前栈顶标签对应的**可见通道**（`None` = 屏蔽）。
+    /// The **visible channel** corresponding to the current top-of-stack tag (`None` = suppressed).
     ///
-    /// 标签外文本（栈为空）也返回 `None`：与最终解析「工具轮只保留 `<description>`」
-    /// 对齐（Step 5）——`<tool>` 标签之间的换行 / 散落文字不再泄漏成 `ContentDelta`。
+    /// Text outside tags (empty stack) also returns `None`: aligned with the final parse's
+    /// "tool turn keeps only `<description>`" (Step 5) — newlines / stray text between `<tool>`
+    /// tags no longer leak out as `ContentDelta`.
     fn visible_channel(&self) -> Option<VisibleChannel> {
         match self.stack.last() {
             None => None,
@@ -946,10 +1034,11 @@ impl TagParser {
         }
     }
 
-    /// 逐字符产出可见增量（屏蔽通道直接丢弃）。
+    /// Emit visible increments char by char (suppressed channels are dropped outright).
     ///
-    /// 空白先暂存（[`Self::pending_ws`]）：后面紧跟非空白才吐出，遇标签边界 / 结束时
-    /// 丢弃——这样标签间的换行不会被当成正文，流式结果与最终 `trim()` 对齐。
+    /// Whitespace is buffered first ([`Self::pending_ws`]): emitted only when immediately followed
+    /// by non-whitespace, dropped at a tag boundary / at the end — so newlines between tags are not
+    /// treated as body text, and the streamed result matches the final `trim()`.
     fn emit_char(&mut self, ch: char) {
         let Some(channel) = self.visible_channel() else {
             self.pending_ws.clear();
@@ -966,7 +1055,7 @@ impl TagParser {
         self.push_visible(channel, &ch.to_string());
     }
 
-    /// 把一段文本追加到指定可见通道（相邻同通道合并）。
+    /// Append a piece of text to the given visible channel (adjacent same-channel pieces merge).
     fn push_visible(&mut self, channel: VisibleChannel, text: &str) {
         match self.emitted.last_mut() {
             Some(VisibleChunk::Thinking(buf)) if channel == VisibleChannel::Thinking => {
@@ -982,7 +1071,7 @@ impl TagParser {
         }
     }
 
-    /// 取出累积的可见增量。
+    /// Take the accumulated visible increments.
     fn take_visible(&mut self) -> Vec<VisibleChunk> {
         std::mem::take(&mut self.emitted)
     }
@@ -990,7 +1079,7 @@ impl TagParser {
     fn resolve_tag(&mut self, raw: &str) {
         let trimmed = raw.trim();
         if trimmed.is_empty() {
-            // `<>` / `</>`：跳过。
+            // `<>` / `</>`: skip.
             return;
         }
         let self_closing = trimmed.ends_with('/');
@@ -1002,9 +1091,11 @@ impl TagParser {
         if name.is_empty() {
             return;
         }
-        // 引号不配对兜底（Step 5）：`<params>` 内字符串引号未闭合时 `params_json_in_string`
-        // 会卡在 true，`</params>` 会被当成字符串内容吞掉。栈顶是 params 且仍处于
-        // 「字符串中」时���遇 `</params>` 先做 JSON 校验：能解析则正常闭合，否则整段还原为文本。
+        // Unmatched-quote fallback (Step 5): when a string quote inside `<params>` is unclosed,
+        // `params_json_in_string` stays stuck at true and `</params>` would be swallowed as string
+        // content. When the top of stack is params and we are still "inside a string", on seeing
+        // `</params>` we first run a JSON check: if it parses, close normally; otherwise restore the
+        // whole thing as text.
         if self.params_json_in_string
             && closing
             && name == self.cfg.params
@@ -1016,7 +1107,7 @@ impl TagParser {
                 return;
             }
         }
-        // 非法 / 未知标签：整段还原为文本（例如 `a < b` 里的裸 `<`）。
+        // Invalid / unknown tag: restore the whole thing as text (e.g. a bare `<` in `a < b`).
         if !is_valid_name(name) || !self.cfg.known(name) {
             self.push_noise(&format!("<{raw}>"));
             return;
@@ -1034,7 +1125,8 @@ impl TagParser {
             self.push_noise(&format!("<{raw}>"));
             return;
         }
-        // 真正的结构标签才丢弃边界空白；正文中的 XML 示例保留原有空白。
+        // Only genuine structural tags drop boundary whitespace; XML examples in the body keep
+        // their existing whitespace.
         self.pending_ws.clear();
         if closing {
             self.close_tag(name);
@@ -1047,7 +1139,8 @@ impl TagParser {
     }
 
     fn open_tag(&mut self, name: &str) {
-        // 兜底清理不合法的嵌套；协议标签在正文中已于 resolve_tag 回退成文本。
+        // Fallback cleanup of invalid nesting; protocol tags in the body were already rolled back
+        // to text in resolve_tag.
         while let Some(top) = self.stack.last() {
             if self.cfg.can_contain(&top.name, name) {
                 break;
@@ -1076,7 +1169,7 @@ impl TagParser {
                 }
                 self.finalize_top();
             }
-            // 找不到对应开标签：还原为文本。
+            // No matching open tag found: restore as text.
             None => self.push_noise(&format!("</{name}>")),
         }
     }
@@ -1091,10 +1184,11 @@ impl TagParser {
             self.backtick_run = 0;
         }
         if top.name == self.cfg.thinking {
-            // 可见增量已在 `emit_char` 逐字符发出；弹栈时只丢弃缓冲，不补发。
+            // Visible increments were already emitted char by char in `emit_char`; popping only
+            // discards the buffer, re-emitting nothing.
             append_opt(&mut self.thinking, content);
         } else if top.name == self.cfg.description {
-            // 反转义（与 `render_assistant` 的 escape_xml 对称，Step 6）。
+            // Unescape (symmetric with `render_assistant`'s escape_xml, Step 6).
             append_opt(&mut self.description, unescape_xml(&content));
         } else if top.name == self.cfg.name {
             self.tool_name = Some(content);
@@ -1103,15 +1197,20 @@ impl TagParser {
         } else if top.name == self.cfg.tool {
             let name = self.tool_name.take().unwrap_or_default();
             let params = self.tool_params.take();
-            // 解析错误不静默（Step 5）：缺 name / params 非法 JSON 记入 errors，
-            // 由 `parse_content_response` 合成可纠正回灌，而不是带着垃圾参数执行。
+            // Parse errors are not silent (Step 5): missing name / invalid params JSON are recorded
+            // in errors, and `parse_content_response` synthesizes a correctable feedback instead of
+            // executing with garbage arguments.
             if name.is_empty() {
-                self.errors.push("工具块缺少 `<name>`".to_string());
+                self.errors
+                    .push(error_message("missing_name", &[("name", &self.cfg.name)]));
             } else {
                 let arguments = match params {
                     Some(raw) if !raw.trim().is_empty() => {
                         if serde_json::from_str::<serde_json::Value>(raw.trim()).is_err() {
-                            self.errors.push(format!("工具 `{name}` 的 `<params>` 不是合法 JSON"));
+                            self.errors.push(error_message(
+                                "invalid_params",
+                                &[("tool_name", &name), ("params", &self.cfg.params)],
+                            ));
                         }
                         raw
                     }
@@ -1123,9 +1222,10 @@ impl TagParser {
     }
 
     fn finish(&mut self) -> ParsedDocument {
-        // 结尾的暂存空白丢弃（与 `trim()` 对齐）。
+        // Drop the trailing buffered whitespace (aligned with `trim()`).
         self.pending_ws.clear();
-        // 输入结束仍在构建标签：未闭合的 `<...` / 孤立的 `<` 还原为文本。
+        // Input ended while still building a tag: an unclosed `<...` / an isolated `<` is restored
+        // as text.
         match self.mode {
             Mode::Tag => {
                 let token = std::mem::take(&mut self.token);
@@ -1143,12 +1243,13 @@ impl TagParser {
         if has_unclosed_tool {
             self.calls.truncate(complete_call_count);
             self.errors.push(if truncated_in_params {
-                "工具块被截断（`<params>` 未闭合），无法执行".to_string()
+                error_message("truncated_params", &[("params", &self.cfg.params)])
             } else {
-                "工具块未闭合（缺少 `</tool>`）".to_string()
+                error_message("unclosed_tool", &[("tool", &self.cfg.tool)])
             });
         }
-        // 标签外散落文本统一丢弃（与流式 visible_channel 对齐，Step 5）。
+        // Stray text outside tags is dropped uniformly (aligned with the streaming visible_channel,
+        // Step 5).
         ParsedDocument {
             thinking: self.thinking.take(),
             description: self.description.take(),
@@ -1158,8 +1259,9 @@ impl TagParser {
     }
 }
 
-/// [`TaggedToolProtocol`] 的**流式**解析器：把同一套字符级状态机包装成
-/// [`ContentStreamParser`]，逐块喂入原始文本、只吐 `thinking` / `description` 增量。
+/// The **streaming** parser for [`TaggedToolProtocol`]: wraps the same char-level state machine as
+/// a [`ContentStreamParser`], fed raw text chunk by chunk and emitting only `thinking` /
+/// `description` increments.
 struct TaggedStreamParser {
     parser: TagParser,
     prefix: String,
@@ -1217,21 +1319,22 @@ impl ContentStreamParser for TaggedStreamParser {
                 vec![VisibleChunk::Content(std::mem::take(&mut self.prefix))]
             };
         }
-        // 冲刷状态机（未闭合标签 / 孤立 `<` 还原为噪音，可能带出可见增量）。
+        // Flush the state machine (unclosed tags / isolated `<` restored as noise, possibly
+        // producing visible increments).
         self.parser.finish();
         self.parser.take_visible()
     }
 }
 
-/// 转义 XML 元字符，保证回放文本里的 `<` / `&` 不会被当成协议标签（Step 6）。
-/// 与解析侧 [`unescape_xml`] 严格互逆。
+/// Escape XML metacharacters so `<` / `&` in replayed text are not treated as protocol tags
+/// (Step 6). Strictly inverse to [`unescape_xml`] on the parse side.
 fn escape_xml(text: &str) -> String {
     text.replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
 }
 
-/// 反转义 [`escape_xml`] 写出的实体（顺序与转义相反）。
+/// Unescape the entities written by [`escape_xml`] (in reverse order).
 fn unescape_xml(text: &str) -> String {
     text.replace("&lt;", "<")
         .replace("&gt;", ">")
@@ -1251,7 +1354,8 @@ fn append_opt(slot: &mut Option<String>, content: String) {
     }
 }
 
-/// 标签名合法性：首字符是 `NameStartChar`、其余是 `NameChar`（W3C XML 的务实子集）。
+/// Tag-name validity: the first char is a `NameStartChar`, the rest are `NameChar` (a pragmatic
+/// subset of W3C XML).
 fn is_valid_name(name: &str) -> bool {
     let mut chars = name.chars();
     match chars.next() {
@@ -1260,12 +1364,12 @@ fn is_valid_name(name: &str) -> bool {
     }
 }
 
-/// W3C XML `NameStartChar` 的务实子集：字母 / `_` / `:`。
+/// A pragmatic subset of W3C XML `NameStartChar`: letters / `_` / `:`.
 fn is_name_start(ch: char) -> bool {
     ch.is_ascii_alphabetic() || ch == '_' || ch == ':'
 }
 
-/// W3C XML `NameChar` 的务实子集：`NameStartChar` + 数字 / `-` / `.`。
+/// A pragmatic subset of W3C XML `NameChar`: `NameStartChar` + digits / `-` / `.`.
 fn is_name_char(ch: char) -> bool {
     is_name_start(ch) || ch.is_ascii_digit() || ch == '-' || ch == '.'
 }
@@ -1281,10 +1385,10 @@ mod tests {
     #[test]
     fn parses_full_document() {
         let doc = protocol().parse(
-            "<thinking>想一下</thinking>\n<description>我来看看</description>\n<tool>\n<name>read_file</name>\n<params>{\"path\":\"a.rs\"}</params>\n</tool>",
+            "<thinking>let me think</thinking>\n<description>let me take a look</description>\n<tool>\n<name>read_file</name>\n<params>{\"path\":\"a.rs\"}</params>\n</tool>",
         );
-        assert_eq!(doc.thinking.as_deref(), Some("想一下"));
-        assert_eq!(doc.description.as_deref(), Some("我来看看"));
+        assert_eq!(doc.thinking.as_deref(), Some("let me think"));
+        assert_eq!(doc.description.as_deref(), Some("let me take a look"));
         assert_eq!(
             doc.calls,
             vec![ParsedToolCall {
@@ -1329,13 +1433,13 @@ mod tests {
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text":
-                    "<thinking>检查路径</thinking><description>我先读取文件</description><tool><name>read_file</name><params>{\"path\":\"a.txt\"}</params></tool>"
+                    "<thinking>check the path</thinking><description>let me read the file first</description><tool><name>read_file</name><params>{\"path\":\"a.txt\"}</params></tool>"
                 }]
             }]
         })).unwrap();
         let message = parse_content_response(&protocol(), response.message);
         let Message::Assistant { content, tool_calls, .. } = message else { panic!("expected assistant") };
-        assert_eq!(content.as_deref(), Some("我先读取文件"));
+        assert_eq!(content.as_deref(), Some("let me read the file first"));
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "read_file");
         assert_eq!(tool_calls[0].arguments, r#"{"path":"a.txt"}"#);
@@ -1343,21 +1447,21 @@ mod tests {
 
     #[test]
     fn description_only_has_no_calls() {
-        let doc = protocol().parse("<description>直接回答，不调工具</description>");
-        assert_eq!(doc.description.as_deref(), Some("直接回答，不调工具"));
+        let doc = protocol().parse("<description>answer directly, no tool call</description>");
+        assert_eq!(doc.description.as_deref(), Some("answer directly, no tool call"));
         assert!(doc.calls.is_empty());
     }
 
     #[test]
     fn nested_protocol_tag_is_literal_until_parent_closes() {
-        let doc = protocol().parse("<thinking>推理中<description>回答</description>");
-        assert_eq!(doc.thinking.as_deref(), Some("推理中<description>回答</description>"));
+        let doc = protocol().parse("<thinking>reasoning<description>answer</description>");
+        assert_eq!(doc.thinking.as_deref(), Some("reasoning<description>answer</description>"));
         assert!(doc.description.is_none());
     }
 
     #[test]
     fn fenced_xml_example_is_not_a_tool_call() {
-        let example = "示例：\n```xml\n<tool><name>bash</name><params>{}</params></tool>\n```";
+        let example = "Example:\n```xml\n<tool><name>bash</name><params>{}</params></tool>\n```";
         let doc = protocol().parse(example);
         assert_eq!(doc.description.as_deref(), Some(example));
         assert!(doc.calls.is_empty());
@@ -1369,13 +1473,13 @@ mod tests {
         let (_, streamed) = collect_visible(&protocol(), &[&wrapped]);
         assert_eq!(streamed, example);
 
-        let outside = format!("<description>示例</description>\n```xml\n<tool><name>bash</name><params>{{}}</params></tool>\n```");
+        let outside = format!("<description>Example</description>\n```xml\n<tool><name>bash</name><params>{{}}</params></tool>\n```");
         assert!(protocol().parse(&outside).calls.is_empty());
 
-        let inline = "<description>调用示例：\n<tool><name>bash</name><params>{}</params></tool></description>";
+        let inline = "<description>call example:\n<tool><name>bash</name><params>{}</params></tool></description>";
         assert!(protocol().parse(inline).calls.is_empty());
         let (_, streamed) = collect_visible(&protocol(), &[inline]);
-        assert_eq!(streamed, "调用示例：\n<tool><name>bash</name><params>{}</params></tool>");
+        assert_eq!(streamed, "call example:\n<tool><name>bash</name><params>{}</params></tool>");
     }
 
     #[test]
@@ -1386,36 +1490,36 @@ mod tests {
 
     #[test]
     fn truncated_params_records_error() {
-        // 被 max_tokens 截断：`<params>` 未闭合 → 不执行，且记入 errors（Step 5）。
+        // Truncated by max_tokens: `<params>` is unclosed -> not executed, and recorded in errors (Step 5).
         let doc = protocol().parse("<tool><name>bash</name><params>{\"command\":\"ls");
         assert!(doc.calls.is_empty());
-        assert!(!doc.errors.is_empty(), "应记录截断错误: {doc:?}");
+        assert!(!doc.errors.is_empty(), "should record a truncation error: {doc:?}");
     }
 
     #[test]
     fn missing_name_records_error() {
         let doc = protocol().parse("<tool><params>{}</params></tool>");
         assert!(doc.calls.is_empty());
-        assert!(doc.errors.iter().any(|e| e.contains("name")), "应记录缺 name: {doc:?}");
+        assert!(doc.errors.iter().any(|e| e.contains("name")), "should record a missing name: {doc:?}");
     }
 
     #[test]
     fn invalid_params_json_records_error() {
         let doc = protocol().parse("<tool><name>bash</name><params>{not json}</params></tool>");
-        assert!(!doc.errors.is_empty(), "应记录非法 JSON: {doc:?}");
+        assert!(!doc.errors.is_empty(), "should record invalid JSON: {doc:?}");
     }
 
     #[test]
     fn unmatched_quote_in_params_falls_back_to_text() {
-        // 字符串引号未闭合时 `</params>` 不应被吞掉；非法 JSON → 还原为文本 + 记错误。
+        // When a string quote is unclosed, `</params>` should not be swallowed; invalid JSON -> restore as text + record an error.
         let doc = protocol().parse("<tool><name>bash</name><params>{\"command\":\"ls}</params></tool>");
-        assert!(doc.calls.is_empty(), "非法 JSON 不应执行: {doc:?}");
-        assert!(!doc.errors.is_empty(), "应记录非法 JSON: {doc:?}");
+        assert!(doc.calls.is_empty(), "invalid JSON should not be executed: {doc:?}");
+        assert!(!doc.errors.is_empty(), "should record invalid JSON: {doc:?}");
     }
 
     #[test]
     fn parse_error_produces_protocol_recovery_call() {
-        // 解析错误 → 合成一条 `__protocol__` 调用回灌，不执行真实工具（Step 5）。
+        // Parse error -> synthesize one `__protocol__` feedback call; execute no real tool (Step 5).
         let message = Message::Assistant {
             content: Some("<tool><params>{}</params></tool>".into()),
             reasoning_content: None,
@@ -1431,46 +1535,46 @@ mod tests {
 
     #[test]
     fn native_reasoning_wins_over_tagged_thinking() {
-        // 思考来源优先级：原生 reasoning 优先，`<thinking>` 仅补空（Step 5）。
+        // Thinking-source priority: native reasoning wins; `<thinking>` only fills a gap (Step 5).
         let message = Message::Assistant {
-            content: Some("<thinking>标签思考</thinking><description>答</description>".into()),
-            reasoning_content: Some("原生思考".into()),
+            content: Some("<thinking>tag thinking</thinking><description>answer</description>".into()),
+            reasoning_content: Some("native thinking".into()),
             tool_calls: Vec::new(),
         };
         let Message::Assistant { reasoning_content, .. } = parse_content_response(&protocol(), message) else {
             panic!("expected assistant");
         };
-        assert_eq!(reasoning_content.as_deref(), Some("原生思考"));
+        assert_eq!(reasoning_content.as_deref(), Some("native thinking"));
 
-        // 原生为空时采用 `<thinking>`。
+        // When native is empty, use `<thinking>`.
         let message = Message::Assistant {
-            content: Some("<thinking>标签思考</thinking><description>答</description>".into()),
+            content: Some("<thinking>tag thinking</thinking><description>answer</description>".into()),
             reasoning_content: None,
             tool_calls: Vec::new(),
         };
         let Message::Assistant { reasoning_content, .. } = parse_content_response(&protocol(), message) else {
             panic!("expected assistant");
         };
-        assert_eq!(reasoning_content.as_deref(), Some("标签思考"));
+        assert_eq!(reasoning_content.as_deref(), Some("tag thinking"));
     }
 
     #[test]
     fn stream_discards_text_outside_tags() {
-        // 标签外散落文本统一丢弃（与最终解析对齐，Step 5）。
+        // Stray text outside tags is dropped uniformly (aligned with the final parse, Step 5).
         let protocol = protocol();
         let (thinking, content) = collect_visible(
             &protocol,
-            &["<description>答</description>\n", "some stray text\n", "<tool><name>bash</name><params>{}</params></tool>"],
+            &["<description>answer</description>\n", "some stray text\n", "<tool><name>bash</name><params>{}</params></tool>"],
         );
         assert_eq!(thinking, "");
-        assert_eq!(content, "答");
+        assert_eq!(content, "answer");
     }
 
     #[test]
     fn bare_angle_bracket_falls_back_to_text() {
-        // `a < b` 不是合法标签，应还原为文本进入 description。
-        let doc = protocol().parse("<description>比较 a < b 的大小</description>");
-        assert_eq!(doc.description.as_deref(), Some("比较 a < b 的大小"));
+        // `a < b` is not a valid tag; it should be restored as text into description.
+        let doc = protocol().parse("<description>compare a < b</description>");
+        assert_eq!(doc.description.as_deref(), Some("compare a < b"));
         assert!(doc.calls.is_empty());
     }
 
@@ -1501,7 +1605,7 @@ mod tests {
 
     #[test]
     fn split_feeding_is_stateful() {
-        // 逐字符喂入（模拟任意分片）与整体解析结果一致。
+        // Feeding char by char (simulating arbitrary fragments) matches the whole-parse result.
         let text = "<tool><name>x</name><params>{}</params></tool>";
         let proto = protocol();
         let whole = parse_tagged(text, proto.tags());
@@ -1512,7 +1616,7 @@ mod tests {
         assert_eq!(parser.finish(), whole);
     }
 
-    /// 把流式解析器吐出的可见增量拼成 (thinking, content) 两段文本。
+    /// Concatenate the visible increments emitted by the streaming parser into (thinking, content) text.
     fn collect_visible(protocol: &TaggedToolProtocol, pieces: &[&str]) -> (String, String) {
         let mut parser = protocol.stream_parser();
         let mut thinking = String::new();
@@ -1539,41 +1643,41 @@ mod tests {
         let protocol = protocol();
         let (thinking, content) = collect_visible(
             &protocol,
-            &["<thinking>想一想</thinking>\n<description>这就做</description>\n<tool><name>read_file</name><params>{\"path\":\"a.rs\"}</params></tool>"],
+            &["<thinking>think a bit</thinking>\n<description>doing it now</description>\n<tool><name>read_file</name><params>{\"path\":\"a.rs\"}</params></tool>"],
         );
-        // thinking / description 增量可见；`<tool>` 块完全屏蔽。
-        assert_eq!(thinking, "想一想");
-        assert_eq!(content, "这就做");
+        // thinking / description increments are visible; the `<tool>` block is fully suppressed.
+        assert_eq!(thinking, "think a bit");
+        assert_eq!(content, "doing it now");
         assert!(!content.contains("read_file"));
         assert!(!content.contains("tool"));
     }
 
     #[test]
     fn stream_parser_is_split_insensitive() {
-        // 同一文档任意分片喂入，可见增量拼接结果一致（含工具块屏蔽）。
+        // Feeding the same document in arbitrary fragments yields the same concatenated increments (including tool-block suppression).
         let protocol = protocol();
-        let doc = "<thinking>想</thinking><description>答</description><tool><name>bash</name><params>{}</params></tool>";
+        let doc = "<thinking>think</thinking><description>answer</description><tool><name>bash</name><params>{}</params></tool>";
         let one_shot = collect_visible(&protocol, &[doc]);
         let per_char: Vec<String> = doc.chars().map(|c| c.to_string()).collect();
         let per_char: Vec<&str> = per_char.iter().map(String::as_str).collect();
         let split = collect_visible(&protocol, &per_char);
         assert_eq!(one_shot, split);
-        assert_eq!(one_shot.1, "答");
-        assert_eq!(one_shot.0, "想");
+        assert_eq!(one_shot.1, "answer");
+        assert_eq!(one_shot.0, "think");
     }
 
     #[test]
     fn stream_parser_passes_through_plain_text() {
-        // 纯文本（无标签）直接作为展示文本流出，不被吞掉。
+        // Plain text (no tags) flows out directly as display text, not swallowed.
         let protocol = protocol();
-        let (thinking, content) = collect_visible(&protocol, &["你好，", "世界"]);
+        let (thinking, content) = collect_visible(&protocol, &["hello, ", "world"]);
         assert_eq!(thinking, "");
-        assert_eq!(content, "你好，世界");
+        assert_eq!(content, "hello, world");
     }
 
     #[test]
     fn default_stream_parser_swallows_everything() {
-        // 未实现流式解析的协议：默认空解析器不外泄任何原始文本（保守安全默认）。
+        // A protocol with no streaming parsing implemented: the default no-op parser leaks no raw text (a safe conservative default).
         struct Bare;
         impl ContentToolProtocol for Bare {
             fn render_instructions(&self, _tools: &[&ToolDefinition]) -> String {
@@ -1624,7 +1728,7 @@ mod tests {
                 assert!(content.contains("\"tool\":\"bash\""));
                 assert!(content.ends_with("hello"));
             }
-            other => panic!("应为 User 回灌消息，实际: {other:?}"),
+            other => panic!("expected a User feedback message, actual: {other:?}"),
         }
     }
 
@@ -1636,12 +1740,12 @@ mod tests {
             name: "bash".into(),
             arguments: "{\"command\":\"ls\"}".into(),
         }];
-        // thinking 不再回放（Step 6）：历史 reasoning 每轮带上会膨胀上下文。
-        let text = proto.render_assistant(Some("想一下"), Some("看一下目录"), &calls);
-        assert!(!text.contains("想一下"), "不应回放 thinking: {text}");
+        // thinking is no longer replayed (Step 6): carrying historical reasoning every turn would bloat the context.
+        let text = proto.render_assistant(Some("think a bit"), Some("look at the catalog"), &calls);
+        assert!(!text.contains("think a bit"), "should not replay thinking: {text}");
         let doc = proto.parse(&text);
         assert_eq!(doc.thinking.as_deref(), None);
-        assert_eq!(doc.description.as_deref(), Some("看一下目录"));
+        assert_eq!(doc.description.as_deref(), Some("look at the catalog"));
         assert_eq!(
             doc.calls,
             vec![ParsedToolCall {
@@ -1651,11 +1755,11 @@ mod tests {
         );
     }
 
-    /// 回放对**正文**做 XML 转义（参数保持 JSON 原文），保证含 `<` 的文本往返解析无损（Step 6）。
+    /// Replay XML-escapes the **body** (arguments stay raw JSON), so text containing `<` round-trips losslessly (Step 6).
     #[test]
     fn render_assistant_escapes_content_and_round_trips() {
         let proto = protocol();
-        let content = "比较 a < b 且 x & y";
+        let content = "compare a < b and x & y";
         let args = r#"{"command":"echo '<tool>'"}"#;
         let calls = vec![ToolCall {
             id: "c".into(),
@@ -1663,49 +1767,50 @@ mod tests {
             arguments: args.into(),
         }];
         let text = proto.render_assistant(None, Some(content), &calls);
-        assert!(text.contains("&lt;"), "应转义正文里的 `<`: {text}");
+        assert!(text.contains("&lt;"), "should escape `<` in the body: {text}");
         let doc = proto.parse(&text);
         assert_eq!(doc.description.as_deref(), Some(content));
         assert_eq!(doc.calls.len(), 1);
         assert_eq!(doc.calls[0].arguments, args);
     }
 
-    /// 回放保留标签：普通 assistant（无 tool_calls）也重渲染成协议原文，
-    /// 而不是原样透传剥壳后的纯文本——否则 `<description>` 标签会丢，KV 前缀逐轮漂移。
+    /// Replay preserves tags: a plain assistant (no tool_calls) is also re-rendered into protocol
+    /// text, rather than passing through the shell-stripped plain text — otherwise the
+    /// `<description>` tag would be lost and the KV prefix would drift every turn.
     #[test]
     fn encode_keeps_tags_on_plain_assistant() {
         let proto = protocol();
         let messages = vec![
             Message::User {
-                content: "你好".into(),
+                content: "hello".into(),
             },
             Message::Assistant {
-                content: Some("我在".into()),
-                reasoning_content: Some("想一下".into()),
+                content: Some("I'm here".into()),
+                reasoning_content: Some("think a bit".into()),
                 tool_calls: Vec::new(),
             },
         ];
         let out = encode_messages_for_content(&messages, &[], &proto);
-        // user 原样保留。
-        assert!(matches!(&out[0], Message::User { content } if content == "你好"));
-        // assistant 被重渲染成带标签原文（标签必须出现）。
+        // user is preserved as-is.
+        assert!(matches!(&out[0], Message::User { content } if content == "hello"));
+        // assistant is re-rendered into tagged original text (the tags must appear).
         let Message::Assistant { content, tool_calls, .. } = &out[1] else {
             panic!("expected assistant");
         };
         let text = content.as_deref().unwrap();
-        // 不回放 thinking（Step 6），但仍保留 description 标签。
-        assert!(!text.contains("<thinking>"), "不应回放 thinking: {text}");
-        assert!(text.contains("<description>我在</description>"), "description 标签: {text}");
+        // thinking is not replayed (Step 6), but the description tag is kept.
+        assert!(!text.contains("<thinking>"), "should not replay thinking: {text}");
+        assert!(text.contains("<description>I'm here</description>"), "description tag: {text}");
         assert!(tool_calls.is_empty());
     }
 
-    /// 回放保留标签：带工具调用的 assistant 与后续 tool 结果都被正确重渲染。
+    /// Replay preserves tags: an assistant with tool calls and its subsequent tool results are both re-rendered correctly.
     #[test]
     fn encode_rerenders_tool_call_and_result() {
         let proto = protocol();
         let messages = vec![
             Message::Assistant {
-                content: Some("看一下".into()),
+                content: Some("take a look".into()),
                 reasoning_content: None,
                 tool_calls: vec![ToolCall {
                     id: "content_call_0".into(),
@@ -1723,19 +1828,20 @@ mod tests {
             panic!("expected assistant");
         };
         let text = content.as_deref().unwrap();
-        assert!(text.contains("<tool>"), "tool 标签: {text}");
-        assert!(text.contains("<name>bash</name>"), "工具名: {text}");
-        // tool 结果按模板渲染（默认模板是 `{"tool":"{tool}"}` + 换行 + 输出）。
+        assert!(text.contains("<tool>"), "tool tag: {text}");
+        assert!(text.contains("<name>bash</name>"), "tool name: {text}");
+        // tool results are rendered per the template (the default template is `{"tool":"{tool}"}` + newline + output).
         let Message::User { content } = &out[1] else {
             panic!("expected user (rendered tool result)");
         };
-        assert!(content.contains("{\"tool\":\"bash\"}"), "回灌头: {content}");
-        assert!(content.contains("file.txt"), "回灌体: {content}");
+        assert!(content.contains("{\"tool\":\"bash\"}"), "feedback header: {content}");
+        assert!(content.contains("file.txt"), "feedback body: {content}");
     }
 
-    /// 同一轮 assistant 并发调用多个工具 → runtime 落成多条连续 `Message::Tool`，
-    /// 编码时必须**合并成一条 user 消息**（`\n\n` 分隔），否则 Anthropic 等要求
-    /// 角色交替的协议会因连续多条 user 而报错（docs/tool-calling-refactor.md Step 4）。
+    /// One assistant turn calling several tools concurrently -> the runtime writes several consecutive
+    /// `Message::Tool` entries; when encoding they must be **merged into a single user message**
+    /// (`\n\n`-separated), otherwise protocols requiring alternating roles (e.g. Anthropic) error
+    /// on multiple consecutive user messages (docs/tool-calling-refactor.md Step 4).
     #[test]
     fn encode_merges_consecutive_tool_results_into_one_user() {
         let proto = protocol();
@@ -1766,48 +1872,65 @@ mod tests {
             },
         ];
         let out = encode_messages_for_content(&messages, &[], &proto);
-        // assistant + 一条合并的 user（而不是两条 user）。
-        assert_eq!(out.len(), 2, "多工具结果应合并，实际输出: {out:?}");
+        // assistant + one merged user (not two users).
+        assert_eq!(out.len(), 2, "multiple tool results should be merged, actual output: {out:?}");
         assert!(matches!(&out[0], Message::Assistant { .. }));
         let Message::User { content } = &out[1] else {
             panic!("expected single merged user, got {:?}", out[1]);
         };
-        // 两块结果都在，且按模板各自带头。
-        assert!(content.contains("{\"tool\":\"bash\"}"), "缺 bash 块: {content}");
-        assert!(content.contains("file.txt"), "缺 bash 输出: {content}");
-        assert!(content.contains("{\"tool\":\"read_file\"}"), "缺 read_file 块: {content}");
-        assert!(content.contains("fn main() {}"), "缺 read_file 输出: {content}");
-        // 两块之间用空行分隔。
-        assert_eq!(content.matches("{\"tool\":").count(), 2, "应有两块: {content}");
+        // Both result blocks are present, each headed per the template.
+        assert!(content.contains("{\"tool\":\"bash\"}"), "missing bash block: {content}");
+        assert!(content.contains("file.txt"), "missing bash output: {content}");
+        assert!(content.contains("{\"tool\":\"read_file\"}"), "missing read_file block: {content}");
+        assert!(content.contains("fn main() {}"), "missing read_file output: {content}");
+        // The two blocks are separated by a blank line.
+        assert_eq!(content.matches("{\"tool\":").count(), 2, "there should be two blocks: {content}");
     }
 
     #[test]
     fn render_instructions_lists_tools() {
         let def = ToolDefinition {
             name: "bash".into(),
-            description: "执行命令".into(),
+            description: "run a command".into(),
             parameters: serde_json::json!({"type": "object"}),
         };
         let text = protocol().render_instructions(&[&def]);
         assert!(text.contains("bash"));
-        assert!(text.contains("执行命令"));
+        assert!(text.contains("run a command"));
         assert!(text.contains("<tool>"));
-        // 仿 figmaagent 的四节结构（契约锁死，防静默回归）。
-        assert!(text.contains("# 工具调用协议"), "缺运行机制节: {text}");
-        assert!(text.contains("# 输出格式（务必严格遵守）"), "缺输出格式节: {text}");
-        assert!(text.contains("# 可用工具"), "缺工具目录节: {text}");
-        assert!(text.contains("# 工具结果回灌"), "缺回灌识别节: {text}");
-        // 参数渲染成紧凑文档（而非原始 JSON Schema）。
-        assert!(text.contains("参数："), "缺参数文档: {text}");
-        // 契约必须覆盖「无需工具、直接纯文本」的分支（否则模型可能强行发工具块）。
+        // The four-section structure modeled on figmaagent (contract locked in to prevent silent regressions).
+        assert!(text.contains("# Tool-calling protocol"), "missing the how-it-works section: {text}");
+        assert!(text.contains("# Output format (follow strictly)"), "missing the output-format section: {text}");
+        assert!(text.contains("# Available tools"), "missing the tool-catalog section: {text}");
+        assert!(text.contains("# Tool-result feedback"), "missing the feedback-recognition section: {text}");
+        // Parameters are rendered as a compact doc (not raw JSON Schema).
+        assert!(text.contains("Parameters:"), "missing the parameter doc: {text}");
+        // The contract must cover the "no tool needed, plain text directly" branch (otherwise the model may force out a tool block).
         assert!(
-            text.contains("不需要工具时直接输出纯文本"),
-            "缺『无需工具时纯文本』契约: {text}"
+            text.contains("when you don't need a tool, just output plain text"),
+            "missing the 'plain text when no tool needed' contract: {text}"
         );
         assert!(
-            text.contains("不需要工具时**：直接输出纯文本回答即可"),
-            "缺纯文本约束条目: {text}"
+            text.contains("When you don't need a tool**: just output a plain-text answer"),
+            "missing the plain-text constraint entry: {text}"
         );
+    }
+
+    #[test]
+    fn render_instructions_caps_the_tool_catalog() {
+        // The catalog section exceeds the limit -> truncated at a char boundary and **explicitly flagged** (not silent).
+        let huge = "x".repeat(MAX_INSTRUCTIONS_CHARS * 2);
+        let def = ToolDefinition {
+            name: "big".into(),
+            description: huge,
+            parameters: serde_json::json!({"type": "object"}),
+        };
+        let text = protocol().render_instructions(&[&def]);
+        assert!(text.contains("tool catalog truncated"), "should explicitly flag truncation: {text}");
+        // The fixed contract is still present (only the catalog section, which grows with tool count, is truncated).
+        assert!(text.contains("# Tool-calling protocol"));
+        assert!(text.contains("# Output format (follow strictly)"));
+        assert!(text.contains("# Tool-result feedback"));
     }
 
     /// JSON Schema -> compact doc: type / optional / comment / constraint / enum / nesting.
@@ -1817,14 +1940,14 @@ mod tests {
             "type": "object",
             "required": ["command"],
             "properties": {
-                "command": { "type": "string", "description": "要执行的命令" },
-                "timeout": { "type": "integer", "minimum": 1, "description": "超时秒数" },
+                "command": { "type": "string", "description": "the command to run" },
+                "timeout": { "type": "integer", "minimum": 1, "description": "timeout in seconds" },
                 "mode": { "enum": ["fast", "safe"] }
             }
         });
         let doc = render_schema_doc(&schema);
         assert!(doc.contains("command: string"), "required field must have no ?: {doc}");
-        assert!(doc.contains("// 要执行的命令"), "comment: {doc}");
+        assert!(doc.contains("// the command to run"), "comment: {doc}");
         assert!(doc.contains("timeout?: integer (>=1)"), "optional+constraint: {doc}");
         assert!(doc.contains("\"fast\" | \"safe\""), "enum: {doc}");
     }

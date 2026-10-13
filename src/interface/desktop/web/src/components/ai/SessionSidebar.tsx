@@ -361,7 +361,7 @@ export function SessionSidebar({
           <PanelLeftClose className="size-4" />
         </button>
       </div>
-      <ScrollArea type="auto" className="min-h-0 flex-1" viewportClassName="px-2 pb-3">
+      <ScrollArea type="scroll" className="min-h-0 flex-1" viewportClassName="px-2 pb-3">
         {/* Pinned：手动置顶（仅本地）。无置顶时不显示该分组。 */}
         {pinnedEntries.length > 0 && (
           <section className="mb-3">

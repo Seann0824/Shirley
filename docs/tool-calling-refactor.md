@@ -5,8 +5,12 @@
 > runtime 也直接读了协议。本文把这层**全部收回 SDK adapter**，对外只暴露一个声明式
 > 枚举 `ToolCallingMode`，由 `ModelConfig` 决定。
 >
-> **落地进度**：Step 1（对外收口）、Step 2（工具说明挪进 adapter、回退 `agent.rs`）
-> **已实现并验证**（SDK 编译通过、测试全绿）。Step 3–5 待落地，本文给出可执行的改法。
+> **落地进度：Step 1–7 全部落地并验证。** 本文原先标注的 Step 3–5（应用层一次解析下发、
+> 请求编码修正、解析一致性与容错）、Step 6（历史回放）、Step 7（提示词与测试）均已在当前
+> 代码中实现——`Agent::set_model_config` 单入口下发、多工具结果合并成一条 user、
+> `__protocol__` 错误回灌、reasoning 优先级、escape_xml、thinking 不回放、提示词通用化都已到位。
+> 端到端集成测试见 `tests/tool_calling_content.rs`；提示词正文抽到 `prompts/tool_calling_*.md`。
+> 本文其余部分保留为设计记录（历史决策链）。
 >
 > **背景一句话**：给不支持原生 function calling 的模型加一层文本（XML）协议，
 > 让它也能驱动工具，但**外部（应用层 / UI / runtime 主循环）不应感知这层协议**。

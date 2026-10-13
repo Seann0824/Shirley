@@ -1,13 +1,15 @@
-//! SSE 分帧工具。
+//! SSE framing utilities.
 //!
-//! 只做**与协议无关**的部分：按空行切分事件段、从段里取出 `data:` 负载。
-//! 事件语义（payload 形状、终态判定）各协议自写——两协议的 payload 完全不同，
-//! 硬套一个泛型解码器只会更绕。
+//! Only does the **protocol-agnostic** part: split event sections on blank lines and extract the
+//! `data:` payload from each section. Event semantics (payload shape, terminal-state detection)
+//! are written per protocol — the two protocols' payloads are completely different, and forcing a
+//! single generic decoder on them would only be more convoluted.
 
-/// 从缓冲里切出所有完整的事件段，并从缓冲中移除。
+/// Cut all complete event sections out of the buffer and remove them from it.
 ///
-/// SSE 以空行分隔事件；这里按 `\n\n` 切分。未收尾的不完整段留在缓冲里，
-/// 等下一个 chunk 补齐。返回的段**不含**结尾的分隔符。
+/// SSE separates events by blank lines; here we split on `\n\n`. An unfinished, incomplete
+/// section stays in the buffer until the next chunk completes it. The returned sections **do not
+/// include** the trailing separator.
 pub fn drain_sections(buffer: &mut String) -> Vec<String> {
     let mut sections = Vec::new();
     while let Some(pos) = buffer.find("\n\n") {
@@ -17,10 +19,12 @@ pub fn drain_sections(buffer: &mut String) -> Vec<String> {
     sections
 }
 
-/// 从事件段里取出 `data:` 负载（多行 `data:` 直接拼接，末尾 trim）。
+/// Extract the `data:` payload from an event section (multiple `data:` lines are concatenated
+/// directly, then trimmed at the end).
 ///
-/// 返回 `None` 表示该段没有 `data:` 行（例如只有注释或 `event:` 行）。
-/// `event:` / `id:` 行当前没有消费方（后者多用于断线续传），忽略而非 panic。
+/// Returns `None` when the section has no `data:` line (e.g. only a comment or `event:` line).
+/// `event:` / `id:` lines currently have no consumer (the latter is mostly used for resume after
+/// disconnect), so they are ignored rather than panicking.
 pub fn data_payload(section: &str) -> Option<String> {
     let mut data = String::new();
     let mut found = false;

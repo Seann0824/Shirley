@@ -1,6 +1,6 @@
 **Shirley 技术方案 · Content 工具调用协议（Content Tool-Calling Protocol）**
 
-> **状态：方案（未落地）。** 本文设计一层**可插拔**的「content 工具解析协议」——
+> **状态：已落地（P1）。** 本文设计一层**可插拔**的「content 工具解析协议」——
 > 当某个模型 / 端点不支持原生 tool calling 时，改用纯文本约定让模型声明工具调用，
 > SDK 在适配层把文本解析回 `Message::Assistant.tool_calls`，从而**复用现有 ReAct 循环**。
 >
@@ -11,6 +11,15 @@
 > **review 结论（第十二节）已确认**：① v1 = 声明式 + 自定义 trait 两档；② 终止语义与原生
 > function calling 的 stop 一致（无工具调用即结束），**不引入** `is_terminal`；③ 目录注入走
 > 扩展 `SystemPromptContext`；④ **暂不移植** `zod-to-doc`，视后续报错再定。
+>
+> **落地情况（当前代码）**：协议核心在 `crates/shirley-agent-sdk/src/adapter/tool_calling.rs`
+> （字符级状态机 + 流式解析器 + `render_schema_doc` + `encode_messages_for_content` +
+> `parse_content_response`），对外只暴露 `ToolCallingMode::{Native,Tagged}`（挂在
+> `ModelConfig.tool_calling`）；接入点在 `adapter/mod.rs::invoke()`，**runtime 零改动**。
+> 提示词正文抽到 `crates/shirley-agent-sdk/prompts/tool_calling_instructions.md` 与
+> `tool_calling_errors.md`（`include_str!`，与仓库 prompts 约定一致）。端到端集成测试见
+> `crates/shirley-agent-sdk/tests/tool_calling_content.rs`（mock 纯文本端点跑完整 ReAct）。
+> 收口细节与后续项见 `docs/tool-calling-refactor.md`。
 
 **一、这份文档要解决什么**
 

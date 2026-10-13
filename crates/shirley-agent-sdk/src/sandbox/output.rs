@@ -1,57 +1,58 @@
-//! 沙盒执行结果。
+//! Sandbox execution result.
 //!
-//! 这里刻意保留 stderr / exit_code / 降级信息：
-//! 模型需要看到失败细节才能自我纠正（见 docs/security.md 6.1），
-//! 审计需要知道"当时隔离是否真的生效了"。
+//! stderr / exit_code / degradation info are deliberately kept here:
+//! the model needs to see failure details to self-correct (see docs/security.md 6.1),
+//! and auditing needs to know "whether isolation was actually in effect at the time".
 
-// 引入 serde 的 Serialize 宏：让这个结构体可以被序列化成 JSON。
-// 用途：审计日志要把它写进文件、或者通过网络发给别的地方。
+// Bring in serde's Serialize macro: lets this struct be serialized to JSON.
+// Use: audit logs need to write it to a file, or send it somewhere over the network.
 use serde::Serialize;
 
-// derive 三个能力：
-// - Debug：能用 {:?} 打印出来，方便调试
-// - Clone：能复制一份
-// - Serialize：能转成 JSON
+// Derive three capabilities:
+// - Debug: can be printed with {:?}, handy for debugging
+// - Clone: can be copied
+// - Serialize: can be turned into JSON
 #[derive(Debug, Clone, Serialize)]
 pub struct SandboxOutput {
-    // 子进程的标准输出（正常打印的东西）。
+    // The subprocess's standard output (what it prints normally).
     pub stdout: String,
-    // 子进程的标准错误（报错信息）。
+    // The subprocess's standard error (error messages).
     pub stderr: String,
 
-    /// 进程退出码。被信号杀死时为 None。
-    // Option<i32>：要么是某个整数 Some(0)/Some(3)，要么是 None（比如被强杀没有退出码）。
+    /// The process exit code. `None` when killed by a signal.
+    // Option<i32>: either some integer Some(0)/Some(3), or None (e.g. force-killed with no exit code).
     pub exit_code: Option<i32>,
 
-    /// 是否因超时被外层强制终止。
+    /// Whether the process was force-terminated by the outer layer due to a timeout.
     pub timed_out: bool, // true / false
 
-    /// 实际生效的隔离强度标签（来自 backend.capabilities().label）。
+    /// The isolation-strength label actually in effect (from backend.capabilities().label).
     pub isolation: String,
 
-    /// 运行时无法满足、被降级处理的约束说明。
-    /// 例如 ProcessBackend 会填"无文件系统隔离 / 无网络隔离"。
-    /// 上层可据此决定是否拒绝这次结果（高危场景下应拒绝）。
-    pub degraded: Vec<String>, // 一串"我没做到的事"的说明文字
+    /// Descriptions of constraints that could not be satisfied at runtime and were degraded.
+    /// For example ProcessBackend fills in "no filesystem isolation / no network isolation".
+    /// The caller can use this to decide whether to reject the result (it should in high-risk
+    /// scenarios).
+    pub degraded: Vec<String>, // a list of descriptions of "things I failed to do"
 }
 
-// 给 SandboxOutput 添加两个便捷方法。
+// Add two convenience methods to SandboxOutput.
 impl SandboxOutput {
-    /// 是否满足"完全隔离"——没有任何降级项。
-    // &self：借用自己来读（不拿走所有权，只是看一眼）。
-    // -> bool：返回 true/false。
+    /// Whether "full isolation" is met — no degradation entries at all.
+    // &self: borrow self to read it (does not take ownership, just a look).
+    // -> bool: returns true/false.
     pub fn is_fully_isolated(&self) -> bool {
-        // degraded 是空列表 → 没有降级项 → 完全隔离。
-        // .is_empty() 返回 true 当列表为空。
+        // degraded is an empty list -> no degradation entries -> fully isolated.
+        // .is_empty() returns true when the list is empty.
         self.degraded.is_empty()
     }
 
-    /// 命令是否成功退出。
+    /// Whether the command exited successfully.
     pub fn success(&self) -> bool {
-        // 两个条件都满足才算成功：
-        // 1. 退出码正好是 0（exit_code 是 Some(0)）
-        // 2. 不是超时
-        // && 是"并且"。== 是"等于"。
-        self.exit_code == Some(0) && !self.timed_out // ! 是"非"，!true 就是 false
+        // Both conditions must hold to count as success:
+        // 1. the exit code is exactly 0 (exit_code is Some(0))
+        // 2. it did not time out
+        // && is "and". == is "equals".
+        self.exit_code == Some(0) && !self.timed_out // ! is "not"; !true is false
     }
 }

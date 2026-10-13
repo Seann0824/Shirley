@@ -1,11 +1,11 @@
-//! 上下文压缩切点与重建的契约测试。
+//! Contract tests for the context-compaction cut point and rebuild.
 //!
-//! 覆盖 `docs/compaction.md` 4.5 / 5.2 的核心不变量：
-//! 切点算法（预算、tool 配对、至少保留一条）、三段切分、
-//! 以及 `CompactParts::rebuild` 的顺序与"恰好一条摘要"约束。
+//! Covers the core invariants of sections 4.5 / 5.2 of `docs/compaction.md`:
+//! the cut-point algorithm (budget, tool pairing, keep at least one), the three-way split,
+//! and the ordering and "exactly one summary" constraint of `CompactParts::rebuild`.
 //!
-//! 原先内联在 `runtime/mod.rs` 的 `mod tests`，拆模块后移到集成测试，
-//! 只依赖 `shirley_agent_sdk` 的公开 API。
+//! Originally inlined in `mod tests` of `runtime/mod.rs`, moved to an integration test after the
+//! module split; relies only on the public API of `shirley_agent_sdk`.
 
 use shirley_agent_sdk::{HeuristicCounter, Message, ToolCall, plan_cut};
 
@@ -41,234 +41,234 @@ fn tool(id: &str, content: &str) -> Message {
     }
 }
 
-/// 每条消息约 4 字符中文 = 4 token + 4 包装 = 8 token 左右。
-/// 用足够小的 budget 逼出"只保留尾部几条"的行为。
+/// Each message is roughly 4 Chinese chars = 4 tokens + 4 wrapper = about 8 tokens.
+/// Use a small enough budget to force the "keep only the last few" behavior.
 fn counter() -> HeuristicCounter {
     HeuristicCounter::new()
 }
 
-/// 全是背景（只有 system）时没有可压内容。
+/// With nothing but background (only system), there is nothing to compress.
 #[test]
 fn no_compaction_when_only_background() {
-    let messages = vec![system("你是 Shirley")];
+    let messages = vec![system("You are Shirley")];
     assert!(plan_cut(&messages, 1000, &counter()).is_none());
 }
 
-/// 全部能装进预算 → 不压缩。
+/// Everything fits in the budget -> no compression.
 #[test]
 fn no_compaction_when_everything_fits() {
-    let messages = vec![system("s"), user("你好"), user("世界")];
+    let messages = vec![system("s"), user("hello"), user("world")];
     let plan = plan_cut(&messages, 10_000, &counter());
-    assert!(plan.is_none(), "全部装得下时不该有切点: {plan:?}");
+    assert!(plan.is_none(), "there should be no cut point when everything fits: {plan:?}");
 }
 
-/// 背景前缀永不被压缩：`head` 覆盖开头 system，且切点不会落进它。
+/// The background prefix is never compacted: `head` covers the leading system, and the cut point never lands in it.
 #[test]
 fn background_prefix_is_never_compacted() {
-    let mut messages = vec![system("你是 Shirley")];
+    let mut messages = vec![system("You are Shirley")];
     for i in 0..40 {
-        messages.push(user(&format!("第 {i} 条很长的用户消息，用来把预算撑爆")));
+        messages.push(user(&format!("long user message #{i} to blow the budget")));
     }
-    let plan = plan_cut(&messages, 40, &counter()).expect("应产生切点");
-    assert_eq!(plan.head, 1, "开头 system 必须是背景");
-    assert!(plan.cut > plan.head, "切点必须在背景之后");
+    let plan = plan_cut(&messages, 40, &counter()).expect("a cut point should be produced");
+    assert_eq!(plan.head, 1, "the leading system must be background");
+    assert!(plan.cut > plan.head, "the cut point must be after the background");
 }
 
-/// 上一轮的 `ContextSummary` 属于背景：它会被新摘要替换，不占保留预算。
+/// The previous `ContextSummary` is background: it gets replaced by the new summary and does not consume the retain budget.
 #[test]
 fn prior_summary_is_background() {
     let mut messages = vec![
-        system("你是 Shirley"),
+        system("You are Shirley"),
         Message::ContextSummary {
-            content: "上一轮摘要".into(),
+            content: "previous summary".into(),
         },
     ];
     for i in 0..40 {
-        messages.push(user(&format!("第 {i} 条很长的用户消息，用来把预算撑爆")));
+        messages.push(user(&format!("long user message #{i} to blow the budget")));
     }
-    let plan = plan_cut(&messages, 40, &counter()).expect("应产生切点");
-    assert_eq!(plan.head, 2, "system + 上轮摘要都算背景");
-    assert!(plan.cut >= 2, "不能压掉背景");
+    let plan = plan_cut(&messages, 40, &counter()).expect("a cut point should be produced");
+    assert_eq!(plan.head, 2, "system + previous summary both count as background");
+    assert!(plan.cut >= 2, "background must not be compacted");
 }
 
-/// 至少保留一条：即使最后一条单独就超预算，也要留在保留段里。
+/// Keep at least one message: even if the last one alone exceeds the budget, it stays in the retained segment.
 #[test]
 fn always_keeps_at_least_one_message() {
     let messages = vec![
         system("s"),
-        user("第一条"),
-        user("超长的一条消息".repeat(50).as_str()),
+        user("first message"),
+        user("an extremely long message".repeat(50).as_str()),
     ];
-    let plan = plan_cut(&messages, 1, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 1, &counter()).expect("a cut point should be produced");
     assert!(
         plan.cut < messages.len(),
-        "至少要保留最后一条，cut 必须小于 len"
+        "at least the last message must be kept, so cut must be less than len"
     );
-    // 最后一条（超预算的那条）必须在保留段内。
+    // The last message (the over-budget one) must be in the retained segment.
     assert_eq!(plan.cut, messages.len() - 1);
 }
-/// 核心修正：保留段第一条不能是 `Tool`，否则孤儿 tool_call 会被 API 400。
+/// Core fix: the first message of the retained segment must not be a `Tool`, or the orphan tool_call gets a 400 from the API.
 #[test]
 fn never_cuts_between_assistant_tool_calls_and_tool_results() {
-    let mut messages = vec![system("s"), user("帮我看看")];
+    let mut messages = vec![system("s"), user("take a look for me")];
     for i in 0..20 {
         messages.push(assistant_calls(&[&format!("call_{i}")]));
-        messages.push(tool(&format!("call_{i}"), "历史工具输出内容，用来占预算"));
+        messages.push(tool(&format!("call_{i}"), "historical tool output to consume budget"));
     }
-    messages.push(user("这是本轮任务"));
+    messages.push(user("this is the current task"));
     for i in 0..10 {
         messages.push(assistant_calls(&[&format!("live_{i}")]));
         messages.push(tool(
             &format!("live_{i}"),
-            "本轮工具输出，很长很长很长很长很长",
+            "current tool output, very very very long",
         ));
     }
 
-    let plan = plan_cut(&messages, 60, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 60, &counter()).expect("a cut point should be produced");
     assert!(
         !matches!(messages.get(plan.cut), Some(Message::Tool { .. })),
-        "切点落在了 Tool 结果上，会产生孤儿 tool_call: cut={}",
+        "the cut point landed on a Tool result, which produces an orphan tool_call: cut={}",
         plan.cut
     );
     assert!(
         matches!(messages.get(plan.cut), Some(Message::Assistant { .. })),
-        "应回退到 Assistant{{tool_calls}}: cut={}",
+        "it should back off to Assistant{{tool_calls}}: cut={}",
         plan.cut
     );
 }
 
-/// 连续多条 Tool 结果（一次并行调用）必须被整体保留，配对完整。
+/// Consecutive Tool results (one parallel call) must be retained as a whole, with complete pairing.
 #[test]
 fn keeps_consecutive_tool_results_together() {
-    let mut messages = vec![system("s"), user("并行调用")];
+    let mut messages = vec![system("s"), user("parallel calls")];
     messages.push(assistant_calls(&["a", "b", "c"]));
-    messages.push(tool("a", "结果 A 很长很长很长很长很长很长很长很长很长"));
-    messages.push(tool("b", "结果 B 很长很长很长很长很长很长很长很长很长"));
-    messages.push(tool("c", "结果 C 很长很长很长很长很长很长很长很长很长"));
+    messages.push(tool("a", "result A is very very very long"));
+    messages.push(tool("b", "result B is very very very long"));
+    messages.push(tool("c", "result C is very very very long"));
 
-    let plan = plan_cut(&messages, 20, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 20, &counter()).expect("a cut point should be produced");
     assert!(
         matches!(messages.get(plan.cut), Some(Message::Assistant { .. })),
-        "并行 tool 结果应整体保留: cut={}",
+        "parallel tool results should be retained as a whole: cut={}",
         plan.cut
     );
     let tool_count = messages[plan.cut..]
         .iter()
         .filter(|m| matches!(m, Message::Tool { .. }))
         .count();
-    assert_eq!(tool_count, 3, "三条 tool 结果都要保留");
+    assert_eq!(tool_count, 3, "all three tool results must be retained");
 }
 
-/// 回归：一条用户消息触发一长串大 tool 输出时，压缩**必须**仍然生效。
+/// Regression: when one user message triggers a long chain of large tool output, compaction **must** still fire.
 ///
-/// 这是"切点卡在最后一条 User 之前"会退化成 `None` 的故障场景：
-/// 那种写法下切点会被顶到 `head`，压缩静默失效，上下文继续膨胀直到 API 报错。
-/// §4.5 的算法（不额外约束最后一条 User）在这种情况下仍能产出切点。
+/// This is the failure scenario where "the cut point sticking just before the last User" degenerates into `None`:
+/// in that form the cut point gets pushed up to `head`, compaction silently fails, and the context keeps growing until the API errors.
+/// The section 4.5 algorithm (which adds no extra constraint on the last User) still produces a cut point here.
 #[test]
 fn compaction_still_fires_when_one_task_has_a_long_tool_chain() {
-    let mut messages = vec![system("s"), user("帮我重构整个项目")];
+    let mut messages = vec![system("s"), user("help me refactor the whole project")];
     for i in 0..40 {
         messages.push(assistant_calls(&[&format!("live_{i}")]));
         messages.push(tool(
             &format!("live_{i}"),
-            "巨大的工具输出，非常长非常长非常长非常长非常长非常长非常长",
+            "huge tool output, extremely extremely extremely long",
         ));
     }
     let plan = plan_cut(&messages, 60, &counter())
-        .expect("一长串大 tool 输出必须能触发压缩，否则会撑爆上下文");
-    assert!(plan.cut > plan.head, "必须有可压区间");
-    // 任务本身仍被正确提取（供重建阶段决定如何保留，见 step 4）。
+        .expect("a long chain of large tool output must trigger compaction, or the context will blow up");
+    assert!(plan.cut > plan.head, "there must be a compactable region");
+    // The task itself is still extracted correctly (so the rebuild stage can decide how to retain it; see step 4).
     match &plan.current_task {
-        Some(Message::User { content }) => assert_eq!(content, "帮我重构整个项目"),
-        other => panic!("current_task 应是最后一条 User，实际 {other:?}"),
+        Some(Message::User { content }) => assert_eq!(content, "help me refactor the whole project"),
+        other => panic!("current_task should be the last User, got {other:?}"),
     }
 }
 
-/// 提取用户最新提出的问题，且它一定落在保留段内。
+/// Extract the user's most recent question, and it must land in the retained segment.
 #[test]
 fn extracts_last_user_message_as_current_task() {
-    let mut messages = vec![system("s"), user("第一个问题")];
+    let mut messages = vec![system("s"), user("first question")];
     for i in 0..30 {
-        messages.push(user(&format!("中间很长的消息 {i} 撑预算")));
+        messages.push(user(&format!("long message {i} in the middle to consume budget")));
     }
-    messages.push(user("这是最新提出的问题"));
-    let plan = plan_cut(&messages, 30, &counter()).expect("应产生切点");
+    messages.push(user("this is the most recent question"));
+    let plan = plan_cut(&messages, 30, &counter()).expect("a cut point should be produced");
 
     match &plan.current_task {
-        Some(Message::User { content }) => assert_eq!(content, "这是最新提出的问题"),
-        other => panic!("current_task 应是最后一条 User，实际 {other:?}"),
+        Some(Message::User { content }) => assert_eq!(content, "this is the most recent question"),
+        other => panic!("current_task should be the last User, got {other:?}"),
     }
-    // 本布局下任务就是最后一条消息，无条件落在保留段内（原样保留，不靠摘要）。
+    // In this layout the task is the last message, unconditionally in the retained segment (kept as-is, not via the summary).
     let task_index = messages
         .iter()
         .rposition(|m| matches!(m, Message::User { .. }))
         .unwrap();
     assert!(
         plan.cut <= task_index,
-        "本轮任务必须在保留段 [{}..] 内",
+        "the current task must be in the retained segment [{}..]",
         plan.cut
     );
 }
 
-/// `compacted_range` 就是 `head..cut`，与重建逻辑一致。
+/// `compacted_range` is exactly `head..cut`, consistent with the rebuild logic.
 #[test]
 fn compacted_range_matches_head_and_cut() {
-    let mut messages = vec![system("s"), user("旧")];
+    let mut messages = vec![system("s"), user("old")];
     for i in 0..30 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
-    let plan = plan_cut(&messages, 20, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 20, &counter()).expect("a cut point should be produced");
     assert_eq!(plan.compacted_range(), plan.head..plan.cut);
 }
 
-/// 校准后的 factor 会改变切点：估算被拉高时，保留段应更短（切点更靠后）。
+/// A calibrated factor changes the cut point: when the estimate is pulled up, the retained segment should be shorter (the cut point further back).
 #[test]
 fn calibration_shifts_the_cut_point() {
     let mut messages = vec![system("s")];
     for i in 0..30 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
     let counter = HeuristicCounter::new();
-    let base = plan_cut(&messages, 60, &counter).expect("应产生切点");
+    let base = plan_cut(&messages, 60, &counter).expect("a cut point should be produced");
 
-    // 真实 token 是估算的 2 倍 → 同样的预算只能装下更少的消息。
+    // The real token count is 2x the estimate -> the same budget fits fewer messages.
     counter.calibrate(2000, 1000);
-    let calibrated = plan_cut(&messages, 60, &counter).expect("应产生切点");
+    let calibrated = plan_cut(&messages, 60, &counter).expect("a cut point should be produced");
 
     assert!(
         calibrated.cut > base.cut,
-        "估算被拉高后保留段应更短: base={} calibrated={}",
+        "the retained segment should be shorter after the estimate is raised: base={} calibrated={}",
         base.cut,
         calibrated.cut
     );
 }
-/// 三段必须互不重叠，且合起来恰好覆盖 `messages[head..]` 的全部消息。
+/// The three segments must not overlap and together cover exactly all messages in `messages[head..]`.
 ///
-/// 这是重建正确性的基础：拼接时既不重复也不遗漏。
+/// This is the basis of rebuild correctness: concatenation neither duplicates nor drops anything.
 #[test]
 fn parts_cover_everything_after_background_exactly_once() {
-    let mut messages = vec![system("s"), user("旧问题")];
+    let mut messages = vec![system("s"), user("old question")];
     for i in 0..30 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
     messages.push(assistant_calls(&["x"]));
-    messages.push(tool("x", "工具输出"));
+    messages.push(tool("x", "tool output"));
 
-    let plan = plan_cut(&messages, 40, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 40, &counter()).expect("a cut point should be produced");
     let parts = plan.split(&messages);
 
-    // 三段总条数 = head 之后的全部消息数。
-    // 任务被摘出时才单独计数；否则它已包含在 `remain` 里，重复计数会多算一条。
+    // The total count of the three segments = all messages after head.
+    // Count the task separately only when it is extracted; otherwise it is already in `remain`, and counting it again would overcount by one.
     let extracted = usize::from(parts.task_extracted);
     let total = parts.to_compress.len() + parts.remain.len() + extracted;
     assert_eq!(
         total,
         messages.len() - plan.head,
-        "三段必须恰好覆盖背景之后的全部消息"
+        "the three segments must cover exactly all messages after the background"
     );
 
-    // 内容层面：`to_compress + (摘出的 task) + remain` 应与原区间逐条相等。
-    // `Message` 未实现 `PartialEq`，用 `Debug` 表示做逐条比较。
+    // At the content level: `to_compress + (extracted task) + remain` should equal the original region message by message.
+    // `Message` does not implement `PartialEq`; compare message by message using the `Debug` representation.
     let mut rebuilt: Vec<Message> = parts.to_compress.clone();
     if parts.task_extracted {
         rebuilt.extend(parts.current_task.clone());
@@ -281,88 +281,88 @@ fn parts_cover_everything_after_background_exactly_once() {
         .collect();
     assert_eq!(
         rebuilt, original,
-        "重建顺序应为 to_compress + current_task + remain"
+        "the rebuild order should be to_compress + current_task + remain"
     );
 }
 
-/// `current_task` 不得同时出现在 `to_compress` 或 `remain` 里。
+/// `current_task` must not appear in both `to_compress` and `remain`.
 #[test]
 fn current_task_is_not_duplicated() {
-    let mut messages = vec![system("s"), user("旧问题")];
+    let mut messages = vec![system("s"), user("old question")];
     for i in 0..30 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
-    messages.push(user("本轮任务"));
+    messages.push(user("current task"));
     messages.push(assistant_calls(&["x"]));
-    messages.push(tool("x", "工具输出"));
+    messages.push(tool("x", "tool output"));
 
-    let plan = plan_cut(&messages, 40, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 40, &counter()).expect("a cut point should be produced");
     let parts = plan.split(&messages);
 
-    let is_task = |m: &Message| matches!(m, Message::User { content } if content == "本轮任务");
+    let is_task = |m: &Message| matches!(m, Message::User { content } if content == "current task");
     assert!(parts.current_task.as_ref().is_some_and(is_task));
     assert!(
         !parts.to_compress.iter().any(is_task),
-        "任务不应出现在 to_compress"
+        "the task should not appear in to_compress"
     );
-    // 任务在末尾，落在保留段内 → 不摘出，位置不变（只在 remain 里出现一次）。
-    assert!(!parts.task_extracted, "任务在保留段时不应被摘出");
+    // The task is at the end, in the retained segment -> not extracted, position unchanged (appears once in remain).
+    assert!(!parts.task_extracted, "the task should not be extracted when it is in the retained segment");
     assert_eq!(
         parts.remain.iter().filter(|m| is_task(m)).count(),
         1,
-        "任务应恰好出现在 remain 中一次"
+        "the task should appear exactly once in remain"
     );
 }
 
-/// 任务落在待压缩区时，仍被单独摘出——这是"长 tool 链"场景下的关键保证。
+/// When the task lands in the to-compress region, it is still extracted separately — the key guarantee in the "long tool chain" scenario.
 #[test]
 fn task_is_extracted_even_when_inside_the_compacted_region() {
-    let mut messages = vec![system("s"), user("旧问题")];
+    let mut messages = vec![system("s"), user("old question")];
     for i in 0..20 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
     let task_index = messages.len();
-    messages.push(user("本轮任务"));
+    messages.push(user("current task"));
     for i in 0..20 {
         messages.push(assistant_calls(&[&format!("live_{i}")]));
         messages.push(tool(
             &format!("live_{i}"),
-            "巨大的工具输出，很长很长很长很长",
+            "huge tool output, very very long",
         ));
     }
 
-    let plan = plan_cut(&messages, 60, &counter()).expect("应产生切点");
-    // 切点落在任务之后 → 任务本会被压进摘要。
-    assert!(plan.cut > task_index, "构造前提：切点应落在任务之后");
+    let plan = plan_cut(&messages, 60, &counter()).expect("a cut point should be produced");
+    // The cut point lands after the task -> the task would otherwise be compressed into the summary.
+    assert!(plan.cut > task_index, "setup precondition: the cut point should land after the task");
     let parts = plan.split(&messages);
-    assert!(parts.task_extracted, "任务落在待压缩区时必须被摘出");
+    assert!(parts.task_extracted, "the task must be extracted when it lands in the to-compress region");
     match &parts.current_task {
-        Some(Message::User { content }) => assert_eq!(content, "本轮任务"),
-        other => panic!("任务必须被摘出，实际 {other:?}"),
+        Some(Message::User { content }) => assert_eq!(content, "current task"),
+        other => panic!("the task must be extracted, got {other:?}"),
     }
-    // 摘出后不得再留在待压缩段里（否则会重复注入）。
+    // Once extracted it must not remain in the to-compress segment (or it would be injected twice).
     assert!(
         !parts
             .to_compress
             .iter()
-            .any(|m| matches!(m, Message::User { content } if content == "本轮任务")),
-        "被摘出的任务不应留在 to_compress"
+            .any(|m| matches!(m, Message::User { content } if content == "current task")),
+        "the extracted task should not remain in to_compress"
     );
 }
 
-/// 待压缩段不含背景前缀（system / 上一轮摘要）。
+/// The to-compress segment contains no background prefix (system / previous summary).
 #[test]
 fn to_compress_never_contains_background() {
     let mut messages = vec![
-        system("你是 Shirley"),
+        system("You are Shirley"),
         Message::ContextSummary {
-            content: "上一轮摘要".into(),
+            content: "previous summary".into(),
         },
     ];
     for i in 0..30 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
-    let plan = plan_cut(&messages, 30, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 30, &counter()).expect("a cut point should be produced");
     let parts = plan.split(&messages);
 
     assert!(
@@ -370,37 +370,37 @@ fn to_compress_never_contains_background() {
             m,
             Message::System { .. } | Message::ContextSummary { .. }
         )),
-        "背景不能进入待压缩段"
+        "background must not enter the to-compress segment"
     );
 }
-/// 回归：任务在保留段里时，重建**不得**打乱顺序。
+/// Regression: when the task is in the retained segment, rebuild **must not** scramble the order.
 ///
-/// 早期 `split` 无条件把 `current_task` 摘出并前置，导致 `U_task` 跑到
-/// `U_prev` 之前、两个 user 连排。修好后只在任务会落进待压缩区时才摘出。
+/// An early `split` unconditionally extracted `current_task` and moved it to the front, so `U_task` ran
+/// before `U_prev`, putting two users back to back. After the fix it is extracted only when the task would land in the to-compress region.
 #[test]
 fn rebuild_preserves_order_when_task_is_in_remain() {
-    let mut messages = vec![system("s"), user("旧问题")];
+    let mut messages = vec![system("s"), user("old question")];
     for i in 0..30 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
-    // 任务在末尾，后面还有一条 assistant——任务必然落在保留段内。
-    messages.push(user("本轮任务"));
+    // The task is at the end, with an assistant after it — the task is necessarily in the retained segment.
+    messages.push(user("current task"));
     messages.push(assistant_calls(&["x"]));
-    messages.push(tool("x", "工具输出"));
+    messages.push(tool("x", "tool output"));
 
-    let plan = plan_cut(&messages, 40, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 40, &counter()).expect("a cut point should be produced");
     let parts = plan.split(&messages);
-    assert!(!parts.task_extracted, "构造前提：任务应在保留段内");
+    assert!(!parts.task_extracted, "setup precondition: the task should be in the retained segment");
 
-    let rebuilt = parts.rebuild("摘要");
+    let rebuilt = parts.rebuild("summary");
 
-    // 重建后消息数 = 摘要 + 保留段（系统提示词不在其中）。
+    // Message count after rebuild = summary + retained segment (the system prompt is not among them).
     assert_eq!(rebuilt.len(), 1 + parts.remain.len());
     assert!(matches!(
         rebuilt[0],
         Message::ContextSummary { .. }
     ));
-    // 摘出的任务不该额外出现：重建里 user 的条数与保留段一致。
+    // The extracted task should not appear extra: the number of users in the rebuild matches the retained segment.
     let users_in_rebuilt = rebuilt
         .iter()
         .filter(|m| matches!(m, Message::User { .. }))
@@ -412,46 +412,46 @@ fn rebuild_preserves_order_when_task_is_in_remain() {
             .iter()
             .filter(|m| matches!(m, Message::User { .. }))
             .count(),
-        "任务未被摘出时，user 条数应与保留段一致（不得重复注入）"
+        "when the task is not extracted, the user count should match the retained segment (no double injection)"
     );
-    // 关键：任务必须仍在其后一条 assistant 之前（顺序未被颠倒）。
+    // Key: the task must still precede its following assistant (the order was not reversed).
     let task_pos = rebuilt
         .iter()
-        .position(|m| matches!(m, Message::User { content } if content == "本轮任务"))
-        .expect("任务应在重建结果里");
+        .position(|m| matches!(m, Message::User { content } if content == "current task"))
+        .expect("the task should be in the rebuild result");
     assert!(
         matches!(
             rebuilt.get(task_pos + 1),
             Some(Message::Assistant { .. })
         ),
-        "任务后面应紧跟它的 assistant，实际: {:?}",
+        "the task should be immediately followed by its assistant, got: {:?}",
         rebuilt.get(task_pos + 1)
     );
 }
 
-/// 任务被摘出时，`rebuild` 把它插在 `remain` 之前，且其后链保持完整。
+/// When the task is extracted, `rebuild` inserts it before `remain`, and its following chain stays intact.
 #[test]
 fn rebuild_reinjects_extracted_task_before_remain() {
-    let mut messages = vec![system("s"), user("旧问题")];
+    let mut messages = vec![system("s"), user("old question")];
     for i in 0..20 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
-    messages.push(user("本轮任务"));
+    messages.push(user("current task"));
     for i in 0..20 {
         messages.push(assistant_calls(&[&format!("live_{i}")]));
         messages.push(tool(
             &format!("live_{i}"),
-            "巨大的工具输出，很长很长很长很长",
+            "huge tool output, very very long",
         ));
     }
 
-    let plan = plan_cut(&messages, 60, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 60, &counter()).expect("a cut point should be produced");
     let parts = plan.split(&messages);
-    assert!(parts.task_extracted, "构造前提：任务应被摘出");
+    assert!(parts.task_extracted, "setup precondition: the task should be extracted");
 
-    let rebuilt = parts.rebuild("摘要");
+    let rebuilt = parts.rebuild("summary");
 
-    // 结构：摘要 + 任务 + 保留段（系统提示词不在其中）。
+    // Structure: summary + task + retained segment (the system prompt is not among them).
     assert!(matches!(
         rebuilt[0],
         Message::ContextSummary { .. }
@@ -459,36 +459,36 @@ fn rebuild_reinjects_extracted_task_before_remain() {
     let task_pos = 1;
     assert!(
         matches!(rebuilt[task_pos], Message::User { .. }),
-        "摘出的任务应紧跟摘要之后"
+        "the extracted task should immediately follow the summary"
     );
     assert_eq!(rebuilt.len(), 2 + parts.remain.len());
-    // 任务只出现一次。
+    // The task appears only once.
     let task_count = rebuilt
         .iter()
-        .filter(|m| matches!(m, Message::User { content } if content == "本轮任务"))
+        .filter(|m| matches!(m, Message::User { content } if content == "current task"))
         .count();
-    assert_eq!(task_count, 1, "任务必须恰好出现一次");
+    assert_eq!(task_count, 1, "the task must appear exactly once");
 }
 
-/// 重建结果不得出现孤儿 `Tool`：每条 `Tool` 前面都有产出它的 `Assistant`。
+/// The rebuild result must not produce an orphan `Tool`: every `Tool` is preceded by the `Assistant` that produced it.
 #[test]
 fn rebuild_never_produces_orphan_tool_results() {
-    let mut messages = vec![system("s"), user("旧问题")];
+    let mut messages = vec![system("s"), user("old question")];
     for i in 0..20 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
-    messages.push(user("本轮任务"));
+    messages.push(user("current task"));
     for i in 0..20 {
         messages.push(assistant_calls(&[&format!("live_{i}")]));
         messages.push(tool(
             &format!("live_{i}"),
-            "巨大的工具输出，很长很长很长很长",
+            "huge tool output, very very long",
         ));
     }
 
-    let plan = plan_cut(&messages, 60, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 60, &counter()).expect("a cut point should be produced");
     let parts = plan.split(&messages);
-    let rebuilt = parts.rebuild("摘要");
+    let rebuilt = parts.rebuild("summary");
 
     for (i, msg) in rebuilt.iter().enumerate() {
         if matches!(msg, Message::Tool { .. }) {
@@ -498,32 +498,32 @@ fn rebuild_never_produces_orphan_tool_results() {
                         rebuilt[i - 1],
                         Message::Assistant { .. } | Message::Tool { .. }
                     ),
-                "第 {i} 条 Tool 没有前置 Assistant，会产生孤儿 tool_call"
+                "Tool #{i} has no preceding Assistant, which produces an orphan tool_call"
             );
         }
     }
 }
 
-/// 重建后必须**恰好一条** `ContextSummary`：禁止"摘要叠摘要"。
+/// After rebuild there must be **exactly one** `ContextSummary`: "summary stacking on summary" is forbidden.
 ///
-/// 这是 `docs/compaction.md` 5.2 的核心不变量。旧实现把新摘要追加在末尾，
-/// 于是旧摘要与新摘要并存，同一段被反复压缩（论文 caveat 4：越压越差）。
+/// This is the core invariant of section 5.2 of `docs/compaction.md`. The old implementation appended the new summary at the end,
+/// so the old and new summaries coexisted and the same span was compressed repeatedly (paper caveat 4: the more you compress, the worse it gets).
 #[test]
 fn rebuild_keeps_exactly_one_summary() {
     let mut messages = vec![
-        system("你是 Shirley"),
+        system("You are Shirley"),
         Message::ContextSummary {
-            content: "上一轮摘要".into(),
+            content: "previous summary".into(),
         },
     ];
     for i in 0..30 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
-    messages.push(user("本轮任务"));
+    messages.push(user("current task"));
 
-    let plan = plan_cut(&messages, 40, &counter()).expect("应产生切点");
+    let plan = plan_cut(&messages, 40, &counter()).expect("a cut point should be produced");
     let parts = plan.split(&messages);
-    let rebuilt = parts.rebuild("新摘要");
+    let rebuilt = parts.rebuild("new summary");
 
     let summaries: Vec<_> = rebuilt
         .iter()
@@ -532,52 +532,52 @@ fn rebuild_keeps_exactly_one_summary() {
     assert_eq!(
         summaries.len(),
         1,
-        "重建后只能有一条摘要，实际 {}",
+        "after rebuild there can be only one summary, got {}",
         summaries.len()
     );
     match summaries[0] {
-        Message::ContextSummary { content } => assert_eq!(content, "新摘要"),
+        Message::ContextSummary { content } => assert_eq!(content, "new summary"),
         _ => unreachable!(),
     }
-    // 重建结果不含任何 System：系统提示词由 `Agent` 现取现置顶，不走 rebuild。
+    // The rebuild result contains no System: the system prompt is fetched fresh and pinned to the top by `Agent`, not via rebuild.
     assert!(
         !rebuilt
             .iter()
             .any(|m| matches!(m, Message::System { .. })),
-        "rebuild 不应复制系统提示词"
+        "rebuild should not copy the system prompt"
     );
-    // 摘要就是重建结果的开头。
+    // The summary is the head of the rebuild result.
     assert!(matches!(rebuilt[0], Message::ContextSummary { .. }));
 }
 
-/// 连续两次重建，摘要数量仍为 1——反复压缩不叠加。
+/// Two rebuilds in a row still yield one summary — repeated compaction does not stack.
 #[test]
 fn repeated_compaction_does_not_stack_summaries() {
-    let mut messages = vec![system("你是 Shirley")];
+    let mut messages = vec![system("You are Shirley")];
     for i in 0..30 {
-        messages.push(user(&format!("历史 {i} 撑预算")));
+        messages.push(user(&format!("history {i} to consume budget")));
     }
-    messages.push(user("本轮任务"));
+    messages.push(user("current task"));
 
-    // 第一次压缩。
-    let plan = plan_cut(&messages, 40, &counter()).expect("第一次应产生切点");
+    // First compaction.
+    let plan = plan_cut(&messages, 40, &counter()).expect("the first should produce a cut point");
     let parts = plan.split(&messages);
-    let mut current = parts.rebuild("摘要一");
+    let mut current = parts.rebuild("summary one");
 
-    // 第二次压缩：基于第一次的结果继续追加历史。
+    // Second compaction: keep appending history on top of the first result.
     for i in 0..30 {
-        current.push(user(&format!("新历史 {i} 撑预算")));
+        current.push(user(&format!("new history {i} to consume budget")));
     }
-    current.push(user("第二个任务"));
+    current.push(user("second task"));
 
-    let plan = plan_cut(&current, 40, &counter()).expect("第二次应产生切点");
+    let plan = plan_cut(&current, 40, &counter()).expect("the second should produce a cut point");
     let parts = plan.split(&current);
-    let rebuilt = parts.rebuild("摘要二");
+    let rebuilt = parts.rebuild("summary two");
 
     let count = rebuilt
         .iter()
         .filter(|m| matches!(m, Message::ContextSummary { .. }))
         .count();
-    assert_eq!(count, 1, "反复压缩后摘要仍应只有一条，实际 {count}");
+    assert_eq!(count, 1, "after repeated compaction there should still be only one summary, got {count}");
 }
 

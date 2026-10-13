@@ -15,33 +15,40 @@ use std::sync::Arc;
 
 pub struct Agent {
     model_config: adapter::ModelConfig,
-    /// 系统提示词单独持有：压缩重建时不从旧消息里复制，而是每次重新生成一条置顶。
+    /// The system prompt is held separately: on a compaction rebuild it is not copied from the
+    /// old messages, but regenerated and prepended each time.
     ///
-    /// 它可以是一个固定字符串，也可以是一个函数——按 [`SystemPromptContext`]
-    /// 动态生成（例如把当前工作目录、项目指南拼进去）。见 [`super::prompt`]。
+    /// It can be a fixed string or a function — generated dynamically from
+    /// [`SystemPromptContext`] (e.g. splicing in the current working directory and project
+    /// guide). See [`super::prompt`].
     system_prompt: SystemPrompt,
-    /// 构建系统提示词时的运行时上下文（当前工作目录）。
+    /// Runtime context for building the system prompt (the current working directory).
     ///
-    /// coding agent 靠它把"我的工作范围在哪"明确告诉模型，避免模型从文件系统
-    /// 根目录开始盲目探索（`plan.md`）。`None` 表示调用方没有指定。
+    /// A coding agent uses it to tell the model explicitly "where my working scope is", so the
+    /// model doesn't blindly explore from the filesystem root (`plan.md`). `None` means the
+    /// caller did not specify one.
     working_dir: Option<PathBuf>,
     messages: Vec<message::Message>,
-    /// 流被 drop 时尚未提交的用户输入与助手增量，供驱动方收尾落库。
+    /// User input and assistant deltas not yet committed when the stream is dropped, for the
+    /// driver to flush into storage.
     pending_user: Option<String>,
     pending_content: String,
     pending_reasoning: String,
     tools: tool::ToolManager,
     compression_instruction: Option<String>,
     compression_pending: bool,
-    /// 压缩策略（触发阈值 / 保留比例 / 摘要模板）。默认即 SDK 内置策略。
+    /// Compaction policy (trigger threshold / retain ratio / summary template). Defaults to the
+    /// SDK built-in policy.
     compression_config: CompressionConfig,
-    /// 每轮请求末尾的附加上下文提供者（应用层可选注入，例如任务账本）。
-    /// 返回的文本作为一条 system 消息追加在本轮请求末尾——不进 `self.messages`、
-    /// 跨压缩存活、且不动前缀（见 [`super::context`]）。
+    /// Provider of the appended context at the end of each request (the application layer may
+    /// inject one, e.g. a task ledger). The returned text is appended as a system message at the
+    /// end of this turn's request — it does not enter `self.messages`, survives compaction, and
+    /// leaves the prefix untouched (see [`super::context`]).
     context_provider: Option<Arc<dyn ContextProvider>>,
-    // L1 估算 + L2 校准状态（见 `token` 模块）
+    // L1 estimation + L2 calibration state (see the `token` module)
     token_counter: token::HeuristicCounter,
-    /// 单次用户任务的模型执行步数上限（压缩不重置此计数）。
+    /// Upper bound on model execution steps for a single user task (compaction does not reset
+    /// this counter).
     max_steps: usize,
 }
 
@@ -64,8 +71,9 @@ impl Agent {
                 "max_steps must be greater than zero".into(),
             ));
         }
-        // 构造时就按工作目录解析一次，把 System 消息置顶（空提示词则不置顶）。
-        // 恢复出的历史里不含 system，这里现生成——与压缩重建同一套规则。
+        // Resolve once at construction against the working directory and prepend the System
+        // message (an empty prompt is not prepended). Restored history contains no system, so it
+        // is generated here — the same rule as a compaction rebuild.
         let resolved = system_prompt.resolve(&SystemPromptContext {
             working_dir: working_dir.clone(),
         });
@@ -91,78 +99,89 @@ impl Agent {
         })
     }
 
-    /// 重新生成系统提示词消息。压缩重建后由它把 system 置顶。
+    /// Regenerate the system prompt message. After a compaction rebuild this prepends system.
     ///
-    /// 系统提示词不随对话变化，也不参与压缩——每次都从 `self.system_prompt` 现取，
-    /// 因此 [`CompactParts::rebuild`] 无需（也不该）复制原消息里的 `System`。
+    /// The system prompt does not change with the conversation and does not take part in
+    /// compaction — it is taken fresh from `self.system_prompt` each time, so
+    /// [`CompactParts::rebuild`] need not (and should not) copy any `System` from the original
+    /// messages.
     fn system_message(&self) -> Option<message::Message> {
         let content = self.system_prompt.resolve(&self.prompt_context());
         (!content.trim().is_empty()).then_some(message::Message::System { content })
     }
 
-    /// 当前用于解析系统提示词的运行时上下文。
+    /// The runtime context currently used to resolve the system prompt.
     fn prompt_context(&self) -> SystemPromptContext {
         SystemPromptContext {
             working_dir: self.working_dir.clone(),
         }
     }
 
-    /// 当前模型配置（只读）。
+    /// The current model config (read-only).
     ///
-    /// 应用层用它展示"现在用的是哪个模型"，以及切换时保留其余配置。
+    /// The application layer uses it to show "which model is in use now" and to preserve the
+    /// other config when switching.
     pub fn model_config(&self) -> &adapter::ModelConfig {
         &self.model_config
     }
 
-    /// 切换模型：只替换 `model` 字段，其余配置（协议 / base_url / 超时 / 窗口等）原样保留。
+    /// Switch model: replace only the `model` field; the rest of the config (protocol /
+    /// base_url / timeouts / window, etc.) is kept as-is.
     ///
-    /// 这是应用层 `/model` 指令落地的唯一 SDK 接缝——模型是可热切换的运行参数，
-    /// 不重建 `Agent` 也能生效（下一次请求即用新模型）。
+    /// This is the only SDK seam for landing the application layer's `/model` command — the
+    /// model is a hot-swappable runtime parameter and takes effect without rebuilding `Agent`
+    /// (the next request uses the new model).
     pub fn set_model(&mut self, model: impl Into<String>) {
         self.model_config.model = model.into();
     }
 
-    /// 整体替换模型配置：把「模型 + 协议 + 端点」等一次性下发。
+    /// Replace the whole model config: hand down "model + protocol + endpoint" in one shot.
     ///
-    /// 这是「模型配置一次下发」的 SDK 接缝（`docs/tool-calling-refactor.md` Step 3）：
-    /// 调用方先用工厂算好一份完整 `ModelConfig`，再整份交给它，**不必记**
-    /// 「先 `set_model` 再 `set_tool_calling`」的顺序，也不会漏切协议。
-    /// `set_model` / `set_provider` 仍是只改单字段的小接缝，按需选用。
+    /// This is the "hand down the model config in one shot" SDK seam
+    /// (`docs/tool-calling-refactor.md` Step 3): the caller first uses a factory to compute a
+    /// complete `ModelConfig`, then hands it over whole, with **no need to remember** the
+    /// "first `set_model`, then `set_tool_calling`" order, and no risk of missing a protocol
+    /// switch. `set_model` / `set_provider` remain small single-field seams, used as needed.
     pub fn set_model_config(&mut self, config: adapter::ModelConfig) {
         self.model_config = config;
     }
 
-    /// 切换模型服务连接（`base_url` + `api_key`）：其余配置原样保留。
+    /// Switch the model service connection (`base_url` + `api_key`): the rest of the config is
+    /// kept as-is.
     ///
-    /// 这是应用层 `/login` 指令落地的 SDK 接缝（与 [`Agent::set_model`] 对称）：
-    /// 换一个供应商 / 端点不必重建 `Agent`，下一次请求即生效。`api_key` 传
-    /// `None` 表示"无鉴权"（本地服务常见），会覆盖掉旧 key——与"未改动"不同，
-    /// 调用方需自行决定是"保留旧值"还是"确实清空"。
+    /// This is the SDK seam for landing the application layer's `/login` command (symmetric with
+    /// [`Agent::set_model`]): switching provider / endpoint needs no `Agent` rebuild and takes
+    /// effect on the next request. Passing `None` for `api_key` means "no auth" (common for
+    /// local services) and overwrites the old key — unlike "unchanged"; the caller decides
+    /// whether to "keep the old value" or "actually clear it".
     pub fn set_provider(&mut self, base_url: impl Into<String>, api_key: Option<String>) {
         self.model_config.base_url = base_url.into();
         self.model_config.api_key = api_key;
     }
 
-    /// 移除一个已注册的工具（与 [`ToolManager::register`] 对称的运行时接缝）。
+    /// Remove a registered tool (a runtime seam symmetric with [`ToolManager::register`]).
     ///
-    /// 触发工具的 `on_unregister`（= destroy），用于运行期动态启停工具。
-    /// 名字未注册时返回 `Err`。与 `set_model` / `set_provider` 同风格：
-    /// 不重建 `Agent`。
+    /// Triggers the tool's `on_unregister` (= destroy), for dynamically enabling/disabling tools
+    /// at runtime. Returns `Err` when the name is not registered. Same style as `set_model` /
+    /// `set_provider`: no `Agent` rebuild.
     pub fn unregister_tool(&mut self, name: &str) -> Result<(), AgentError> {
         self.tools.unregister(name).map_err(Into::into)
     }
 
-    /// 对话历史的只读视图。
+    /// A read-only view of the conversation history.
     ///
-    /// 供上层展示"当前 Agent 实际记得什么"，以及"回溯"时定位目标消息——
-    /// 被压缩掉的历史不在这里，因此天然不可回溯（压缩边界之后才谈得上回溯）。
+    /// Lets upper layers show "what the Agent actually remembers now" and locate the target
+    /// message for "rewind" — history that has been compacted away is not here, so it is
+    /// naturally non-rewindable (rewinding is only meaningful after the compaction boundary).
     pub fn messages(&self) -> &[message::Message] {
         &self.messages
     }
 
-    /// drop 掉 run_stream 后保存未完成消息，返回需要由应用层追加到日志的消息。
-    /// 重复调用为空；已完成的消息不会重复提交。未返回结果的工具调用补齐中断结果，
-    /// 避免下一轮携带孤立 tool_call 被端点拒绝。
+    /// After dropping run_stream, save the unfinished messages and return the messages the
+    /// application layer needs to append to the log. Repeated calls are empty; completed messages
+    /// are not re-submitted. Tool calls with no returned result get a placeholder interrupted
+    /// result, so the next turn doesn't carry an orphan tool_call and get rejected by the
+    /// endpoint.
     pub fn finish_interrupted_turn(&mut self) -> Vec<message::Message> {
         let mut added = Vec::new();
         if let Some(content) = self.pending_user.take() {
@@ -177,7 +196,7 @@ impl Agent {
                 tool_calls: Vec::new(),
             });
         }
-        // 只有当前消息尾部的工具组可能尚未完成。
+        // Only the tool group at the tail of the current message may be unfinished.
         if let Some(index) = self
             .messages
             .iter()
@@ -192,7 +211,7 @@ impl Agent {
                     added.push(message::Message::Tool {
                         tool_call_id: call.id.clone(),
                         content: Some(
-                            "工具等待被中断；执行可能已产生副作用，请先检查实际状态。".into(),
+                            "Tool call was interrupted while waiting; execution may have produced side effects — check the actual state first.".into(),
                         ),
                     });
                 }
@@ -202,16 +221,19 @@ impl Agent {
         added
     }
 
-    /// 把对话历史尾截断到前 `len` 条，返回截断后的长度。
+    /// Truncate the conversation history to the first `len` messages, returning the truncated
+    /// length.
     ///
-    /// 这是回溯的**原子能力**：SDK 只负责"把工作集变短"并维护内部不变量
-    /// （不越过置顶 system、越界自动钳制），**"截到哪"是业务判定**——例如"回退最后
-    /// 一轮用户消息"由上层按 [`Agent::messages`] 自行定位后调用（`docs/session.md`
-    /// 一.决策 4：只截尾，不产生中间空洞）。持久化由应用层据截断后的长度自行截尾
-    /// （SDK 不持有会话日志）。
+    /// This is the **atomic capability** for rewinding: the SDK only "shortens the working set"
+    /// and maintains internal invariants (never crosses the prepended system, clamps
+    /// out-of-range), while **"where to truncate" is a business judgment** — e.g. "roll back the
+    /// last user turn" is located by the upper layer via [`Agent::messages`] and then called
+    /// (`docs/session.md` decision 4: truncate the tail only, no middle holes). Persistence
+    /// truncates on its own by the truncated length (the SDK does not hold the session log).
     pub fn truncate_messages(&mut self, len: usize) -> usize {
-        // 置顶 system 是构造 / 压缩重建维护的不变量，不允许被截掉：以开头连续
-        // 的 system 条数为下界。`clamp` 同时兜住 `len` 越界（超长则原样）。
+        // The prepended system is an invariant maintained by construction / compaction rebuild
+        // and must not be truncated away: use the count of leading consecutive system messages as
+        // the lower bound. `clamp` also catches an out-of-range `len` (kept as-is when too long).
         let floor = self
             .messages
             .iter()
@@ -234,19 +256,23 @@ impl Agent {
         ))
     }
 
-    /// 一次性补全：对单条 prompt 跑**一次无工具、非流式**的模型请求，返回助手正文。
+    /// One-shot completion: run **a single tool-less, non-streaming** model request for one
+    /// prompt and return the assistant's text.
     ///
-    /// 这是给应用层「用一次模型调用做点小事」准备的通用原语（例如为新建会话自动
-    /// 生成标题）。它**不碰** `self.messages` / 会话日志 / 召回库 / 任务账本——纯
-    /// 只读地复用当前 `model_config`，因此可以在持有 `&self` 时调用，不会污染会话。
+    /// A general primitive for the application layer to "do something small with one model call"
+    /// (e.g. auto-generate a title for a new session). It **does not touch** `self.messages` /
+    /// the session log / the recall store / the task ledger — it purely read-reuses the current
+    /// `model_config`, so it can be called while holding `&self` without polluting the session.
     ///
-    /// 与 [`Agent::run`] 的区别：不驱动 ReAct 循环、不发工具、不落库；`stream` /
-    /// `thinking` 被就地关掉（一次性补全要的是短文本，流式与推理无意义）。
-    /// 取 `Assistant` 的正文（`content`）；若模型只回了推理内容（`reasoning_content`）
-    /// 则回退取它；两者皆空返回空串。
+    /// Unlike [`Agent::run`]: it doesn't drive the ReAct loop, send tools, or write storage;
+    /// `stream` / `thinking` are turned off in place (a one-shot completion wants short text, so
+    /// streaming and reasoning are pointless). It takes the `Assistant` text (`content`); if the
+    /// model returned only reasoning (`reasoning_content`), it falls back to that; both empty
+    /// returns an empty string.
     pub async fn complete(&self, prompt: &str) -> Result<String, AgentError> {
         let client = reqwest::Client::new();
-        // 克隆一份配置并关掉流式 / 推理：只借模型名与端点，不改动 `self` 的���置。
+        // Clone the config and turn off streaming / reasoning: borrow only the model name and
+        // endpoint, without touching `self`'s config.
         let mut config = self.model_config.clone();
         config.stream = false;
         config.thinking = false;
@@ -311,7 +337,7 @@ impl Agent {
             loop {
                 if steps >= self.max_steps {
                     let notice = message::Message::Assistant {
-                        content: Some(format!("已达到本轮执行上限（{} 次模型调用），任务尚未完成。当前对话与工具结果已保留；请检查已有结论后决定是否继续。", self.max_steps)),
+                        content: Some(format!("Reached the execution limit for this turn ({} model calls); the task is not yet complete. The current conversation and tool results have been kept; review the existing conclusions and decide whether to continue.", self.max_steps)),
                         reasoning_content: None,
                         tool_calls: Vec::new(),
                     };
@@ -335,12 +361,12 @@ impl Agent {
                     total_usage = total_usage + usage;
                     yield AgentEvent::Usage(usage);
 
-                    // 压缩把 self.messages 整体重建（远短于原列表），
-                    // start_index 这个绝对下标随之失效——不钳制会在
-                    // Finished 处切片越界 panic（"range start index N out
-                    // of range"）。钳到当前长度后，切出的 [summary, task,
-                    // remain..] 仍是"本轮可见的新增内容"：summary 是本轮
-                    // 压缩产物，remain 是本轮的对话与 tool 链。
+                    // Compaction rebuilds self.messages wholesale (far shorter than the original
+                    // list), invalidating the absolute start_index — without clamping, the slice
+                    // at Finished panics out of range ("range start index N out of range"). After
+                    // clamping to the current length, the sliced [summary, task, remain..] is
+                    // still "the new content visible this turn": summary is this turn's
+                    // compaction product, remain is this turn's conversation and tool chain.
                     start_index = start_index.min(self.messages.len());
                 }
                 let active_messages = self.active_messages();
@@ -386,17 +412,18 @@ impl Agent {
                                         };
 
                                         let tools = &self.tools;
-                                        // ToolContext 内部是 Arc，clone 只加引用计数；
-                                        // 在循环里 clone 而不是把 self 捕获进 async 块。
-                                        // 上下文由 ToolManager 持有（工具在 on_register
-                                        // 里写入），这里只取一份 clone 分发下去。
+                                        // ToolContext is Arc inside, so clone only bumps the
+                                        // refcount; clone inside the loop instead of capturing
+                                        // self into the async block. The context is held by
+                                        // ToolManager (tools write it in on_register); here we
+                                        // just take one clone and hand it down.
                                         let ctx = self.tools.context().clone();
 
                                         tasks.push(async move {
                                             let started = std::time::Instant::now();
                                             let (ok, content) = match tools.invoke(call, ctx).await {
                                                 Ok(output) => (true, output.to_string()),
-                                                // TODO: 感觉这里不太合理，不过如果消费者是AI合理，外部消费者应该通过 AgentEvent 把错误信息传递出去
+                                                // TODO: this feels off, but it's fine if the consumer is the AI; external consumers should get the error via AgentEvent instead.
                                                 Err(error) => (false, error.to_string()),
                                             };
                                             (call, ok, content, started.elapsed().as_millis() as u64)
@@ -454,18 +481,18 @@ impl Agent {
         })
     }
 
-    /// 当前保留尾部的 token 预算：`context_window_tokens * 20%`。
+    /// The current token budget for the retained tail: `context_window_tokens * 20%`.
     ///
-    /// 未配置窗口（或配成 0）时返回 `None`，表示**不做压缩**。
+    /// Returns `None` when no window is configured (or it is 0), meaning **no compaction**.
     fn retain_budget(&self) -> Option<u64> {
         let window = self.model_config.context_window_tokens.filter(|&w| w > 0)?;
         Some(((window as f64) * self.compression_config.retain_ratio).round() as u64)
     }
 
-    /// 计算压缩切点，并提取用户最新提出的问题。
+    /// Compute the compaction cut point and extract the user's latest question.
     ///
-    /// 返回 `None` 的三种情况，语义都是"本轮不压缩"：
-    /// 未配置上下文窗口、没有可压内容、或全部消息本来就能装进预算。
+    /// The three cases returning `None` all mean "no compaction this turn": no context window
+    /// configured, nothing compressible, or all messages already fit in the budget.
     fn compute_cut(&self, messages: &[message::Message]) -> Option<CutPlan> {
         let budget = self.retain_budget()?;
         plan_cut(messages, budget, &self.token_counter)
@@ -486,20 +513,22 @@ impl Agent {
         {
             return false;
         }
-        // 下一次请求会携带本轮输出。用整数比较避免浮点精度和溢出：
-        // 阈值 = limit * trigger_ratio，转成 (used / limit >= ratio) 的整数判定。
+        // The next request will carry this turn's output. Use integer comparison to avoid float
+        // precision and overflow: threshold = limit * trigger_ratio, turned into the integer test
+        // (used / limit >= ratio).
         let used = usage.input_tokens.saturating_add(usage.output_tokens);
         let ratio = self.compression_config.trigger_ratio;
         if !(ratio > 0.0 && ratio <= 1.0) {
             return false;
         }
-        // 放大 10000 倍做定点比较：0.80 → 8000，避免 f64 精度问题。
+        // Scale by 10000 for fixed-point comparison: 0.80 → 8000, avoiding f64 precision issues.
         let scaled = (ratio * 10_000.0).round() as u128;
         (used as u128) * 10_000 >= (limit as u128) * scaled
     }
 
-    /// 普通执行与压缩共享同一工作集；恢复日志中已被摘要替代的消息不再参与。
-    /// 只返回副本，完整日志仍可用于界面与历史查看。
+    /// Normal execution and compaction share the same working set; messages already replaced by a
+    /// summary in a restored log no longer participate. Only a copy is returned; the full log is
+    /// still available for the UI and history viewing.
     fn active_history(&self) -> Vec<message::Message> {
         let last_summary = self
             .messages
@@ -522,13 +551,17 @@ impl Agent {
 
     fn active_messages(&self) -> Vec<message::Message> {
         let mut active = self.active_history();
-        // 附加上下文（应用层注入，例如任务账本）作为一条 system 消息**追加在末尾**。
+        // The appended context (injected by the application layer, e.g. a task ledger) is
+        // **appended at the end** as a system message.
         //
-        // 位置选末尾的理由：
-        //   - 它不进 `self.messages`，压缩碰不到它，跨压缩存活；
-        //   - 追加在尾部不动前面的前缀，内容稳定时前缀缓存照常命中
-        //     （Responses 适配器把 system 原位保留，正是为了这一点）；
-        //   - 内容只在提供者决定变化时才变，变化点被压到最小。
+        // Why the end:
+        //   - it does not enter `self.messages`, compaction can't touch it, so it survives
+        //     compaction;
+        //   - appending at the tail leaves the preceding prefix untouched, so when the content is
+        //     stable the prefix cache hits as usual (the Responses adapter keeps system in place
+        //     precisely for this);
+        //   - the content changes only when the provider decides it should, minimizing the change
+        //     points.
         if let Some(provider) = &self.context_provider
             && let Some(text) = provider.context()
             && !text.trim().is_empty()
@@ -538,29 +571,34 @@ impl Agent {
         active
     }
 
-    /// 压缩上下文：算切点 → 切三段 → 只对 `to_compress` 求摘要 → 重建消息。
+    /// Compact the context: compute the cut → split into three segments → summarize only
+    /// `to_compress` → rebuild the messages.
     ///
-    /// 对应 `docs/compaction.md` 5.1 的结构与 5.2 的"禁止摘要叠摘要"：
+    /// Corresponds to the structure in `docs/compaction.md` 5.1 and "no summary-on-summary" in
+    /// 5.2:
     ///
     /// ```text
-    /// self.messages = [system（重新生成）] + [新 ContextSummary] + current_task + remain
+    /// self.messages = [system (regenerated)] + [new ContextSummary] + current_task + remain
     /// ```
     ///
-    /// 与旧实现的区别：旧实现把摘要**追加在末尾**（等于把尾巴也吃掉），
-    /// 且摘要器看到的是整段对话、拿不到"本轮任务是什么"，所以会忘任务、会编下一步。
+    /// Difference from the old implementation: the old one **appended** the summary at the end
+    /// (effectively eating the tail too), and the summarizer saw the whole conversation without
+    /// knowing "what this turn's task is", so it forgot the task and invented next steps.
     async fn compress_context(
         &mut self,
         client: &reqwest::Client,
     ) -> Result<(message::Usage, Option<message::Message>), AgentError> {
-        // 1. 算切点并切三段。
+        // 1. Compute the cut and split into three segments.
         let history = self.active_history();
         let Some(mut plan) = self.compute_cut(&history) else {
-            // 没有可压内容（窗口未配置 / 只剩背景 / 本来装得下）：不压缩，直接放行。
+            // Nothing compressible (no window / only background left / already fits): no
+            // compaction, pass through.
             self.compression_pending = false;
             return Ok((message::Usage::default(), None));
         };
-        // 摘要事件只追加到日志，运行中的原始任务未必在摘要后的日志尾部。
-        // 从完整记录补回最近的用户任务，但不重新带入已压缩的工具/推理历史。
+        // The summary event is only appended to the log; the running original task may not be at
+        // the tail of the post-summary log. Restore the most recent user task from the full
+        // record, but do not bring back the already-compacted tool/reasoning history.
         if plan.current_task.is_none() {
             plan.current_task = self
                 .messages
@@ -570,7 +608,8 @@ impl Agent {
                 .cloned();
         }
         let mut parts = plan.split(&history);
-        // split 只能定位 history 内的任务；从归档前缀恢复的任务也需重建保留。
+        // split can only locate a task within history; a task restored from the archived prefix
+        // also needs to be kept at rebuild.
         if parts.current_task.is_some()
             && !history
                 .iter()
@@ -579,15 +618,17 @@ impl Agent {
             parts.task_extracted = true;
         }
 
-        // 2. 旧摘要不占尾部预算，但必须作为新摘要的输入；否则 rebuild
-        // 替换旧摘要时，之前已确认的结论也会被一起丢弃。
+        // 2. The old summary doesn't count against the tail budget, but must be an input to the
+        // new summary; otherwise, when rebuild replaces the old summary, previously confirmed
+        // conclusions are discarded too.
         let mut messages: Vec<_> = history[..plan.head]
             .iter()
             .filter(|m| matches!(m, message::Message::ContextSummary { .. }))
             .cloned()
             .collect();
         messages.extend(parts.to_compress.iter().cloned());
-        // 显式告诉摘要器"本轮任务是什么"，避免它从历史里猜（猜就会编）。
+        // Explicitly tell the summarizer "what this turn's task is", so it doesn't guess from
+        // history (guessing leads to inventing).
         if let Some(task) = &parts.current_task {
             messages.push(task.clone());
         }
@@ -602,13 +643,16 @@ impl Agent {
         let instruction = self.compression_instruction.clone().ok_or_else(|| {
             AgentError::Compression("compression instruction is not configured".into())
         })?;
-        // 调用方给领域相关的取舍，SDK 追加结构模板（`docs/compaction.md` 5.3）：
-        // 摘要始终是 XML 块，且禁止推演"下一步"。模板可由 `compression_config` 覆盖。
+        // The caller supplies the domain-relevant trade-offs; the SDK appends the structural
+        // template (`docs/compaction.md` 5.3): the summary is always XML blocks and speculation
+        // about "next steps" is forbidden. The template can be overridden via
+        // `compression_config`.
         let content = format!("{instruction}\n\n{}", self.compression_config.template);
         messages.push(message::Message::System { content });
 
-        // 触发压缩的比例不是摘要请求的容量上限。按窗口预留输出空间，
-        // 估算只决定如何缩减请求，不代替服务端的真实 token 校验。
+        // The compaction trigger ratio is not the capacity limit of the summary request. Reserve
+        // output space from the window; estimation only decides how to shrink the request, not
+        // replace the server's real token validation.
         if let Some(window) = self.model_config.context_window_tokens.filter(|w| *w > 0) {
             let reserve = self
                 .model_config
@@ -616,8 +660,9 @@ impl Agent {
                 .map(u64::from)
                 .unwrap_or_else(|| (window / 10).max(1));
             let budget = window.saturating_sub(reserve);
-            // 优先移除可重复、冗长的推理草稿，保留正文、账本和工具证据。
-            // 仅处理摘要请求的副本；原始记录和保留尾部不受影响。
+            // Prefer removing the repetitive, verbose reasoning drafts, keeping the text, the
+            // ledger, and the tool evidence. Only the summary request's copy is touched; the
+            // original record and retained tail are unaffected.
             if self.token_counter.estimate_messages(&messages) > budget {
                 for message in &mut messages {
                     if let message::Message::Assistant {
@@ -655,8 +700,9 @@ impl Agent {
                         }
                     };
 
-                    // 3. 重建：[新摘要] + current_task + remain，再把系统提示词重新生成置顶。
-                    //    system 不参与压缩、也不从旧消息复制，每次重建现取一条。
+                    // 3. Rebuild: [new summary] + current_task + remain, then regenerate the
+                    //    system prompt and prepend it. system does not take part in compaction and
+                    //    is not copied from the old messages; one is taken fresh each rebuild.
                     let rebuilt = parts.rebuild(summary);
                     let summary_message = rebuilt
                         .first()
@@ -666,14 +712,16 @@ impl Agent {
                     if let Some(system) = self.system_message() {
                         next.insert(0, system);
                     }
-                    // 压缩把 self.messages 整体重建为 [system?, 新摘要, task, remain]。
-                    // 应用层据 `MessageAdded(summary)` 事件自行落库（SDK 不持有会话日志）。
+                    // Compaction rebuilds self.messages wholesale into [system?, new summary,
+                    // task, remain]. The application layer writes storage itself based on the
+                    // `MessageAdded(summary)` event (the SDK does not hold the session log).
                     self.messages = next;
                     self.compression_pending = false;
 
-                    // 4. 用真实 input_tokens 校准估算系数（L2）。
-                    //    估算口径必须与请求一致：待压缩段 + 任务 + 指令。
-                    //    不含 system / tool schema —— 本轮压缩请求也没带它们。
+                    // 4. Calibrate the estimation factor (L2) with the real input_tokens. The
+                    //    estimation basis must match the request: to-compress segment + task +
+                    //    instruction. Excludes system / tool schema — this compaction request
+                    //    didn't carry them either.
                     self.token_counter
                         .calibrate(usage.input_tokens, token::count_messages(&messages));
 
@@ -723,7 +771,8 @@ fn trim_compaction_tool_outputs(
         let marker = format!(
             "\n[tool result excerpt; middle omitted; original tool_call_id={tool_call_id}]\n"
         );
-        // 小结果不裁剪；大结果也至少留 256 token 的片段（含省略标记）。
+        // Small results are not trimmed; large results keep at least a 256-token excerpt
+        // (including the omission marker).
         let target = cost.saturating_sub(total - raw_budget).max(256);
         let marker_cost = token::count_text(&marker);
         if target >= cost || target <= marker_cost {
@@ -746,7 +795,8 @@ fn trim_compaction_tool_outputs(
 }
 
 fn text_prefix_for_tokens(text: &str, budget: u64) -> &str {
-    // 每字符的权重为 1/4 的整数倍，按同一启发式累计，避免切断 UTF-8。
+    // Each character's weight is an integer multiple of 1/4, accumulated with the same heuristic,
+    // avoiding splitting UTF-8.
     let mut quarters = 0;
     for (i, ch) in text.char_indices() {
         quarters += (token::char_weight(ch) * 4.0) as u64;
@@ -761,7 +811,7 @@ fn text_prefix_for_tokens(text: &str, budget: u64) -> &str {
 mod tests {
     use super::*;
 
-    /// 测试用提供者：返回固定文本。
+    /// Test provider: returns fixed text.
     struct FixedProvider(&'static str);
     impl ContextProvider for FixedProvider {
         fn context(&self) -> Option<String> {
@@ -769,7 +819,7 @@ mod tests {
         }
     }
 
-    /// 测试用提供者：始终不注入。
+    /// Test provider: never injects.
     struct EmptyProvider;
     impl ContextProvider for EmptyProvider {
         fn context(&self) -> Option<String> {
@@ -785,59 +835,60 @@ mod tests {
             .build();
         Agent::builder()
             .model_config(config)
-            .system_prompt("你是 Shirley")
+            .system_prompt("You are Shirley")
             .maybe_context_provider(provider)
             .build()
             .unwrap()
     }
 
-    /// 没有提供者时不注入任何东西（避免每轮多出一条无意义的 system）。
+    /// With no provider, nothing is injected (avoiding a meaningless system message each turn).
     #[test]
     fn no_provider_injects_nothing() {
         let agent = agent_with(None);
         let active = agent.active_messages();
-        assert_eq!(active.len(), 1, "只有置顶 system");
+        assert_eq!(active.len(), 1, "only the prepended system");
         assert!(matches!(active[0], message::Message::System { .. }));
     }
 
-    /// 提供者返回 `None` 时也不注入。
+    /// A provider returning `None` also injects nothing.
     #[test]
     fn provider_returning_none_injects_nothing() {
         let agent = agent_with(Some(Arc::new(EmptyProvider)));
         let active = agent.active_messages();
-        assert_eq!(active.len(), 1, "只有置顶 system");
+        assert_eq!(active.len(), 1, "only the prepended system");
     }
 
-    /// 附加上下文作为**最后一条** system 注入，且不进入 `self.messages`
-    /// （因此压缩重建 `self.messages` 时碰不到它）。
+    /// The appended context is injected as the **last** system message and does not enter
+    /// `self.messages` (so a compaction rebuild of `self.messages` can't touch it).
     #[test]
     fn context_is_appended_and_not_persisted() {
-        let agent = agent_with(Some(Arc::new(FixedProvider("注入的任务账本"))));
+        let agent = agent_with(Some(Arc::new(FixedProvider("injected task ledger"))));
 
-        // 附加上下文不在工作集里——压缩 / rewind 都动不到它。
+        // The appended context is not in the working set — neither compaction nor rewind can
+        // touch it.
         assert!(
             !agent
                 .messages
                 .iter()
-                .any(|m| matches!(m, message::Message::System { content } if content.contains("任务账本"))),
-            "附加上下文不应写入 self.messages"
+                .any(|m| matches!(m, message::Message::System { content } if content.contains("task ledger"))),
+            "appended context must not be written into self.messages"
         );
 
         let active = agent.active_messages();
-        let last = active.last().expect("至少有一条");
+        let last = active.last().expect("at least one message");
         let message::Message::System { content } = last else {
-            panic!("末条应是注入的 system");
+            panic!("the last message should be the injected system");
         };
-        assert_eq!(content, "注入的任务账本");
-        // 置顶的原始 system 仍在最前。
+        assert_eq!(content, "injected task ledger");
+        // The original prepended system is still first.
         assert!(
-            matches!(&active[0], message::Message::System { content } if content == "你是 Shirley")
+            matches!(&active[0], message::Message::System { content } if content == "You are Shirley")
         );
     }
 
     #[test]
     fn oversized_tool_evidence_is_excerpted_without_destroying_small_results() {
-        let original = format!("重要开头{}关键结尾", "输出".repeat(5000));
+        let original = format!("important start{}critical end", "output".repeat(5000));
         let mut messages = vec![
             message::Message::Tool {
                 tool_call_id: "large".into(),
@@ -856,8 +907,8 @@ mod tests {
         else {
             panic!()
         };
-        assert!(excerpt.starts_with("重要开头"));
-        assert!(excerpt.ends_with("关键结尾"));
+        assert!(excerpt.starts_with("important start"));
+        assert!(excerpt.ends_with("critical end"));
         assert!(excerpt.contains("tool_call_id=large"));
         assert!(token::count_messages(&messages) <= 600);
         assert!(

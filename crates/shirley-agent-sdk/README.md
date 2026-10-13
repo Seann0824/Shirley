@@ -96,6 +96,48 @@ let config = ModelConfig::builder()
 
 Everything downstream of `ModelConfig` is protocol-agnostic: the same `Agent`, `Message`, and tool code runs against any of the three. Protocol quirks (system handling, tool-result placement, thinking blocks, usage semantics, streaming event shapes) live entirely in `src/adapter/`.
 
+### Tool-calling modes
+
+Some models / endpoints do not support native tool calling at all. For those, the SDK
+can drive tools through a **text protocol**: the tool catalog and an XML contract are
+injected into the system prompt, the model writes tool calls as text, and the adapter
+parses them back into `Message::Assistant.tool_calls` — so the ReAct loop and the
+`AgentEvent` stream are **unchanged**.
+
+This is a *transport mode*, orthogonal to `ModelProtocol`, and is selected with a single
+field on `ModelConfig`:
+
+```rust
+use shirley_agent_sdk::ToolCallingMode;
+
+// Default: use the provider's native tool_calls.
+let config = ModelConfig::builder()
+    .protocol(ModelProtocol::ChatCompletions)
+    .base_url("https://api.example.com/v1/chat/completions")
+    .model("some-model")
+    .tool_calling(ToolCallingMode::Native)
+    .build();
+
+// Text protocol for models without native tool calling.
+let config = ModelConfig::builder()
+    .protocol(ModelProtocol::ChatCompletions)
+    .base_url("http://localhost:11434/v1/chat/completions")
+    .model("local-model")
+    .tool_calling(ToolCallingMode::Tagged)
+    .build();
+```
+
+Consumers do not need to know which mode is active: tool calls surface as the same
+`AgentEvent::ToolStarted` / `ToolFinished`, and streaming text as the same
+`ContentDelta` / `ReasoningDelta` (the tool block itself is filtered out of the stream).
+Everything specific to the text protocol — the prompt, the request encoding, the parser —
+lives inside `src/adapter/`; `runtime/` has no protocol knowledge.
+
+> **Auto-selection is a host concern.** The SDK only exposes the field; choosing a mode
+> per model (e.g. a `tool_mode` column in a model catalog) is up to the embedding
+> application.
+
+
 ### Consuming the stream
 
 `run_stream()` returns a stream of events, suitable for driving a UI:
@@ -116,6 +158,29 @@ while let Some(event) = stream.next().await {
 }
 ```
 
+## Examples
+
+Runnable examples live in [`examples/`](examples/). Model-backed ones read the endpoint from
+the environment (`LOCAL_BASE_URL`, `LOCAL_API_KEY`, `LOCAL_MODEL`); the rest run locally with
+no network.
+
+| Example | What it shows |
+| --- | --- |
+| `quickstart` | The smallest end-to-end run: one tool, one turn (`Agent::run`) |
+| `streaming` | Consuming the `AgentEvent` stream: deltas, tool activity, usage |
+| `tools` | A stateless tool, a stateful tool reading `ToolContext`, and `on_register` / `on_unregister` hooks |
+| `context_provider` | Appending application-owned context to every request via `ContextProvider` |
+| `sandbox` | Running a command with a timeout and inspecting `SandboxOutput` / degradation |
+| `workspace` | `WorkSpace::resolve` path confinement (`OutsideRoot` vs `InvalidPath`) |
+| `token_counting` | The CJK-aware token heuristic used for compaction cut points |
+| `protocols` | Building the three protocol configs and the `ToolCallingMode` switch |
+| `real_tool_calling` | Native vs Tagged tool calling against a real endpoint |
+
+```sh
+cargo run -p shirley-agent-sdk --example quickstart
+cargo run -p shirley-agent-sdk --example sandbox
+```
+
 ## Core types
 
 | Type | Description |
@@ -123,6 +188,7 @@ while let Some(event) = stream.next().await {
 | `Agent` | The ReAct runtime; built with a `bon` builder, driven by `run` / `run_stream` |
 | `ModelConfig` | Model endpoint config: protocol, base_url, model, api_key, stream, thinking, etc. |
 | `ModelProtocol` | Protocol enum: `ChatCompletions` / `Responses` / `AnthropicMessages` (all implemented) |
+| `ToolCallingMode` | Tool transport: `Native` (provider `tool_calls`) or `Tagged` (text/XML protocol for models without native tool calling) |
 | `Message` | Message enum: System / User / Assistant / Tool / ContextSummary |
 | `ToolManager` | Tool registration and invocation; `definitions()` is sorted by name to keep the prompt prefix stable |
 | `Tool` / `ToolError` | The tool trait and its error type (tool authors only return `ToolError`) |

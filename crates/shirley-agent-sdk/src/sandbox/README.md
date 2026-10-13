@@ -1,35 +1,36 @@
 # sandbox
 
-进程沙盒层。目标：把"执行外部命令"从"把 shell 交给模型"变成"在一个受限的假世界里跑"。
+The process sandbox layer. Goal: turn "executing an external command" from "handing the shell to
+the model" into "running inside a restricted fake world".
 
-## 分层
+## Layers
 
-| 文件 | 职责 |
+| File | Responsibility |
 |---|---|
-| `spec.rs` | 平台无关的执行意图：跑什么、能碰什么、出网策略（bon builder） |
-| `backend/mod.rs` | 后端抽象 `SandboxBackend` + 能力自描述 `Capabilities` |
-| `backend/process.rs` | 裸进程后端（无隔离），仅用于开发/测试与降级基线 |
-| `output.rs` | 统一结果：stdout/stderr/exit_code/timed_out/**degraded** |
-| `mod.rs` | 门面 `Sandbox`：统一施加超时，组装结果 |
+| `spec.rs` | Platform-independent execution intent: what to run, what can be touched, network policy (bon builder) |
+| `backend/mod.rs` | Backend abstraction `SandboxBackend` + self-describing capabilities `Capabilities` |
+| `backend/process.rs` | Bare-process backend (no isolation), for development/testing and as the degraded baseline only |
+| `output.rs` | Unified result: stdout/stderr/exit_code/timed_out/**degraded** |
+| `mod.rs` | Facade `Sandbox`: applies the timeout uniformly and assembles the result |
 
-## 四条设计原则
+## Four design principles
 
-1. **边界在"能碰什么"，不在命令字符串。** spec 用 `program + args`，不做 `bash -c` 那种无法静态判断的字符串。
-2. **默认拒绝。** 网络默认断，环境变量默认不继承，写路径默认空。
-3. **超时不可逃避。** 由 `Sandbox::run` 在最外层用 `tokio::time::timeout` 施加，后端赖着不停也会被 drop + kill。
-4. **降级透明。** 后端做不到的约束必须写进 `output.degraded`，上层可据此拒绝结果，而不是被"看起来跑了"骗过去。
+1. **The boundary is "what can be touched", not the command string.** The spec uses `program + args`, never a `bash -c` string that cannot be statically reasoned about.
+2. **Deny by default.** Network is off by default, env vars are not inherited by default, and write paths are empty by default.
+3. **Timeouts cannot be evaded.** Applied at the outermost layer by `Sandbox::run` with `tokio::time::timeout`; even if the backend hangs on, it will be dropped + killed.
+4. **Degradation is transparent.** Constraints the backend cannot enforce must be written into `output.degraded`, so the caller can reject the result instead of being fooled by "it looked like it ran".
 
-## 接真实隔离（下一步）
+## Wiring up real isolation (next step)
 
-`ProcessBackend` 只是把链路跑通。生产按平台替换：
+`ProcessBackend` only gets the pipeline working. In production, swap per platform:
 
-- **macOS**：新增 `backend::sandbox_exec`，把 spec 编译成 `sandbox-exec` 的 SBPL profile（`(deny default)` + 放行 read/write/network）。
-- **Linux**：新增 `backend::bwrap`，映射为 `bwrap` 参数（`--ro-bind` / `--tmpfs` / `--unshare-net` / `--die-with-parent`）。
-- **高保证**：新增 `backend::microvm`（Firecracker），每任务一个独立内核。
+- **macOS**: add `backend::sandbox_exec`, compiling the spec into a `sandbox-exec` SBPL profile (`(deny default)` + allow read/write/network).
+- **Linux**: add `backend::bwrap`, mapping to `bwrap` arguments (`--ro-bind` / `--tmpfs` / `--unshare-net` / `--die-with-parent`).
+- **High assurance**: add `backend::microvm` (Firecracker), one isolated kernel per task.
 
-新增后端只需实现 `SandboxBackend`，`Sandbox` 门面与上层调用无需改动。
+A new backend only needs to implement `SandboxBackend`; the `Sandbox` facade and its callers need no changes.
 
-## 与权限层的关系
+## Relationship to the permission layer
 
-本层只负责"执行与隔离"。**"该不该执行"由 policy 层决定**（见 `docs/security.md` 第五节）。
-正确顺序：`policy.check(spec) -> Allow/Deny/Ask` → 放行后再交给 `Sandbox::run`。
+This layer is only responsible for "execution and isolation". **"Whether it should be executed" is decided by the policy layer** (see section 5 of `docs/security.md`).
+Correct order: `policy.check(spec) -> Allow/Deny/Ask` -> if allowed, hand off to `Sandbox::run`.

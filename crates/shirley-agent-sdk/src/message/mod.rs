@@ -20,7 +20,7 @@ pub enum Message {
         tool_call_id: String,
         content: Option<String>,
     },
-    // 不展示，转换的时候转换成 system
+    // Never shown; downgraded to a system message when encoding a request
     ContextSummary {
         content: String,
     },
@@ -33,15 +33,16 @@ pub struct ToolCall {
     pub arguments: String,
 }
 
-// 关注输入多少，输出多少，缓存命中多少，推理 token 花了多少。
+// Tracks how much input, how much output, how much cache hit, and how many reasoning tokens were spent.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, Default)]
 pub struct Usage {
     pub input_tokens: u64,
     pub output_tokens: u64,
-    // None 表示供应商没上报，区别于上报了 0
+    // None means the provider did not report it, which differs from reporting 0
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cached_input_tokens: Option<u64>,
-    // 累计命中率只统计上报了缓存数据的调用；旧数据缺此字段时按单次输入计算。
+    // The cumulative hit rate counts only calls that reported cache data; when older data
+    // lacks this field, fall back to the single-call input.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_reported_input_tokens: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -62,7 +63,7 @@ impl Usage {
         self.input_tokens.saturating_sub(self.cached_tokens())
     }
 
-    // 未上报时返回 None，不要把"测不到"当成 0% 命中
+    // Returns None when unreported; don't treat "can't measure" as a 0% hit rate
     pub fn cache_hit_rate(&self) -> Option<f64> {
         let reported_input = self.reported_input_tokens()?;
         if reported_input == 0 {
@@ -87,7 +88,7 @@ impl std::ops::Add for Usage {
             input_tokens: self.input_tokens + rhs.input_tokens,
             output_tokens: self.output_tokens + rhs.output_tokens,
             cache_reported_input_tokens: reported_input,
-            // 一侧未上报就保留已知的那侧，不能当 0 累加
+            // If one side is unreported, keep the known side; don't accumulate it as 0
             cached_input_tokens: match (self.cached_input_tokens, rhs.cached_input_tokens) {
                 (Some(a), Some(b)) => Some(a + b),
                 (Some(a), None) => Some(a),

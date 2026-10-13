@@ -3,10 +3,10 @@ use std::fmt;
 
 #[derive(Debug, Clone)]
 pub struct RunResult {
-    // 本次调用新增的消息，按照发送顺序排序
+    // Messages added by this call, in the order they were sent
     pub messages: Vec<message::Message>,
 
-    // 停止的原因
+    // Why the run stopped
     pub stop_reason: StopReason,
 
     pub usage: message::Usage,
@@ -36,20 +36,20 @@ pub enum AgentEvent {
     ToolStarted {
         call_id: String,
         name: String,
-        /// 工具调用参数（原始 JSON 字符串），供界面展示调用意图。
+        /// Tool-call arguments (raw JSON string), for the UI to show the call intent.
         arguments: String,
     },
     ToolFinished {
         call_id: String,
         name: String,
-        /// 工具执行是否成功（`Err` 分支为 `false`）。
+        /// Whether the tool succeeded (the `Err` branch is `false`).
         ok: bool,
-        /// 工具返回内容；失败时为错误文案（与落库的 tool message 一致）。
+        /// What the tool returned; on failure it is the error text (matching the stored tool message).
         output: String,
-        /// 执行耗时（毫秒），供界面展示。
+        /// Execution time in milliseconds, for the UI to show.
         elapsed_ms: u64,
     },
-    // 每次模型调用后上报，便于实时观察缓存命中
+    // Reported after each model call, to observe cache hits in real time
     Usage(message::Usage),
     Finished(RunResult),
 }
@@ -59,13 +59,13 @@ impl fmt::Display for AgentEvent {
         match self {
             Self::ContentDelta(text) | Self::ReasoningDelta(text) => write!(f, "{text}"),
             Self::MessageAdded(message) => write!(f, "{message}"),
-            Self::CompressionStarted => write!(f, "正在压缩上下文"),
-            Self::CompressionFinished => write!(f, "上下文压缩完成"),
+            Self::CompressionStarted => write!(f, "compacting context"),
+            Self::CompressionFinished => write!(f, "context compaction finished"),
             Self::ContextUsage {
                 used_tokens,
                 limit_tokens,
             } => {
-                let _ = write!(f, "上下文用量: {used_tokens}/{limit_tokens}");
+                let _ = write!(f, "context usage: {used_tokens}/{limit_tokens}");
                 Ok(())
             }
             Self::ToolStarted { call_id, name, .. } => {

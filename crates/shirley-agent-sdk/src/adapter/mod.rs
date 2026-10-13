@@ -38,26 +38,28 @@ pub struct ModelConfig {
     pub temperature: Option<f64>,
     pub max_output_tokens: Option<u32>,
     pub context_window_tokens: Option<u64>,
-    /// `tool_choice` 原样透传（`"auto"` / `"none"` / `"required"` 或对象）。
+    /// `tool_choice` is passed through as-is (`"auto"` / `"none"` / `"required"` or an object).
     ///
-    /// 用 [`serde_json::Value`] 而非枚举：各家取值形态不一，枚举会反复破 API。
-    /// `None` 表示不发送该字段（沿用端点默认）。
+    /// Uses [`serde_json::Value`] rather than an enum: providers vary in shape, and an enum would
+    /// repeatedly break the API. `None` means the field is not sent (use the endpoint default).
     pub tool_choice: Option<serde_json::Value>,
-    /// 覆盖 / 追加请求体的逃生口。
+    /// An escape hatch to override / append to the request body.
     ///
-    /// 各厂商私有字段（`enable_thinking` / `thinking_budget` / `{type:"enabled"}` …）
-    /// 差异极大，逐个加分支是无底洞。应用把要改的字段放这里，SDK 在标准字段
-    /// 构造完成后做一次**浅合并**：应用键覆盖标准键，**值为 `null` 表示删除该键**
-    /// （这样应用能彻底移除 SDK 默认写入的字段）。`None` 表示不做任何覆盖。
+    /// Vendor-private fields (`enable_thinking` / `thinking_budget` / `{type:"enabled"}` …) vary
+    /// wildly, and adding a branch for each is a bottomless pit. The app puts the fields it wants
+    /// to change here, and after building the standard fields the SDK does a **shallow merge**:
+    /// app keys override standard keys, and **a `null` value deletes that key** (so the app can
+    /// fully remove a field the SDK writes by default). `None` means no override at all.
     #[builder(into)]
     pub extra_body: Option<serde_json::Value>,
-    /// 工具传输模式：`Native`（默认，结构化 `tools` / `tool_calls`）或
-    /// `Content(协议)`（文本协议，见 [`tool_calling`]）。
+    /// Tool transport mode: `Native` (default, structured `tools` / `tool_calls`) or
+    /// `Content(protocol)` (a text protocol, see [`tool_calling`]).
     ///
-    /// **正交于** [`ModelProtocol`]：content 可与任意底层协议组合，它是"工具怎么传"
-    /// 而非"对话怎么编码"。content 模式下 `invoke()` 会：编码前把 `Message::Tool`
-    /// 渲染成文本、编码后移除原生 `tools` 字段、解码后把文本解析回 `tool_calls`——
-    /// 三个 codec 一行不改（差异收敛在这一层）。
+    /// **Orthogonal to** [`ModelProtocol`]: content combines with any underlying protocol; it is
+    /// "how tools are transmitted", not "how the conversation is encoded". In content mode
+    /// `invoke()` will: render `Message::Tool` as text before encoding, remove the native `tools`
+    /// field after encoding, and parse text back into `tool_calls` after decoding — the three
+    /// codecs unchanged by a single line (the difference is contained in this layer).
     #[builder(default)]
     pub tool_calling: tool_calling::ToolCallingMode,
 }
@@ -69,33 +71,34 @@ pub enum AdapterEvent {
     Finished(ModelResponse),
 }
 
-/// 适配层错误。
+/// Adapter-layer error.
 ///
-/// 刻意保留 HTTP 状态码与底层错误对象：重试、降级、取消的决策都依赖
-/// "这个错误是哪一类"（见 `docs/runtime-hardening.md` 第二节），
-/// 把状态码压成字符串就等于把决策依据丢了。
+/// Deliberately keeps the HTTP status code and the underlying error object: retry, degradation,
+/// and cancellation decisions all depend on "which kind of error this is" (see
+/// `docs/runtime-hardening.md` section 2); flattening the status code into a string throws away
+/// the basis for the decision.
 ///
-/// 展示格式统一为 `[前缀]: 详情`，与 `ToolError` / `SandboxError` /
-/// `WorkspaceError` 一致；前缀留在变体旁，不从 [`ErrorKind`] 推导。
+/// Display format is uniformly `[prefix]: detail`, consistent with `ToolError` / `SandboxError` /
+/// `WorkspaceError`; the prefix stays next to the variant and is not derived from [`ErrorKind`].
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
-    /// 网络层失败：连不上、连接被重置、读取响应体中断等。
+    /// Network-layer failure: cannot connect, connection reset, response body read interrupted, etc.
     #[error("[transport failure]: {0}")]
     Transport(#[source] reqwest::Error),
 
-    /// 服务端返回了非 2xx。状态码必须保留，它是可重试性的唯一依据。
+    /// The server returned a non-2xx. The status code must be kept; it is the sole basis for retryability.
     #[error("[HTTP {status}]: {body}")]
     Http { status: u16, body: String },
 
-    /// 响应体解析失败（JSON 结构不符合协议、缺字段等）。
+    /// Response body parsing failed (JSON structure doesn't match the protocol, missing fields, etc.).
     #[error("[decode failure]: {0}")]
     Decode(String),
 
-    /// 请求编码失败（例如 API Key 无法构成合法请求头）。
+    /// Request encoding failed (e.g. the API key can't form a valid header).
     #[error("[encode failure]: {0}")]
     Encode(String),
 
-    /// 请求的协议还没有实现。绝不用 panic 表达"未实现"。
+    /// The requested protocol is not implemented. Never express "not implemented" with a panic.
     #[error("[unsupported protocol]: {protocol}")]
     UnsupportedProtocol { protocol: String },
 }
@@ -103,15 +106,15 @@ pub enum AdapterError {
 impl SdkError for AdapterError {
     fn kind(&self) -> ErrorKind {
         match self {
-            // 网络层：瞬时，可重试。
+            // Network layer: transient, retryable.
             Self::Transport(_) => ErrorKind::Transport,
-            // 状态码决定语义：429 限流、5xx 服务端、其余是请求本身有问题。
+            // The status code decides the semantics: 429 rate limit, 5xx server, the rest are bad requests.
             Self::Http { status, .. } => match status {
                 429 => ErrorKind::RateLimited,
                 500..=599 => ErrorKind::ServerError,
                 _ => ErrorKind::BadRequest,
             },
-            // 解析/编码失败重试同一份输入不会变好。
+            // A parse/encode failure won't improve by retrying the same input.
             Self::Decode(_) | Self::Encode(_) => ErrorKind::Internal,
             Self::UnsupportedProtocol { .. } => ErrorKind::Unsupported,
         }
@@ -134,7 +137,8 @@ pub enum ModelFinishReason {
 #[derive(Debug)]
 pub struct ModelResponse {
     pub message: message::Message,
-    /// 解析自响应、随结果返回，供上层将来做截断/工具调用判定；当前未消费。
+    /// Parsed from the response and returned with the result, for upper layers to later decide on
+    /// truncation / tool calls; currently unconsumed.
     #[allow(dead_code)]
     pub finish_reason: ModelFinishReason,
     pub usage: message::Usage,
@@ -148,16 +152,17 @@ pub struct PreparedRequest {
 
 type Encoder = fn(&ModelConfig, &ModelRequest<'_>) -> Result<PreparedRequest, AdapterError>;
 type Decoder = fn(serde_json::Value) -> Result<ModelResponse, AdapterError>;
-/// 流式解码。也纳入 codec，避免 `invoke` 里出现"每加一个协议多一个硬分支"。
+/// Streaming decode. Also folded into the codec, avoiding "one more hard branch per protocol" in `invoke`.
 type StreamDecoder =
     fn(
         reqwest::Response,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send>>;
 
-/// 按协议取编解码函数三件套：请求编码 / 非流式解码 / 流式解码。
+/// Get the codec triple by protocol: request encoding / non-streaming decode / streaming decode.
 ///
-/// 未实现的协议返回 `Err` 而不是 panic：切换协议是运行时行为，
-/// 不能让它把宿主进程带走（见 `docs/runtime-hardening.md` 第七节）。
+/// An unimplemented protocol returns `Err` rather than panicking: switching protocols is a
+/// runtime behavior and must not take down the host process (see `docs/runtime-hardening.md`
+/// section 7).
 fn codec(protocol: &ModelProtocol) -> Result<(Encoder, Decoder, StreamDecoder), AdapterError> {
     match protocol {
         ModelProtocol::ChatCompletions => Ok((
@@ -178,17 +183,20 @@ fn codec(protocol: &ModelProtocol) -> Result<(Encoder, Decoder, StreamDecoder), 
     }
 }
 
-/// 检查 HTTP 状态：非 2xx 时读出错误体并返回结构化错误。
+/// Check the HTTP status: on non-2xx, read the error body and return a structured error.
 ///
-/// 单独抽出来有两个原因：
-/// 1. `reqwest::Response` 只能被消费一次，"先检查状态、后读 body" 必须在同一处完成；
-/// 2. 流式与非流式都要这段逻辑，且都必须保留状态码（重试决策的唯一依据）。
+/// Pulled out separately for two reasons:
+/// 1. `reqwest::Response` can only be consumed once, so "check status, then read body" must
+///    happen in one place;
+/// 2. both streaming and non-streaming need this logic, and both must keep the status code (the
+///    sole basis for the retry decision).
 async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response, AdapterError> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
     }
-    // 已知的 HTTP 状态不能被读取错误体失败覆盖，否则 400 也会变成可重试错误。
+    // A known HTTP status must not be overwritten by a failure to read the error body, or a 400
+    // would also become a retryable error.
     let body = response
         .text()
         .await
@@ -199,13 +207,14 @@ async fn ensure_success(response: reqwest::Response) -> Result<reqwest::Response
     })
 }
 
-/// 首次请求失败后最多重试 5 次，共最多 6 次请求。
+/// At most 5 retries after the first request fails, for at most 6 requests total.
 const MAX_RETRIES: usize = 5;
-/// 退避基数：第 n 次重试前等待 `BASE_BACKOFF_MS * 2^(n-1)`，封顶 `MAX_BACKOFF_MS`。
+/// Backoff base: before the n-th retry, wait `BASE_BACKOFF_MS * 2^(n-1)`, capped at `MAX_BACKOFF_MS`.
 const BASE_BACKOFF_MS: u64 = 500;
 const MAX_BACKOFF_MS: u64 = 8_000;
 
-/// 单次请求与解码；重试边界由 invoke 按是否已发出事件决定。
+/// A single request and decode; the retry boundary is decided by invoke based on whether an event
+/// has already been emitted.
 fn invoke_prepared<'a>(
     client: &'a reqwest::Client,
     prepared: &'a PreparedRequest,
@@ -243,9 +252,11 @@ pub async fn invoke<'a>(
     Box::pin(async_stream::try_stream! {
         let (encode, decode, decode_stream) = codec(&config.protocol)?;
 
-        // content 工具协议（见 `tool_calling`）：协议实例由模式在内部构造，外部不感知。
-        // 编码视图：工具目录注入 system、历史重渲染成协议原文、Tool 结果转回灌文本；
-        // 同时传空 tools、清掉 tool_choice，从源头不生成原生工具字段。
+        // Content tool protocol (see `tool_calling`): the protocol instance is built internally
+        // from the mode, invisible to the outside. Encoding view: the tool catalog is injected
+        // into system, history is re-rendered into the protocol's original text, Tool results are
+        // turned back into feedback text; meanwhile pass empty tools and clear tool_choice, so no
+        // native tool fields are generated at the source.
         let protocol = config.tool_calling.protocol();
         let content_view: Option<Vec<message::Message>> = protocol.as_deref().map(|protocol| {
             tool_calling::encode_messages_for_content(input.messages, input.tools, protocol)
@@ -253,9 +264,10 @@ pub async fn invoke<'a>(
         let no_tools: [&tool::ToolDefinition; 0] = [];
         let content_config;
         let encode_config = if protocol.is_some() {
-            // content 模式：清掉原生工具字段。`tool_choice` 直接置 None；
-            // `parallel_tool_calls` 不在标准字段里，经 `extra_body` 置 `null` 删除
-            // （浅合并里 `null` 表示删除该键），避免端点残留原生工具行为。
+            // Content mode: clear the native tool fields. `tool_choice` is set to None directly;
+            // `parallel_tool_calls` isn't a standard field, so it's set to `null` via `extra_body`
+            // to delete it (in the shallow merge `null` means delete the key), avoiding residual
+            // native tool behavior at the endpoint.
             content_config = ModelConfig {
                 tool_choice: None,
                 extra_body: Some(remove_parallel_tool_calls(config.extra_body.clone())),
@@ -274,9 +286,10 @@ pub async fn invoke<'a>(
         let mut emitted = false;
         'attempt: loop {
             let mut stream = invoke_prepared(client, &prepared, config.stream, decode, decode_stream);
-            // content 模式：建一个**流式解析器**，把原始协议文本增量翻译成可见增量
-            // （thinking → ReasoningDelta、description → ContentDelta，工具块屏蔽）。
-            // 未实现流式解析的协议默认吞掉一切（不外泄），最终态仍由 Finished 给出。
+            // Content mode: build a **stream parser** that translates raw protocol text deltas
+            // into visible deltas (thinking → ReasoningDelta, description → ContentDelta, tool
+            // blocks suppressed). A protocol with no stream parser swallows everything by default
+            // (nothing leaks); the final state is still given by Finished.
             let mut stream_parser = protocol.as_deref().map(|protocol| protocol.stream_parser());
             while let Some(event) = stream.next().await {
                 let event = match event {
@@ -290,7 +303,7 @@ pub async fn invoke<'a>(
                     Err(error) => Err(error)?,
                 };
                 let Some(parser) = stream_parser.as_mut() else {
-                    // native 模式：原样透传。
+                    // Native mode: pass through as-is.
                     emitted = true;
                     yield event;
                     continue;
@@ -302,13 +315,13 @@ pub async fn invoke<'a>(
                             yield visible_chunk_event(chunk);
                         }
                     }
-                    // 解码器上报的 reasoning 增量原样透传（协议无关）。
+                    // The reasoning deltas reported by the decoder pass through as-is (protocol-agnostic).
                     AdapterEvent::ReasoningDelta(text) => {
                         emitted = true;
                         yield AdapterEvent::ReasoningDelta(text);
                     }
                     AdapterEvent::Finished(mut response) => {
-                        // 冲刷尾部残留增量，再解析出结构化 `tool_calls`。
+                        // Flush any residual tail deltas, then parse out structured `tool_calls`.
                         for chunk in parser.finish() {
                             yield visible_chunk_event(chunk);
                         }
@@ -326,8 +339,9 @@ pub async fn invoke<'a>(
     })
 }
 
-/// 在 `extra_body` 上叠一个 `parallel_tool_calls: null`（删除语义），用于 content 模式
-/// 清掉端点可能写入的原生并行工具开关。`None` 输入也会产出一个只含该删除键的对象。
+/// Layer a `parallel_tool_calls: null` (delete semantics) onto `extra_body`, used in content mode
+/// to clear the native parallel-tool switch the endpoint may write. A `None` input also produces
+/// an object containing only that delete key.
 fn remove_parallel_tool_calls(extra: Option<serde_json::Value>) -> serde_json::Value {
     let mut object = match extra {
         Some(serde_json::Value::Object(map)) => map,
@@ -337,7 +351,8 @@ fn remove_parallel_tool_calls(extra: Option<serde_json::Value>) -> serde_json::V
     serde_json::Value::Object(object)
 }
 
-/// 把流式解析器吐出的可见增量映射成对外事件（统一抽象：UI 只认 `AdapterEvent`）。
+/// Map the visible deltas emitted by the stream parser into outward events (unified abstraction:
+/// the UI only knows `AdapterEvent`).
 fn visible_chunk_event(chunk: tool_calling::VisibleChunk) -> AdapterEvent {
     match chunk {
         tool_calling::VisibleChunk::Thinking(text) => AdapterEvent::ReasoningDelta(text),

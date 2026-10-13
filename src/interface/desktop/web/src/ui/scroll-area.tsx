@@ -27,7 +27,7 @@ export const ScrollArea = forwardRef<ElementRef<typeof ScrollAreaPrimitive.Root>
       viewportProps,
       viewportRef,
       scrollbarClassName,
-      type = "hover",
+      type = "scroll",
       ...props
     },
     ref,

@@ -7,20 +7,23 @@ use serde::Serialize;
 use crate::error::{ErrorKind, SdkError};
 use crate::message;
 
-/// 协议层保留的工具名：content 模式下，当解析发现工具块不完整 / 非法时，
-/// `parse_content_response` 会合成一个对它的调用；runtime 无需改动即可把
-/// 「可纠正的回灌」交回主循环（见 `adapter/tool_calling.rs` Step 5）。
+/// Tool name reserved by the protocol layer: in content mode, when parsing finds an
+/// incomplete / invalid tool block, `parse_content_response` synthesizes a call to this;
+/// the runtime can feed a "correctable echo-back" back into the main loop without any
+/// change (see `adapter/tool_calling.rs` Step 5).
 pub(crate) const PROTOCOL_ERROR_TOOL: &str = "__protocol__";
 
-/// 工具层错误。
+/// Tool-layer error.
 ///
-/// 展示格式统一为 `[前缀]: 详情`，与 `AdapterError` / `SandboxError` /
-/// `WorkspaceError` 一致；实现机制统一走 thiserror 派生，不再手写 `Display`。
+/// The display format is uniformly `[prefix]: detail`, consistent with `AdapterError` /
+/// `SandboxError` / `WorkspaceError`; the mechanism is uniformly thiserror-derived, no
+/// hand-written `Display`.
 ///
-/// 前缀刻意留在变体旁，而不是从 [`ErrorKind`] 推导：`ErrorKind` 是粗粒度的
-/// 重试决策轴，多个变体归到同一个 kind（如这里的 `NotFoundError` 与
-/// `ArgumentsError` 都是 `BadRequest`），模型需要靠前缀区分"工具不存在"和
-/// "参数写错了"——后者它自己能改参数修好。
+/// The prefix deliberately lives next to the variant rather than being derived from
+/// [`ErrorKind`]: `ErrorKind` is the coarse retry-decision axis, and several variants map
+/// to the same kind (e.g. `NotFoundError` and `ArgumentsError` here are both `BadRequest`).
+/// The model needs the prefix to tell "the tool doesn't exist" from "the arguments are
+/// wrong" — the latter it can fix itself by changing the arguments.
 #[derive(Debug, Serialize, thiserror::Error)]
 pub enum ToolError {
     #[error("[execution error]: {0}")]
@@ -39,9 +42,11 @@ pub enum ToolError {
 impl SdkError for ToolError {
     fn kind(&self) -> ErrorKind {
         match self {
-            // 工具内部跑失败：模型应该看到细节并换策略，但重试同一份参数没用。
+            // The tool itself failed: the model should see the details and change strategy,
+            // but retrying the same arguments is pointless.
             Self::ExecutionError(_) => ErrorKind::ToolFailure,
-            // 工具不存在 / 参数不合法 / 重复注册：属于调用方（或模型）的请求有问题。
+            // Tool missing / invalid arguments / duplicate registration: the caller's (or the
+            // model's) request is at fault.
             Self::RepetitionError(_) | Self::NotFoundError(_) | Self::ArgumentsError(_) => {
                 ErrorKind::BadRequest
             }
@@ -51,23 +56,27 @@ impl SdkError for ToolError {
 
 pub type ToolName = String;
 
-/// 工具执行结果。
+/// The result of a tool execution.
 ///
-/// 错误类型是 [`ToolError`] 而不是 [`crate::AgentError`]：工具层只负责"我这次跑成没跑成"，
-/// 把它归到哪一层、要不要重试，是 runtime 的事。
-/// 这与沙盒后端的做法一致——`ProcessBackend::execute` 只返回 `SandboxError`。
+/// The error type is [`ToolError`], not [`crate::AgentError`]: the tool layer only owns
+/// "did this run succeed or not"; which layer to attribute it to and whether to retry is
+/// the runtime's business.
+/// This matches the sandbox backend — `ProcessBackend::execute` only returns `SandboxError`.
 pub type ToolFuture<'a> =
     Pin<Box<dyn Future<Output = Result<serde_json::Value, ToolError>> + Send + 'a>>;
 
-/// 工具运行时上下文。
+/// The tool runtime context.
 ///
-/// 工具在 ReAct 循环里是**并发执行**的（`runtime/agent.rs` 用 `FuturesUnordered`），
-/// 所以上下文不可能是 `&mut Session`——多个工具同时跑、同时要可变借用同一份会话
-/// 必然冲突。唯一可行的形态是**内部可变性句柄**（`Arc<Mutex<Session>>` 之类）。
+/// Tools run **concurrently** inside the ReAct loop (`runtime/agent.rs` uses
+/// `FuturesUnordered`), so the context can't be `&mut Session` — several tools running at
+/// once and all wanting a mutable borrow of the same session would necessarily conflict.
+/// The only workable shape is an **interior-mutability handle** (`Arc<Mutex<Session>>` and
+/// the like).
 ///
-/// 本类型是类型擦除的容器：应用把任意 `Send + Sync + 'static` 数据用
-/// [`ToolContext::with`] 塞进去，工具用 [`ToolContext::get`] 取回。存的是 `Arc`，
-/// clone 只增加引用计数，可以低成本地按调用分发。
+/// This type is a type-erased container: the application puts arbitrary
+/// `Send + Sync + 'static` data in with [`ToolContext::with`], and a tool takes it back
+/// out with [`ToolContext::get`]. What's stored is an `Arc`, so clone only bumps the
+/// refcount and per-call dispatch is cheap.
 ///
 /// ```
 /// use shirley_agent_sdk::ToolContext;
@@ -87,36 +96,40 @@ impl ToolContext {
         Self::default()
     }
 
-    /// 存入一份应用数据（链式写法）。同一类型重复存入时后写入者覆盖。
+    /// Store a piece of application data (chainable). A later store of the same type wins.
     pub fn with<T: Any + Send + Sync>(mut self, value: T) -> Self {
         self.insert(value);
         self
     }
 
-    /// 就地存入一份应用数据。供 `Tool::on_register` 等持有 `&mut ToolContext` 的
-    /// 场合使用（链式的 [`ToolContext::with`] 会消费 `self`，在这里用不了）。
-    /// 同一类型重复存入时后写入者覆盖。
+    /// Store a piece of application data in place. For contexts holding a
+    /// `&mut ToolContext`, such as `Tool::on_register` (the chainable [`ToolContext::with`]
+    /// consumes `self` and can't be used there).
+    /// A later store of the same type wins.
     pub fn insert<T: Any + Send + Sync>(&mut self, value: T) {
         Arc::make_mut(&mut self.inner).insert(TypeId::of::<T>(), Arc::new(value));
     }
 
-    /// 取出应用数据。类型不匹配或未注入时返回 `None`。
+    /// Take out the application data. Returns `None` when the type doesn't match or was never injected.
     pub fn get<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
         self.inner
             .get(&TypeId::of::<T>())
             .and_then(|value| value.clone().downcast::<T>().ok())
     }
 
-    /// 移除一份应用数据，返回被移除的值（不存在或类型不符时 `None`）。
+    /// Remove a piece of application data, returning the removed value (`None` when absent
+    /// or of the wrong type).
     ///
-    /// 供工具的 `on_unregister`（= destroy）清理自己注入的上下文项使用。
-    /// 内部是 `Arc<HashMap>` + [`Arc::make_mut`] 写时复制：若此刻有在途的工具
-    /// 调用持有旧 clone，`make_mut` 会先复制一份再改，**在途调用仍看到旧数据**
-    /// （安全，无悬垂），只是新调用不再看到被移除的项。
+    /// For a tool's `on_unregister` (= destroy) to clean up the context item it injected.
+    /// Internally this is `Arc<HashMap>` + [`Arc::make_mut`] copy-on-write: if an in-flight
+    /// tool call still holds an old clone, `make_mut` copies first and then mutates, so
+    /// **in-flight calls still see the old data** (safe, no dangling), while new calls no
+    /// longer see the removed item.
     ///
-    /// 注意按 [`TypeId`] 索引：两个工具若注入**同一类型**，其中一个注销会把
-    /// 另一个的数据一并清掉。约定每个工具用独立 newtype 承载自己的状态；
-    /// 跨工具共享的句柄不要由单个工具在 `on_unregister` 里移除。
+    /// Note it is indexed by [`TypeId`]: if two tools inject the **same type**, unregistering
+    /// one clears the other's data too. The convention is for each tool to carry its state in
+    /// its own newtype; a handle shared across tools should not be removed by a single tool in
+    /// `on_unregister`.
     pub fn remove<T: Any + Send + Sync>(&mut self) -> Option<Arc<T>> {
         Arc::make_mut(&mut self.inner)
             .remove(&TypeId::of::<T>())
@@ -133,39 +146,47 @@ pub struct ToolDefinition {
 }
 
 pub trait Tool: Send + Sync {
-    // 获取名称、描述 和 参数Schema
+    // Get the name, description, and parameter schema
     fn definition(&self) -> &ToolDefinition;
 
-    // SDK 内部调用接受JSON, 通过识别到调用工具后，反序列化到对应的 Argument 类型
-    // ctx 是调用级运行时上下文，见 [`ToolContext`]。
+    // Called internally by the SDK with JSON; after a tool call is recognized, it is
+    // deserialized into the corresponding Arguments type.
+    // ctx is the call-level runtime context, see [`ToolContext`].
     fn invoke(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture<'_>;
 
-    /// 注册（= created）。[`ToolManager::register`] 在查重通过后、插入前调用一次。
+    /// Register (= created). [`ToolManager::register`] calls this once after the duplicate
+    /// check passes and before insertion.
     ///
-    /// 工具在这里 (a) 把共享运行时依赖写进上下文 / 存进 `self`；(b) 自检配置，
-    /// 缺失即返回 `Err` —— **注册失败，工具不入表**，不会留下半注册状态。
+    /// Here a tool can (a) write shared runtime dependencies into the context / store them in
+    /// `self`; (b) self-check its config, returning `Err` when something is missing —
+    /// **registration fails, the tool does not enter the table**, leaving no half-registered
+    /// state.
     ///
-    /// 默认空实现：无状态工具零改动。同步（注册发生在构造期，不引入 async）。
+    /// Defaults to a no-op: stateless tools need no change. Synchronous (registration happens
+    /// at construction time; no async introduced).
     fn on_register(&mut self, _ctx: &mut ToolContext) -> Result<(), ToolError> {
         Ok(())
     }
 
-    /// 注销（= destroy）。[`ToolManager::unregister`] 在把工具移出表**之后**调用一次。
+    /// Unregister (= destroy). [`ToolManager::unregister`] calls this once **after** removing
+    /// the tool from the table.
     ///
-    /// 工具在这里释放自己注入的上下文项（如 `ctx.remove::<T>()`）。
+    /// Here a tool releases the context item it injected (e.g. `ctx.remove::<T>()`).
     ///
-    /// 语义：**best-effort 清理**。无论返回 `Ok` 还是 `Err`，工具都已从表里移除，
-    /// `Err` 只用于告知调用方"清理失败"，不会让工具复活。
-    /// 默认空实现：无状态工具零改动。
+    /// Semantics: **best-effort cleanup**. Whether it returns `Ok` or `Err`, the tool has
+    /// already been removed from the table; `Err` only tells the caller "cleanup failed" and
+    /// does not resurrect the tool.
+    /// Defaults to a no-op: stateless tools need no change.
     fn on_unregister(&mut self, _ctx: &mut ToolContext) -> Result<(), ToolError> {
         Ok(())
     }
 }
 pub struct ToolManager {
     tools: HashMap<ToolName, Box<dyn Tool>>,
-    /// 工具运行时上下文。所有权在 manager（不再由应用层单独持有 / 传入）：
-    /// 工具在 `on_register` 里把依赖写进来，runtime 调用时 clone 分发，
-    /// `on_unregister` 里清理。见 `docs/tool-lifecycle.md`。
+    /// The tool runtime context. Owned by the manager (no longer held / passed separately by
+    /// the application layer): tools write dependencies into it in `on_register`, the runtime
+    /// clones it for dispatch on each call, and `on_unregister` cleans up.
+    /// See `docs/tool-lifecycle.md`.
     context: ToolContext,
 }
 
@@ -195,7 +216,7 @@ impl ToolManager {
     }
 
     pub fn register(&mut self, mut tool: impl Tool + 'static) -> Result<(), ToolError> {
-        // 1. 判断工具是否重复， 重复抛出错误
+        // 1. Check whether the tool is a duplicate; throw if so
         let tool_name = tool.definition().name.clone();
         if self.tools.contains_key(&tool_name) {
             return Err(ToolError::RepetitionError(format!(
@@ -203,21 +224,23 @@ impl ToolManager {
             )));
         }
 
-        // 2. created：查重通过后、插入前跑注册钩子。失败即不入表——
-        //    不留"已初始化一半"的工具（见 `docs/tool-lifecycle.md` 4.3）。
+        // 2. created: after the duplicate check passes and before insertion, run the
+        //    register hook. On failure the tool does not enter the table — no "half
+        //    initialized" tool is left behind (see `docs/tool-lifecycle.md` 4.3).
         tool.on_register(&mut self.context)?;
 
-        // 3. 不重复且初始化成功，将工具添加到 self.tools
+        // 3. Not a duplicate and initialized successfully; add the tool to self.tools
         self.tools.insert(tool_name, Box::new(tool));
 
         Ok(())
     }
 
-    /// 移除一个已注册的工具（= destroy 的触发路径）。
+    /// Remove a registered tool (= the destroy trigger path).
     ///
-    /// 顺序：**先移出表 → 再回调 `on_unregister`**。即使回调报错，工具也不会复活，
-    /// 因此不会留下"已调用 destroy 但仍在表里"的错乱状态。名字未注册时返回
-    /// [`ToolError::NotFoundError`]。
+    /// Order: **remove from the table first → then call `on_unregister`**. Even if the
+    /// callback errors, the tool does not come back, so there is no inconsistent state of
+    /// "destroy was called but it's still in the table". Returns [`ToolError::NotFoundError`]
+    /// when the name isn't registered.
     pub fn unregister(&mut self, name: &str) -> Result<(), ToolError> {
         let mut tool = self
             .tools
@@ -227,35 +250,37 @@ impl ToolManager {
         tool.on_unregister(&mut self.context)
     }
 
-    /// 工具运行时上下文的只读视图（runtime 调用前 clone 分发用）。
+    /// A read-only view of the tool runtime context (the runtime clones it for dispatch before a call).
     pub fn context(&self) -> &ToolContext {
         &self.context
     }
 
-    /// 工具运行时上下文的可变视图：应用在注册前后向其中注入跨工具共享的句柄
-    /// （每个工具私有的状态更适合放进它的 `on_register`，见 `docs/tool-lifecycle.md` 4.4）。
+    /// A mutable view of the tool runtime context: the application injects handles shared
+    /// across tools here before/after registration (per-tool private state is better placed in
+    /// its `on_register`; see `docs/tool-lifecycle.md` 4.4).
     pub fn context_mut(&mut self) -> &mut ToolContext {
         &mut self.context
     }
 
-    /// 调用一个工具。
+    /// Invoke a tool.
     ///
-    /// 返回 `ToolError`：调用方（runtime）如果需要 `AgentError`，
-    /// 用 `?` 自动收敛即可，不必在这里提前包装。
+    /// Returns `ToolError`: if the caller (the runtime) needs `AgentError`, it can converge
+    /// automatically with `?` rather than wrapping here prematurely.
     pub async fn invoke(
         &self,
         input: &message::ToolCall,
         ctx: ToolContext,
     ) -> Result<serde_json::Value, ToolError> {
-        // 协议保留工具：不查表，直接把参数里的 `message` 作为回灌内容返回。
-        // 这样「解析失败」也能走工具结果通道回到模型，而 agent.rs 零改动。
+        // Protocol-reserved tool: don't look it up; return the `message` argument directly as
+        // the echo-back content. This lets a "parse failure" travel back to the model through
+        // the tool-result channel with zero changes to agent.rs.
         if input.name == PROTOCOL_ERROR_TOOL {
             let message = serde_json::from_str::<serde_json::Value>(&input.arguments)
                 .ok()
                 .and_then(|value| {
                     value.get("message").and_then(|m| m.as_str()).map(str::to_string)
                 })
-                .unwrap_or_else(|| "工具调用格式错误，请重新发送完整、合法的调用。".to_string());
+                .unwrap_or_else(|| "Malformed tool call; please resend a complete, valid call.".to_string());
             return Ok(serde_json::Value::String(message));
         }
 
@@ -267,7 +292,7 @@ impl ToolManager {
             ToolError::ArgumentsError(format!("arguments is not valid JSON: {error}"))
         })?;
 
-        // 交给工具处理自己的参数
+        // Hand off to the tool to process its own arguments
         tool.invoke(arguments, ctx).await
     }
 }

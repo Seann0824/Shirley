@@ -1,54 +1,59 @@
-//! 系统提示词：支持固定字符串，也支持按运行时上下文动态生成。
+//! The system prompt: supports a fixed string, and also generation from runtime context.
 //!
-//! 之所以要"函数形式"，是因为 system prompt 需要把运行时信息拼进去——
-//! 最典型的是 coding agent 的**当前工作目录**（`plan.md`：AI 不知道工作区
-//! 就会从文件系统根目录开始找，白烧 token），以及项目自带的**指南文件**
-//! （本仓库里是 `Agent.md`）。
+//! The reason for the "function form" is that the system prompt needs runtime information
+//! folded in — most notably a coding agent's **current working directory** (`plan.md`:
+//! without knowing the workspace, the AI starts searching from the filesystem root and
+//! wastes tokens), plus the project's own **guide file** (`Agent.md` in this repo).
 //!
-//! 这些信息在 `Agent` 构造时才知道，且希望"每次重建都现算"，所以把提示词
-//! 建模成一个 `Fn(&SystemPromptContext) -> String`。调用方既可以图省事直接
-//! 传字符串，也可以传一个函数去读取工作目录、拼项目指南。
+//! This information is only known when `Agent` is constructed, and we want it "recomputed
+//! on every rebuild", so the prompt is modeled as a
+//! `Fn(&SystemPromptContext) -> String`. A caller can just pass a string for convenience,
+//! or pass a function that reads the working directory and assembles the project guide.
 
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-/// 构建系统提示词时可用的运行时上下文。
+/// The runtime context available when building the system prompt.
 ///
-/// 目前只携带"当前工作目录"。后续如果需要注入更多运行时信息
-/// （例如平台、可用工具摘要），在这里加字段即可，函数签名不用变。
+/// Currently it carries only the "current working directory". If more runtime information
+/// needs injecting later (e.g. platform, available-tool summary), add fields here; the
+/// function signature need not change.
 #[derive(Debug, Clone, Default)]
 pub struct SystemPromptContext {
-    /// 当前工作目录（coding agent 的工作范围根）。
+    /// The current working directory (the root of the coding agent's scope).
     ///
-    /// `None` 表示调用方没有提供——提示词函数需要自行处理这种情况，
-    /// 不要假定它一定存在。
+    /// `None` means the caller did not provide one — the prompt function must handle that
+    /// case itself and must not assume it is always present.
     pub working_dir: Option<PathBuf>,
 }
 
-/// 系统提示词。
+/// The system prompt.
 ///
-/// 既能是固定字符串（`From<String>` / `From<&str>`），也能是一个函数
-/// （`From<F: Fn(&SystemPromptContext) -> String>`）。函数形式让提示词可以
-/// 按运行时环境动态生成，例如把当前工作目录、项目指南（`Agent.md`）拼进去。
+/// It can be a fixed string (`From<String>` / `From<&str>`) or a function
+/// (`From<F: Fn(&SystemPromptContext) -> String>`). The function form lets the prompt be
+/// generated dynamically from the runtime environment, e.g. folding in the current working
+/// directory and the project guide (`Agent.md`).
 ///
-/// 之所以用 `Arc<dyn Fn>` 而不是泛型参数：`Agent` 需要把它存进字段，并在
-/// 压缩重建时反复调用。泛型会把类型参数传染给整个 `Agent`，得不偿失。
-/// 函数必须是 `Send + Sync`，因为 `run_stream` 返回的流是 `Send` 的。
+/// The reason for `Arc<dyn Fn>` rather than a generic parameter: `Agent` must store it in a
+/// field and call it repeatedly on compaction rebuild. A generic would infect the whole
+/// `Agent` with the type parameter, which isn't worth it. The function must be
+/// `Send + Sync`, because the stream returned by `run_stream` is `Send`.
 #[derive(Clone)]
 pub struct SystemPrompt {
     resolve: Arc<dyn Fn(&SystemPromptContext) -> String + Send + Sync>,
 }
 
 impl SystemPrompt {
-    /// 按当前上下文解析出最终的系统提示词文本。
+    /// Resolve the final system-prompt text against the current context.
     pub fn resolve(&self, context: &SystemPromptContext) -> String {
         (self.resolve)(context)
     }
 }
 
 impl Default for SystemPrompt {
-    /// 默认是空提示词——`Agent` 会据此判断"没有系统提示词"，不置顶 System 消息。
+    /// Defaults to an empty prompt — `Agent` uses that to decide "there is no system prompt"
+    /// and does not prepend a System message.
     fn default() -> Self {
         Self::from(String::new())
     }
@@ -99,9 +104,9 @@ mod tests {
 
     #[test]
     fn static_string_ignores_context() {
-        let prompt = SystemPrompt::from("你是 Shirley");
-        assert_eq!(prompt.resolve(&ctx(None)), "你是 Shirley");
-        assert_eq!(prompt.resolve(&ctx(Some("/tmp"))), "你是 Shirley");
+        let prompt = SystemPrompt::from("You are Shirley");
+        assert_eq!(prompt.resolve(&ctx(None)), "You are Shirley");
+        assert_eq!(prompt.resolve(&ctx(Some("/tmp"))), "You are Shirley");
     }
 
     #[test]
@@ -142,7 +147,7 @@ mod tests {
 
     #[test]
     fn resolve_is_repeatable() {
-        // 压缩重建会反复调用 resolve，结果必须稳定、可重入。
+        // Compaction rebuild calls resolve repeatedly; the result must be stable and reentrant.
         let prompt = SystemPrompt::from(|_: &SystemPromptContext| "stable".to_string());
         assert_eq!(prompt.resolve(&ctx(None)), prompt.resolve(&ctx(None)));
     }

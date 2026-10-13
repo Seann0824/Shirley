@@ -1,6 +1,6 @@
-// 协议 DTO：字段按 ChatCompletions 契约完整定义，只做反序列化。
-// 部分字段当前未被消费（如 `id` / `total_tokens` / 各类 token 明细），
-// 保留它们是协议完整性的一部分，不是死代码。
+// Protocol DTO: fields fully defined per the ChatCompletions contract, deserialization only.
+// Some fields are currently unconsumed (e.g. `id` / `total_tokens` / the various token details);
+// keeping them is part of protocol completeness, not dead code.
 #![allow(dead_code)]
 
 #[derive(Debug, Clone, serde::Deserialize)]
@@ -29,7 +29,7 @@ pub struct ChoiceMessage {
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ToolCall {
     pub id: String,
-    // 通过Value 反序列化，需要重名ming，避免与函数名冲突。
+    // Deserialized from Value, needs a rename to avoid clashing with the function name.
     #[serde(rename = "type")]
     pub call_type: String,
     pub function: FunctionCall,

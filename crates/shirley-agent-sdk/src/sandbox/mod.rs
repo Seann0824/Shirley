@@ -1,18 +1,21 @@
-//! 进程沙盒。
+//! Process sandbox.
 //!
-//! 设计意图（与 docs/security.md 一致）：
+//! Design intent (consistent with docs/security.md):
 //!
-//! 1. **边界在"能碰什么"，不在"命令字符串长什么样"。**
-//!    所以 spec 用 program + args，而不是 `bash -c "..."`。
-//! 2. **默认拒绝。** 网络默认断，环境变量默认不继承，写路径默认空。
-//! 3. **可替换后端。** 隔离机制由 [`backend::SandboxBackend`] 提供，
-//!    本地开发用 [`backend::ProcessBackend`]，生产换成 bwrap / sandbox-exec / microVM。
-//! 4. **超时不可逃避。** 超时由 [`Sandbox`] 在最外层用 tokio 施加，
-//!    后端即使想赖着不停也会被 drop + kill。
-//! 5. **降级透明。** 后端做不到的约束必须写进 [`SandboxOutput::degraded`]，
-//!    上层可据此拒绝结果，而不是被"看起来跑了"骗过去。
+//! 1. **The boundary is "what can be touched", not "what the command string looks like".**
+//!    So the spec uses program + args, not `bash -c "..."`.
+//! 2. **Deny by default.** Network is off by default, env vars are not inherited by default, and
+//!    write paths are empty by default.
+//! 3. **Swappable backend.** The isolation mechanism is provided by [`backend::SandboxBackend`]:
+//!    local development uses [`backend::ProcessBackend`], production swaps in bwrap / sandbox-exec /
+//!    microVM.
+//! 4. **Timeouts cannot be evaded.** The timeout is applied at the outermost layer by [`Sandbox`]
+//!    with tokio; even if the backend tries to hang on, it will be dropped + killed.
+//! 5. **Degradation is transparent.** Constraints the backend cannot enforce must be written into
+//!    [`SandboxOutput::degraded`], so the caller can reject the result instead of being fooled by
+//!    "it looked like it ran".
 //!
-//! 典型用法：
+//! Typical usage:
 //!
 //! ```no_run
 //! use shirley_agent_sdk::sandbox::{Sandbox, SandboxSpec, backend::ProcessBackend};
@@ -28,90 +31,92 @@
 //! # Ok(()) }
 //! ```
 
-// 声明三个子模块，各自对应一个文件。
+// Declare the three submodules, each corresponding to one file.
 pub mod backend; // backend/mod.rs
 pub mod output;  // output.rs
 pub mod spec;    // spec.rs
 
-// 重新导出常用类型，让外面能少写一层路径。
-// 比如写 sandbox::SandboxSpec 而不是 sandbox::spec::SandboxSpec。
+// Re-export common types so callers can write one less path segment.
+// E.g. sandbox::SandboxSpec instead of sandbox::spec::SandboxSpec.
 pub use backend::{Capabilities, SandboxBackend, SandboxError};
 pub use output::SandboxOutput;
 pub use spec::{NetworkPolicy, SandboxSpec};
 
-// 引入 Duration（时间段类型）。
+// Import Duration (the time-span type).
 use std::time::Duration;
 
-/// 沙盒门面：持有一个后端，负责在最外层施加超时、组装结果。
+/// Sandbox facade: holds one backend and is responsible for applying the timeout at the outermost
+/// layer and assembling the result.
 ///
-/// `<B: SandboxBackend>` 是泛型参数：Sandbox 能装任意一种后端。
-/// 这样换后端时，Sandbox 这层代码一个字都不用改。
+/// `<B: SandboxBackend>` is a generic parameter: a Sandbox can hold any kind of backend. This way,
+/// swapping backends requires zero changes to the Sandbox layer itself.
 pub struct Sandbox<B: SandboxBackend> {
-    // 内部持有的后端，真正干活的。
+    // The backend held internally; the one that actually does the work.
     backend: B,
-    /// 覆盖 spec 里的 timeout；None 表示用 spec 自己的。
+    /// Overrides the timeout in the spec; `None` means use the spec's own.
     hard_timeout: Option<Duration>,
 }
 
-// `impl<B: SandboxBackend> Sandbox<B>`：给"任意后端的 Sandbox"添加方法。
+// `impl<B: SandboxBackend> Sandbox<B>`: add methods to "a Sandbox over any backend".
 impl<B: SandboxBackend> Sandbox<B> {
-    // 构造：传入一个后端，得到一个 Sandbox。
+    // Constructor: pass in a backend, get a Sandbox.
     pub fn new(backend: B) -> Self {
         Self {
             backend,
-            hard_timeout: None, // 默认没有硬超时上限
+            hard_timeout: None, // no hard timeout cap by default
         }
     }
 
-    /// 设置一个不可被 spec 放宽的硬超时上限。
-    // mut self + 返回 self：链式风格。
+    /// Set a hard timeout cap that the spec cannot relax.
+    // mut self + returns self: chained style.
     pub fn with_hard_timeout(mut self, timeout: Duration) -> Self {
         self.hard_timeout = Some(timeout);
         self
     }
 
-    // 把后端的能力透传出去，方便上层查询。
+    // Pass the backend's capabilities through so callers can query them.
     pub fn capabilities(&self) -> Capabilities {
         self.backend.capabilities()
     }
 
-    /// 执行一次。
+    /// Execute once.
     ///
-    /// 超时在这里统一施加：即便后端内部也有超时，这里是最后一道保险。
+    /// The timeout is applied uniformly here: even if the backend has its own timeout internally,
+    /// this is the last line of defense.
     pub async fn run(&self, spec: &SandboxSpec) -> Result<SandboxOutput, SandboxError> {
-        // 决定这次实际用多长的超时。
-        // match 根据 hard_timeout 有没有值，分两种处理。
+        // Decide how long a timeout to actually use this time.
+        // match handles two cases depending on whether hard_timeout has a value.
         let effective = match self.hard_timeout {
-            // 有硬上限：取"spec 要的"和"硬上限"里更小的那个。
-            // .min(...) 返回两者中较小的值。
+            // Has a hard cap: take the smaller of "what the spec wants" and "the hard cap".
+            // .min(...) returns the smaller of the two.
             Some(hard) => spec.timeout.min(hard),
-            // 没硬上限：就用 spec 自己指定的。
+            // No hard cap: use the spec's own.
             None => spec.timeout,
         };
 
-        // 复制一份 spec，把超时改成上面算出的 effective。
-        // clone() 复制；这样不改动调用方传进来的原始 spec。
+        // Clone the spec and set its timeout to the computed effective value.
+        // clone() copies it, so the original spec passed in by the caller is not modified.
         let mut effective_spec = spec.clone();
         effective_spec.timeout = effective;
 
-        // 关键：用 tokio 的超时把后端执行包起来。
-        // tokio::time::timeout(时长, future) 会在超时后中断 future。
+        // The key step: wrap the backend execution with tokio's timeout.
+        // tokio::time::timeout(duration, future) interrupts the future on timeout.
         match tokio::time::timeout(effective, self.backend.execute(&effective_spec)).await {
-            // 后端在超时前完成了，直接返回它的结果。
+            // The backend finished before the timeout; return its result directly.
             Ok(result) => result,
-            // 超时了（Err(_) 里是超时信息，我们不用它）。
+            // Timed out (Err(_) carries the timeout info; we don't use it).
             Err(_) => {
-                // 超时：后端 future 被 drop，配合 backend 内的 kill_on_drop 完成清理。
-                // 这里手工拼一个"超时结果"返回。
+                // Timeout: the backend future is dropped, and cleanup is done via kill_on_drop in
+                // the backend. Here we hand-assemble a "timeout result" to return.
                 Ok(SandboxOutput {
-                    stdout: String::new(), // 没拿到输出
-                    // 生成一句说明，比如 "命令执行超时（5s）"。
+                    stdout: String::new(), // no output captured
+                    // Build an explanatory message, e.g. "command timed out after 5s".
                     stderr: format!("command timed out after {}s", effective.as_secs()),
-                    exit_code: None, // 被强杀，没有退出码
-                    timed_out: true, // 标记超时
-                    // 记录用的是哪个后端的标签。
+                    exit_code: None, // force-killed, no exit code
+                    timed_out: true, // mark as timed out
+                    // Record the label of the backend that was used.
                     isolation: self.backend.capabilities().label.to_owned(),
-                    // 超时不算"隔离降级"，所以是空列表。
+                    // A timeout is not an "isolation degradation", so the list is empty.
                     degraded: Vec::new(),
                 })
             }

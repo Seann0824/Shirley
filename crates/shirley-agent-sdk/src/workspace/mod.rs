@@ -10,25 +10,26 @@ pub struct WorkSpace {
     root: PathBuf,
 }
 
-/// 工作区路径校验失败。
+/// A workspace path-validation failure.
 ///
-/// 刻意区分 `OutsideRoot` 与 `InvalidPath`：前者是"越界被拒绝"，
-/// 后者是"这个路径本身没法用"，模型需要靠这个差别决定是换路径还是换写法。
+/// It deliberately distinguishes `OutsideRoot` from `InvalidPath`: the former is
+/// "rejected for escaping the root", the latter is "this path is unusable as-is". The
+/// model uses that difference to decide whether to change the path or change the spelling.
 ///
-/// 展示格式统一为 `[前缀]: 详情`，与 `AdapterError` / `ToolError` /
-/// `SandboxError` 一致；前缀留在变体旁，不从 [`ErrorKind`] 推导
-/// （两者同属 `BadRequest`，但语义不同）。
+/// The display format is uniformly `[prefix]: detail`, consistent with `AdapterError` /
+/// `ToolError` / `SandboxError`; the prefix lives next to the variant and is not derived
+/// from [`ErrorKind`] (both map to `BadRequest`, but their semantics differ).
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceError {
-    /// 请求的路径落在工作区根目录之外。
+    /// The requested path falls outside the workspace root.
     #[error("[path outside workspace]: {0}")]
     OutsideRoot(String),
 
-    /// 路径本身不合法（无法解析、指向符号链接等）。
+    /// The path itself is invalid (unresolvable, points to a symlink, etc.).
     #[error("[invalid path]: {0}")]
     InvalidPath(String),
 
-    /// 底层文件系统错误。
+    /// An underlying filesystem error.
     #[error("[workspace io error]: {0}")]
     Io(#[source] io::Error),
 }
@@ -36,7 +37,8 @@ pub enum WorkspaceError {
 impl SdkError for WorkspaceError {
     fn kind(&self) -> ErrorKind {
         match self {
-            // 越界与非法路径都是请求侧问题：重试同一份输入不会变好。
+            // Both escaping and invalid paths are request-side problems: retrying the same
+            // input won't help.
             Self::OutsideRoot(_) | Self::InvalidPath(_) => ErrorKind::BadRequest,
             Self::Io(_) => ErrorKind::Internal,
         }
@@ -59,29 +61,29 @@ impl WorkSpace {
         Ok(Self { root })
     }
 
-    // reoslve 解析路径
+    // resolve a path against the workspace root
     pub fn resolve(&self, input: &str) -> Result<PathBuf, WorkspaceError> {
         let input_path = Path::new(input);
 
         if input_path.is_absolute() {
             return Err(WorkspaceError::OutsideRoot(input.to_owned()));
         }
-        // 按照 . 和 .. 展开，不允许超过 workspace root
+        // Expand `.` and `..`, and never allow going above the workspace root
         let mut relative = PathBuf::new();
         for component in input_path.components() {
             match component {
-                // "." 表示当前目录，不改变路径，所以忽略。
+                // "." is the current directory and doesn't change the path, so ignore it.
                 Component::CurDir => {}
-                // 普通目录名或文件名，追加到相对路径末尾。
+                // A normal directory or file name; append it to the relative path.
                 Component::Normal(part) => relative.push(part),
-                // ".." 表示退回上一级。
+                // ".." means going up one level.
                 Component::ParentDir => {
-                    // 如果已经没有路径组件可退，说明试图越过 workspace 根目录。
+                    // If there is nothing left to pop, it's trying to escape the workspace root.
                     if !relative.pop() {
                         return Err(WorkspaceError::OutsideRoot(input.to_owned()));
                     }
                 }
-                // 根目录或盘符前缀意味着路径带有绝对路径特征，拒绝。
+                // A root dir or drive prefix means the path is absolute-like; reject it.
                 Component::RootDir | Component::Prefix(_) => {
                     return Err(WorkspaceError::OutsideRoot(input.to_owned()));
                 }
@@ -89,14 +91,14 @@ impl WorkSpace {
         }
         let candidate = self.root.join(relative);
 
-        // 已存在时规范化完整路径，可检测逃出 root 的符号链接。
+        // When it already exists, canonicalize the full path to detect symlinks escaping the root.
         match fs::canonicalize(&candidate) {
             Ok(canonical) => {
                 self.ensure_within_root(&canonical, input)?;
                 Ok(canonical)
             }
             Err(error) if error.kind() == io::ErrorKind::NotFound => {
-                // canonicalize 对 dangling symlink 也会报 NotFound，不能把它当普通新文件。
+                // canonicalize also reports NotFound for a dangling symlink; don't treat it as a plain new file.
                 match fs::symlink_metadata(&candidate) {
                     Ok(_) => {
                         return Err(WorkspaceError::InvalidPath(input.to_owned()));

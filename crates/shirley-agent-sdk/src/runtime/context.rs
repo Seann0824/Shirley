@@ -1,33 +1,42 @@
-//! 每轮请求的**附加上下文**接缝：SDK 提供挂点，应用层提供内容。
+//! The **additional-context** seam for each request: the SDK provides the hook, the
+//! application provides the content.
 //!
-//! 压缩会把对话压成有损摘要，模型因此容易丢失"我做到哪了"。应用层常常需要
-//! 在**每轮请求末尾**补一条 system 消息（例如任务账本 / 进度清单 / 临时约束），
-//! 且这条消息必须**不参与压缩、跨压缩存活**。
+//! Compaction reduces the conversation to a lossy summary, so the model easily loses
+//! track of "where it got to". Applications often need to append a system message at the
+//! **end of each request** (e.g. a task ledger / progress checklist / temporary
+//! constraints), and that message must **not participate in compaction and must survive
+//! across it**.
 //!
-//! SDK 不关心这条消息是"任务账本"还是别的什么——那是应用层的业务。SDK 只提供
-//! 一个通用接缝：[`ContextProvider`]。`Agent` 在组装每轮请求时调用它，把返回的
-//! 文本作为一条 system 消息**追加在末尾**。
+//! The SDK does not care whether this message is a "task ledger" or anything else — that
+//! is the application's business. The SDK only provides a generic seam:
+//! [`ContextProvider`]. `Agent` calls it while assembling each request and appends the
+//! returned text as a system message **at the end**.
 //!
-//! 位置选末尾的理由（与 KV 前缀缓存有关，别改）：
-//! - 附加上下文不进 `self.messages`，压缩碰不到它，天然跨压缩存活；
-//! - 追加在尾部不动前面的前缀，内容稳定时前缀缓存照常命中；
-//! - 内容只在提供者决定变化时才变，变化点被压到最小。
+//! Why the end (this relates to KV prefix caching — don't change it):
+//! - The additional context does not enter `self.messages`, so compaction can't touch it
+//!   and it naturally survives across compaction;
+//! - Appending at the tail leaves the prefix untouched, so the prefix cache still hits
+//!   while the content is stable;
+//! - The content only changes when the provider decides to change it, keeping the change
+//!   points minimal.
 
-/// 每轮请求末尾的附加上下文提供者。
+/// Provider of the additional context appended to the end of each request.
 ///
-/// 实现必须是 `Send + Sync`（`run_stream` 返回的流是 `Send`）。`context()` 返回
-/// `Some(text)` 时，`Agent` 会把它包成一条 `System` 消息追加到本轮请求末尾；
-/// 返回 `None` 表示本轮不注入。
+/// Implementations must be `Send + Sync` (the stream returned by `run_stream` is `Send`).
+/// When `context()` returns `Some(text)`, `Agent` wraps it into a `System` message and
+/// appends it to the end of the current request; returning `None` means no injection this
+/// turn.
 ///
-/// 提供者通常需要内部可变性（计数 / 状态）——用 `Mutex` / `AtomicUsize` 等自行
-/// 处理，因为 `context()` 取 `&self`。
+/// Providers usually need interior mutability (counters / state) — handle it yourself with
+/// `Mutex` / `AtomicUsize` etc., since `context()` takes `&self`.
 pub trait ContextProvider: Send + Sync {
-    /// 产出本轮要追加的 system 文本；`None` 表示不注入。
+    /// Produce the system text to append this turn; `None` means no injection.
     fn context(&self) -> Option<String>;
 
-    /// 压缩时必须继承的状态快照。默认不注入；提供者应只返回任务状态等
-    /// 必要内容，避免把完整技能/检索记忆重复塞进摘要请求。
-    /// 此方法不应推进正常请求的轮次计数。
+    /// State snapshot that must be carried into compaction. Defaults to no injection;
+    /// providers should return only what is necessary (task state, etc.) to avoid dumping
+    /// the full skill/retrieved-memory payload into the summary request again.
+    /// This method must not advance the normal request's turn counter.
     fn compaction_context(&self) -> Option<String> {
         None
     }

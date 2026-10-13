@@ -79,7 +79,7 @@ export function FileMentionPopover({
         </div>
       )}
       <ScrollArea
-        type="auto"
+        type="scroll"
         viewportRef={viewportRef}
         viewportClassName="max-h-[min(16rem,45dvh)] overscroll-contain"
       >

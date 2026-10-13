@@ -1,23 +1,24 @@
-// Responses 协议 DTO：字段按 `POST /responses` 契约定义，只做反序列化。
+// Responses protocol DTO: fields defined per the `POST /responses` contract, deserialization only.
 //
-// 依据：
+// References:
 // - https://api-docs.deepseek.com/guides/responses_api/
 // - https://api-docs.deepseek.com/zh-cn/api/create-response
 //
-// 未消费的字段（`id` / `total_tokens` 等）保留是协议完整性的一部分，不是死代码。
+// Unconsumed fields (`id` / `total_tokens` etc.) are kept as part of protocol completeness, not
+// dead code.
 #![allow(dead_code)]
 
 use serde::Deserialize;
 
-/// 顶层响应对象（`object: "response"`）。
+/// Top-level response object (`object: "response"`).
 ///
-/// 非流式直接是它；流式则由 `response.completed` / `incomplete` / `failed`
-/// 事件携带同一个对象。
+/// Non-streaming returns it directly; streaming carries the same object inside
+/// `response.completed` / `incomplete` / `failed` events.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Response {
     #[serde(default)]
     pub id: String,
-    /// `in_progress` / `completed` / `incomplete` / `failed`。
+    /// `in_progress` / `completed` / `incomplete` / `failed`.
     #[serde(default)]
     pub status: Option<String>,
     #[serde(default)]
@@ -26,7 +27,7 @@ pub struct Response {
     pub usage: Option<Usage>,
     #[serde(default)]
     pub incomplete_details: Option<IncompleteDetails>,
-    /// `failed` 时携带的错误对象，原样保留供上层展示。
+    /// The error object carried when `failed`, kept as-is for upper-layer display.
     #[serde(default)]
     pub error: Option<serde_json::Value>,
 }
@@ -37,17 +38,18 @@ pub struct IncompleteDetails {
     pub reason: Option<String>,
 }
 
-/// `output[]` 的条目。按 `type` 分派。
+/// An entry of `output[]`. Dispatched by `type`.
 ///
-/// 注意：`function_call` 是与 `message` **并列的兄弟 item**，而不是嵌在
-/// assistant 消息里——这是 Responses 与 ChatCompletions 最本质的结构差异。
+/// Note: `function_call` is a **sibling item parallel to** `message`, not nested inside an
+/// assistant message — this is the most fundamental structural difference between Responses and
+/// ChatCompletions.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputItem {
     Message(MessageItem),
     Reasoning(ReasoningItem),
     FunctionCall(FunctionCallItem),
-    /// 其余 item 类型（`custom_tool_call` / `web_search_call` 等）忽略。
+    /// Other item types (`custom_tool_call` / `web_search_call` etc.) are ignored.
     #[serde(other)]
     Unknown,
 }
@@ -62,12 +64,12 @@ pub struct MessageItem {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReasoningItem {
-    /// 推理摘要（`summary_text` 块）。OpenAI 系推理模型默认只回这个，
-    /// `content`（原始 CoT）通常为空——见 `ReasoningItem.summary`（schema 里是
-    /// `required` 字段）。
+    /// Reasoning summary (the `summary_text` block). OpenAI-family reasoning models return only
+    /// this by default; `content` (the raw CoT) is usually empty — see `ReasoningItem.summary`
+    /// (a `required` field in the schema).
     #[serde(default)]
     pub summary: Option<Content>,
-    /// 原始推理文本（`reasoning_text` 块）。部分实现（如 DeepSeek）走这里。
+    /// Raw reasoning text (the `reasoning_text` block). Some implementations (e.g. DeepSeek) use this.
     #[serde(default)]
     pub content: Option<Content>,
 }
@@ -82,10 +84,11 @@ pub struct FunctionCallItem {
     pub arguments: String,
 }
 
-/// 内容既可能是纯字符串，也可能是内容块数组（`input_text` / `output_text` /
-/// `reasoning_text` / `input_image` …）。
+/// Content may be either a plain string or an array of content blocks (`input_text` /
+/// `output_text` / `reasoning_text` / `input_image` …).
 ///
-/// 解码时只关心文本，所以只提取每个块的 `text`，非文本块自然得到空串。
+/// Decoding only cares about text, so only each block's `text` is extracted; non-text blocks
+/// naturally yield an empty string.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 pub enum Content {
@@ -132,10 +135,10 @@ pub struct OutputTokensDetails {
     pub reasoning_tokens: Option<u64>,
 }
 
-/// 流式事件。
+/// Streaming events.
 ///
-/// 与 ChatCompletions 不同：**没有 `data: [DONE]`**，流以
-/// `response.completed` / `incomplete` / `failed` 收尾，所以终态由事件类型驱动。
+/// Unlike ChatCompletions: **there is no `data: [DONE]`**; the stream ends with
+/// `response.completed` / `incomplete` / `failed`, so the terminal state is driven by event type.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum StreamEvent {
@@ -149,8 +152,9 @@ pub enum StreamEvent {
         #[serde(default)]
         delta: String,
     },
-    /// OpenAI 系推理模型的**摘要**增量（`summary_text`），与 `reasoning_text.delta`
-    /// 并列；字段是 `summary_index` 而非 `content_index`，但我们只关心 `delta`。
+    /// The **summary** delta of OpenAI-family reasoning models (`summary_text`), parallel to
+    /// `reasoning_text.delta`; the field is `summary_index` rather than `content_index`, but we
+    /// only care about `delta`.
     #[serde(rename = "response.reasoning_summary_text.delta")]
     ReasoningSummaryTextDelta {
         #[serde(default)]
@@ -162,9 +166,9 @@ pub enum StreamEvent {
     Incomplete { response: Response },
     #[serde(rename = "response.failed")]
     Failed { response: Response },
-    /// 其余事件（`created` / `in_progress` / `output_item.added` /
-    /// `content_part.*` / `*.done` / `function_call_arguments.delta` …）忽略：
-    /// 终态以 `response.completed` 携带的完整对象为准，无需靠 delta 拼装。
+    /// Other events (`created` / `in_progress` / `output_item.added` / `content_part.*` /
+    /// `*.done` / `function_call_arguments.delta` …) are ignored: the terminal state is taken from
+    /// the full object carried by `response.completed`, so there is no need to assemble from deltas.
     #[serde(other)]
     Other,
 }
