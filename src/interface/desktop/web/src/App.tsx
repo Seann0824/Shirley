@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { LoaderCircle } from "lucide-react";
+import { Clock, LoaderCircle, X } from "lucide-react";
 import { DesktopChrome } from "@/components/DesktopChrome";
 import {
   AiConversationTranscript,
@@ -61,6 +61,22 @@ const MINIMAP_LEFT_PX = 12;
 const MINIMAP_WIDTH_PX = 40;
 
 /**
+ * 一条「待发送」消息：任务运行中用户提前提交，排队等上一轮结束后自动发送。
+ *
+ * 与 `dispatchTurn` 的入参一一对应（`display` 回显、`text` 发模型、`refs` / `sendPaths`
+ * 为 `@` 引用）。按会话存进 `SessionView.pending`，切走再切回不丢。
+ */
+type PendingTurn = {
+  id: string;
+  project: string;
+  session: string;
+  text: string;
+  display: string;
+  refs: FileReference[];
+  sendPaths: string[];
+};
+
+/**
  * 单个会话的视图状态（transcript + 每轮段落 + busy / 错误）。
  *
  * 多项目多会话：事件按 `project` + `session` 打标，每个会话各持一份视图；当前会话
@@ -82,6 +98,8 @@ type SessionView = {
   contextUsage: { used: number; limit: number } | null;
   /** 最近一次上报的用量，来自 `usage` 事件。 */
   usage: UsageWire | null;
+  /** 待发送队列：busy 时用户提前提交的消息，上一轮结束后自动依次发送。 */
+  pending: PendingTurn[];
 };
 
 function emptyView(): SessionView {
@@ -95,6 +113,7 @@ function emptyView(): SessionView {
     compressing: false,
     contextUsage: null,
     usage: null,
+    pending: [],
   };
 }
 
@@ -142,6 +161,39 @@ function SessionStatusLine({
           上下文 {percent}%
         </span>
       )}
+    </div>
+  );
+}
+
+/**
+ * 待发送队列：任务运行中用户提前提交、排队等上一轮结束后自动发送的消息。
+ *
+ * 只在前台会话有排队项时出现，逐条展示正文（去掉 chip 占位符）并允许移除。
+ * 发送顺序 = 入队顺序（先提交先发）。
+ */
+function PendingQueue({ turns, onRemove }: { turns: PendingTurn[]; onRemove: (id: string) => void }) {
+  if (turns.length === 0) return null;
+  return (
+    <div className="mx-3 mb-1 rounded-card border border-line bg-surface px-3 py-2 shadow-card">
+      <div className="mb-1 flex items-center gap-1.5 text-caption text-muted">
+        <Clock className="size-3.5" aria-hidden="true" />
+        待发送 · {turns.length}
+      </div>
+      <ul className="flex flex-col gap-1">
+        {turns.map((turn) => (
+          <li key={turn.id} className="flex items-start gap-2 text-body-sm text-ink">
+            <span className="min-w-0 flex-1 truncate">{stripTokens(turn.display)}</span>
+            <button
+              type="button"
+              aria-label="取消这条待发送消息"
+              className="mt-0.5 shrink-0 rounded-control p-0.5 text-muted transition-colors hover:bg-selected hover:text-ink"
+              onClick={() => onRemove(turn.id)}
+            >
+              <X className="size-3.5" />
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -344,7 +396,9 @@ export function App() {
       if (existing && existing.messages.length > 0) {
         return { ...prev, [key]: { ...existing, loading: true } };
       }
-      return { ...prev, [key]: { ...emptyView(), loading: true } };
+      // 待发送队列是纯前端状态、不在后端快照里——重建视图时必须原样保留，
+      // 否则切走再切回（或重开会话）会把它清空。
+      return { ...prev, [key]: { ...emptyView(), loading: true, pending: existing?.pending ?? [] } };
     });
   }, []);
 
@@ -417,6 +471,8 @@ export function App() {
             ...view,
             messages,
             turnSegments,
+            // 快照不含待发送队列（后端不知道它）；保留本地已排队的条目。
+            pending: cached?.pending ?? [],
           },
         };
       });
@@ -611,6 +667,24 @@ export function App() {
     [activeProject, openSession, sessionName],
   );
 
+  /** 把一条已解析好的消息排进待发送队列（busy 时用）。 */
+  const enqueueTurn = useCallback((turn: PendingTurn) => {
+    const key = viewKey(turn.project, turn.session);
+    setViews((prev) => {
+      const view = prev[key] ?? emptyView();
+      return { ...prev, [key]: { ...view, pending: [...view.pending, turn] } };
+    });
+  }, []);
+
+  /** 从待发送队列里移除一条（用户撤销）。 */
+  const removePending = useCallback((key: string, id: string) => {
+    setViews((prev) => {
+      const view = prev[key];
+      if (!view) return prev;
+      return { ...prev, [key]: { ...view, pending: view.pending.filter((turn) => turn.id !== id) } };
+    });
+  }, []);
+
   /** 把一条消息作为新一轮发给模型（回显 user + 起 assistant 流式占位）。
    *  `display` 是回显正文（保留 chip 占位符），`text` 是发给模型的纯文本。 */
   const dispatchTurn = useCallback(
@@ -656,12 +730,45 @@ export function App() {
     [views, applyEvent],
   );
 
+  /** 提交一轮：空闲则立即发送，运行中则排进 pending，等上一轮结束自动发送。 */
+  const submit = useCallback(
+    async (project: string, session: string, text: string, display: string, refs: FileReference[], sendPaths: string[]) => {
+      const key = viewKey(project, session);
+      if (views[key]?.busy ?? false) {
+        enqueueTurn({ id: nextId(), project, session, text, display, refs, sendPaths });
+        return;
+      }
+      await dispatchTurn(project, session, text, display, refs, sendPaths);
+    },
+    [views, dispatchTurn, enqueueTurn],
+  );
+
+  // 待发送队列自动 flush：某会话空闲（busy 由 true→false）且队列非空时，弹队首发送。
+  // 用 `flushingRef` 防止「移除队首」触发的重渲染在 `busy` 尚未置位时重复弹队。
+  const flushingRef = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    for (const [key, view] of Object.entries(views)) {
+      if (view.busy || view.pending.length === 0) {
+        flushingRef.current.delete(key);
+        continue;
+      }
+      if (flushingRef.current.has(key)) continue;
+      const [next, ...rest] = view.pending;
+      flushingRef.current.add(key);
+      setViews((prev) => {
+        const current = prev[key];
+        if (!current) return prev;
+        return { ...prev, [key]: { ...current, pending: rest } };
+      });
+      void dispatchTurn(next.project, next.session, next.text, next.display, next.refs, next.sendPaths);
+    }
+  }, [views, dispatchTurn]);
+
   const send = useCallback(async () => {
     const project = activeProject;
     const session = sessionName;
     if (!project || !session) return;
     const key = viewKey(project, session);
-    if (views[key]?.busy ?? false) return;
 
     const refs = references;
     // `/` 技能入口（与 TUI 同语义）：技能以 chip 形式出现在输入框里；chip 之后的
@@ -704,8 +811,8 @@ export function App() {
         return;
       }
       // 有参：激活后把 args 当本轮 prompt 继续走正常发送流程；display 保留 chip，
-      // 但**不把技能名当引用路径发给后端**（sendPaths 为空）。
-      await dispatchTurn(project, session, args, `${CHIP_TOKEN}${args}`, [skill], []);
+      // 但**不把技能名当引用路径发给后端**（sendPaths 为空）。运行中则排队。
+      await submit(project, session, args, `${CHIP_TOKEN}${args}`, [skill], []);
       return;
     }
 
@@ -717,7 +824,7 @@ export function App() {
     setInput("");
     setReferences([]);
     setUiError("");
-    await dispatchTurn(
+    await submit(
       project,
       session,
       plain,
@@ -725,7 +832,7 @@ export function App() {
       refs,
       refs.map((reference) => reference.path),
     );
-  }, [activeProject, input, references, sessionName, views, slashSearch, dispatchTurn]);
+  }, [activeProject, input, references, sessionName, slashSearch, submit]);
 
   const stop = useCallback(async () => {
     const project = activeProject;
@@ -851,6 +958,11 @@ export function App() {
         <SessionStatusLine
           compressing={view.compressing}
           contextUsage={view.contextUsage}
+        />
+        {/* 待发送队列：运行中提前提交的消息，上一轮结束后自动发送。 */}
+        <PendingQueue
+          turns={view.pending}
+          onRemove={(id) => activeProject && sessionName && removePending(viewKey(activeProject, sessionName), id)}
         />
         <div className="relative shrink-0 px-3 pb-3">
           {slashSearch.open && (
@@ -1200,6 +1312,7 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
       compressing: false,
       contextUsage: null,
       usage: null,
+      pending: [],
     },
     lastAssistantId: currentAssistantId,
   };

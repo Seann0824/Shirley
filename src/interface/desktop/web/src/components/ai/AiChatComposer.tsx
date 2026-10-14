@@ -57,18 +57,21 @@ export function AiChatComposer({
   onStop,
   ...props
 }: AiChatComposerProps) {
-  const unavailable = disabled || busy;
+  // 单个按钮自适应：输入框有内容 = 发送（运行中则排队）；输入框为空且正在生成 = 暂停/停止。
+  const hasText = value.trim().length > 0;
+  const showStop = !hasText && busy && Boolean(onStop);
   return (
     <form
       className={cn(
-        "relative flex shrink-0 flex-col rounded-card bg-inset p-2 transition-[background-color,box-shadow] duration-150 ease-product focus-within:bg-surface focus-within:ring-2 focus-within:ring-ink/8",
+        "relative flex shrink-0 flex-col rounded-card border border-line bg-surface p-2 shadow-card transition-[border-color,box-shadow] duration-150 ease-product focus-within:border-line-strong focus-within:ring-2 focus-within:ring-ink/8",
         className,
       )}
       data-ai-chat-composer
       {...props}
       onSubmit={(event) => {
         event.preventDefault();
-        if (unavailable || !value.trim()) return;
+        // busy 时也允许提交：调用方会把它排进 pending 队列，等上一轮结束自动发送。
+        if (disabled || !value.trim()) return;
         onSend();
         // 发送后把焦点还给输入控件（内置 textarea 或 inputSlot 里的富输入）。
         event.currentTarget
@@ -100,7 +103,7 @@ export function AiChatComposer({
               onChange={(event) => onValueChange(event.target.value)}
               onKeyDown={(event) => {
                 if (textareaOnKeyDown?.(event)) return;
-                if (shouldSendChatOnEnter(event) && value.trim() && !unavailable) {
+                if (shouldSendChatOnEnter(event) && value.trim() && !disabled) {
                   event.preventDefault();
                   onSend();
                 }
@@ -113,15 +116,16 @@ export function AiChatComposer({
         <div className="flex min-w-0 items-center gap-1">{leadingAction}</div>
         <div className="flex shrink-0 items-center gap-1">
           {trailingAction}
-          {busy && onStop ? (
+          {showStop ? (
             <Button
               type="button"
               variant="secondary"
               size="icon-sm"
               aria-label="停止生成"
+              disabled={disabled}
               onClick={(event) => {
                 event.preventDefault();
-                onStop();
+                onStop?.();
               }}
             >
               <Square data-icon="inline-start" fill="currentColor" />
@@ -131,8 +135,8 @@ export function AiChatComposer({
               type="submit"
               variant="primary"
               size="icon-sm"
-              aria-label={sendLabel}
-              disabled={unavailable || !value.trim()}
+              aria-label={busy ? "加入队列，待上一轮结束后发送" : sendLabel}
+              disabled={disabled || !hasText}
             >
               <ArrowUp data-icon="inline-start" />
             </Button>

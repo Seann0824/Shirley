@@ -39,6 +39,9 @@
   /* streamdown 把代码块 / 表格容器画成 bg-sidebar、边框 border-sidebar，
      Shirley 原 token 没有这一项，缺它时这些类解析为空 → 容器没底色没边框。 */
   --color-sidebar: #f1f1ee;
+  /* 最外层框架（顶部标题栏 + 左侧栏）专用底色：刻意比 canvas 更沉，
+     让框架与内容区一眼可分；与 --color-sidebar（markdown 代码块用）解耦。 */
+  --color-frame: #e9e8e3;
   --color-muted: #676763;
   --color-line: rgb(23 23 21 / 9%);
   --color-line-strong: rgb(23 23 21 / 16%);
@@ -183,6 +186,7 @@
   --color-panel: var(--color-overlay);
   --color-ink: #f1f1ed;
   --color-sidebar: #20201e;
+  --color-frame: #1d1d1b;
   --color-muted: #aaa9a2;
   --color-line: rgb(241 241 237 / 10%);
   --color-line-strong: rgb(241 241 237 / 18%);

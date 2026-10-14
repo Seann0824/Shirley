@@ -345,8 +345,8 @@ export function SessionSidebar({
     <aside
       aria-hidden={collapsed || undefined}
       className={cn(
-        "flex h-full shrink-0 flex-col overflow-hidden border-r border-line bg-sidebar transition-[width] duration-200 ease-product",
-        collapsed ? "invisible w-0 border-r-0" : "w-64",
+        "flex h-full shrink-0 flex-col overflow-hidden transition-[width] duration-200 ease-product",
+        collapsed ? "invisible w-0" : "w-64 border-r border-line",
         className,
       )}
     >
