@@ -32,7 +32,7 @@ use std::sync::Arc;
 
 use futures::StreamExt;
 use serde::Serialize;
-use shirley_agent_sdk::{Agent, AgentEvent, Message, RunResult, StopReason};
+use shirley_agent_sdk::{AgentEvent, Message, RunResult, StopReason};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::{Mutex, oneshot};
@@ -41,9 +41,7 @@ use super::wire::{AgentEventWire, SessionSnapshotWire, TaskViewWire};
 use crate::bootstrap::AgentFactory;
 use crate::interface::session::SessionManager;
 use crate::project::{ProjectEntry, ProjectRegistry};
-use crate::session::{
-    SessionCatalog, SessionEntry, first_user_message, sanitize_title, title_prompt,
-};
+use crate::session::{SessionEntry, generate_session_title};
 
 /// The single event name the webview listens on.
 const EVENT_NAME: &str = "agent://event";
@@ -486,7 +484,7 @@ async fn agent_send(
 
     tauri::async_runtime::spawn(async move {
         let mut cancel_rx = cancel_rx;
-        let cancelled_before_start = if let Some(memory) = memory.as_ref() {
+        let mut cancelled_before_start = if let Some(memory) = memory.as_ref() {
             tokio::select! {
                 biased;
                 _ = &mut cancel_rx => true,
@@ -496,6 +494,18 @@ async fn agent_send(
             false
         };
 
+        // First-message naming runs **before** the instruction is handled: a brand-new
+        // session derives its title from this first message, so the session list shows a
+        // meaningful name early. Best-effort (a no-op when the session is already named)
+        // and cancellable by the stop signal.
+        if !cancelled_before_start {
+            cancelled_before_start = tokio::select! {
+                biased;
+                _ = &mut cancel_rx => true,
+                _ = generate_session_title(&agent, &catalog, &session_name, &text) => false,
+            };
+        }
+
         // Drive this turn: `tokio::select!` races "next stream event" against "cancel
         // signal". After the cancel branch `break`s, `stream` is dropped — the SDK's
         // `run_stream` is an async-stream-generated stream, so **drop means stop** (same
@@ -503,7 +513,7 @@ async fn agent_send(
         // ReAct loop to completion (clicking stop only changed the frontend `busy` and
         // never actually interrupted).
         let mut terminal_update = None;
-        let mut cancelled = {
+        let cancelled = {
             let mut stream = agent.run_stream(&prompt);
             let mut cancelled = cancelled_before_start;
             while !cancelled {
@@ -545,14 +555,6 @@ async fn agent_send(
                 .sessions
                 .apply_event(&session_name, Ok(AgentEvent::MessageAdded(message)));
         }
-        if !cancelled && matches!(&terminal_update, Some(Ok(AgentEvent::Finished(_)))) {
-            // Title generation also counts as part of this turn's wait and can be cancelled by the stop signal.
-            cancelled = tokio::select! {
-                biased;
-                _ = &mut cancel_rx => true,
-                _ = auto_title_session(&agent, &catalog, &session_name) => false,
-            };
-        }
         if cancelled {
             // Requirement 2: interruption **keeps** this turn's messages (user message +
             // half-finished streaming reply) for the next turn to reference, instead of
@@ -578,48 +580,6 @@ async fn agent_send(
     });
 
     Ok(())
-}
-
-/// Auto-generate a session title after the first turn; the web model just truncates the first message.
-async fn auto_title_session(agent: &Agent, catalog: &Arc<dyn SessionCatalog>, name: &str) {
-    let probe_catalog = catalog.clone();
-    let probe_name = name.to_owned();
-    let already_named = tauri::async_runtime::spawn_blocking(move || {
-        probe_catalog
-            .list()
-            .ok()
-            .and_then(|entries| entries.into_iter().find(|entry| entry.name == probe_name))
-            .map(|entry| entry.label != entry.name)
-            .unwrap_or(false)
-    })
-    .await
-    .unwrap_or(false);
-    if already_named {
-        return;
-    }
-
-    let Some(first) = first_user_message(agent.messages()) else {
-        return;
-    };
-    // A one-shot completion for the web model creates a separate conversation on the
-    // DeepSeek side. Taking the title from the first message avoids a single Shirley
-    // utterance producing a second session on the web side.
-    let raw = if agent.model_config().model == "deepseek-web" {
-        first.chars().take(20).collect::<String>()
-    } else {
-        let Ok(raw) = agent.complete(&title_prompt(&first)).await else {
-            return;
-        };
-        raw
-    };
-    let Some(title) = sanitize_title(&raw) else {
-        return;
-    };
-
-    let write_catalog = catalog.clone();
-    let write_name = name.to_owned();
-    let _ = tauri::async_runtime::spawn_blocking(move || write_catalog.rename(&write_name, &title))
-        .await;
 }
 
 /// Subscribe to a session: return its view snapshot and start a per-session pump that emits subsequent events in wire format.
@@ -1151,7 +1111,7 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::session::FileSessionCatalog;
+    use crate::session::{FileSessionCatalog, SessionCatalog};
 
     fn tmp_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("shirley_shell_{tag}_{}", std::process::id()))
