@@ -5,6 +5,7 @@ use std::time::Instant;
 
 use crate::models::{ModelCatalog, ModelEntry, StaticCatalog};
 use crate::session::{EmptySessionCatalog, SessionCatalog, SessionEntry};
+use crate::subagent::SubagentInfo;
 use crate::todo::TaskView;
 
 use super::command::{CommandManager, CommandOutcome, DEFAULT_PREFIX};
@@ -73,6 +74,28 @@ pub struct SessionPicker {
 impl SessionPicker {
     /// Name of the "new session" sentinel entry (the empty string marks the new-session entry point).
     pub const NEW_NAME: &'static str = "";
+}
+
+/// State of the `/subagents` picker (`docs/subagent.md` decision 10, P2).
+///
+/// The list is a snapshot of the current session's `SubagentManager` taken when the panel opens
+/// (like `/session`, a local synchronous read, so no background load is needed). Confirming an
+/// entry opens a read-only transcript overlay ([`SubagentPreview`]).
+pub struct SubagentPicker {
+    pub entries: Vec<SubagentInfo>,
+    /// Index of the currently highlighted entry.
+    pub selected: usize,
+}
+
+/// Read-only child-transcript overlay (decision 10: "click to preview the sub-session").
+///
+/// Holds the child's `Message` log as loaded from `<id>.jsonl` and a scroll offset. Rendering
+/// reuses the parent path (`markdown::render`), so no separate view logic is built.
+pub struct SubagentPreview {
+    pub id: String,
+    pub messages: Vec<Message>,
+    /// Vertical scroll offset (lines), clamped at draw time.
+    pub scroll: u16,
 }
 
 /// Current stage of the `/login` step-by-step flow.
@@ -146,6 +169,10 @@ pub struct App {
     /// Set when `/session` is triggered but the session list has not finished loading.
     /// Taken by the TUI main loop to load the catalog and then open the picker.
     session_picker_requested: bool,
+    /// The open subagent picker (`/subagents`); `None` means not open.
+    subagent_picker: Option<SubagentPicker>,
+    /// The open child-transcript preview overlay; `None` means not open.
+    subagent_preview: Option<SubagentPreview>,
     /// The confirmed `/rewind` rewind point: the UI `items` index of the edited message.
     ///
     /// Rewind acts only on the **last user message** (`docs/session.md` decision 4),
@@ -205,7 +232,7 @@ impl App {
         session_catalog: Arc<dyn SessionCatalog>,
     ) -> Self {
         Self::with_manager(
-            SessionManager::single(agent, None, session_catalog, None, None, None, None),
+            SessionManager::single(agent, None, session_catalog, None, None, None, None, None),
             catalog,
         )
     }
@@ -231,6 +258,8 @@ impl App {
             picker_requested: false,
             session_picker: None,
             session_picker_requested: false,
+            subagent_picker: None,
+            subagent_preview: None,
             rewind_target: None,
             command_hint: None,
             login: None,
@@ -494,6 +523,15 @@ impl App {
                 self.suggestions.clear();
                 self.command_hint = Some(" ↑↓ select · Enter switch · Esc cancel ".to_owned());
                 self.session_picker_requested = true;
+                return None;
+            }
+            CommandOutcome::SubagentPicker => {
+                // Do not send, do not record history: open the subagent picker from the current
+                // session's manager snapshot (a local synchronous read, no background load needed).
+                self.input.clear();
+                self.input_cursor = 0;
+                self.suggestions.clear();
+                self.open_subagent_picker();
                 return None;
             }
             CommandOutcome::Login => {
@@ -1220,6 +1258,124 @@ impl App {
         self.session_picker.is_some()
     }
 
+    // ---- Subagent picker + transcript preview (`/subagents`, docs/subagent.md decision 10) ----
+
+    /// Open the subagent picker from the current session's `SubagentManager` snapshot.
+    ///
+    /// A local synchronous read (the registry is in memory), so unlike `/model` / `/session`
+    /// there is no background load. If the session has no subagent manager (or no subagents yet)
+    /// a system hint is shown instead of an empty panel.
+    pub fn open_subagent_picker(&mut self) {
+        let entries = self
+            .sessions
+            .active()
+            .subagents
+            .as_ref()
+            .map(|manager| manager.list())
+            .unwrap_or_default();
+        if entries.is_empty() {
+            self.add_system_message("No subagents in this session yet.".to_owned());
+            return;
+        }
+        self.subagent_picker = Some(SubagentPicker {
+            entries,
+            selected: 0,
+        });
+        self.message_cache = None;
+    }
+
+    pub fn subagent_picker(&self) -> Option<&SubagentPicker> {
+        self.subagent_picker.as_ref()
+    }
+
+    /// Move the subagent picker highlight (no wrap, stops at the ends).
+    pub fn subagent_picker_move(&mut self, delta: i32) {
+        let Some(picker) = self.subagent_picker.as_mut() else {
+            return;
+        };
+        let last = picker.entries.len().saturating_sub(1) as i32;
+        let next = (picker.selected as i32 + delta).clamp(0, last);
+        picker.selected = next as usize;
+    }
+
+    /// Confirm the highlighted subagent: load its transcript from the store and open the read-only
+    /// preview overlay. Returns the opened id, or `None` if nothing was open / the transcript
+    /// could not be loaded (a system hint is shown in that case).
+    pub fn subagent_picker_confirm(&mut self) -> Option<String> {
+        let picker = self.subagent_picker.take()?;
+        self.message_cache = None;
+        let entry = picker.entries.get(picker.selected)?.clone();
+        let Some(manager) = self.sessions.active().subagents.clone() else {
+            self.add_system_message("No subagent manager for this session.".to_owned());
+            return None;
+        };
+        let messages = manager.load_transcript(&entry.id);
+        self.subagent_preview = Some(SubagentPreview {
+            id: entry.id.clone(),
+            messages,
+            scroll: 0,
+        });
+        Some(entry.id)
+    }
+
+    /// Cancel the subagent picker (back to the input box).
+    pub fn subagent_picker_cancel(&mut self) {
+        if self.subagent_picker.take().is_some() {
+            self.message_cache = None;
+        }
+    }
+
+    /// Whether the subagent picker is open (the main loop routes keys here first).
+    pub fn is_subagent_picker_open(&self) -> bool {
+        self.subagent_picker.is_some()
+    }
+
+    /// The open child-transcript preview overlay, if any.
+    pub fn subagent_preview(&self) -> Option<&SubagentPreview> {
+        self.subagent_preview.as_ref()
+    }
+
+    /// Whether the preview overlay is open (the main loop routes keys here first).
+    pub fn is_subagent_preview_open(&self) -> bool {
+        self.subagent_preview.is_some()
+    }
+
+    /// Scroll the preview overlay. The upper clamp is applied at draw time (the exact content
+    /// height depends on the wrap width), so a too-large value here is harmless.
+    pub fn subagent_preview_scroll(&mut self, delta: i32) {
+        let Some(preview) = self.subagent_preview.as_mut() else {
+            return;
+        };
+        preview.scroll = (preview.scroll as i32 + delta).max(0) as u16;
+    }
+
+    /// Close the preview overlay (back to the input box).
+    pub fn subagent_preview_close(&mut self) {
+        if self.subagent_preview.take().is_some() {
+            self.message_cache = None;
+        }
+    }
+
+    /// Cancel the subagent shown in the preview (`c` key): abort it if it is still running and
+    /// refresh the overlay's transcript snapshot so the new status is reflected. Best-effort.
+    pub fn subagent_preview_cancel(&mut self) {
+        let Some(id) = self.subagent_preview.as_ref().map(|p| p.id.clone()) else {
+            return;
+        };
+        let Some(manager) = self.sessions.active().subagents.clone() else {
+            return;
+        };
+        if let Err(error) = manager.cancel(&id) {
+            self.add_system_message(format!("failed to cancel subagent {id}: {error}"));
+            return;
+        }
+        // Reload the transcript snapshot so the preview reflects the cancellation immediately.
+        let messages = manager.load_transcript(&id);
+        if let Some(preview) = self.subagent_preview.as_mut() {
+            preview.messages = messages;
+        }
+    }
+
     /// Replay UI items from the Agent's current message list (called after switching sessions).
     ///
     /// UI items are a view of the Agent messages; switching sessions swaps the whole history, so the view must be rebuilt entirely,
@@ -1295,6 +1451,7 @@ mod tests {
             Some(built.memory),
             Some(built.skills),
             Some(built.todo),
+            built.subagents,
         );
         let catalog = factory.model_catalog.clone();
         App::with_manager(sessions, catalog)

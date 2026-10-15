@@ -26,6 +26,7 @@ use super::app::{ChatMessage, Item, Role, ToolCallView};
 use crate::bootstrap::AgentFactory;
 use crate::memory::MemoryRuntime;
 use crate::session::{SessionCatalog, SessionStore};
+use crate::subagent::{SubagentManager, SubagentStore};
 use crate::skills::SkillRuntime;
 use crate::todo::{TaskView, TodoStore};
 
@@ -106,6 +107,12 @@ pub struct Session {
     /// so the UI can read task progress in real time ([`TodoStore::view`]) -- the TUI reads it directly every frame in
     /// `draw`, and desktop reads it when the pump receives a `todo` tool completion event.
     pub todo: Option<Arc<TodoStore>>,
+    /// This session's subagent manager (`None` = no subagents, for tests / child agents).
+    ///
+    /// **Shares the same `Arc`** with the `subagent` tool (created and returned by `build_agent`).
+    /// It also holds the fork snapshot source (`parent_view`), fed here in [`Session::apply_event`]
+    /// so a `fork` child inherits the parent's conversation (see `docs/subagent.md`).
+    pub subagents: Option<Arc<SubagentManager>>,
 }
 
 impl Session {
@@ -113,6 +120,7 @@ impl Session {
     ///
     /// `store` is this session's persistent store (`None` = no persistence); persistence goes through
     /// [`Session::apply_event`]'s event-driven path.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         mut agent: Agent,
         name: Option<String>,
@@ -121,9 +129,15 @@ impl Session {
         memory: Option<Arc<MemoryRuntime>>,
         skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
+        subagents: Option<Arc<SubagentManager>>,
     ) -> Self {
         agent.set_request_session_id(request_session_id);
         let model = Some(agent.model_config().model.clone());
+        // Seed the fork snapshot source from the restored working set (system included; the fork
+        // snapshot strips the leading `System` when it is actually used).
+        if let Some(manager) = &subagents {
+            manager.set_parent_view(agent.messages().to_vec());
+        }
         Self {
             name,
             agent: Some(agent),
@@ -146,6 +160,7 @@ impl Session {
             memory,
             skills,
             todo,
+            subagents,
         }
     }
 
@@ -190,6 +205,11 @@ impl Session {
     pub fn apply_event(&mut self, event: Result<AgentEvent, String>) {
         match event {
             Ok(AgentEvent::MessageAdded(message)) => {
+                // Keep the fork snapshot source current (the SDK gives a `Tool` no live message
+                // handle, so the manager mirrors the parent's working set from here).
+                if let Some(manager) = &self.subagents {
+                    manager.push_parent_message(&message);
+                }
                 // Event-driven persistence: the SDK only emits events; persistence is the application layer's job (system does not go into the log).
                 self.persist_message(&message);
                 // The user message's view item is recorded by the driver when starting a turn (see `begin_turn`),
@@ -251,6 +271,10 @@ impl Session {
             .unwrap_or_default();
         self.items = items;
         self.streaming_delta_start = None;
+        // Re-seed the fork snapshot source (e.g. after restoring a session from disk).
+        if let (Some(manager), Some(agent)) = (&self.subagents, &self.agent) {
+            manager.set_parent_view(agent.messages().to_vec());
+        }
     }
 
     /// Rebuild view items from a persisted message (used when subscribing to a finished session mid-run / switching sessions).
@@ -508,6 +532,7 @@ pub struct SessionManager {
 
 impl SessionManager {
     /// Start a manager containing only a single session with an existing `Agent` (no factory, cannot create/switch).
+    #[allow(clippy::too_many_arguments)]
     pub fn single(
         agent: Agent,
         name: Option<String>,
@@ -516,11 +541,21 @@ impl SessionManager {
         memory: Option<Arc<MemoryRuntime>>,
         skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
+        subagents: Option<Arc<SubagentManager>>,
     ) -> Self {
         let mut sessions = HashMap::new();
+        // Attach the `.agents/` sidecar before the session starts using the manager.
+        {
+            let dir = catalog.storage_dir();
+            if let (Some(manager), Some(name), Some(dir)) =
+                (subagents.as_ref(), name.as_deref(), dir)
+            {
+                manager.set_store(SubagentStore::for_session(&dir, name));
+            }
+        }
         sessions.insert(
             0,
-            Session::new(agent, name, None, store, memory, skills, todo),
+            Session::new(agent, name, None, store, memory, skills, todo, subagents),
         );
         Self {
             sessions,
@@ -542,12 +577,21 @@ impl SessionManager {
         memory: Option<Arc<MemoryRuntime>>,
         skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
+        subagents: Option<Arc<SubagentManager>>,
     ) -> Self {
         let mut sessions = HashMap::new();
         let request_session_id = proxy_session_id(&factory.working_dir, name.as_deref());
+        {
+            let dir = catalog.storage_dir();
+            if let (Some(manager), Some(name), Some(dir)) =
+                (subagents.as_ref(), name.as_deref(), dir)
+            {
+                manager.set_store(SubagentStore::for_session(&dir, name));
+            }
+        }
         sessions.insert(
             0,
-            Session::new(agent, name, request_session_id, store, memory, skills, todo),
+            Session::new(agent, name, request_session_id, store, memory, skills, todo, subagents),
         );
         Self {
             sessions,
@@ -556,6 +600,22 @@ impl SessionManager {
             catalog,
             factory: Some(factory),
         }
+    }
+
+    /// Attach a `SubagentStore` (the session's `.agents/` sidecar) to a freshly built manager, so
+    /// `subagent` persistence and the child-transcript preview work. No-op when the session has no
+    /// name or the catalog has no storage directory (tests / single-session fallback).
+    fn attach_subagent_store(
+        &self,
+        subagents: &Option<Arc<SubagentManager>>,
+        name: Option<&str>,
+    ) {
+        let (Some(manager), Some(name), Some(dir)) =
+            (subagents.as_ref(), name, self.catalog.storage_dir())
+        else {
+            return;
+        };
+        manager.set_store(SubagentStore::for_session(&dir, name));
     }
 
     /// Foreground session (read-only).
@@ -600,6 +660,7 @@ impl SessionManager {
     }
 
     /// Insert a session with an existing `Agent`, returning its key (does not change the foreground pointer).
+    #[allow(clippy::too_many_arguments)]
     fn insert(
         &mut self,
         agent: Agent,
@@ -608,6 +669,7 @@ impl SessionManager {
         memory: Option<Arc<MemoryRuntime>>,
         skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
+        subagents: Option<Arc<SubagentManager>>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -615,9 +677,10 @@ impl SessionManager {
             .factory
             .as_ref()
             .and_then(|factory| proxy_session_id(&factory.working_dir, name.as_deref()));
+        self.attach_subagent_store(&subagents, name.as_deref());
         self.sessions.insert(
             id,
-            Session::new(agent, name, request_session_id, store, memory, skills, todo),
+            Session::new(agent, name, request_session_id, store, memory, skills, todo, subagents),
         );
         id
     }
@@ -661,6 +724,7 @@ impl SessionManager {
             Some(built.memory),
             Some(built.skills),
             Some(built.todo),
+            built.subagents,
         );
         // A session restored from disk: rebuild view items from its history so the snapshot / render has content.
         if let Some(session) = self.sessions.get_mut(&id) {
@@ -704,6 +768,7 @@ impl SessionManager {
             Some(built.memory),
             Some(built.skills),
             Some(built.todo),
+            built.subagents,
         );
         self.active = id;
         if let Some(previous) = previous.filter(|p| p != entry.name.as_str()) {
@@ -995,6 +1060,7 @@ mod tests {
             test_agent(),
             Some("s".into()),
             Arc::new(EmptySessionCatalog),
+            None,
             None,
             None,
             None,

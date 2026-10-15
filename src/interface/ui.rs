@@ -8,6 +8,7 @@ use ratatui::{
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, ChatMessage, Item, Role};
+use shirley_agent_sdk::Message;
 use super::markdown;
 
 /// Maximum number of lines shown for the input box; beyond that it scrolls vertically inside, to avoid squeezing the message area.
@@ -245,6 +246,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     // Session picker: same modal overlay.
     draw_session_picker(frame, app, messages_area);
+
+    // Subagent picker + read-only child-transcript preview (`docs/subagent.md` decision 10).
+    draw_subagent_picker(frame, app, messages_area);
+    draw_subagent_preview(frame, app, messages_area);
 }
 
 /// Rewind-edit mode rendering: header + in-place input box + tail.
@@ -545,6 +550,137 @@ fn draw_session_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
     }
 
     frame.render_widget(Paragraph::new(lines).block(block), popup_area);
+}
+
+/// Render the `/subagents` picker (`docs/subagent.md` decision 10, P2): a modal overlay listing the
+/// current session's subagents. Confirming an entry opens the read-only preview overlay.
+fn draw_subagent_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let Some(picker) = app.subagent_picker() else {
+        return;
+    };
+    if area.height < 4 || area.width < 12 {
+        return;
+    }
+    // One line per entry.
+    let height = (picker.entries.len() as u16 + 3).min(area.height);
+    let width = (area.width.saturating_sub(2)).clamp(24, 72).min(area.width);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup_area = ratatui::layout::Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, popup_area);
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title_top(
+            Line::from("Subagents (\u{2191}\u{2193} select \u{b7} Enter preview \u{b7} Esc cancel)".to_owned())
+                .style(Style::default().fg(Color::Cyan)),
+        );
+
+    let mut lines: Vec<Line> = Vec::new();
+    for (i, entry) in picker.entries.iter().enumerate() {
+        let highlighted = i == picker.selected;
+        let cursor = if highlighted { "\u{25b6} " } else { "  " };
+        let style = if highlighted {
+            Style::default()
+                .fg(Color::Black)
+                .bg(Color::Cyan)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+        };
+        let task = entry.task.replace('\n', " ");
+        let label = format!(
+            "{cursor}{} [{}] {}",
+            entry.kind.as_str(),
+            entry.status.as_str(),
+            task
+        );
+        lines.push(Line::from(Span::styled(label, style)));
+    }
+
+    frame.render_widget(Paragraph::new(lines).block(block), popup_area);
+}
+
+/// Render the read-only child-transcript overlay (`docs/subagent.md` decision 10: "click to preview
+/// the sub-session"). Reuses `markdown::render`, the same render path as the parent transcript.
+/// The overlay is scrollable (Up/Down / PageUp/PageDown); `c` cancels a running subagent.
+fn draw_subagent_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
+    let Some(preview) = app.subagent_preview() else {
+        return;
+    };
+    if area.height < 4 || area.width < 12 {
+        return;
+    }
+    // Cover most of the message area, leaving a one-cell margin.
+    let width = area.width.saturating_sub(4).min(area.width);
+    let height = area.height.saturating_sub(2).min(area.height);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let popup_area = ratatui::layout::Rect { x, y, width, height };
+
+    frame.render_widget(ratatui::widgets::Clear, popup_area);
+
+    let block = Block::bordered()
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(Color::Cyan))
+        .title_top(
+            Line::from(format!(
+                "Subagent {} (\u{2191}\u{2193} scroll \u{b7} c cancel \u{b7} Esc back)",
+                preview.id
+            ))
+            .style(Style::default().fg(Color::Cyan)),
+        );
+
+    let inner_width = popup_area.width.saturating_sub(2) as usize;
+    let inner_height = popup_area.height.saturating_sub(2) as usize;
+
+    // Build the rendered lines: role label + markdown body, reusing the parent render path.
+    let mut lines: Vec<Line> = Vec::new();
+    for message in &preview.messages {
+        match message {
+            Message::User { content } => {
+                lines.push(Line::from(Span::styled(
+                    "task".to_owned(),
+                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                )));
+                lines.extend(markdown::render(content, Style::default(), inner_width));
+                lines.push(Line::default());
+            }
+            Message::Assistant { content, .. } => {
+                let Some(content) = content.as_ref().filter(|text| !text.is_empty()) else {
+                    continue;
+                };
+                lines.push(Line::from(Span::styled(
+                    "agent".to_owned(),
+                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                )));
+                lines.extend(markdown::render(content, Style::default(), inner_width));
+                lines.push(Line::default());
+            }
+            // System / Tool / ContextSummary are not projected (consistent with the parent view).
+            _ => {}
+        }
+    }
+    if lines.is_empty() {
+        lines.push(Line::from(Span::styled(
+            "No transcript yet.".to_owned(),
+            Style::default().fg(Color::DarkGray),
+        )));
+    }
+
+    // Clamp the scroll to the content so a stale offset cannot scroll past the end.
+    let max_scroll = lines.len().saturating_sub(inner_height) as u16;
+    let scroll = preview.scroll.min(max_scroll);
+
+    frame.render_widget(
+        Paragraph::new(lines)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0))
+            .block(block),
+        popup_area,
+    );
 }
 
 /// Render the fuzzy command-suggestion popup triggered by `/`.

@@ -9,6 +9,7 @@ mod prompt;
 mod prompt_template;
 mod session;
 mod settings;
+mod subagent;
 mod skills;
 mod todo;
 mod tools;

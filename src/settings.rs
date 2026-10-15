@@ -57,6 +57,8 @@ pub struct FileSettings {
     pub memory: MemorySettings,
     /// Execution limits for a single task.
     pub runtime: RuntimeSettings,
+    /// Subagent (child Agent) config (the `[subagent]` table in the config file).
+    pub subagent: SubagentSettings,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -166,6 +168,48 @@ impl MemorySettings {
     }
 }
 
+/// Subagent config (the `[subagent]` table in the config file, `docs/subagent.md` decision 8).
+///
+/// All `Option`: `None` means "this layer does not manage this key", and merging yields to lower priority / built-in defaults.
+/// The caps are enforced by the application-layer `SubagentManager`; the SDK knows nothing about subagents.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SubagentSettings {
+    /// Master switch. `false` disables the `subagent` tool entirely (the tool is not registered).
+    /// Default `true`.
+    pub enabled: Option<bool>,
+    /// Max subagents running at the same time; beyond this a dispatch is rejected outright. Default 4.
+    pub max_concurrent: Option<usize>,
+    /// Max nesting depth. `1` = a child cannot dispatch a child (default).
+    pub max_depth: Option<usize>,
+    /// A single child's model-call budget (independent of the parent). Default 24.
+    pub per_task_max_steps: Option<usize>,
+    /// Default `wait` / blocking-dispatch timeout in milliseconds. Default 600000 (10 min).
+    pub default_timeout_ms: Option<u64>,
+    /// The default tool set handed to a child when the model does not pass an explicit `tools`
+    /// allowlist. `None` = all tools. `subagent` is never included (recursion guard).
+    pub default_tools: Option<Vec<String>>,
+}
+
+impl SubagentSettings {
+    /// Layer-by-layer override: a higher-priority `Some` beats a lower priority.
+    fn merge_into(&mut self, over: SubagentSettings) {
+        macro_rules! take {
+            ($($field:ident),* $(,)?) => {
+                $(if over.$field.is_some() { self.$field = over.$field; })*
+            };
+        }
+        take!(
+            enabled,
+            max_concurrent,
+            max_depth,
+            per_task_max_steps,
+            default_timeout_ms,
+            default_tools,
+        );
+    }
+}
+
 /// Model service connection config (the `[provider]` table in the config file).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
@@ -269,6 +313,8 @@ pub struct Settings {
     pub compression: CompressionSettings,
     /// Memory system config (curator model / periodic consolidation threshold).
     pub memory: MemorySettings,
+    /// Subagent config (caps / default tool set / default timeout).
+    pub subagent: SubagentSettings,
     /// Model call limit per user task. `0` = unlimited (see [`RuntimeSettings::max_steps`]).
     pub max_steps: usize,
 }
@@ -324,13 +370,19 @@ impl Settings {
             memory.merge_into(layer.memory.clone());
         }
 
+        // The subagent config is likewise overridden layer by layer (the env layer has no such key).
+        let mut subagent = SubagentSettings::default();
+        for layer in [&global, &workspace].into_iter().flatten() {
+            subagent.merge_into(layer.subagent.clone());
+        }
+
         let max_steps = workspace
             .as_ref()
             .and_then(|s| s.runtime.max_steps)
             .or_else(|| global.as_ref().and_then(|s| s.runtime.max_steps))
             .unwrap_or(64);
         // `max_steps == 0` is allowed and means "no execution cap" (see `RuntimeSettings`).
-        Self::finalize(merged, compression, memory, max_steps)
+        Self::finalize(merged, compression, memory, subagent, max_steps)
     }
 
     /// Convenience entry point: uses the real `config_dir` and process env vars.
@@ -359,6 +411,7 @@ impl Settings {
         merged: ProviderSettings,
         compression: CompressionSettings,
         memory: MemorySettings,
+        subagent: SubagentSettings,
         max_steps: usize,
     ) -> Result<Self, SettingsError> {
         let base_url = merged
@@ -429,6 +482,7 @@ impl Settings {
             tool_mode,
             compression,
             memory,
+            subagent,
             max_steps,
         })
     }

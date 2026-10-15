@@ -33,6 +33,10 @@ use crate::settings::Settings;
 use crate::skills::{
     self, SkillCatalog, SkillContextProvider, SkillRuntime,
 };
+use crate::subagent::{
+    DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH, DEFAULT_PER_TASK_MAX_STEPS, DEFAULT_WAIT_TIMEOUT_MS,
+    SubagentLimits, SubagentManager, SubagentTool, ToolSelection,
+};
 use crate::todo::{TodoContextProvider, TodoStore};
 use crate::tools;
 
@@ -75,6 +79,15 @@ pub struct AgentFactory {
     /// Skill catalog (`docs/skills.md` P0): scanned once at assembly, shared by all sessions (read-only, unchanging).
     /// Each `Agent` injects its Tier1 catalog at the end of each round via `SkillContextProvider`.
     skill_catalog: SkillCatalog,
+    /// Subagent config (`docs/subagent.md` decision 8): resolved once at assembly, shared by all sessions.
+    /// `enabled == false` means the `subagent` tool is not registered at all.
+    subagent_enabled: bool,
+    /// The three caps for child agents.
+    subagent_limits: SubagentLimits,
+    /// The default child tool set when the model omits `tools` (`None` = all tools).
+    subagent_default_tools: Option<Vec<String>>,
+    /// Default `wait` / blocking-dispatch timeout (ms).
+    subagent_default_timeout_ms: u64,
 }
 
 /// The location of global memory relative to `config_dir` (cross-project).
@@ -150,6 +163,33 @@ impl AgentFactory {
         // read-only, shared across sessions; each session injects its Tier1 catalog via `SkillContextProvider`.
         let skill_catalog = SkillCatalog::discover(&working_dir, skills::user_home().as_deref());
 
+        // Subagent config (`docs/subagent.md` decision 8): resolve the caps once. `enabled` defaults to
+        // true; a value of `0` for a cap means "unset" and falls back to the built-in default.
+        let subagent = &settings.subagent;
+        let subagent_enabled = subagent.enabled.unwrap_or(true);
+        let subagent_limits = SubagentLimits {
+            max_concurrent: subagent
+                .max_concurrent
+                .filter(|n| *n > 0)
+                .unwrap_or(DEFAULT_MAX_CONCURRENT),
+            max_depth: subagent
+                .max_depth
+                .filter(|n| *n > 0)
+                .unwrap_or(DEFAULT_MAX_DEPTH),
+            per_task_max_steps: subagent
+                .per_task_max_steps
+                .filter(|n| *n > 0)
+                .unwrap_or(DEFAULT_PER_TASK_MAX_STEPS),
+        };
+        let subagent_default_tools = subagent
+            .default_tools
+            .clone()
+            .filter(|tools| !tools.is_empty());
+        let subagent_default_timeout_ms = subagent
+            .default_timeout_ms
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+
         Ok(Self {
             model_config,
             system_prompt: prompt::build(working_dir.clone()),
@@ -164,6 +204,10 @@ impl AgentFactory {
             consolidate_after_entries: settings.memory.consolidate_after_entries.unwrap_or(0),
             embedder,
             skill_catalog,
+            subagent_enabled,
+            subagent_limits,
+            subagent_default_tools,
+            subagent_default_timeout_ms,
         })
     }
 
@@ -180,7 +224,25 @@ impl AgentFactory {
     /// Returns [`BuiltAgent`]: besides the `Agent`, **it brings back a memory runtime handle** -- because
     /// `ContextProvider` is a trait object, the driver (TUI / desktop) cannot get the concrete type and
     /// needs to `set_query` via this handle before each round (`docs/memory.md` §4.2).
-    pub fn build_agent(&self, messages: Vec<Message>) -> Result<BuiltAgent, AgentError> {
+    pub fn build_agent(self: &Arc<Self>, messages: Vec<Message>) -> Result<BuiltAgent, AgentError> {
+        self.build_agent_with(messages, None, None)
+    }
+
+    /// Build one `Agent`, optionally as a **child** with a filtered tool table (`docs/subagent.md` P0).
+    ///
+    /// - `tool_filter == None`: the **top level**. A [`SubagentManager`] is created (holding this
+    ///   factory) and the `subagent` tool is registered, so this `Agent` can dispatch children.
+    /// - `tool_filter == Some(selection)`: a **child**. No manager and no `subagent` tool are created
+    ///   (the recursion guard: a child can never dispatch a child); the tool table is
+    ///   `(allow ?? all) - deny - {subagent}`.
+    ///
+    /// `max_steps` overrides the factory default (children use their own `per_task_max_steps` budget).
+    pub fn build_agent_with(
+        self: &Arc<Self>,
+        messages: Vec<Message>,
+        tool_filter: Option<&ToolSelection>,
+        max_steps: Option<usize>,
+    ) -> Result<BuiltAgent, AgentError> {
         // Task ledger (application-layer capability): one `TodoStore` per `Agent`, given both to the
         // `todo` tool (write) and `TodoContextProvider` (injected at the end of each round, surviving compaction).
         // Both share the same `Arc`, so the ledger state is isolated per session.
@@ -210,6 +272,40 @@ impl AgentFactory {
         let _ = tool_manager.register(tools::ActivateSkillTool::new(skill_runtime.clone()));
         let _ = tool_manager.register(tools::ReadSkillFileTool::new(skill_catalog));
 
+        // The available tool names (before adding `subagent`), for the child-tool allow/deny check and
+        // for the child tool-table filter. `subagent` is deliberately absent (recursion guard).
+        let available_tools: Vec<String> = tool_manager
+            .definitions()
+            .iter()
+            .map(|definition| definition.name.clone())
+            .collect();
+
+        let subagents = match tool_filter {
+            Some(selection) => {
+                // Child: filter the table; never register `subagent`.
+                apply_tool_filter(&mut tool_manager, selection);
+                None
+            }
+            None => {
+                if self.subagent_enabled {
+                    // Top level: create the manager (holding this factory) and expose the `subagent` tool.
+                    let mut manager = SubagentManager::new(
+                        self.clone(),
+                        self.subagent_limits.clone(),
+                        available_tools,
+                    );
+                    manager.set_default_tools(self.subagent_default_tools.clone());
+                    manager.set_default_timeout_ms(self.subagent_default_timeout_ms);
+                    let manager = Arc::new(manager);
+                    let _ = tool_manager.register(SubagentTool::new(manager.clone()));
+                    Some(manager)
+                } else {
+                    // Disabled by config: the `subagent` tool is not registered at all.
+                    None
+                }
+            }
+        };
+
         // The SDK `Agent` accepts only a **single** `context_provider`, but here we need to inject several
         // (task ledger + memory + skills) -- use `CompositeContextProvider` to concatenate in order.
         let provider = CompositeContextProvider::new(vec![
@@ -225,7 +321,7 @@ impl AgentFactory {
             .working_dir(self.working_dir.clone())
             .compression_instruction(COMPRESSION_INSTRUCTION)
             .compression_config(self.compression_config.clone())
-            .max_steps(self.max_steps)
+            .max_steps(max_steps.unwrap_or(self.max_steps))
             .context_provider(Arc::new(provider) as Arc<dyn ContextProvider>)
             .tools(tool_manager)
             .messages(messages)
@@ -235,6 +331,7 @@ impl AgentFactory {
             todo: todo_store,
             memory,
             skills: skill_runtime,
+            subagents,
         })
     }
 
@@ -466,6 +563,11 @@ pub struct BuiltAgent {
     /// Skill runtime (one per session): the TUI's `/<skill-name>` slash entry activates directly via this handle
     /// (`docs/skills.md` 5.6). Shares the same `Arc` as `SkillContextProvider`.
     pub skills: Arc<SkillRuntime>,
+    /// Subagent manager (one per session, **top level only**; `None` for a child `Agent`).
+    ///
+    /// Shares the same `Arc` as the `subagent` tool, so the interface can read subagent status
+    /// (`docs/subagent.md` P0). `None` when this `Agent` was built as a child.
+    pub subagents: Option<Arc<SubagentManager>>,
 }
 
 /// Concatenate multiple [`ContextProvider`]s into one: joins each `context()` in order; all-empty returns `None`.
@@ -510,6 +612,86 @@ fn assemble_tools() -> ToolManager {
     tool_manager
 }
 
+/// Trim a `ToolManager` down to a child's tool table (`docs/subagent.md` decision 5):
+/// `(allow ?? all) - deny - {subagent}`. Unknown names are validated earlier (the `subagent` tool
+/// returns `ArgumentsError`); here we only subtract.
+fn apply_tool_filter(manager: &mut ToolManager, selection: &ToolSelection) {
+    let names: Vec<String> = manager
+        .definitions()
+        .iter()
+        .map(|definition| definition.name.clone())
+        .collect();
+    let keep: std::collections::HashSet<String> = filtered_tool_names(&names, selection)
+        .into_iter()
+        .collect();
+    for name in names {
+        if !keep.contains(&name) {
+            let _ = manager.unregister(&name);
+        }
+    }
+}
+
+/// The child tool table as a pure function (unit-testable without a `ToolManager`).
+///
+/// `(allow ?? all) - deny - {subagent}`: the recursion guard (`subagent` is never delegated) is
+/// applied here, structurally, regardless of what the caller allowed.
+pub(crate) fn filtered_tool_names(names: &[String], selection: &ToolSelection) -> Vec<String> {
+    names
+        .iter()
+        .filter(|name| name.as_str() != "subagent")
+        .filter(|name| match &selection.allow {
+            Some(allow) => allow.contains(name),
+            None => true,
+        })
+        .filter(|name| !selection.deny.contains(name))
+        .cloned()
+        .collect()
+}
+
+/// Test-only factory constructor, shared by the bootstrap tests and the subagent tests.
+#[cfg(test)]
+pub(crate) mod test_support {
+    use super::*;
+    use crate::models::StaticCatalog;
+    use crate::session::FileSessionCatalog;
+    use shirley_agent_sdk::ModelProtocol;
+
+    pub(crate) fn test_factory_with_base(
+        root: std::path::PathBuf,
+        base_url: &str,
+        stream: bool,
+    ) -> AgentFactory {
+        AgentFactory {
+            model_config: ModelConfig::builder()
+                .protocol(ModelProtocol::ChatCompletions)
+                .base_url(base_url)
+                .model("test")
+                .stream(stream)
+                .build(),
+            system_prompt: SystemPrompt::from("test"),
+            compression_config: CompressionConfig::default(),
+            max_steps: 64,
+            working_dir: root.clone(),
+            model_catalog: Arc::new(StaticCatalog::builtin()) as Arc<dyn ModelCatalog>,
+            session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
+            needs_login: false,
+            memory_roots: vec![root.join(".shirley/memory")],
+            curator_model_config: None,
+            consolidate_after_entries: 0,
+            embedder: None,
+            skill_catalog: SkillCatalog::new(Vec::new()),
+            subagent_enabled: true,
+            subagent_limits: SubagentLimits::default(),
+            subagent_default_tools: None,
+            subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
+        }
+    }
+
+    pub(crate) fn test_factory(root: std::path::PathBuf) -> AgentFactory {
+        test_factory_with_base(root, "http://localhost", false)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -546,7 +728,58 @@ mod tests {
             consolidate_after_entries: 0,
             embedder: None,
             skill_catalog: SkillCatalog::new(Vec::new()),
+            subagent_enabled: true,
+            subagent_limits: SubagentLimits::default(),
+            subagent_default_tools: None,
+            subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
         }
+    }
+
+    #[test]
+    fn child_tool_filter_applies_allow_deny_and_recursion_guard() {
+        let names = vec![
+            "bash".to_string(),
+            "read_file".to_string(),
+            "subagent".to_string(),
+        ];
+        // No selection: everything except `subagent` (the recursion guard is structural).
+        assert_eq!(
+            filtered_tool_names(&names, &ToolSelection::default()),
+            vec!["bash", "read_file"]
+        );
+        // Allowlist keeps only the named tools.
+        assert_eq!(
+            filtered_tool_names(
+                &names,
+                &ToolSelection {
+                    allow: Some(vec!["read_file".into()]),
+                    deny: vec![],
+                }
+            ),
+            vec!["read_file"]
+        );
+        // Denylist subtracts from the default set.
+        assert_eq!(
+            filtered_tool_names(
+                &names,
+                &ToolSelection {
+                    allow: None,
+                    deny: vec!["bash".into()],
+                }
+            ),
+            vec!["read_file"]
+        );
+        // Even an explicit allow of `subagent` cannot get it back.
+        assert!(
+            filtered_tool_names(
+                &names,
+                &ToolSelection {
+                    allow: Some(vec!["subagent".into()]),
+                    deny: vec![],
+                }
+            )
+            .is_empty()
+        );
     }
 
     fn tmp_root(tag: &str) -> PathBuf {
@@ -566,6 +799,7 @@ mod tests {
             Some("s".into()),
             catalog,
             Arc::new(factory(root.clone())),
+            None,
             None,
             None,
             None,
@@ -591,7 +825,7 @@ mod tests {
     #[ignore]
     async fn live_smoke_against_configured_provider() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let factory = AgentFactory::assemble(root).expect("assembly failed");
+        let factory = Arc::new(AgentFactory::assemble(root).expect("assembly failed"));
         let mut built = factory.build_agent(Vec::new()).expect("failed to build Agent");
         let result = built
             .agent
@@ -720,6 +954,7 @@ mod tests {
             Some("s".into()),
             catalog,
             Arc::new(factory(root.clone())),
+            None,
             None,
             None,
             None,

@@ -34,6 +34,37 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             }
             return None;
         }
+        // Subagent transcript preview overlay (`docs/subagent.md` decision 10): the preview is
+        // read-only, so it only needs scrolling + close. `c` cancels the subagent if it is running.
+        Event::Key(key_event)
+            if key_event.kind == KeyEventKind::Press && app.is_subagent_preview_open() =>
+        {
+            match key_event.code {
+                KeyCode::Up => app.subagent_preview_scroll(-1),
+                KeyCode::Down => app.subagent_preview_scroll(1),
+                KeyCode::PageUp => app.subagent_preview_scroll(-10),
+                KeyCode::PageDown => app.subagent_preview_scroll(10),
+                KeyCode::Char('c') => app.subagent_preview_cancel(),
+                KeyCode::Esc => app.subagent_preview_close(),
+                _ => {}
+            }
+            return None;
+        }
+        // Subagent picker: keys go to the panel first (up/down, Enter to open the preview, Esc to cancel).
+        Event::Key(key_event)
+            if key_event.kind == KeyEventKind::Press && app.is_subagent_picker_open() =>
+        {
+            match key_event.code {
+                KeyCode::Up => app.subagent_picker_move(-1),
+                KeyCode::Down => app.subagent_picker_move(1),
+                KeyCode::Enter => {
+                    app.subagent_picker_confirm();
+                }
+                KeyCode::Esc => app.subagent_picker_cancel(),
+                _ => {}
+            }
+            return None;
+        }
         // When the command-suggestion popup is open: arrows move the highlight, Tab / Enter
         // accepts, Esc dismisses the popup (without exiting). Other keys fall through to the
         // normal editing logic below (the user can keep typing to refine).

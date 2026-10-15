@@ -76,6 +76,26 @@ export type HistoryMessage = {
   content: string;
 };
 
+/** A subagent summary (aligned with Rust's `SubagentSummaryWire`). */
+export type SubagentSummary = {
+  /** Subagent id (file stem of `<id>.jsonl`). */
+  id: string;
+  /** `spawn` (fresh child) or `fork` (inherits the parent transcript). */
+  kind: "spawn" | "fork";
+  /** The task the child was given. */
+  task: string;
+  /** Lifecycle status: running / completed / failed / cancelled. */
+  status: "running" | "completed" | "failed" | "cancelled";
+  started_ms: number;
+  /** Terminal time; `null` while running. */
+  finished_ms: number | null;
+  elapsed_ms: number;
+  /** Conclusion (empty while running). */
+  summary: string;
+  /** Terminal stop reason (empty while running). */
+  stop_reason: string;
+};
+
 export type AgentBridge = {
   /** List projects. `archived = true` includes archived projects (for the archive list). */
   listProjects: (archived?: boolean) => Promise<ProjectEntry[]>;
@@ -141,6 +161,13 @@ export type AgentBridge = {
   moveSession: (project: string, name: string, targetProject: string) => Promise<void>;
   /** Replay a project's current session history (used to rebuild the transcript after switching / startup). */
   loadHistory: (project: string) => Promise<HistoryMessage[]>;
+
+  /** List a session's subagents (from the in-memory registry, seeded from `index.jsonl`). */
+  listSubagents: (project: string, session: string) => Promise<SubagentSummary[]>;
+  /** Replay a subagent's transcript (`<id>.jsonl`) — the same `HistoryMessage` shape as `loadHistory`. */
+  loadSubagent: (project: string, session: string, id: string) => Promise<HistoryMessage[]>;
+  /** Cancel a running subagent (idempotent no-op once terminal / unknown). */
+  cancelSubagent: (project: string, session: string, id: string) => Promise<void>;
 };
 
 const isTauri =
@@ -238,6 +265,15 @@ async function createTauriBridge(): Promise<AgentBridge> {
     },
     async loadHistory(project) {
       return invoke<HistoryMessage[]>("agent_load_history", { project });
+    },
+    async listSubagents(project, session) {
+      return invoke<SubagentSummary[]>("agent_list_subagents", { project, session });
+    },
+    async loadSubagent(project, session, id) {
+      return invoke<HistoryMessage[]>("agent_load_subagent", { project, session, id });
+    },
+    async cancelSubagent(project, session, id) {
+      await invoke("agent_cancel_subagent", { project, session, id });
     },
   };
 }
@@ -401,6 +437,15 @@ function createMockBridge(): AgentBridge {
     },
     async loadHistory() {
       return [];
+    },
+    async listSubagents() {
+      return [];
+    },
+    async loadSubagent() {
+      return [];
+    },
+    async cancelSubagent() {
+      // mock: no-op.
     },
   };
 }

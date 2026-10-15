@@ -42,6 +42,7 @@ use super::wire::{AgentEventWire, SessionSnapshotWire, TaskViewWire};
 use crate::bootstrap::AgentFactory;
 use crate::interface::session::SessionManager;
 use crate::project::{ProjectEntry, ProjectRegistry};
+use crate::subagent::{SubagentInfo, SubagentManager};
 use crate::session::{
     SessionCatalog, SessionEntry, first_user_message, sanitize_title, title_prompt,
 };
@@ -139,6 +140,7 @@ fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime, St
         Some(built.memory),
         Some(built.skills),
         Some(built.todo),
+        built.subagents,
     );
     // A session restored from disk: its `Agent` already has the full history, but the
     // view items are still empty — rebuild once so snapshots / rendering have content
@@ -1048,6 +1050,102 @@ async fn agent_load_history(
     Ok(history_from_messages(agent.messages()))
 }
 
+/// A subagent summary replayed to the frontend sidebar (`agent_list_subagents`), aligned with
+/// `SubagentSummaryWire` in `web/src/lib/bridge.ts`. `summary` / `stop_reason` appear only once the
+/// subagent has reached a terminal state.
+#[derive(Debug, Clone, Serialize)]
+struct SubagentSummaryWire {
+    id: String,
+    kind: &'static str,
+    task: String,
+    status: &'static str,
+    started_ms: u64,
+    finished_ms: Option<u64>,
+    elapsed_ms: u64,
+    summary: String,
+    stop_reason: String,
+}
+
+impl SubagentSummaryWire {
+    fn from_info(info: &SubagentInfo) -> Self {
+        let (summary, stop_reason) = match &info.result {
+            Some(result) => (result.summary.clone(), result.stop_reason.clone()),
+            None => (String::new(), String::new()),
+        };
+        Self {
+            id: info.id.clone(),
+            kind: info.kind.as_str(),
+            task: info.task.clone(),
+            status: info.status.as_str(),
+            started_ms: info.started_ms,
+            finished_ms: info.finished_ms,
+            elapsed_ms: info.elapsed_ms(),
+            summary,
+            stop_reason,
+        }
+    }
+}
+
+/// The subagent manager of a given session in a project (`None` = the session is not loaded, or the
+/// session has no subagents). Reads the in-memory registry, which is seeded from `index.jsonl` when
+/// the session's manager is created (`SubagentManager::set_store`).
+async fn subagent_manager(
+    state: &DesktopState,
+    project: &str,
+    session: &str,
+) -> Result<Arc<SubagentManager>, String> {
+    let runtime = ensure_runtime(state, project).await?;
+    let guard = runtime.lock().await;
+    guard
+        .sessions
+        .session(session)
+        .and_then(|session| session.subagents.clone())
+        .ok_or_else(|| format!("session has no subagents: {session}"))
+}
+
+/// List a session's subagents (from the in-memory registry, seeded from `index.jsonl`).
+#[tauri::command]
+async fn agent_list_subagents(
+    state: State<'_, DesktopState>,
+    project: String,
+    session: String,
+) -> Result<Vec<SubagentSummaryWire>, String> {
+    let manager = subagent_manager(&state, &project, &session).await?;
+    Ok(manager
+        .list()
+        .iter()
+        .map(SubagentSummaryWire::from_info)
+        .collect())
+}
+
+/// Replay a subagent's transcript (`<id>.jsonl`) as `HistoryMessageWire[]` (same style as
+/// `agent_load_history`). Empty when the subagent has no transcript yet (still running, no store).
+#[tauri::command]
+async fn agent_load_subagent(
+    state: State<'_, DesktopState>,
+    project: String,
+    session: String,
+    id: String,
+) -> Result<Vec<HistoryMessageWire>, String> {
+    let manager = subagent_manager(&state, &project, &session).await?;
+    Ok(history_from_messages(&manager.load_transcript(&id)))
+}
+
+/// Cancel a running subagent (`AbortHandle::abort`, decision 7). Idempotent: cancelling an already
+/// finished / unknown subagent is a silent no-op.
+#[tauri::command]
+async fn agent_cancel_subagent(
+    state: State<'_, DesktopState>,
+    project: String,
+    session: String,
+    id: String,
+) -> Result<(), String> {
+    let manager = subagent_manager(&state, &project, &session).await?;
+    // An unknown id is treated as a silent no-op (the sidebar may race a just-finished subagent).
+    let _ = manager.cancel(&id);
+    Ok(())
+}
+
 /// Cancel the running turn of the given session.
 ///
 /// Take out the cancel handle registered by `agent_send` for that session and signal
@@ -1120,7 +1218,10 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
             agent_rename_session,
             agent_delete_session,
             agent_move_session,
-            agent_load_history
+            agent_load_history,
+            agent_list_subagents,
+            agent_load_subagent,
+            agent_cancel_subagent
         ])
         .run(tauri::generate_context!())
         .map_err(|error| std::io::Error::other(error.to_string()))

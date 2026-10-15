@@ -29,6 +29,10 @@ pub enum CommandOutcome {
 /// TUI local action: open the session picker. The session list comes from the application-layer session catalog
 /// (see `crate::session`); the command itself does not care where sessions come from or where they are stored.
     SessionPicker,
+/// TUI local action: open the subagent picker (`docs/subagent.md` decision 10, P2).
+/// The list comes from the current session's `SubagentManager`; the command itself does not care
+/// where subagents come from. Confirming an entry opens a read-only child-transcript overlay.
+    SubagentPicker,
 /// TUI local action: enter the step-by-step login flow (asks for base_url / api_key / model in turn).
 /// The command itself does not care how/where config is written -- that is `App`'s and `settings`' concern.
     Login,
@@ -49,6 +53,7 @@ enum Builtin {
     Rewind,
     Session,
     Login,
+    Subagents,
 }
 
 impl Builtin {
@@ -59,6 +64,7 @@ impl Builtin {
             Builtin::Rewind => "rewind",
             Builtin::Session => "session",
             Builtin::Login => "login",
+            Builtin::Subagents => "subagents",
         }
     }
 
@@ -75,6 +81,8 @@ impl Builtin {
             Builtin::Session => CommandOutcome::SessionPicker,
             // Enter step-by-step login: the actual Q&A and persistence are driven by `App`; the command layer only "initiates login".
             Builtin::Login => CommandOutcome::Login,
+            // Open the subagent picker: the list comes from the session's `SubagentManager`; the command layer only "opens this panel".
+            Builtin::Subagents => CommandOutcome::SubagentPicker,
         }
     }
 }
@@ -123,6 +131,7 @@ impl CommandManager {
                 Builtin::Rewind,
                 Builtin::Session,
                 Builtin::Login,
+                Builtin::Subagents,
             ],
         }
     }
