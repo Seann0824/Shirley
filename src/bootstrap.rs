@@ -24,16 +24,16 @@ use shirley_agent_sdk::{
 
 use crate::memory::{
     self, CurateOutcome, CuratorError, Embedder, EmbeddingConfig, MemoryContextProvider,
-    MemoryRuntime, MemoryStore, RecallTool,
+    MemoryRuntime, MemoryStore,
 };
 use crate::models::{self, ModelCatalog, ModelEntry};
 use crate::prompt;
 use crate::session::{self, SessionCatalog};
 use crate::settings::Settings;
 use crate::skills::{
-    self, ActivateSkillTool, ReadSkillFileTool, SkillCatalog, SkillContextProvider, SkillRuntime,
+    self, SkillCatalog, SkillContextProvider, SkillRuntime,
 };
-use crate::todo::{TodoContextProvider, TodoStore, TodoTool};
+use crate::todo::{TodoContextProvider, TodoStore};
 use crate::tools;
 
 /// Compression instruction: shared by all sessions (does not vary by session). The text lives in `prompts/compression_instruction.md`.
@@ -197,18 +197,18 @@ impl AgentFactory {
         // tool definitions are stable (prefix-cache friendly), and `on_register` hooks (e.g. web_search's
         // credential injection) each run once -- state is isolated per tool instance anyway, which is acceptable (decision 5).
         let mut tool_manager = assemble_tools();
-        let _ = tool_manager.register(TodoTool::new(todo_store.clone()));
+        let _ = tool_manager.register(tools::TodoTool::new(todo_store.clone()));
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
         // Memory writes go **through no** tool; they are done only by the background curator (`docs/memory.md` decision 3).
-        let _ = tool_manager.register(RecallTool::new(memory.clone()));
+        let _ = tool_manager.register(tools::RecallTool::new(memory.clone()));
 
         // Skill runtime (application-layer capability): the catalog is read-only and shared across sessions; the activated set is **created fresh per session**
         // (activation state is isolated per session). `activate_skill` writes, `SkillContextProvider` reads,
         // sharing the same `Arc`, exactly like the runtime dispatch of todo / memory.
         let skill_catalog = Arc::new(self.skill_catalog.clone());
         let skill_runtime = Arc::new(SkillRuntime::new(skill_catalog.clone()));
-        let _ = tool_manager.register(ActivateSkillTool::new(skill_runtime.clone()));
-        let _ = tool_manager.register(ReadSkillFileTool::new(skill_catalog));
+        let _ = tool_manager.register(tools::ActivateSkillTool::new(skill_runtime.clone()));
+        let _ = tool_manager.register(tools::ReadSkillFileTool::new(skill_catalog));
 
         // The SDK `Agent` accepts only a **single** `context_provider`, but here we need to inject several
         // (task ledger + memory + skills) -- use `CompositeContextProvider` to concatenate in order.

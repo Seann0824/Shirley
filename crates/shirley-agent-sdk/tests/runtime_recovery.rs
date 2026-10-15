@@ -569,13 +569,15 @@ async fn endless_tool_calls_stop_at_budget_with_complete_tool_results_and_can_re
 }
 
 #[test]
-fn rejects_zero_execution_budget() {
+fn zero_execution_budget_means_unlimited() {
+    // `max_steps == 0` is the documented "no cap" sentinel: it must build successfully
+    // (the loop then only ends when the model stops requesting tools).
     assert!(
         Agent::builder()
             .model_config(config("http://127.0.0.1:1", false))
             .max_steps(0)
             .build()
-            .is_err()
+            .is_ok()
     );
 }
 

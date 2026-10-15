@@ -27,12 +27,10 @@ pub mod discovery;
 pub mod parse;
 pub mod provider;
 pub mod runtime;
-pub mod tool;
 
 pub use catalog::SkillCatalog;
 pub use provider::SkillContextProvider;
 pub use runtime::SkillRuntime;
-pub use tool::{ActivateSkillTool, ReadSkillFileTool};
 
 // Public surface of discovery / parsing (used by the existing P0 wiring and tests).
 #[allow(unused_imports)]

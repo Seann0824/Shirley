@@ -62,7 +62,8 @@ pub struct FileSettings {
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeSettings {
-    /// The model call limit per user task. Default 64; must be greater than 0.
+    /// The model call limit per user task. Default 64. `0` means **no cap**
+    /// (unlimited); the loop only ends when the model stops requesting tools.
     pub max_steps: Option<usize>,
 }
 
@@ -268,6 +269,7 @@ pub struct Settings {
     pub compression: CompressionSettings,
     /// Memory system config (curator model / periodic consolidation threshold).
     pub memory: MemorySettings,
+    /// Model call limit per user task. `0` = unlimited (see [`RuntimeSettings::max_steps`]).
     pub max_steps: usize,
 }
 
@@ -327,11 +329,7 @@ impl Settings {
             .and_then(|s| s.runtime.max_steps)
             .or_else(|| global.as_ref().and_then(|s| s.runtime.max_steps))
             .unwrap_or(64);
-        if max_steps == 0 {
-            return Err(SettingsError::Invalid(
-                "runtime.max_steps must be greater than 0".into(),
-            ));
-        }
+        // `max_steps == 0` is allowed and means "no execution cap" (see `RuntimeSettings`).
         Self::finalize(merged, compression, memory, max_steps)
     }
 
@@ -569,7 +567,7 @@ mod tests {
     }
 
     #[test]
-    fn runtime_limit_inherits_global_overrides_per_workspace_and_rejects_zero() {
+    fn runtime_limit_inherits_global_overrides_per_workspace_and_allows_zero_as_unlimited() {
         let root = temp_root("runtime_budget");
         let global = root.join("global.toml");
         std::fs::write(&global, "[runtime]\nmax_steps = 128\n").unwrap();
@@ -593,11 +591,14 @@ mod tests {
                 .max_steps,
             12
         );
+        // `0` is the documented "unlimited" sentinel and must be accepted (not an error).
         std::fs::write(ws.join("config.toml"), "[runtime]\nmax_steps = 0\n").unwrap();
-        assert!(matches!(
-            Settings::load(&root, Some(&global), &env_of(&[])),
-            Err(SettingsError::Invalid(_))
-        ));
+        assert_eq!(
+            Settings::load(&root, Some(&global), &env_of(&[]))
+                .unwrap()
+                .max_steps,
+            0
+        );
         std::fs::remove_dir_all(root).unwrap();
     }
 

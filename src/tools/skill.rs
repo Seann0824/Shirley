@@ -15,8 +15,8 @@ use std::sync::Arc;
 
 use shirley_agent_sdk::{Tool, ToolContext, ToolDefinition, ToolError, ToolFuture};
 
-use super::catalog::SkillCatalog;
-use super::runtime::{ActivateError, SkillRuntime};
+use crate::skills::catalog::SkillCatalog;
+use crate::skills::runtime::{ActivateError, SkillRuntime};
 use crate::tools::read::read_text_range;
 
 /// `activate_skill(name)`: read a skill's body (stripping frontmatter) and mark it activated.

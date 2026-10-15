@@ -52,7 +52,8 @@ pub struct Agent {
     // L1 estimation + L2 calibration state (see the `token` module)
     token_counter: token::HeuristicCounter,
     /// Upper bound on model execution steps for a single user task (compaction does not reset
-    /// this counter).
+    /// this counter). `0` means **no cap** — the loop only ends when the model stops requesting
+    /// tools.
     max_steps: usize,
 }
 
@@ -70,11 +71,7 @@ impl Agent {
         context_provider: Option<Arc<dyn ContextProvider>>,
         #[builder(default = 64)] max_steps: usize,
     ) -> Result<Self, AgentError> {
-        if max_steps == 0 {
-            return Err(AgentError::Other(
-                "max_steps must be greater than zero".into(),
-            ));
-        }
+        // `max_steps == 0` is allowed and means "no execution cap" (see the field docs).
         // Resolve once at construction against the working directory and prepend the System
         // message (an empty prompt is not prepended). Restored history contains no system, so it
         // is generated here — the same rule as a compaction rebuild.
@@ -352,7 +349,7 @@ impl Agent {
             let mut recoveries = 0usize;
             let mut resuming = false;
             loop {
-                if steps >= self.max_steps {
+                if self.max_steps != 0 && steps >= self.max_steps {
                     let notice = message::Message::Assistant {
                         content: Some(format!("Reached the execution limit for this turn ({} model calls); the task is not yet complete. The current conversation and tool results have been kept; review the existing conclusions and decide whether to continue.", self.max_steps)),
                         reasoning_content: None,

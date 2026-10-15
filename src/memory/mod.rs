@@ -14,11 +14,10 @@
 
 mod curator;
 mod embed;
-mod format;
-mod index;
-mod provider;
-mod store;
-mod tool;
+pub(crate) mod format;
+pub(crate) mod index;
+pub(crate) mod provider;
+pub(crate) mod store;
 mod vector;
 
 // Re-export only the types actually consumed **outside** the module (keep the facade small):
@@ -32,4 +31,3 @@ pub use curator::{ConsolidateOutcome, CurateOutcome, CuratorError, consolidate, 
 pub use embed::{Embedder, EmbeddingConfig};
 pub use provider::{MemoryContextProvider, MemoryRuntime};
 pub use store::MemoryStore;
-pub use tool::RecallTool;

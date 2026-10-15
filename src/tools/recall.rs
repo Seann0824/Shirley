@@ -1,20 +1,23 @@
-//! The `recall` tool: gives the main Agent a read-only entry point to **actively query memory** (`docs/memory.md` 4.4).
+//! The `recall` tool: gives the main Agent a read-only entry point to **actively query memory**
+//! (`docs/memory.md` 4.4).
 //!
-//! Why it is needed: memory is normally injected automatically by the runtime (`core.md` + entries relevant to a query),
-//! but injection is **passive** -- the model cannot actively ask "what else do I remember about X". Without this entry point, the model
-//! would fall back to `bash` to rummage through the memory directory, even read the source to learn the format, and finally write to disk itself (this really happened). Give it a
-//! proper read-only tool and that motivation disappears.
+//! Memory is normally injected automatically by [`MemoryContextProvider`](crate::memory::MemoryContextProvider)
+//! (`core.md` + entries relevant to a query), but that injection is **passive** -- the model
+//! cannot actively ask "what else do I remember about X". Without this entry point the model
+//! would fall back to `bash` to rummage through the memory directory, even read the source to
+//! learn the format, and finally write to disk itself (this really happened). A proper read-only
+//! tool removes that motivation.
 //!
-//! **Read-only**: the tool provides no write path whatsoever; memory writes are done only by the background curator (`docs/memory.md`
-//! decision 3). Returns the **full text** of matching entries (with `id` / type / status / date / subject), so the model can directly
-//! cite them without reading files again.
+//! **Read-only**: no write path whatsoever; memory writes are done only by the background curator
+//! (`docs/memory.md` decision 3). Returns the **full text** of matching entries (with
+//! `id` / type / status / date / subject), so the model can cite them without re-reading files.
 
 use std::sync::Arc;
 
 use shirley_agent_sdk::{Tool, ToolContext, ToolDefinition, ToolError, ToolFuture};
 
-use super::format::MemoryError;
-use super::provider::{status_label, type_label, MemoryRuntime};
+use crate::memory::index::Scored;
+use crate::memory::provider::{status_label, type_label, MemoryRuntime};
 
 /// Default number of results.
 const DEFAULT_LIMIT: usize = 5;
@@ -97,7 +100,7 @@ struct RecallArgs {
 }
 
 /// Render the hits as plain text (the model can read it directly). An empty result gives an explicit message rather than an empty string.
-fn render_hits(query: &str, hits: &[super::index::Scored]) -> String {
+fn render_hits(query: &str, hits: &[Scored]) -> String {
     if hits.is_empty() {
         return format!("No memories matched \"{query}\".");
     }
@@ -120,12 +123,6 @@ fn render_hits(query: &str, hits: &[super::index::Scored]) -> String {
         out.push('\n');
     }
     out
-}
-
-/// For tests: convert a `MemoryError` into a tool error (preserving the classification).
-#[allow(dead_code)]
-fn memory_error(error: MemoryError) -> ToolError {
-    ToolError::ExecutionError(error.to_string())
 }
 
 #[cfg(test)]
