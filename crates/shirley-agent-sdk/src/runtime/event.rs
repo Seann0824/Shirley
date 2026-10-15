@@ -27,6 +27,7 @@ pub enum StopReason {
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
+    Retrying { attempt: usize, reason: String },
     ContentDelta(String),
     ReasoningDelta(String),
     MessageAdded(message::Message),
@@ -60,6 +61,7 @@ pub enum AgentEvent {
 impl fmt::Display for AgentEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            Self::Retrying { attempt, reason } => write!(f, "Retrying model request ({attempt}): {reason}"),
             Self::ContentDelta(text) | Self::ReasoningDelta(text) => write!(f, "{text}"),
             Self::MessageAdded(message) => write!(f, "{message}"),
             Self::CompressionStarted => write!(f, "compacting context"),

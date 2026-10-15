@@ -35,6 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut stream = agent.run_stream("Count from 1 to 5, one number per line.");
     while let Some(event) = stream.next().await {
         match event? {
+            AgentEvent::Retrying { attempt, reason } => eprintln!("[retry {attempt}] {reason}"),
             AgentEvent::ReasoningDelta(text) => print!("[reasoning] {text}"),
             AgentEvent::ContentDelta(text) => print!("{text}"),
             AgentEvent::ToolStarted { name, arguments, .. } => {

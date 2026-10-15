@@ -204,6 +204,7 @@ impl Session {
             Ok(AgentEvent::ContentDelta(delta)) => self.append_streaming_delta(delta),
             // Thinking (reasoning) is not displayed: digested internally, the user only cares about behavior and results.
             Ok(AgentEvent::ReasoningDelta(_)) => {}
+            Ok(AgentEvent::Retrying { .. }) => {}
             Ok(AgentEvent::Usage(usage)) => self.record_usage(usage),
             Ok(AgentEvent::CompressionStarted) => self.start_compression(),
             Ok(AgentEvent::CompressionFinished) => self.finish_compression(),

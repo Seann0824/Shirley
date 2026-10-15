@@ -8,6 +8,7 @@ use crate::adapter::ModelRequest;
 use crate::message;
 use crate::token;
 use crate::tool;
+use crate::SdkError;
 use futures::StreamExt;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -15,6 +16,7 @@ use std::sync::Arc;
 
 pub struct Agent {
     model_config: adapter::ModelConfig,
+    client: reqwest::Client,
     /// The system prompt is held separately: on a compaction rebuild it is not copied from the
     /// old messages, but regenerated and prepended each time.
     ///
@@ -85,6 +87,10 @@ impl Agent {
 
         Ok(Self {
             model_config,
+            client: reqwest::Client::builder()
+                .connect_timeout(std::time::Duration::from_secs(15))
+                .build()
+                .map_err(adapter::AdapterError::Transport)?,
             system_prompt,
             working_dir,
             messages,
@@ -278,7 +284,7 @@ impl Agent {
     /// model returned only reasoning (`reasoning_content`), it falls back to that; both empty
     /// returns an empty string.
     pub async fn complete(&self, prompt: &str) -> Result<String, AgentError> {
-        let client = reqwest::Client::new();
+        let client = self.client.clone();
         // Clone the config and turn off streaming / reasoning: borrow only the model name and
         // endpoint, without touching `self`'s config.
         let mut config = self.model_config.clone();
@@ -322,7 +328,7 @@ impl Agent {
     ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + Send + 'a>> {
         self.pending_user = Some(task.to_owned());
         Box::pin(async_stream::try_stream! {
-            let client = reqwest::Client::new();
+            let client = self.client.clone();
             let mut total_usage = message::Usage::default();
             if self.compression_pending {
                 yield AgentEvent::CompressionStarted;
@@ -343,6 +349,8 @@ impl Agent {
             yield AgentEvent::MessageAdded(user_message);
 
             let mut steps = 0usize;
+            let mut recoveries = 0usize;
+            let mut resuming = false;
             loop {
                 if steps >= self.max_steps {
                     let notice = message::Message::Assistant {
@@ -378,7 +386,12 @@ impl Agent {
                     // compaction product, remain is this turn's conversation and tool chain.
                     start_index = start_index.min(self.messages.len());
                 }
-                let active_messages = self.active_messages();
+                let mut active_messages = self.active_messages();
+                if resuming {
+                    active_messages.push(message::Message::System {
+                        content: include_str!("../../prompts/stream_recovery.md").trim().to_owned(),
+                    });
+                }
                 let tools = self.tools.definitions();
                 let estimated = token::count_messages(&active_messages) + token::count_tools(&tools);
                 let model_request = ModelRequest {
@@ -387,12 +400,20 @@ impl Agent {
                     session_id: self.request_session_id.as_deref(),
                 };
                 let mut is_finished = false;
+                let mut interrupted = None;
                 let mut stream = adapter::invoke(&client, &self.model_config, model_request).await;
                 while let Some(adapter_event) = stream.next().await {
-                    let adapter_event = adapter_event.map_err(AgentError::Adapter)?;
+                    let adapter_event = match adapter_event {
+                        Ok(event) => event,
+                        Err(error) => { interrupted = Some(error); break; }
+                    };
 
                     match adapter_event {
+                        adapter::AdapterEvent::Retrying { attempt, reason } => {
+                            yield AgentEvent::Retrying { attempt, reason };
+                        }
                         adapter::AdapterEvent::Finished(response) => {
+                            resuming = false;
                             self.token_counter.calibrate(response.usage.input_tokens, estimated);
                             self.pending_content.clear();
                             self.pending_reasoning.clear();
@@ -493,6 +514,24 @@ impl Agent {
                             yield AgentEvent::ContentDelta(delta);
                         }
                     }
+                }
+                drop(stream);
+                if let Some(error) = interrupted {
+                    // No tools from an incomplete response have been dispatched. Commit only
+                    // visible text, keep completed tool results, and ask for a continuation.
+                    // Never replay a tool group or resend the original user task.
+                    let has_partial = !self.pending_content.is_empty() || !self.pending_reasoning.is_empty();
+                    if error.is_retryable() && has_partial && recoveries < 2 {
+                        recoveries += 1;
+                        for message in self.finish_interrupted_turn() {
+                            yield AgentEvent::MessageAdded(message);
+                        }
+                        yield AgentEvent::Retrying { attempt: recoveries, reason: error.to_string() };
+                        resuming = true;
+                        tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        continue;
+                    }
+                    Err(AgentError::Adapter(error))?;
                 }
                 if is_finished {
                     break;
@@ -749,7 +788,8 @@ impl Agent {
                     return Ok((usage, Some(summary_message)));
                 }
                 adapter::AdapterEvent::ReasoningDelta(_)
-                | adapter::AdapterEvent::ContentDelta(_) => {}
+                | adapter::AdapterEvent::ContentDelta(_)
+                | adapter::AdapterEvent::Retrying { .. } => {}
             }
         }
 

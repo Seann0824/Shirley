@@ -42,6 +42,7 @@ export type UsageWire = {
 type SessionTag = { project: string | null; session: string | null };
 
 export type AgentEventWire =
+  | ({ type: "retrying"; attempt: number; reason: string } & SessionTag)
   | ({ type: "content_delta"; text: string } & SessionTag)
   | ({ type: "message_added"; role: "user" | "assistant" | "tool" } & SessionTag)
   | ({ type: "compact"; content: string } & SessionTag)

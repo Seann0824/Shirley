@@ -314,7 +314,7 @@ pub fn decode_stream_response(
         let mut tool_calls = BTreeMap::new();
         let mut usage = message::Usage::default();
         let mut finish_reason = None;
-        while let Some(chunk) = byte_stream.next().await {
+        'read: while let Some(chunk) = byte_stream.next().await {
             // A read interruption must not be unwrapped: it's a network error and should go
             // through the Transport classification so the upper layer decides on retry.
             let chunk = chunk.map_err(AdapterError::Transport)?;
@@ -338,7 +338,8 @@ pub fn decode_stream_response(
                 }
                 // Why would this appear
                 let payload = data.trim();
-                if payload.is_empty() || payload == "[DONE]" {
+                if payload == "[DONE]" { break 'read; }
+                if payload.is_empty() {
                     continue;
                 }
                 let value = serde_json::from_str::<dto::ModelStreamResponse>(data.trim()).map_err(|e| AdapterError::Decode(format!("failed to deserialize SSE payload: {e}")))?;

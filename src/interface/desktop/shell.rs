@@ -30,7 +30,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use futures::StreamExt;
+use futures::{FutureExt, StreamExt};
+use std::panic::AssertUnwindSafe;
 use serde::Serialize;
 use shirley_agent_sdk::{Agent, AgentEvent, Message, RunResult, StopReason};
 use tauri::{AppHandle, Emitter, State};
@@ -485,103 +486,82 @@ async fn agent_send(
     let cancels = state.cancels.clone();
 
     tauri::async_runtime::spawn(async move {
-        let mut cancel_rx = cancel_rx;
-        let cancelled_before_start = if let Some(memory) = memory.as_ref() {
-            tokio::select! {
-                biased;
-                _ = &mut cancel_rx => true,
-                _ = memory.prefetch_query_vector() => false,
-            }
-        } else {
-            false
-        };
-
-        // Drive this turn: `tokio::select!` races "next stream event" against "cancel
-        // signal". After the cancel branch `break`s, `stream` is dropped — the SDK's
-        // `run_stream` is an async-stream-generated stream, so **drop means stop** (same
-        // trick as the TUI's `run_agent`). Without this path the background would run the
-        // ReAct loop to completion (clicking stop only changed the frontend `busy` and
-        // never actually interrupted).
-        let mut terminal_update = None;
-        let mut cancelled = {
+        // Catch unwinding while the Agent remains owned by this supervisor. A tool panic
+        // must not drop the Agent and leave the session permanently marked as running.
+        let terminal_update = guard_turn(async {
+            let mut cancel_rx = cancel_rx;
+            // Record pending input even if cancellation happens during memory prefetch.
             let mut stream = agent.run_stream(&prompt);
-            let mut cancelled = cancelled_before_start;
-            while !cancelled {
+            if let Some(memory) = memory.as_ref() {
                 tokio::select! {
                     biased;
-                    // `&mut` borrow: `select!` polls it every iteration; moving by value
-                    // would trigger `use of moved value` on the second round
-                    // (oneshot::Receiver is not Copy).
-                    _ = &mut cancel_rx => {
-                        cancelled = true;
-                        break;
-                    }
+                    _ = &mut cancel_rx => return Ok(cancelled_event()),
+                    _ = memory.prefetch_query_vector() => {},
+                }
+            }
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut cancel_rx => return Ok(cancelled_event()),
                     event = stream.next() => {
-                        let Some(event) = event else { break };
-                        let update = match event {
-                            Ok(event) => Ok(event),
-                            Err(error) => Err(error.to_string()),
-                        };
-                        if matches!(&update, Ok(AgentEvent::Finished(_)) | Err(_)) {
-                            terminal_update = Some(update);
-                            break;
+                        let event = event.ok_or_else(|| "Agent stream ended unexpectedly; conversation preserved.".to_owned())?
+                            .map_err(|error| error.to_string())?;
+                        if matches!(&event, AgentEvent::Finished(_)) {
+                            return Ok(event);
                         }
-                        runtime_for_task
-                            .lock()
-                            .await
-                            .sessions
-                            .apply_event(&session_name, update);
+                        runtime_for_task.lock().await.sessions.apply_event(&session_name, Ok(event));
                     }
                 }
             }
-            cancelled
-        };
+        }).await;
 
-        // Stream dropped: commit the half-finished assistant reply into the Agent and the log for the next turn to reference.
-        for message in agent.finish_interrupted_turn() {
-            runtime_for_task
-                .lock()
-                .await
-                .sessions
-                .apply_event(&session_name, Ok(AgentEvent::MessageAdded(message)));
-        }
-        if !cancelled && matches!(&terminal_update, Some(Ok(AgentEvent::Finished(_)))) {
-            // Title generation also counts as part of this turn's wait and can be cancelled by the stop signal.
-            cancelled = tokio::select! {
-                biased;
-                _ = &mut cancel_rx => true,
-                _ = auto_title_session(&agent, &catalog, &session_name) => false,
-            };
-        }
-        if cancelled {
-            // Requirement 2: interruption **keeps** this turn's messages (user message +
-            // half-finished streaming reply) for the next turn to reference, instead of
-            // rolling back and deleting them — matching the TUI `App::complete_turn`
-            // interruption semantics. So we do **not** truncate the agent / trim the log
-            // here. We still finish with `Finished(Cancelled)`: it lets the frontend mark
-            // this turn's assistant as complete, clear `busy`, and lets subscribers know
-            // the turn really ended.
-            terminal_update = Some(Ok(AgentEvent::Finished(RunResult {
-                messages: Vec::new(),
-                stop_reason: StopReason::Cancelled,
-                usage: Default::default(),
-            })));
-        }
-
-        // A terminal event means the next turn can start immediately, so return the Agent first, then unblock the frontend.
+        // The stream is gone. Preserve partial text and close orphan tool calls on all
+        // terminal paths, including a panic, before accepting the next user message.
+        let title_input = matches!(&terminal_update, Ok(AgentEvent::Finished(result))
+            if matches!(result.stop_reason, StopReason::Completed))
+            .then(|| first_user_message(agent.messages()))
+            .flatten()
+            .map(|first| (agent.model_config().clone(), first));
+        let messages = agent.finish_interrupted_turn();
         cancels.lock().await.remove(&key);
-        let mut runtime = runtime_for_task.lock().await;
-        runtime.sessions.restore_agent(&session_name, agent);
-        if let Some(update) = terminal_update {
-            runtime.sessions.apply_event(&session_name, update);
+        {
+            let mut runtime = runtime_for_task.lock().await;
+            for message in messages {
+                runtime.sessions.apply_event(&session_name, Ok(AgentEvent::MessageAdded(message)));
+            }
+            runtime.sessions.restore_agent(&session_name, agent);
+            runtime.sessions.apply_event(&session_name, terminal_update);
+        }
+        // Naming is ancillary: it must never keep an already-finished task loading.
+        if let Some((config, first)) = title_input {
+            let _ = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                auto_title_session(config, first, &catalog, &session_name),
+            ).await;
         }
     });
 
     Ok(())
 }
 
+fn cancelled_event() -> AgentEvent {
+    AgentEvent::Finished(RunResult {
+        messages: Vec::new(),
+        stop_reason: StopReason::Cancelled,
+        usage: Default::default(),
+    })
+}
+
+async fn guard_turn(
+    future: impl std::future::Future<Output = Result<AgentEvent, String>>,
+) -> Result<AgentEvent, String> {
+    AssertUnwindSafe(future).catch_unwind().await.unwrap_or_else(|_| {
+        Err("Task crashed; conversation preserved. Check any interrupted tool's effects before continuing.".to_owned())
+    })
+}
+
 /// Auto-generate a session title after the first turn; the web model just truncates the first message.
-async fn auto_title_session(agent: &Agent, catalog: &Arc<dyn SessionCatalog>, name: &str) {
+async fn auto_title_session(config: shirley_agent_sdk::ModelConfig, first: String, catalog: &Arc<dyn SessionCatalog>, name: &str) {
     let probe_catalog = catalog.clone();
     let probe_name = name.to_owned();
     let already_named = tauri::async_runtime::spawn_blocking(move || {
@@ -598,15 +578,13 @@ async fn auto_title_session(agent: &Agent, catalog: &Arc<dyn SessionCatalog>, na
         return;
     }
 
-    let Some(first) = first_user_message(agent.messages()) else {
-        return;
-    };
     // A one-shot completion for the web model creates a separate conversation on the
     // DeepSeek side. Taking the title from the first message avoids a single Shirley
     // utterance producing a second session on the web side.
-    let raw = if agent.model_config().model == "deepseek-web" {
+    let raw = if config.model == "deepseek-web" {
         first.chars().take(20).collect::<String>()
     } else {
+        let Ok(agent) = Agent::builder().model_config(config).build() else { return; };
         let Ok(raw) = agent.complete(&title_prompt(&first)).await else {
             return;
         };
@@ -1152,6 +1130,32 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
 mod tests {
     use super::*;
     use crate::session::FileSessionCatalog;
+
+    #[tokio::test]
+    async fn task_panic_keeps_the_agent_and_user_input_available() {
+        struct PanickingContext;
+        impl shirley_agent_sdk::ContextProvider for PanickingContext {
+            fn context(&self) -> Option<String> { panic!("injected task panic") }
+        }
+        let mut agent = Agent::builder()
+            .model_config(shirley_agent_sdk::ModelConfig::builder()
+                .protocol(shirley_agent_sdk::ModelProtocol::ChatCompletions)
+                .base_url("http://127.0.0.1:1")
+                .model("fixture").build())
+            .context_provider(Arc::new(PanickingContext) as Arc<dyn shirley_agent_sdk::ContextProvider>)
+            .build().unwrap();
+        let result = guard_turn(async {
+            let mut stream = agent.run_stream("keep this input");
+            while let Some(event) = stream.next().await {
+                event.map_err(|error| error.to_string())?;
+            }
+            Ok(cancelled_event())
+        }).await;
+        assert!(result.unwrap_err().contains("Task crashed"));
+        agent.finish_interrupted_turn();
+        assert!(matches!(agent.messages(), [Message::User { content }] if content == "keep this input"));
+        assert!(agent.finish_interrupted_turn().is_empty());
+    }
 
     fn tmp_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("shirley_shell_{tag}_{}", std::process::id()))

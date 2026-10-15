@@ -31,6 +31,10 @@ pub struct ModelConfig {
     pub api_key: Option<String>,
     #[builder(default)]
     pub stream: bool,
+    /// Maximum silence while waiting for the next decoded event, including headers and
+    /// non-streaming bodies. Healthy long streams reset this deadline on every event.
+    #[builder(default = std::time::Duration::from_secs(180))]
+    pub request_timeout: std::time::Duration,
     #[builder(default)]
     pub thinking: bool,
     #[builder(into)]
@@ -66,6 +70,7 @@ pub struct ModelConfig {
 
 #[derive(Debug)]
 pub enum AdapterEvent {
+    Retrying { attempt: usize, reason: String },
     ReasoningDelta(String),
     ContentDelta(String),
     Finished(ModelResponse),
@@ -82,6 +87,10 @@ pub enum AdapterEvent {
 /// `WorkspaceError`; the prefix stays next to the variant and is not derived from [`ErrorKind`].
 #[derive(Debug, thiserror::Error)]
 pub enum AdapterError {
+    #[error("[transport failure]: model made no progress for {0:?}")]
+    Timeout(std::time::Duration),
+    #[error("[transport failure]: model stream ended without a completion event")]
+    IncompleteStream,
     /// Network-layer failure: cannot connect, connection reset, response body read interrupted, etc.
     #[error("[transport failure]: {0}")]
     Transport(#[source] reqwest::Error),
@@ -107,7 +116,7 @@ impl SdkError for AdapterError {
     fn kind(&self) -> ErrorKind {
         match self {
             // Network layer: transient, retryable.
-            Self::Transport(_) => ErrorKind::Transport,
+            Self::Transport(_) | Self::Timeout(_) | Self::IncompleteStream => ErrorKind::Transport,
             // The status code decides the semantics: 429 rate limit, 5xx server, the rest are bad requests.
             Self::Http { status, .. } => match status {
                 429 => ErrorKind::RateLimited,
@@ -281,9 +290,14 @@ fn invoke_prepared<'a>(
         let response = ensure_success(response).await?;
         if streaming {
             let mut stream = decode_stream(response);
+            let mut finished = false;
             while let Some(event) = stream.next().await {
-                yield event?;
+                let event = event?;
+                finished = matches!(&event, AdapterEvent::Finished(_));
+                yield event;
+                if finished { break; }
             }
+            if !finished { Err(AdapterError::IncompleteStream)?; }
         } else {
             let text = response.text().await.map_err(AdapterError::Transport)?;
             let body = serde_json::from_str(&text)
@@ -341,12 +355,14 @@ pub async fn invoke<'a>(
             // blocks suppressed). A protocol with no stream parser swallows everything by default
             // (nothing leaks); the final state is still given by Finished.
             let mut stream_parser = protocol.as_deref().map(|protocol| protocol.stream_parser());
-            while let Some(event) = stream.next().await {
+            while let Some(event) = tokio::time::timeout(config.request_timeout, stream.next())
+                .await.unwrap_or_else(|_| Some(Err(AdapterError::Timeout(config.request_timeout)))) {
                 let event = match event {
                     Ok(event) => event,
                     Err(error) if !emitted && retries < MAX_RETRIES && error.is_retryable() => {
                         let backoff = (BASE_BACKOFF_MS << retries).min(MAX_BACKOFF_MS);
                         retries += 1;
+                        yield AdapterEvent::Retrying { attempt: retries, reason: error.to_string() };
                         tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
                         continue 'attempt;
                     }
@@ -359,6 +375,9 @@ pub async fn invoke<'a>(
                     continue;
                 };
                 match event {
+                    AdapterEvent::Retrying { attempt, reason } => {
+                        yield AdapterEvent::Retrying { attempt, reason };
+                    }
                     AdapterEvent::ContentDelta(text) => {
                         for chunk in parser.push(&text) {
                             emitted = true;

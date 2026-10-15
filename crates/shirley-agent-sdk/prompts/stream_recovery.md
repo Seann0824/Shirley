@@ -1,0 +1,1 @@
+The previous model response was interrupted by a connection failure. Continue the current task from the preserved conversation and tool results. Do not repeat text already provided. Completed tools have already run: use their saved results instead of repeating their side effects. Any tool-call fragments from the interrupted response were discarded and were not executed.

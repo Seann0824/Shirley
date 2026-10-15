@@ -47,6 +47,12 @@ fn error_kind_str(kind: ErrorKind) -> String {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEventWire {
+    Retrying {
+        project: Option<String>,
+        session: Option<String>,
+        attempt: usize,
+        reason: String,
+    },
     ContentDelta {
         project: Option<String>,
         session: Option<String>,
@@ -189,6 +195,9 @@ impl AgentEventWire {
     /// format or reach the frontend. Returning `Option` lets the caller drop it.
     pub fn from_event(event: AgentEvent) -> Option<Self> {
         let wire = match event {
+            AgentEvent::Retrying { attempt, reason } => Self::Retrying {
+                project: None, session: None, attempt, reason,
+            },
             // Reasoning does not reach the UI: swallow it (the SDK still emits the event for internal observation).
             AgentEvent::ReasoningDelta(_) => return None,
             AgentEvent::ContentDelta(text) => Self::ContentDelta {
@@ -279,6 +288,7 @@ impl AgentEventWire {
     /// the backend pump's `project::session` key).
     pub fn with_route(mut self, project: &str, session: &str) -> Self {
         let (project_slot, session_slot) = match &mut self {
+            Self::Retrying { project, session, .. } |
             Self::ContentDelta {
                 project, session, ..
             }

@@ -110,6 +110,7 @@ type SessionView = {
   messages: AiTranscriptMessage[];
   turnSegments: Record<string, AiSegment[]>;
   busy: boolean;
+  retryStatus: string | null;
   error: string;
   /** History snapshot not yet arrived: render optimistically, showing a skeleton. */
   loading: boolean;
@@ -130,6 +131,7 @@ function emptyView(): SessionView {
     messages: [],
     turnSegments: {},
     busy: false,
+    retryStatus: null,
     error: "",
     loading: false,
     todo: null,
@@ -163,7 +165,9 @@ function removeLocations(history: NavigationHistory, remove: (entry: SessionLoca
 function SessionStatusLine({
   compressing,
   contextUsage,
+  retryStatus,
 }: {
+  retryStatus: string | null;
   compressing: boolean;
   contextUsage: { used: number; limit: number } | null;
 }) {
@@ -171,9 +175,10 @@ function SessionStatusLine({
     contextUsage && contextUsage.limit > 0
       ? Math.round((contextUsage.used / contextUsage.limit) * 100)
       : null;
-  if (!compressing && percent === null) return null;
+  if (!compressing && percent === null && !retryStatus) return null;
   return (
     <div className="mx-3 mb-1 flex items-center gap-2 text-caption text-muted">
+      {retryStatus && <span role="status">{retryStatus}</span>}
       {compressing && (
         <span className="inline-flex items-center gap-1.5">
           <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
@@ -360,6 +365,7 @@ export function App() {
               } : segment),
             ])),
             busy: false,
+            retryStatus: null,
             compressing: false,
             error: "",
           },
@@ -807,6 +813,7 @@ export function App() {
             ],
             turnSegments: { ...view.turnSegments, [assistantId]: [] },
             busy: true,
+            retryStatus: null,
             error: "",
           },
         };
@@ -1151,6 +1158,7 @@ export function App() {
             {view.todo && <TaskCard task={view.todo} />}
             {/* Runtime status line: compressing / context usage. Gives the "process" visible feedback instead of a silent UI. */}
             <SessionStatusLine
+              retryStatus={view.retryStatus}
               compressing={view.compressing}
               contextUsage={view.contextUsage}
             />
@@ -1189,7 +1197,10 @@ function applyWireEvent(
   event: AgentEventWire,
   assistantId: string | null,
 ): SessionView {
+  if (event.type !== "retrying") view = { ...view, retryStatus: null };
   switch (event.type) {
+    case "retrying":
+      return { ...view, retryStatus: `Connection interrupted · retrying (${event.attempt})` };
     case "compact": {
       if (!assistantId) return view;
       return {
@@ -1266,6 +1277,15 @@ function applyWireEvent(
       return {
         ...view,
         error: event.message,
+        turnSegments: Object.fromEntries(Object.entries(view.turnSegments).map(([id, segments]) => [
+          id,
+          segments.map((segment) => segment.kind === "tools" ? {
+            ...segment,
+            executions: segment.executions.map((execution) => execution.status === "running" ? {
+              ...execution, status: "error" as const, error: "Task ended; execution status needs confirmation",
+            } : execution),
+          } : segment),
+        ])),
         busy: false,
         compressing: false,
         messages: view.messages.map((message) =>
@@ -1448,6 +1468,7 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
       messages,
       turnSegments,
       busy: snapshot.running,
+      retryStatus: null,
       error: "",
       loading: false,
       todo: snapshot.todo,
