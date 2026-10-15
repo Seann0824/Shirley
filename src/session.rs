@@ -17,7 +17,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use shirley_agent_sdk::{Agent, Message};
+use shirley_agent_sdk::Message;
 
 /// Storage abstraction for session logs.
 ///
@@ -623,58 +623,6 @@ pub fn sanitize_title(raw: &str) -> Option<String> {
         return None;
     }
     Some(truncate_chars(&collapsed, AUTO_TITLE_MAX_CHARS))
-}
-
-/// Generate a session title from the first user instruction and persist it as the `<name>.title` sidecar.
-///
-/// This is the **shared first-message naming entry** used by the TUI and the desktop interface: before a brand-new
-/// session's first instruction is handled, its title is derived from that instruction with a one-shot `agent.complete`
-/// call, so the session list shows a meaningful name as early as possible (instead of the raw timestamp name).
-///
-/// Best-effort by contract -- any failure (no first message, model error, empty result, catalog without title support)
-/// is a silent no-op; naming must never block or fail the user's actual instruction. A title already set by the user
-/// (label != name) is never overwritten.
-pub async fn generate_session_title(
-    agent: &Agent,
-    catalog: &Arc<dyn SessionCatalog>,
-    name: &str,
-    first_message: &str,
-) {
-    // Only the very first message names a session: if the Agent already carries a user message, do nothing.
-    if first_user_message(agent.messages()).is_some() {
-        return;
-    }
-    let first = truncate_chars(first_message, AUTO_TITLE_INPUT_CHARS);
-    // A one-shot completion creates a separate conversation on the DeepSeek web side; taking the title from the first
-    // message avoids a single Shirley utterance producing a second web-side session.
-    let raw = if agent.model_config().model == "deepseek-web" {
-        first.chars().take(20).collect::<String>()
-    } else {
-        match agent.complete(&title_prompt(&first)).await {
-            Ok(raw) => raw,
-            Err(_) => return,
-        }
-    };
-    let Some(title) = sanitize_title(&raw) else {
-        return;
-    };
-
-    // Catalog IO is synchronous (a directory scan + a small sidecar write): keep it off the async runtime.
-    let catalog = catalog.clone();
-    let name = name.to_owned();
-    let _ = tokio::task::spawn_blocking(move || {
-        // Never clobber a title the user set by hand (`label != name` means a custom title already exists).
-        let already_named = catalog
-            .list()
-            .ok()
-            .and_then(|entries| entries.into_iter().find(|entry| entry.name == name))
-            .map(|entry| entry.label != entry.name)
-            .unwrap_or(false);
-        if !already_named {
-            let _ = catalog.rename(&name, &title);
-        }
-    })
-    .await;
 }
 
 /// Auto-title input truncation (character count).

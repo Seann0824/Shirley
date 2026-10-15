@@ -8,7 +8,6 @@ use tokio::task::JoinHandle;
 use super::session::SessionManager;
 use super::{app::App, event::Event, event::EventHandler, ui, update};
 use crate::models::ModelCatalog;
-use crate::session::SessionCatalog;
 use std::sync::Arc;
 
 async fn run_agent(
@@ -17,8 +16,6 @@ async fn run_agent(
     updates: mpsc::UnboundedSender<Result<AgentEvent, String>>,
     mut cancel: tokio::sync::oneshot::Receiver<()>,
     memory: Option<Arc<crate::memory::MemoryRuntime>>,
-    catalog: Arc<dyn SessionCatalog>,
-    session_name: Option<String>,
 ) -> Agent {
     // Memory V2.5: use this turn's user input as the query, and **prefetch the query vector**
     // (embedding is async HTTP, while `ContextProvider::context()` is synchronous, so it can only
@@ -34,16 +31,6 @@ async fn run_agent(
     } else {
         false
     };
-    // First-message naming runs **before** the instruction is handled: a brand-new session derives its title from
-    // this first message, so the session list shows a meaningful name early. Best-effort (a no-op when the session
-    // is already named) and cancellable by the stop signal.
-    if !cancelled && let Some(name) = session_name.as_deref() {
-        cancelled = tokio::select! {
-            biased;
-            _ = &mut cancel => true,
-            _ = crate::session::generate_session_title(&agent, &catalog, name, &prompt) => false,
-        };
-    }
     let mut stream = agent.run_stream(&prompt);
     let mut failure = None;
     while !cancelled {
@@ -221,8 +208,6 @@ impl<'a> Tui<'a> {
                                 // see `run_agent`), so the provider can do relevance retrieval when assembling the request
                                 // and inject it (core.md resident + top-k relevant, V2.5 hybrid retrieval).
                                 let memory = self.app.memory.clone();
-                                let catalog = self.app.session_catalog();
-                                let session_name = self.app.current_session().map(str::to_owned);
                                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                                 self.cancel = Some(cancel_tx);
                                 response = Some(tokio::spawn(run_agent(
@@ -231,8 +216,6 @@ impl<'a> Tui<'a> {
                                     updates_tx.clone(),
                                     cancel_rx,
                                     memory,
-                                    catalog,
-                                    session_name,
                                 )));
                             }
                             // User requested interrupt: send a cancel signal to the running task (one-shot).
