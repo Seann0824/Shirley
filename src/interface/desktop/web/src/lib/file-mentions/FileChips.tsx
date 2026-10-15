@@ -4,7 +4,7 @@ import { cn } from "@/ui/utils";
 import { CHIP_TOKEN } from "./editor-dom";
 import type { FileReference, ReferenceKind } from "./types";
 
-/** chip 行首图标：目录 / 文件 / 技能（`/` 入口）。两类引用共用同一渲染。 */
+/** Chip leading icon: directory / file / skill (`/` entry). Both reference kinds share the same rendering. */
 function iconFor(kind: ReferenceKind) {
   if (kind === "dir") return Folder;
   if (kind === "skill") return Sparkles;
@@ -12,8 +12,10 @@ function iconFor(kind: ReferenceKind) {
 }
 
 /**
- * 单个引用 chip（`@` 文件/目录 与 `/` 技能共用）。`onRemove` 省略时为只读展示
- * （用于已发送的用户消息回显）；传入时为可删除（输入框内的引用仍由编辑区按退格整体删除）。
+ * A single reference chip (shared by `@` file/dir and `/` skill). When `onRemove` is
+ * omitted it is read-only (for echoing a sent user message); when provided it is
+ * removable (references inside the input box are still deleted as a whole with Backspace
+ * by the editor).
  */
 export function FileChip({
   reference,
@@ -45,7 +47,7 @@ export function FileChip({
       {onRemove && (
         <button
           type="button"
-          aria-label={`移除引用：${reference.name}`}
+          aria-label={`Remove reference: ${reference.name}`}
           onClick={() => onRemove(reference.path)}
           className={cn(
             "shrink-0 rounded-full p-0.5 text-muted transition-colors",
@@ -60,8 +62,9 @@ export function FileChip({
 }
 
 /**
- * 把「带占位符的正文」与 references 交错渲染成**内联混排**：chip 落在它在正文里的
- * 原始位置，而不是堆在顶部。第 N 个 `CHIP_TOKEN` ↔ `references[N]`。
+ * Interleaves "body text with placeholders" and references into an **inline mix**: the
+ * chip lands at its original position in the body text instead of being stacked on top.
+ * The Nth `CHIP_TOKEN` <-> `references[N]`.
  */
 export function InlineReferences({
   content,
@@ -86,8 +89,9 @@ export function InlineReferences({
   return <span className={cn("whitespace-pre-wrap", className)}>{nodes}</span>;
 }
 
-// lucide 图标路径（与上面的 <File/> / <Folder/> / <Sparkles/> 同源），供 contenteditable
-// 里直接构造 DOM 节点用（React 不接管编辑区内部，故手写 outerHTML）。
+// lucide icon paths (same source as <File/> / <Folder/> / <Sparkles/> above), for
+// directly constructing DOM nodes inside contenteditable (React does not manage the
+// editor interior, so outerHTML is written by hand).
 const FILE_ICON_PATHS = [
   "M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z",
   "M14 2v4a2 2 0 0 0 2 2h4",
@@ -95,7 +99,7 @@ const FILE_ICON_PATHS = [
 const FOLDER_ICON_PATHS = [
   "M20 20a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.93 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z",
 ];
-// lucide `sparkles`（0.487）的 path 集合，与 `SkillSlashPopover` 的行首图标一致。
+// The path set for lucide `sparkles` (0.487), matching the leading icon in `SkillSlashPopover`.
 const SKILL_ICON_PATHS = [
   "M9.937 15.5A2 2 0 0 0 8.5 14.063l-6.135-1.582a.5.5 0 0 1 0-.962L8.5 9.936A2 2 0 0 0 9.937 8.5l1.582-6.135a.5.5 0 0 1 .963 0L14.063 8.5A2 2 0 0 0 15.5 9.937l6.135 1.581a.5.5 0 0 1 0 .964L15.5 14.063a2 2 0 0 0-1.437 1.437l-1.582 6.135a.5.5 0 0 1-.963 0z",
   "M20 3v4",
@@ -119,8 +123,8 @@ function escapeHtml(value: string): string {
 }
 
 /**
- * 构造编辑区里的一个内联 chip 元素（`contenteditable=false`）。
- * 样式与 React 版 `FileChip` 对齐，保证输入框内与发送后回显一致。
+ * Builds an inline chip element inside the editor (`contenteditable=false`).
+ * Styling matches the React `FileChip` so the input box and the sent echo look the same.
  */
 export function createChipElement(reference: FileReference): HTMLElement {
   const span = document.createElement("span");

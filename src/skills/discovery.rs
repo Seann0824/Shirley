@@ -1,43 +1,43 @@
-//! skill 发现：扫描约定的目录位置，产出一份去重后的 [`SkillMeta`] 列表。
+//! skill discovery: scan the conventional directory locations, producing a deduplicated list of [`SkillMeta`].
 //!
-//! 发现位置（跨客户端约定，`docs/skills.md` 2.3）：
+//! Discovery locations (cross-client convention, `docs/skills.md` 2.3):
 //!
-//! | 层级 | 路径 | 优先级 |
+//! | Level | Path | Priority |
 //! | --- | --- | --- |
-//! | 项目级 | `<project>/.agents/skills/` | 高 |
-//! | 项目级（兼容） | `<project>/.claude/skills/` | 高 |
-//! | 用户级 | `~/.agents/skills/` | 低 |
-//! | 用户级（兼容） | `~/.claude/skills/` | 低 |
+//! | Project | `<project>/.agents/skills/` | high |
+//! | Project (compatible) | `<project>/.claude/skills/` | high |
+//! | User | `~/.agents/skills/` | low |
+//! | User (compatible) | `~/.claude/skills/` | low |
 //!
-//! **重名规则**：先扫到的赢（项目级天然先于用户级 → 项目覆盖用户）。同一根目录内
-//! 按目录名排序扫描，保证结果确定。
+//! **Duplicate-name rule**: first scanned wins (project level naturally precedes user level -> project overrides user). Within one root
+//! scan in directory-name order to keep the result deterministic.
 //!
-//! **容错**：`SKILL.md` 缺失 / 解析失败（缺 `description` 等）→ 跳过该 skill 并
-//! 记一条 warn，绝不让一个坏 skill 拖垮整个目录（对齐官方客户端指南第 2 步）。
+//! **Leniency**: missing `SKILL.md` / parse failure (missing `description`, etc.) -> skip that skill and
+//! log a warn; never let one bad skill bring down the whole directory (aligned with step 2 of the official client guide).
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::parse::{parse_skill, SkillMeta};
 
-/// 相对项目根的 skill 目录（按优先级排列，先扫的赢）。
+/// skill directories relative to the project root (in priority order, first scanned wins).
 const PROJECT_SKILL_DIRS: &[&str] = &[".agents/skills", ".claude/skills"];
-/// 相对用户 home 的 skill 目录（按优先级排列）。
+/// skill directories relative to the user home (in priority order).
 const USER_SKILL_DIRS: &[&str] = &[".agents/skills", ".claude/skills"];
-/// skill 定义文件名。
+/// skill definition file name.
 const SKILL_FILE: &str = "SKILL.md";
 
-/// 发现结果：去重后的 skill 列表 + 被覆盖的重名记录（用于观测 / 诊断）。
+/// Discovery result: the deduplicated skill list + overridden duplicate-name records (for observation / diagnostics).
 #[derive(Debug, Default)]
 pub struct Discovery {
     pub skills: Vec<SkillMeta>,
-    /// 因重名被跳过的 skill：`(name, 保留者根目录, 被跳过者根目录)`。
+    /// skills skipped due to duplicate names: `(name, keeper root dir, skipped root dir)`.
     pub conflicts: Vec<(String, PathBuf, PathBuf)>,
 }
 
-/// 从「项目根 + 用户 home」发现全部 skill。
+/// Discover all skills from "project root + user home".
 ///
-/// `home` 为 `None`（拿不到用户目录）时只扫项目级。
+/// When `home` is `None` (user directory unavailable), only scan project level.
 pub fn discover(project_root: &Path, home: Option<&Path>) -> Discovery {
     let mut roots: Vec<PathBuf> = PROJECT_SKILL_DIRS
         .iter()
@@ -49,7 +49,7 @@ pub fn discover(project_root: &Path, home: Option<&Path>) -> Discovery {
     scan_roots(&roots)
 }
 
-/// 按优先级扫描多个根目录，先扫到的名字赢。
+/// Scan multiple root directories by priority; the first scanned name wins.
 pub fn scan_roots(roots: &[PathBuf]) -> Discovery {
     let mut discovery = Discovery::default();
     let mut seen: HashSet<String> = HashSet::new();
@@ -73,10 +73,10 @@ pub fn scan_roots(roots: &[PathBuf]) -> Discovery {
     discovery
 }
 
-/// 扫描单个根目录下的**直接子目录**，每个含 `SKILL.md` 的子目录即一个 skill。
+/// Scan the **direct subdirectories** of a single root directory; each subdirectory containing a `SKILL.md` is a skill.
 ///
-/// 目录不存在 / 不可读 → 返回空（发现是尽力而为，不报错）。子目录按名字排序，
-/// 保证结果确定。
+/// Directory missing / unreadable -> returns empty (discovery is best-effort, no error). Subdirectories are sorted by name,
+/// keeping the result deterministic.
 fn scan_root(root: &Path) -> Vec<SkillMeta> {
     let Ok(entries) = std::fs::read_dir(root) else {
         return Vec::new();
@@ -94,18 +94,18 @@ fn scan_root(root: &Path) -> Vec<SkillMeta> {
         let Some(dir_name) = dir.file_name().and_then(|name| name.to_str()) else {
             continue;
         };
-        // 跳过隐藏目录（`.git` 等噪音；skill 名本身不允许以 `.` 开头）。
+        // skip hidden directories (noise like `.git`; skill names themselves may not start with `.`).
         if dir_name.starts_with('.') {
             continue;
         }
         let skill_file = dir.join(SKILL_FILE);
         let Ok(text) = std::fs::read_to_string(&skill_file) else {
-            continue; // 没有 SKILL.md → 不是 skill
+            continue; // no SKILL.md -> not a skill
         };
         match parse_skill(&text, dir_name, dir.clone()) {
             Ok(meta) => skills.push(meta),
             Err(error) => {
-                eprintln!("[skills] 跳过 {}：{error}", skill_file.display());
+                eprintln!("[skills] skipping {}: {error}", skill_file.display());
             }
         }
     }
@@ -144,9 +144,9 @@ mod tests {
         let root = tmp("scan");
         write_skill(&root, "alpha", "does alpha");
         write_skill(&root, "beta", "does beta");
-        // 没有 SKILL.md 的目录被跳过
+        // directories without SKILL.md are skipped
         std::fs::create_dir_all(root.join("not-a-skill")).unwrap();
-        // 隐藏目录被跳过
+        // hidden directories are skipped
         write_skill(&root, ".hidden", "should be skipped");
 
         let found = scan_root(&root);
@@ -159,11 +159,11 @@ mod tests {
     fn project_overrides_user_on_conflict() {
         let project = tmp("proj");
         let home = tmp("home");
-        // 项目根下的 .agents/skills
+        // .agents/skills under the project root
         let proj_skills = project.join(".agents/skills");
         std::fs::create_dir_all(&proj_skills).unwrap();
         write_skill(&proj_skills, "dup", "project version");
-        // home 下的 .agents/skills
+        // .agents/skills under home
         let home_skills = home.join(".agents/skills");
         std::fs::create_dir_all(&home_skills).unwrap();
         write_skill(&home_skills, "dup", "user version");

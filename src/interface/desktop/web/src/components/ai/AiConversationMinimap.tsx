@@ -19,7 +19,7 @@ function buildConversationTurns(messages: AiTranscriptMessage[]) {
   for (const message of messages) {
     const content = normalizePreview(message.content);
     if (message.role === "user") {
-      turns.push({ id: String(message.id), question: content || "未命名问题", answer: "" });
+      turns.push({ id: String(message.id), question: content || "Untitled question", answer: "" });
       continue;
     }
     const current = turns.at(-1);
@@ -27,7 +27,7 @@ function buildConversationTurns(messages: AiTranscriptMessage[]) {
       current.answer = content;
       continue;
     }
-    turns.push({ id: String(message.id), question: "AI 回答", answer: content });
+    turns.push({ id: String(message.id), question: "AI answer", answer: content });
   }
   return turns;
 }
@@ -45,7 +45,7 @@ export function AiConversationMinimap({
 }: {
   messages: AiTranscriptMessage[];
   viewportRef: RefObject<HTMLDivElement | null>;
-  /** 定位覆写：宿主可把它钉到父容器的左侧边缘（缺省相对最近定位祖先 `-left-5`）。 */
+  /** Positioning override: the host may pin it to the left edge of the parent container (defaults to `-left-5` relative to the nearest positioned ancestor). */
   className?: string;
 }) {
   const turns = useMemo(() => buildConversationTurns(messages), [messages]);
@@ -130,7 +130,7 @@ export function AiConversationMinimap({
         "absolute inset-y-0 z-20 flex w-10 items-center",
         className ?? "-left-5",
       )}
-      aria-label="对话轮次导航"
+      aria-label="Conversation turn navigation"
       data-ai-turn-minimap
     >
       <div
@@ -193,7 +193,7 @@ export function AiConversationMinimap({
                 type="button"
                 className="group pointer-events-none absolute left-2 flex h-1.5 w-8 items-center outline-none"
                 style={{ top: `${index * 8}px` }}
-                aria-label={`跳到第 ${index + 1} 轮：${turn.question}`}
+                aria-label={`Jump to turn ${index + 1}: ${turn.question}`}
                 aria-current={turn.id === activeTurnId ? "true" : undefined}
                 title={turn.question}
                 data-turn-anchor-id={turn.id}
@@ -224,7 +224,7 @@ export function AiConversationMinimap({
             {previewTurn.question}
           </p>
           <p className="mt-1.5 mb-0 line-clamp-3 text-body-sm leading-relaxed text-muted">
-            {previewTurn.answer || "这轮回答仍在生成或尚未开始。"}
+            {previewTurn.answer || "This turn's answer is still generating or has not started yet."}
           </p>
         </div>
       )}

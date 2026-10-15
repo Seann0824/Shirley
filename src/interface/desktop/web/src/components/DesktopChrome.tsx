@@ -50,8 +50,9 @@ export function DesktopChrome({
   onHome: () => void;
   onNewChat: () => void;
   onAddProject: () => void;
-  /** 内容区顶栏的自定义内容；不传则回退到默认的「文件夹图标 + 标题 + 项目名」。
-   *  让不同页面（Home / 各会话）可以定制顶栏右区。 */
+  /** Custom content for the content-area top bar; falls back to the default
+   *  "folder icon + title + project name". Lets different pages (Home / sessions)
+   *  customize the top-bar right area. */
   topContent?: ReactNode;
   children: ReactNode;
 }) {
@@ -60,17 +61,19 @@ export function DesktopChrome({
     const next = !dark;
     setDark(next);
     document.documentElement.dataset.theme = next ? "dark" : "light";
-    try { localStorage.setItem(THEME_KEY, next ? "dark" : "light"); } catch { /* 本次有效 */ }
+    try { localStorage.setItem(THEME_KEY, next ? "dark" : "light"); } catch { /* valid for this session */ }
   };
 
   useEffect(() => {
     document.title = `${title} — Shirley`;
   }, [title]);
 
-  // 全屏检测：进入全屏后 macOS 把红黄绿交通灯收到系统层级，标题栏左侧那段为交通灯
-  // 预留的留白就成了空白——此时收掉留白，让后面的按钮补位。全屏切换会伴随一次
-  // resize（窗口尺寸变化），故在 resize 回调里重查 `isFullscreen()`；非 mac / 非桌面
-  // 环境（纯浏览器调试）无需检测。
+  // Fullscreen detection: in fullscreen, macOS moves the red/yellow/green traffic
+  // lights to the system layer, so the title-bar left area reserved for them becomes
+  // blank — collapse that gutter and let the following buttons take its place. Fullscreen
+  // toggling comes with a resize (window size change), so re-check `isFullscreen()` in
+  // the resize callback; non-mac / non-desktop environments (plain-browser debugging)
+  // need no detection.
   const [fullscreen, setFullscreen] = useState(false);
   useEffect(() => {
     if (!isMacDesktop) return;
@@ -83,7 +86,7 @@ export function DesktopChrome({
         try {
           const next = await win.isFullscreen();
           if (!disposed) setFullscreen(next);
-        } catch { /* 拿不到就当作未全屏 */ }
+        } catch { /* if unavailable, treat as not fullscreen */ }
       };
       await sync();
       unlisten = await win.onResized(() => void sync());
@@ -96,15 +99,19 @@ export function DesktopChrome({
 
   return (
     <div className="flex h-dvh min-h-0 w-full flex-col overflow-hidden bg-frame">
-      {/* 48px 标题栏与 tauri.conf.json 的 trafficLightPosition.y=26 配套；
-          原生 y 是容器 inset，并不是按钮中心，20 会让红黄绿按钮偏高约 6px。 */}
+      {/* The 48px title bar pairs with trafficLightPosition.y=26 in tauri.conf.json;
+          the native y is the container inset, not the button center, so 20 would make
+          the traffic lights about 6px too high. */}
       <header
         className="flex h-12 shrink-0 items-center bg-frame pr-3 select-none"
         data-tauri-drag-region
       >
-        {/* 左区宽度对齐「图标栏 w-14 + 会话侧栏 w-64」= 19.5rem，使右端的分段竖线与
-            下方 sidebar 的右边框同 x 对齐；竖线只是短线段，不向下贯穿成一条连续长线。
-            侧栏折叠时左区不再定宽、也不画竖线（此时没有 sidebar 边界可对齐）。 */}
+        {/* The left area width aligns with "icon rail w-14 + session sidebar w-64" =
+            19.5rem, so the divider tick at its right end lines up on the same x as the
+            sidebar's right border below; the tick is only a short segment, not a
+            continuous line running down. When the sidebar is collapsed, the left area is
+            no longer fixed-width and the tick is not drawn (there is no sidebar border to
+            align to). */}
         <div
           className={cn(
             "flex h-full shrink-0 items-center gap-1 overflow-hidden transition-[width] duration-200 ease-product",
@@ -114,21 +121,23 @@ export function DesktopChrome({
               : "w-[19.5rem]",
           )}
         >
-          <IconButton label="后退" disabled={!canGoBack || navigationBusy} onClick={onBack}>
+          <IconButton label="Back" disabled={!canGoBack || navigationBusy} onClick={onBack}>
             <ArrowLeft className="size-4" />
           </IconButton>
-          <IconButton label="前进" disabled={!canGoForward || navigationBusy} onClick={onForward}>
+          <IconButton label="Forward" disabled={!canGoForward || navigationBusy} onClick={onForward}>
             <ArrowRight className="size-4" />
           </IconButton>
-          <IconButton label={sidebarCollapsed ? "展开侧边栏" : "收起侧边栏"} aria-expanded={!sidebarCollapsed} onClick={onToggleSidebar}>
+          <IconButton label={sidebarCollapsed ? "Expand sidebar" : "Collapse sidebar"} aria-expanded={!sidebarCollapsed} onClick={onToggleSidebar}>
             {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
           </IconButton>
-          {/* 新建会话：仅侧栏收起时在此展示——侧栏展开时侧栏内已有入口，避免重复。 */}
+          {/* New session: shown here only when the sidebar is collapsed — when expanded, the sidebar already has an entry, avoiding duplication. */}
           {sidebarCollapsed && (
-            <IconButton label="新建会话" onClick={onNewChat}><SquarePen className="size-4" /></IconButton>
+            <IconButton label="New session" onClick={onNewChat}><SquarePen className="size-4" /></IconButton>
           )}
-          {/* 分段竖线：与下方会话侧栏的右边框同 x 对齐，但只是短线段、不向下贯穿。
-              折叠时用透明度淡出（而非直接卸载），与左区宽度过渡同步。 */}
+          {/* Divider tick: lines up on the same x as the session sidebar's right border
+              below, but is only a short segment, not running down. Fades out via opacity
+              when collapsed (rather than unmounting), synced with the left area's width
+              transition. */}
           <div
             className={cn(
               "ml-auto h-5 shrink-0 bg-line transition-[width,opacity] duration-200 ease-product",
@@ -136,7 +145,7 @@ export function DesktopChrome({
             )}
           />
         </div>
-        {/* 内容区顶栏（右区）：随页面定制，默认渲染文件夹图标 + 标题 + 项目名。 */}
+        {/* Content-area top bar (right area): customized per page, default renders folder icon + title + project name. */}
         <div className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-3" data-tauri-drag-region>
           {topContent ?? (
             <>
@@ -148,26 +157,27 @@ export function DesktopChrome({
         </div>
         <ContextMenu menu={
           <>
-            <ContextMenuItem icon={<MessageSquarePlus className="size-4" />} onSelect={onNewChat}>新建会话</ContextMenuItem>
-            <ContextMenuItem icon={<FolderPlus className="size-4" />} onSelect={onAddProject}>添加项目</ContextMenuItem>
+            <ContextMenuItem icon={<MessageSquarePlus className="size-4" />} onSelect={onNewChat}>New session</ContextMenuItem>
+            <ContextMenuItem icon={<FolderPlus className="size-4" />} onSelect={onAddProject}>Add project</ContextMenuItem>
             <ContextMenuSeparator />
             <ContextMenuItem icon={dark ? <Sun className="size-4" /> : <Moon className="size-4" />} onSelect={toggleTheme}>
-              {dark ? "切换浅色外观" : "切换深色外观"}
+              {dark ? "Switch to light appearance" : "Switch to dark appearance"}
             </ContextMenuItem>
           </>
         }>
-          {(open) => <IconButton label="更多操作" aria-haspopup="menu" onClick={open}><MoreHorizontal className="size-4" /></IconButton>}
+          {(open) => <IconButton label="More actions" aria-haspopup="menu" onClick={open}><MoreHorizontal className="size-4" /></IconButton>}
         </ContextMenu>
       </header>
       <div className="flex min-h-0 flex-1">
-        <nav aria-label="主导航" className="flex w-14 shrink-0 flex-col items-center gap-2 bg-frame py-3">
+        <nav aria-label="Main navigation" className="flex w-14 shrink-0 flex-col items-center gap-2 bg-frame py-3">
           <IconButton label="Home" active className="size-10" onClick={onHome}><House className="size-5" /></IconButton>
           <div className="flex-1" />
-          <IconButton label={dark ? "切换浅色外观" : "切换深色外观"} className="size-10" onClick={toggleTheme}>{dark ? <Sun className="size-5" /> : <Moon className="size-5" />}</IconButton>
+          <IconButton label={dark ? "Switch to light appearance" : "Switch to dark appearance"} className="size-10" onClick={toggleTheme}>{dark ? <Sun className="size-5" /> : <Moon className="size-5" />}</IconButton>
           <img src="/brand/shirley-logo.png" alt="Shirley" className="mt-1 size-8 rounded-full object-cover" draggable={false} />
         </nav>
-        {/* 内容区 = 会话侧栏 + 聊天主区，作为一整块圆角面板嵌在框架（顶栏 + 左侧图标栏）里；
-            左上内圆角透出下方 frame 色，形成框架与内容区的过渡。 */}
+        {/* Content area = session sidebar + chat main area, embedded as a single rounded
+            panel in the frame (top bar + left icon rail); the top-left inner corner lets
+            the frame color show through, forming a transition between frame and content. */}
         <div className="flex min-h-0 min-w-0 flex-1 overflow-hidden rounded-tl-2xl bg-canvas">
           {children}
         </div>

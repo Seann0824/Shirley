@@ -4,8 +4,9 @@ use super::{app::App, event::Event};
 
 pub fn update(app: &mut App, event: Event) -> Option<String> {
     match event {
-        // 模型选择器打开时，按键先交给面板处理（上/下选择、Enter 确认、Esc 取消）。
-        // 其余按键吞掉，避免在面板上层继续编辑输入框造成状态错乱。
+        // When the model picker is open, keys go to the panel first (up/down to move,
+        // Enter to confirm, Esc to cancel). Other keys are swallowed so the input box isn't
+        // edited underneath the panel, which would corrupt the state.
         Event::Key(key_event) if key_event.kind == KeyEventKind::Press && app.is_picker_open() => {
             match key_event.code {
                 KeyCode::Up => app.picker_move(-1),
@@ -18,7 +19,7 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             }
             return None;
         }
-        // 会话选择器打开时同理：按键先交给面板（上/下选择、Enter 切换、Esc 取消）。
+        // Same for the session picker: keys go to the panel first (up/down, Enter to switch, Esc to cancel).
         Event::Key(key_event)
             if key_event.kind == KeyEventKind::Press && app.is_session_picker_open() =>
         {
@@ -33,8 +34,9 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             }
             return None;
         }
-        // 指令候选浮层打开时：↑↓←→ 移动高亮，Tab / Enter 采纳，Esc 关闭浮层（不退出）。
-        // 其余按键交给下方常规编辑逻辑（用户仍可继续打字修正）。
+        // When the command-suggestion popup is open: arrows move the highlight, Tab / Enter
+        // accepts, Esc dismisses the popup (without exiting). Other keys fall through to the
+        // normal editing logic below (the user can keep typing to refine).
         Event::Key(key_event)
             if key_event.kind == KeyEventKind::Press
                 && !app.suggestions().is_empty()
@@ -59,14 +61,14 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             return None;
         }
         Event::Key(key_event) if key_event.kind == KeyEventKind::Press => match key_event.code {
-            // Esc：AI 回复中 → 打断本轮回复（会话不丢）；
-            // 回溯编辑态 → 取消本次改动（不退出）；
-            // 其余空闲 → 退出程序。
+            // Esc: while the AI is replying -> interrupt this turn (the session is kept);
+            // in rewind-edit state -> cancel this edit (don't exit);
+            // otherwise idle -> exit the program.
             KeyCode::Esc => {
                 if app.is_waiting() {
                     app.request_interrupt();
                 } else if app.is_login() {
-                    // 登录流程中：Esc 只取消登录，不退出程序（与回溯编辑态一致）。
+                    // In the login flow: Esc only cancels login, it doesn't exit (same as rewind-edit).
                     app.cancel_login();
                 } else if app.is_rewind_edit() {
                     app.cancel_rewind_edit();
@@ -81,10 +83,10 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             KeyCode::Char('s') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
                 app.toggle_latest_compact()
             }
-            // Tab：采纳第一个模糊指令候选（如 /inti → /init ）。
+            // Tab: accept the first fuzzy command suggestion (e.g. /inti -> /init).
             KeyCode::Tab => app.accept_suggestion(),
-            // Enter 在等待回复时不提交（submit 内部也会拦截），
-            // 但编辑能力不受等待影响，AI 回复期间照样能打字。
+            // Enter doesn't submit while waiting for a reply (submit also guards internally),
+            // but editing is unaffected by the wait — you can still type while the AI replies.
             KeyCode::Enter => return app.submit(),
             KeyCode::Backspace => app.pop_input(),
             KeyCode::Delete => app.delete_input(),
@@ -94,7 +96,7 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             KeyCode::End => app.move_cursor_end(),
             KeyCode::Up => app.history_prev(),
             KeyCode::Down => app.history_next(),
-            // 键盘翻页：与鼠标滚轮等价，方便不想用鼠标时滚动（见 event.rs）。
+            // Keyboard paging: equivalent to the mouse wheel, for scrolling without a mouse (see event.rs).
             KeyCode::PageUp => app.scroll_by(-3),
             KeyCode::PageDown => app.scroll_by(3),
             KeyCode::Char('a') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
@@ -109,11 +111,12 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             _ => {}
         },
         Event::Key(_) => {}
-        // 括号粘贴整体插入：粘贴文本里的换行只当作普通字符写入输入框，
-        // 绝不触发发送，避免粘贴多行内容时消息被自动发出去。
+        // Bracketed paste inserts as a whole: newlines in the pasted text are written to the
+        // input box as ordinary characters and never trigger a send, so pasting multiple lines
+        // doesn't fire the message off automatically.
         Event::Paste(text) => app.insert_input(&text),
-        // 鼠标事件由 `Tui::handle_mouse` 直接处理（需要缓冲区与剪贴板），
-        // 不会走到这里；保留空分支只是为了穷尽枚举。
+        // Mouse events are handled directly by `Tui::handle_mouse` (it needs the buffer and the
+        // clipboard) and never reach here; this empty arm just exhausts the enum.
         Event::Mouse(_) => {}
         Event::Resize(_width, _height) => {}
     }

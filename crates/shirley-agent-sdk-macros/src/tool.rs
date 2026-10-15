@@ -1,46 +1,46 @@
 use proc_macro::TokenStream;
-// 把rust模版代码转换成token
+// Turn the Rust template code into tokens
 use quote::{quote, quote_spanned};
-// ItemFn 用来表示抽象语法树, LitStr 字符串字面量，既保留字符串内容，也保留源码位置。 Parser trait
+// ItemFn represents the abstract syntax tree; LitStr is a string literal that keeps both the string content and its source location. Parser trait
 use syn::{Attribute, FnArg, Ident, ItemFn, LitStr, Pat, Type, parse::Parser, spanned::Spanned};
 
-// 保存从 #[tool(...)] 中读取的配置
+// Holds the configuration read from #[tool(...)]
 struct ToolConfig {
-    // LisStr 带有位置信息
+    // LitStr carries location information
     description: LitStr,
 
-    // 可选的注册钩子（= created）：注册时执行的伴生函数名。
-    // 函数签名须为 `fn(&mut ToolContext) -> Result<(), ToolError>`。
+    // Optional register hook (= created): name of the companion function to run at registration time.
+    // Signature must be `fn(&mut ToolContext) -> Result<(), ToolError>`.
     on_register: Option<Ident>,
 
-    // 可选的注销钩子（= destroy）：注销时执行的伴生函数名。
-    // 函数签名须为 `fn(&mut ToolContext) -> Result<(), ToolError>`。
+    // Optional unregister hook (= destroy): name of the companion function to run at unregistration time.
+    // Signature must be `fn(&mut ToolContext) -> Result<(), ToolError>`.
     on_unregister: Option<Ident>,
 }
 
 struct ToolParameter {
-    // 参数名
+    // Parameter name
     name: Ident,
 
-    // 参数类型
+    // Parameter type
     ty: Type,
 
-    // 参数描述
+    // Parameter description
     description: LitStr,
 }
 
-// 一次工具调用里、按原函数参数顺序排列的实参。
-// 上下文参数不进入参数 Schema，但仍要按位置传给原函数，所以这里保留顺序。
+// The actual arguments of one tool call, arranged in the original function parameter order.
+// The context parameter does not go into the parameter schema, but it still has to be passed to the original function positionally, so the order is preserved here.
 enum CallArgument {
-    // 从 JSON 参数反序列化来的普通参数
+    // An ordinary parameter deserialized from the JSON arguments
     Field(Ident),
-    // 运行时上下文（由 SDK 注入），见 SDK 的 ToolContext。
-    // by_ref 表示原函数声明的是 `&ToolContext`，否则是按值 `ToolContext`。
+    // The runtime context (injected by the SDK), see the SDK's ToolContext.
+    // by_ref means the original function declared `&ToolContext`, otherwise it is a by-value `ToolContext`.
     Context { by_ref: bool },
 }
 
 pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
-    // 根据解析结果分别处理
+    // Handle the two cases separately based on the parse result
     match try_expand(attr, item) {
         Ok(code) => code.into(),
         Err(error) => error.to_compile_error().into(),
@@ -50,29 +50,29 @@ pub(crate) fn expand(attr: TokenStream, item: TokenStream) -> TokenStream {
 fn try_expand(attr: TokenStream, item: TokenStream) -> syn::Result<proc_macro2::TokenStream> {
     let config = parse_config(attr)?;
 
-    // 注释修饰的代码解析成函数，如果不是直接报错
+    // Parse the annotated code as a function; if not, error out directly
     let mut function = syn::parse::<ItemFn>(item)?;
 
-    // 提取参数信息，同时清除已经消费的辅助注解
+    // Extract the parameter info, clearing the helper attributes already consumed
     let (parameters, call_arguments) = extract_parameters(&mut function)?;
 
-    // 根据收集的信息生成代码。
-    // generate_tool 返回代码 token，用 Ok 包装成成功结果。
+    // Generate code from the collected info.
+    // generate_tool returns code tokens, wrapped in Ok as a success result.
     Ok(generate_tool(function, config, parameters, call_arguments))
 }
 
-// 解析 #tool[(...)] 括号里面的内容
+// Parse the contents inside the #tool[(...)] parentheses
 //
-// 支持的键：
-// - `description = "..."`（必填）
-// - `on_register = fn_name`（可选，= created 钩子）
-// - `on_unregister = fn_name`（可选，= destroy 钩子）
+// Supported keys:
+// - `description = "..."` (required)
+// - `on_register = fn_name` (optional, = created hook)
+// - `on_unregister = fn_name` (optional, = destroy hook)
 fn parse_config(attr: TokenStream) -> syn::Result<ToolConfig> {
     let mut description: Option<LitStr> = None;
     let mut on_register: Option<Ident> = None;
     let mut on_unregister: Option<Ident> = None;
 
-    // 属性解析器：对每个逗号分隔的配置项调用这个闭包 #tool(a=1,b=2,...)
+    // Attribute parser: this closure is called for each comma-separated config item #tool(a=1,b=2,...)
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("on_register") {
             return read_hook(meta, &mut on_register, "on_register");
@@ -86,9 +86,9 @@ fn parse_config(attr: TokenStream) -> syn::Result<ToolConfig> {
     parser.parse(attr)?;
 
     let description = description.ok_or_else(|| {
-        //  没有填写抛出宏编译错误
+        // Raise a macro compile error when it is not filled in
         syn::Error::new(
-            // Span::call_site 表示被调用的位置
+            // Span::call_site indicates the call site
             proc_macro2::Span::call_site(),
             "missing description; write #tool(description = \"tool description\")",
         )
@@ -101,7 +101,7 @@ fn parse_config(attr: TokenStream) -> syn::Result<ToolConfig> {
     })
 }
 
-// 读取 `on_register` / `on_unregister` 的值：一个伴生函数名（Ident）。
+// Read the value of `on_register` / `on_unregister`: a companion function name (Ident).
 fn read_hook(
     meta: syn::meta::ParseNestedMeta<'_>,
     slot: &mut Option<Ident>,
@@ -115,31 +115,31 @@ fn read_hook(
     Ok(())
 }
 
-// 解析 #[param()]
+// Parse #[param()]
 fn parse_parameter_description(attribute: &Attribute) -> syn::Result<LitStr> {
     let mut description = None;
-    // 足个解析阔好李敏啊的配置
+    // Parse the config items one by one
     attribute.parse_nested_meta(|meta| {
-        // 复用上一轮写好的校验
-        // 检查名称，重复填写，字符串类型和空字符串
+        // Reuse the validation written in the previous round
+        // Check the name, duplicate entries, string type and empty string
         read_description(meta, &mut description)
     })?;
 
-    // 如果写的 #[param()]
+    // If #[param()] was written
     description.ok_or_else(|| syn::Error::new_spanned(attribute, "missing description"))
 }
 
-// 判断上下文参数是不是引用形式（`&ToolContext`）。
+// Determine whether the context parameter is by reference (`&ToolContext`).
 fn context_is_by_ref(ty: &Type) -> bool {
     matches!(ty, Type::Reference(_))
 }
 
-// 判断一个类型是不是运行时上下文参数（ToolContext）。
+// Determine whether a type is the runtime context parameter (ToolContext).
 //
-// 按类型路径的最后一段匹配，这样 `ToolContext` 与
-// `shirley_agent_sdk::ToolContext` 两种写法都能识别。
+// Match on the last segment of the type path, so both `ToolContext` and
+// `shirley_agent_sdk::ToolContext` are recognized.
 fn is_tool_context_type(ty: &Type) -> bool {
-    // `&ToolContext` 与 `ToolContext` 都算
+    // Both `&ToolContext` and `ToolContext` count
     let ty = match ty {
         Type::Reference(reference) => reference.elem.as_ref(),
         other => other,
@@ -154,20 +154,20 @@ fn is_tool_context_type(ty: &Type) -> bool {
         .is_some_and(|segment| segment.ident == "ToolContext")
 }
 
-// 读取参数。返回 (进入 Schema 的参数, 按原顺序排列的调用实参)。
+// Read the parameters. Returns (parameters that go into the schema, actual call arguments in original order).
 fn extract_parameters(function: &mut ItemFn) -> syn::Result<(Vec<ToolParameter>, Vec<CallArgument>)> {
     let mut parameters = vec![];
     let mut call_arguments = vec![];
     let mut has_context = false;
 
-    // sig 是函数签名，inputs 是参数列表
+    // sig is the function signature, inputs is the parameter list
     for input in &mut function.sig.inputs {
-        // self 和 普通参数 Typed location: String
+    // self and ordinary parameters Typed location: String
         let FnArg::Typed(parameter) = input else {
             return Err(syn::Error::new_spanned(input, "tools do not support self methods"));
         };
 
-        // 可能是解构的元组, 目前只支持简单的
+    // Possibly a destructured tuple; only simple forms are supported for now
         let Pat::Ident(pattern) = parameter.pat.as_ref() else {
             return Err(syn::Error::new_spanned(
                 &parameter.pat,
@@ -175,8 +175,8 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<(Vec<ToolParameter>,
             ));
         };
 
-        // 排除 ref name 和 name @ pattern 这类复杂绑定
-        // mut name 可以保留，不影响参观名称提取
+    // Exclude complex bindings such as `ref name` and `name @ pattern`
+    // `mut name` may be kept; it does not affect parameter-name extraction
         if pattern.by_ref.is_some() || pattern.subpat.is_some() {
             return Err(syn::Error::new_spanned(
                 pattern,
@@ -184,7 +184,7 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<(Vec<ToolParameter>,
             ));
         }
 
-        // 上下文参数：不进入 Schema，单独按位置传给原函数。
+        // Context parameter: does not go into the schema, passed to the original function positionally.
         if is_tool_context_type(&parameter.ty) {
             if has_context {
                 return Err(syn::Error::new_spanned(
@@ -216,7 +216,7 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<(Vec<ToolParameter>,
                 ));
             }
 
-            // 不能重复写
+            // Must not be repeated
             if description.is_some() {
                 return Err(syn::Error::new_spanned(attribute, "#[param] must not be repeated"));
             }
@@ -236,37 +236,37 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<(Vec<ToolParameter>,
             description,
         });
 
-        // 清除 param 辅助注解
+        // Clear the param helper attribute
         parameter.attrs.clear();
     }
     Ok((parameters, call_arguments))
 }
 
-// 通用读取#[xxx(description = xxx)]
+// Generic reader for #[xxx(description = xxx)]
 fn read_description(
     meta: syn::meta::ParseNestedMeta<'_>,
     description: &mut Option<LitStr>,
 ) -> syn::Result<()> {
-    // path 相当于 key
+    // path corresponds to the key
     if !meta.path.is_ident("description") {
         return Err(meta.error("unknown option; only description is supported"));
     }
-    // 重复key判断
+    // Duplicate-key check
     if description.is_some() {
         return Err(meta.error("description must not be repeated"));
     }
 
-    // value() 消费 =，parse() 消费 value
+    // value() consumes the =, parse() consumes the value
     let value: LitStr = meta.value()?.parse()?;
 
-    // 检查值是否为空
+    // Check whether the value is empty
     if value.value().trim().is_empty() {
         return Err(syn::Error::new(value.span(), "description must not be empty"));
     }
 
     *description = Some(value);
 
-    // 不返回错误说明成功了
+    // Not returning an error means success
     Ok(())
 }
 
@@ -276,13 +276,13 @@ fn generate_tool(
     parameters: Vec<ToolParameter>,
     call_arguments: Vec<CallArgument>,
 ) -> proc_macro2::TokenStream {
-    // 原始函数名
+    // Original function name
     let name = &function.sig.ident;
 
-    // 函数可见性 pub / private
+    // Function visibility pub / private
     let visibility = &function.vis;
 
-    // 函数描述
+    // Function description
     let description = &config.description;
 
     let fields = parameters.iter().map(|parameter| {
@@ -300,7 +300,7 @@ fn generate_tool(
         CallArgument::Field(field_name) => quote! {
             args.#field_name
         },
-        // 按原函数的声明形式传：`&ToolContext` 借引用，`ToolContext` 按值移动。
+        // Pass it in the form the original function declares: `&ToolContext` borrows, `ToolContext` moves by value.
         CallArgument::Context { by_ref } => {
             if *by_ref {
                 quote! { &__tool_context }
@@ -310,9 +310,9 @@ fn generate_tool(
         }
     });
 
-    // 可选的注册 / 注销钩子：生成 `on_register` / `on_unregister` 覆写，
-    // 直接调用用户写的伴生函数（与工具函数同层，故走 `super::`）。
-    // 没写钩子就不生成覆写——`GenerateTool` 自动继承 trait 的默认空实现。
+    // Optional register / unregister hooks: generate `on_register` / `on_unregister` overrides that
+    // directly call the user-written companion functions (same level as the tool function, hence `super::`).
+    // If no hook is written, no override is generated -- `GenerateTool` inherits the trait's default empty impl.
     let on_register_impl = config.on_register.as_ref().map(|hook| {
         quote! {
             fn on_register(
@@ -335,9 +335,9 @@ fn generate_tool(
         }
     });
 
-    // 获取返回值类型的代码位置
+    // Get the code location of the return type
     let return_span = function.sig.output.span();
-    // _ 让编译器推导成功值类型，错误类型固定为 SDK 的 ToolError
+    // `_` lets the compiler infer the success value type; the error type is fixed to the SDK's ToolError
     let invoke_function = quote_spanned! {return_span=>
         let outcome: ::std::result::Result<_, ::shirley_agent_sdk::ToolError> = super::#name(
             #(#call_arguments),*
@@ -351,18 +351,18 @@ fn generate_tool(
         #visibility mod #name {
             use super::*;
 
-            // 自动实现参数解析和 Schema 生成能力
+            // Automatically implement argument parsing and schema generation
             #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
             #[serde(deny_unknown_fields)]
-            // 解析参数时拒绝未知字段
-            // Schema 中也会相应禁止额外属性
+            // Reject unknown fields when parsing arguments
+            // The schema correspondingly forbids additional properties
             struct Arguments {
-                // 重复插入所有字段，没个字段后面添加逗号
+                // Insert all fields, adding a trailing comma after each field
                 #(#fields,)*
             }
 
 
-            // 这里应该大写结构体？
+            // Should the struct be capitalized here?
             struct GenerateTool {
                 definition: ::shirley_agent_sdk::ToolDefinition,
             }
@@ -375,15 +375,15 @@ fn generate_tool(
                 #on_register_impl
                 #on_unregister_impl
 
-                // 接受 SDK 统一传入的 JSON 参数与运行时上下文
+                // Accept the unified JSON arguments and runtime context passed in by the SDK
                 fn invoke(
                     &self,
                     input: ::serde_json::Value,
                     __tool_context: ::shirley_agent_sdk::ToolContext,
                 ) -> ::shirley_agent_sdk::ToolFuture<'_> {
-                    // 1. 将 input 反序列化
+                    // 1. Deserialize the input
 
-                    // 2. 调用原始函数
+                    // 2. Call the original function
                     Box::pin(async move {
                         let args = ::serde_json::from_value::<Arguments>(input)
                             .map_err(|error| {
@@ -392,10 +392,10 @@ fn generate_tool(
                                 )
                         })?;
 
-                        // 调用函数，并传入参数
+                        // Call the function, passing the arguments
                         #invoke_function
 
-                        // 返回序列话的json结果
+                        // Return the serialized JSON result
                         ::serde_json::to_value(result)
                             .map_err(|error| {
                                 ::shirley_agent_sdk::ToolError::ExecutionError(

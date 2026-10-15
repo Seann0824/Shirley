@@ -1,27 +1,27 @@
-**Shirley 技术方案 · SDK 能力缺口修复（P0）**
+**Shirley technical design · SDK capability gap fixes (P0)**
 
-这份文档处理三条来自使用方反馈的 SDK 问题。三条都经代码核对，共同点是：**SDK 替应用做了本该由应用决定的事**——决定请求体形状、决定工具有没有状态、决定工具顺序。
+This document handles three SDK issues reported by consumers. All three were verified against the code, and their common thread is: **the SDK did something on the application's behalf that the application should have decided** -- deciding the request-body shape, deciding whether a tool has state, deciding tool order.
 
-结论：**gap-1（工具上下文）与 gap-4（请求体留口）已落地**；**gap-2（工具顺序保序）决定不做**（见第一节的"为什么不改"）。已落地的两条为破坏性变更，发 `0.0.2`（`Cargo.toml` × 3 同步，SDK 依赖 macros 的 `version` 一并改）。
+Conclusion: **gap-1 (tool context) and gap-4 (request-body escape hatch) have landed**; **gap-2 (tool-order preservation) is decided not to be done** (see the "why not change it" in section 1). The two that landed are breaking changes, released as `0.0.2` (`Cargo.toml` x 3 kept in sync; the SDK's dependency on macros has its `version` changed too).
 
-| 缺口 | 定性 | 破坏性 | 落地顺序 |
+| Gap | Nature | Breaking | Landing order |
 | --- | --- | --- | --- |
-| gap-2 `definitions()` 强制按名排序 | 设计取向（非缺陷） | —— | **决定不做** |
-| gap-4 请求体写死、字段未接线 | 真缺陷，含一个 400 bug | 行为变更 | 2（**已落地**） |
-| gap-1 工具拿不到运行时上下文 | 真缺陷，改动面最大 | 签名变更 | 3（**已落地**） |
+| gap-2 `definitions()` forcing sort-by-name | a design stance (not a defect) | -- | **decided not to do** |
+| gap-4 request body hard-coded, fields not wired | a real defect, including a 400 bug | behavior change | 2 (**landed**) |
+| gap-1 tools cannot get the runtime context | a real defect, largest blast radius | signature change | 3 (**landed**) |
 
 ---
 
-**一、gap-2：`definitions()` 保序（决定不做）**
+**1. gap-2: `definitions()` order preservation (decided not to do)**
 
-> **结论：不做。** 下面保留原始分析，但结论调整为"维持现状（按名排序）"。
-> 原因见 1.6：这不是缺陷，是把一个影响很小的决策权交给应用的**取向**问题，
-> 当前没有功能依赖它，改动的收益（迁移可复刻 + 模型 steering）不足以支撑
-> 一次破坏性的 prefix 变更。
+> **Conclusion: not doing it.** The original analysis is kept below, but the conclusion is adjusted to "keep the status quo (sort by name)".
+> The reason is in 1.6: this is not a defect but a **stance** question of handing an application a low-impact decision,
+> and currently nothing functionally depends on it, so the benefit of the change (migration reproducibility + model steering) does not justify
+> a breaking prefix change.
 
-**1.1 现状**
+**1.1 Status quo**
 
-`tool/mod.rs`：
+`tool/mod.rs`:
 
 ```rust
 pub struct ToolManager {
@@ -30,72 +30,72 @@ pub struct ToolManager {
 
 pub fn definitions(&self) -> Vec<&ToolDefinition> {
     let mut definitions = self.tools.values().map(|t| t.definition()).collect();
-    definitions.sort_by(|a, b| a.name.cmp(&b.name));   // 越俎代庖
+    definitions.sort_by(|a, b| a.name.cmp(&b.name));   // overstepping its bounds
     definitions
 }
 ```
 
-底层 `HashMap` 迭代本就无序，再按名排序 = **双重丢失应用意图**。
+The underlying `HashMap` iteration is unordered to begin with, and then sorting by name = **doubly discarding the application's intent**.
 
-**1.2 为什么是缺陷**
+**1.2 Why it is a defect**
 
-原注释的理由是"排序为了 stable prompt prefix"。但**稳定只要求"每次一样"，不要求"按字母"**。注册顺序本身也是确定的（`main.rs` 是一串固定调用），保序同样满足 prefix 稳定，且把顺序决定权还给应用。
+The original comment's reason was "sorting for a stable prompt prefix". But **stability only requires "the same every time", not "alphabetical"**. The registration order is itself deterministic (`main.rs` is a fixed sequence of calls), and order preservation also satisfies prefix stability, while returning the order decision to the application.
 
-应用可能需要按优先级、按阶段（先导航工具后写入工具）排列。SDK 按字母排会破坏应用刻意设计的顺序，导致 prompt 前缀变化、缓存命中率骤降。
+An application may need to arrange tools by priority or by phase (navigation tools before write tools). The SDK's alphabetical sort would break an order the application deliberately designed, causing the prompt prefix to change and the cache hit rate to plunge.
 
-**1.3 方案**
+**1.3 Plan**
 
-底层补一条插入序，`definitions()` 按它取：
+Add an insertion order at the bottom layer, and have `definitions()` read by it:
 
 ```rust
 pub struct ToolManager {
     tools: HashMap<ToolName, Box<dyn Tool>>,
-    order: Vec<ToolName>,          // 新增：注册顺序
+    order: Vec<ToolName>,          // new: registration order
 }
 ```
 
-- `register()` 成功时 `self.order.push(tool_name.into())`（查重已在前面，不会重复）。
-- `definitions()` 改为按 `order` 取，不再排序。
+- `register()` on success does `self.order.push(tool_name.into())` (the duplicate check is already done earlier, so there is no repetition).
+- `definitions()` reads by `order` instead of sorting.
 
-不引入 `IndexMap` 依赖，保持 O(1) 查找。
+No `IndexMap` dependency is introduced, keeping O(1) lookup.
 
-**1.4 语义与影响**
+**1.4 Semantics and impact**
 
-- 稳定 = 每次一样；注册顺序确定 ⇒ prefix 仍稳定。
-- 一次性 cache miss（顺序变了），之后稳定——正是应用预期。
-- `definitions()` 返回类型不变，**调用方无感**。
+- Stable = the same every time; a deterministic registration order => the prefix is still stable.
+- A one-time cache miss (the order changed), then stable -- exactly what the application expects.
+- The `definitions()` return type is unchanged, **invisible to callers**.
 
-**1.5 验收**
+**1.5 Acceptance**
 
-单测：注册 `c, a, b` → `definitions()` 名字序列必须是 `["c","a","b"]`，不得是字母序。
-
----
-
-**1.6 为什么不改（最终决策）**
-
-最初把这条定性为"真缺陷"，是**抬高了**。复盘如下：
-
-- **现状不是 bug。** `sort_by(name)` 出来的是**确定**的字母序，每次请求都一样，prompt 前缀**本来就稳定**。评审说的"改成字母序 → prefix 变 → 线上掉缓存"这个因果**不成立**——保序同样稳定，两条路都不会持续掉缓存，差别只是切换那一次 miss。
-- **保序站得住的理由只有两条**：① 迁移期复刻旧系统的既定前缀（一次性价值）；② 工具在数组里的位置对模型选择有**微弱** steering 作用。都不构成硬需求。
-- **当前没有任何功能依赖顺序**，诉求本质是偏好。
-- **改动并非零成本**：底层是 `HashMap`（迭代无序），保序必须额外存一份插入序（`order: Vec<ToolName>` 或换 `IndexMap`），且会**改变 prompt 前缀**（一次 breaking 的行为变更）。
-
-结论：**维持按名排序**。若将来出现"必须控制工具顺序"的真实需求（例如多阶段工具集按阶段排序能显著提升选择准确率），再按 1.3 的方案做——届时它是**有依据的功能**，而不是现在的偏好。
+Unit test: register `c, a, b` -> the name sequence from `definitions()` must be `["c","a","b"]`, not alphabetical.
 
 ---
 
-**二、gap-4：请求体留口 + 接线未生效字段（已落地）**
+**1.6 Why not change it (final decision)**
 
-> 落地实现：`ModelConfig` 新增 `tool_choice` / `extra_body`；`encode_request` 改为
-> 仅在 `Some` 时写入 `temperature` / `max_tokens` / `reasoning_effort` / `tool_choice`，
-> `thinking` 仅在开启时写 `{"type":"enabled"}`；最后 `apply_extra_body` 浅合并
-> （`null` 删除键）。单测 `chat_completions::tests`（5 个）。
-> 注意线上键名是 `max_tokens`（ChatCompletions），非 `max_output_tokens`。
-> 下面保留原始设计推导。
+Calling this a "real defect" at first **overstated** it. The retrospective:
 
-**2.1 现状**
+- **The status quo is not a bug.** `sort_by(name)` produces a **deterministic** alphabetical order, the same on every request, so the prompt prefix **is already stable**. The reviewer's causal claim "changing to alphabetical -> prefix changes -> caches drop in production" **does not hold** -- order preservation is equally stable, neither path keeps dropping caches, and the only difference is the one-time miss at the switch.
+- **Only two reasons for order preservation hold up**: (1) reproducing the old system's established prefix during migration (one-time value); (2) a tool's position in the array has a **weak** steering effect on the model's choice. Neither constitutes a hard requirement.
+- **Currently nothing functionally depends on order**; the demand is essentially a preference.
+- **The change is not zero-cost**: the bottom layer is a `HashMap` (unordered iteration), so order preservation must store an extra insertion order (`order: Vec<ToolName>` or switch to `IndexMap`), and it would **change the prompt prefix** (a breaking behavior change).
 
-`chat_completions/mod.rs::encode_request`：
+Conclusion: **keep the sort-by-name**. If a real need to "control tool order" arises in the future (e.g. ordering a multi-phase tool set by phase significantly improves selection accuracy), then do it per the plan in 1.3 -- at that point it is a **justified feature**, not the current preference.
+
+---
+
+**2. gap-4: request-body escape hatch + wiring the unwired fields (landed)**
+
+> Landed implementation: `ModelConfig` gains `tool_choice` / `extra_body`; `encode_request` is changed to
+> write `temperature` / `max_tokens` / `reasoning_effort` / `tool_choice` only when `Some`,
+> write `thinking` as `{"type":"enabled"}` only when enabled; finally `apply_extra_body` shallow-merges
+> (`null` deletes a key). Unit tests `chat_completions::tests` (5).
+> Note the on-the-wire key name is `max_tokens` (ChatCompletions), not `max_output_tokens`.
+> The original design derivation is kept below.
+
+**2.1 Status quo**
+
+`chat_completions/mod.rs::encode_request`:
 
 ```rust
 let thinking = match config.thinking { true => "enabled", false => "disabled" };
@@ -110,89 +110,89 @@ let body = serde_json::json!({
 });
 ```
 
-`temperature` / `max_output_tokens` 已定义未进 body；`tool_choice` 完全没暴露。
+`temperature` / `max_output_tokens` are defined but not in the body; `tool_choice` is not exposed at all.
 
-**2.2 三处问题分级（纠正一处因果）**
+**2.2 Grading the three problems (correcting one causal claim)**
 
-| 项 | 定性 |
+| Item | Nature |
 | --- | --- |
-| `thinking` 硬编码 `{"type":"enabled"}` | **真问题，400 的根源**——这是某厂商私有约定，不是 OpenAI 标准。OpenAI 只用 `reasoning_effort`；严格校验端点会因该字段 400 |
-| `tool_choice` 缺失 | **功能缺失，非 400**——OpenAI 中它可选，不传不报错；缺的是"强制/禁用工具调用"的能力 |
-| `temperature` / `max_output_tokens` 未接线 | 已定义未使用 |
+| `thinking` hard-coded as `{"type":"enabled"}` | **a real problem, the root of the 400** -- this is a vendor-private convention, not an OpenAI standard. OpenAI only uses `reasoning_effort`; a strict endpoint would 400 on this field |
+| `tool_choice` missing | **a missing feature, not a 400** -- in OpenAI it is optional and not sending it does not error; what is missing is the ability to "force/disable tool calls" |
+| `temperature` / `max_output_tokens` not wired | defined but unused |
 
-同时塞 `thinking` + `reasoning_effort` 是"广撒网"，在严格端点上不可靠。
+Also stuffing in `thinking` + `reasoning_effort` is "spray and pray", unreliable on strict endpoints.
 
-**2.3 方案：加一处 escape hatch，而不是加 N 个厂商分支**
+**2.3 Plan: add one escape hatch, not N vendor branches**
 
-厂商私有字段（`enable_thinking` / `thinking_budget` / `{type:"enabled"}`…）差万别，逐个加分支是无底洞。改为**给应用一个覆盖请求体的口子**。
+Vendor-private fields (`enable_thinking` / `thinking_budget` / `{type:"enabled"}`...) differ endlessly; adding branches one by one is a bottomless pit. Instead, **give the application a hole to override the request body**.
 
-`ModelConfig` 新增：
+`ModelConfig` adds:
 
 ```rust
 #[builder(default)] pub tool_choice: Option<serde_json::Value>,
 #[builder(into)]  pub extra_body: Option<serde_json::Value>,
 ```
 
-`Value` 而非枚举：`tool_choice` 可为 `"auto"` / `"none"` / `"required"` 或对象，枚举会反复破 API。
+`Value` rather than an enum: `tool_choice` can be `"auto"` / `"none"` / `"required"` or an object; an enum would repeatedly break the API.
 
-`encode_request` 构造顺序：
+`encode_request` construction order:
 
-1. 构造标准字段：`model` / `messages` / `tools` / `stream`；
-2. `temperature` / `max_output_tokens` / `tool_choice` **仅在 `Some` 时**插入；
-3. `thinking`：**仅当 `config.thinking == true`** 时输出 `{"type":"enabled"}`；`false` 时**完全省略**（现在会发 `disabled`，多数端点不接受该形状）；
-4. 最后 `apply_extra_body(&mut body, extra)`：**浅合并**，应用键覆盖标准键；**值为 `null` 表示删除该键**——这样应用能彻底移除 SDK 默认的 `thinking`，换成自己的形状。
+1. Build the standard fields: `model` / `messages` / `tools` / `stream`;
+2. `temperature` / `max_output_tokens` / `tool_choice` are inserted **only when `Some`**;
+3. `thinking`: output `{"type":"enabled"}` **only when `config.thinking == true`**; when `false`, **omit it entirely** (currently it would send `disabled`, a shape most endpoints do not accept);
+4. Finally `apply_extra_body(&mut body, extra)`: **shallow merge**, application keys override standard keys; **a value of `null` means delete that key** -- this way the application can completely remove the SDK's default `thinking` and replace it with its own shape.
 
-合并函数独立成 `fn apply_extra_body(body: &mut Value, extra: &Value)`，单测覆盖三种情形。
+The merge function is a standalone `fn apply_extra_body(body: &mut Value, extra: &Value)`, with unit tests covering three cases.
 
-**2.4 语义与影响**
+**2.4 Semantics and impact**
 
-- 默认路径行为尽量不变（除 `thinking:false` 不再发 `disabled`）。
-- 厂商私有字段一律走 `extra_body`，SDK 不做厂商判断。
-- `ModelConfig` 加字段是 builder 兼容变更，调用方无感。
+- The default-path behavior stays as unchanged as possible (except `thinking:false` no longer sends `disabled`).
+- Vendor-private fields all go through `extra_body`; the SDK does no vendor detection.
+- Adding fields to `ModelConfig` is a builder-compatible change, invisible to callers.
 
-**2.5 验收**
+**2.5 Acceptance**
 
-单测：
+Unit tests:
 
-1. `temperature` / `max_output_tokens` / `tool_choice` 为 `Some` 时出现在 body；
-2. `extra_body` 覆盖 `reasoning_effort`；
-3. `extra_body` 里 `"thinking": null` 删除该键；
-4. `thinking=false` 时 body 无 `thinking` 键。
+1. `temperature` / `max_output_tokens` / `tool_choice` appear in the body when `Some`;
+2. `extra_body` overrides `reasoning_effort`;
+3. `"thinking": null` in `extra_body` deletes that key;
+4. when `thinking=false` the body has no `thinking` key.
 
 ---
 
-**三、gap-1：工具运行时上下文注入（已落地）**
+**3. gap-1: tool runtime context injection (landed)**
 
-> 落地实现：`ToolContext`（`tool/mod.rs`）+ `Tool::invoke` 新增 `ctx` 参数 +
-> 宏识别 `ToolContext` / `&ToolContext` 参数（不进入 schema，按原位置传给原函数）。
-> 回归测试 `tests/tool_context.rs`（5 个）。
+> Landed implementation: `ToolContext` (`tool/mod.rs`) + `Tool::invoke` gains a `ctx` parameter +
+> the macro recognizes a `ToolContext` / `&ToolContext` parameter (not entering the schema, passed to the original function in its original position).
+> Regression tests `tests/tool_context.rs` (5).
 >
-> **后续演进**：原先的 `Agent` 的 `.tool_context()` builder **已被移除**——`ToolContext`
-> 的所有权移入 `ToolManager`，并新增注册钩子 `on_register` / `on_unregister`（注入与
-> 清理），见 `docs/tool-lifecycle.md`、`docs/tool-macro.md`。下面保留原始设计推导，
-> 其中"方案 A"即最终采用形态；**注入途径以 lifecycle 文档为准**。
+> **Later evolution**: the old `Agent`'s `.tool_context()` builder **has been removed** -- ownership of `ToolContext`
+> moved into `ToolManager`, and registration hooks `on_register` / `on_unregister` were added (injection and
+> cleanup), see `docs/tool-lifecycle.md`, `docs/tool-macro.md`. The original design derivation is kept below,
+> in which "option A" is the finally adopted form; **the injection path is governed by the lifecycle doc**.
 
-**3.1 现状**
+**3.1 Status quo**
 
 ```rust
-fn invoke(&self, input: serde_json::Value) -> ToolFuture<'_>;   // 无上下文
+fn invoke(&self, input: serde_json::Value) -> ToolFuture<'_>;   // no context
 ```
 
-宏展开（`macros/src/tool.rs`）只做 `反序列化参数 → super::#name(args).await`，把函数编译成**纯函数**。工具拿不到 session、状态或任何外部句柄。
+The macro expansion (`macros/src/tool.rs`) only does `deserialize args -> super::#name(args).await`, compiling the function into a **pure function**. A tool cannot get a session, state, or any external handle.
 
-有状态工具（`TodoTool` 持 `Arc<TodoStore>`、应用手工 `impl Tool + Arc<Mutex<Session>>`）**只能手写，用不了宏**。
+Stateful tools (`TodoTool` holding an `Arc<TodoStore>`, an application manually doing `impl Tool + Arc<Mutex<Session>>`) **can only be hand-written, cannot use the macro**.
 
-**3.2 为什么框架层该管**
+**3.2 Why the framework layer should handle it**
 
-ReAct agent 的工具天然有状态——工具要读写会话状态。任何有状态 agent 都会遇到，不是某个应用的特殊业务。
+A ReAct agent's tools are naturally stateful -- tools need to read and write session state. Any stateful agent runs into this; it is not some application's special business.
 
-**3.3 关键约束（决定形态）**
+**3.3 Key constraint (determines the form)**
 
-工具是**并发执行**的（`runtime/agent.rs` 用 `FuturesUnordered`）。所以上下文**不可能**是 `&mut Session`——多工具并发要 `&mut` 同一会话必然冲突。**唯一可行形态是内部可变性句柄**（`Arc<Mutex<Session>>`）。应用手工绕过用的正是这个形态，是对的。
+Tools are **executed concurrently** (`runtime/agent.rs` uses `FuturesUnordered`). So the context **cannot** be a `&mut Session` -- multiple tools concurrently needing `&mut` on the same session would necessarily conflict. **The only viable form is an interior-mutability handle** (`Arc<Mutex<Session>>`). This is exactly the form applications use when working around it manually, and it is correct.
 
-**3.4 方案 A（推荐）：类型擦除上下文**
+**3.4 Option A (recommended): type-erased context**
 
-新增公开类型：
+New public types:
 
 ```rust
 #[derive(Clone, Default)]
@@ -202,22 +202,22 @@ pub struct ToolContext {
 
 impl ToolContext {
     pub fn new() -> Self;
-    pub fn with<T: Any + Send + Sync>(self, value: T) -> Self;   // 存入 Arc::new(value)
+    pub fn with<T: Any + Send + Sync>(self, value: T) -> Self;   // stores Arc::new(value)
     pub fn get<T: Any + Send + Sync>(&self) -> Option<Arc<T>>;   // Arc::downcast
 }
 ```
 
-签名变更（`Tool` trait）：
+Signature change (`Tool` trait):
 
 ```rust
-fn invoke(&self, input: Value, ctx: ToolContext) -> ToolFuture<'_>;   // 新增 ctx，owned
+fn invoke(&self, input: Value, ctx: ToolContext) -> ToolFuture<'_>;   // new ctx, owned
 ```
 
-`ToolContext` 内部是 `Arc<map>`，clone = 引用计数 +1，per-call 开销可忽略；owned 传入避免生命周期纠缠。
+`ToolContext` internally is `Arc<map>`, so clone = refcount +1, a negligible per-call cost; owned passing avoids lifetime tangles.
 
-`ToolManager::invoke` 透传 `ctx`；`Agent` 持有 `ToolContext`（builder 新增 `.tool_context(ToolContext)`），runtime 调用时 `self.context.clone()`。
+`ToolManager::invoke` passes `ctx` through; `Agent` holds the `ToolContext` (builder adds `.tool_context(ToolContext)`), and the runtime does `self.context.clone()` when calling.
 
-宏识别**类型末段为 `ToolContext`** 的参数为上下文参数——不纳入 `Arguments` struct / schema，展开时把 `ctx` 传给原函数：
+The macro recognizes a parameter whose **type's last segment is `ToolContext`** as a context parameter -- it is not included in the `Arguments` struct / schema, and on expansion `ctx` is passed to the original function:
 
 ```rust
 #[tool(description = "...")]
@@ -227,68 +227,68 @@ async fn save_section(
 ) -> Result<String, ToolError> { ... }
 ```
 
-（`ToolContext` 或 `shirley_agent_sdk::ToolContext` 均可；一个函数最多一个 ctx 参数。）
+(`ToolContext` or `shirley_agent_sdk::ToolContext` both work; a function has at most one ctx parameter.)
 
-应用侧：
+Application side:
 
 ```rust
 let ctx = ToolContext::new().with(Mutex::new(my_session));
 Agent::builder().tool_context(ctx)...
 ```
 
-工具内：
+Inside a tool:
 
 ```rust
 let session = ctx.get::<Mutex<Session>>().expect("session not provided");
 ```
 
-`TodoTool` 等手写实现只需加一个忽略的 `_ctx` 参数。
+Hand-written implementations such as `TodoTool` only need to add an ignored `_ctx` parameter.
 
-**3.5 方案 B（备选）：泛型 `Agent<T>` / `ToolManager<T>`**
+**3.5 Option B (alternative): generic `Agent<T>` / `ToolManager<T>`**
 
-`ctx: &T` 类型安全，但泛型参数**污染整条链**（`Agent` / `ToolManager` / `Tool` / runtime 全要带 `<T>`），并**杀死 `dyn Tool`**（当前 `ToolManager` 靠它擦除存储）。与"对外契约保持小"冲突。
+`ctx: &T` is type-safe, but the generic parameter **pollutes the whole chain** (`Agent` / `ToolManager` / `Tool` / runtime all have to carry `<T>`), and **kills `dyn Tool`** (the current `ToolManager` relies on it for type-erased storage). It conflicts with "keep the external contract small".
 
-**3.6 取舍**
+**3.6 Trade-off**
 
-**选 A。** 它保留 `dyn Tool`、改动面可控；代价是 `get::<T>()` 为运行期 downcast，取不到需显式处理。这比 B 的传染代价小得多。
+**Choose A.** It keeps `dyn Tool` and has a controllable blast radius; the cost is that `get::<T>()` is a runtime downcast and a miss must be handled explicitly. That is far smaller than B's contagion cost.
 
-**3.7 验收**
+**3.7 Acceptance**
 
-集成测试：注册一个从 ctx 取 `Arc<Mutex<Session>>` 的宏工具，**并发**调用两次，断言状态累加正确（同时验证"并发执行"与"状态可用"两个前提）。
+Integration test: register a macro tool that gets an `Arc<Mutex<Session>>` from ctx, call it **concurrently** twice, and assert the state accumulates correctly (verifying both premises "concurrent execution" and "state is available").
 
 ---
 
-**四、变更清单与破坏性**
+**4. Change list and breakage**
 
-| 变更 | 破坏性 | 影响的调用方 |
+| Change | Breaking | Affected callers |
 | --- | --- | --- |
-| `ToolManager` 加 `order` 字段 | 否 | 无 |
-| `definitions()` 返回顺序变 | 行为 | prefix 一次性 miss |
-| `ModelConfig` 加 `tool_choice` / `extra_body` | 加字段（builder 兼容） | 无 |
-| `encode_request` 输出变 | 行为 | 端点请求体 |
-| `Tool::invoke` 加 `ctx` 参数 | **是** | 所有手写 `impl Tool`（含 `TodoTool`、应用手工工具） |
-| `ToolManager::invoke` 加 `ctx` | **是** | runtime、测试 |
-| 新增 `ToolContext` | 否（新增） | 无 |
-| ~~`Agent` builder 加 `.tool_context()`~~ | —— | **已被移除**，改由 `ToolManager` 持有 `ToolContext`（见 `docs/tool-lifecycle.md`） |
-| 宏支持 ctx 参数 | 否（向后兼容） | 无 |
+| `ToolManager` adds an `order` field | no | none |
+| `definitions()` return order changes | behavior | one-time prefix miss |
+| `ModelConfig` adds `tool_choice` / `extra_body` | added fields (builder-compatible) | none |
+| `encode_request` output changes | behavior | endpoint request body |
+| `Tool::invoke` adds a `ctx` parameter | **yes** | all hand-written `impl Tool` (including `TodoTool`, application hand-written tools) |
+| `ToolManager::invoke` adds `ctx` | **yes** | runtime, tests |
+| add `ToolContext` | no (added) | none |
+| ~~`Agent` builder adds `.tool_context()`~~ | -- | **has been removed**; `ToolContext` is now held by `ToolManager` (see `docs/tool-lifecycle.md`) |
+| macro supports a ctx parameter | no (backward compatible) | none |
 
-→ 发 **`0.0.2`**。
+-> release **`0.0.2`**.
 
 ---
 
-**五、落地状态**
+**5. Landing status**
 
-| 缺口 | 状态 | 落点 |
+| Gap | Status | Landing point |
 | --- | --- | --- |
-| gap-1 工具上下文 | **已落地** | `ToolContext` + `Tool::invoke` 加 `ctx` + 宏识别 ctx 参数；测试 `tests/tool_context.rs`（5）。所有权后移入 `ToolManager`（`docs/tool-lifecycle.md`） |
-| gap-4 请求体留口 | **已落地** | `ModelConfig::tool_choice` / `extra_body` + `encode_request` 重构；单测 `chat_completions::tests`（5） |
-| gap-2 工具顺序保序 | **不做** | 见 1.6 |
+| gap-1 tool context | **landed** | `ToolContext` + `Tool::invoke` gains `ctx` + the macro recognizes a ctx parameter; tests `tests/tool_context.rs` (5). Ownership later moved into `ToolManager` (`docs/tool-lifecycle.md`) |
+| gap-4 request-body escape hatch | **landed** | `ModelConfig::tool_choice` / `extra_body` + `encode_request` refactor; unit tests `chat_completions::tests` (5) |
+| gap-2 tool-order preservation | **not doing** | see 1.6 |
 
-已同步更新：`Agent.md`（工具系统、`#[tool]` 宏、已知缺口）、`docs/README.md`（索引）。
+Already synced: `Agent.md` (tool system, `#[tool]` macro, known gaps), `docs/README.md` (index).
 
 ---
 
-**六、版本**
+**6. Version**
 
-gap-1 与 gap-4 均为破坏性变更（`Tool::invoke` 签名、`encode_request` 输出行为），
-发 **`0.0.2`**（`Cargo.toml` × 3 同步）。
+gap-1 and gap-4 are both breaking changes (`Tool::invoke` signature, `encode_request` output behavior),
+released as **`0.0.2`** (`Cargo.toml` x 3 kept in sync).

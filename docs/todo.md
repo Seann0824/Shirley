@@ -1,83 +1,85 @@
-**Shirley 技术方案 · 任务账本（todo）**
+**Shirley technical design · Task ledger (todo)**
 
-这份文档把"让模型维护自己的任务状态"落地成方案。它是 `compaction.md`
-的配套能力：压缩解决了"上下文装不下"，而 todo 解决的是
-**"压缩后模型忘了自己做到哪、于是重新探索"**这个正反馈回路。
+This document turns "let the model maintain its own task state" into a plan. It is a companion capability to
+`compaction.md`: compaction solves "the context does not fit", while todo solves the
+**positive feedback loop of "after compaction the model forgets where it got to, so it re-explores"**.
 
-**范围声明**：本轮只做内存实现，持久化层留空。
+**Scope statement**: this round only does an in-memory implementation; the persistence layer is left empty.
 
-**归属修正（后续决策）**：账本**已从 SDK 移到应用层**（`src/todo.rs`）。
-"记什么、怎么催、注入什么文案"是 coding agent 这个产品的取舍，不是通用基础
-能力。SDK 只保留一个与业务无关的通用接缝——[`ContextProvider`]：`Agent` 组装
-每轮请求时调它，把返回文本作为一条 system **追加在末尾**。账本只是该接缝的
-一个应用层实现（`TodoContextProvider`）。
-
----
-
-**一、要解决什么**
-
-压缩是**有损**的（`compaction.md` 引用 Tirmazi et al. 的信息论结论：精确信息在摘要中
-必然丢失）。丢的不只是"用户说过的话"，还有**模型自己的进度状态**：
-
-- 我这一轮的目标是什么、拆成了哪几步、哪几步做完了；
-- 我已经验证过什么事实（读过哪个文件、跑过什么命令、得到什么结论）；
-- 还有哪些问题悬而未决。
-
-这些信息原本散落在 assistant 正文、reasoning、tool 调用里。压缩把工具输出清空、
-把对话压成摘要后，模型看不到"我已经做过 X 了"，于是：
-
-```
-压缩 → 忘了做过 X → 重新探索 X → 上下文又涨 → 再压缩 → ……
-```
-
-账本换一条路：把"进度状态"从对话里**抽出来、单独持有**，
-每轮无条件注入，模型不需要"想起来去查"，它一直在眼前。
+**Ownership correction (later decision)**: the ledger **has moved from the SDK to the application layer** (`src/todo.rs`).
+"What to record, how to nag, what copy to inject" is a trade-off of the coding-agent product, not a generic fundamental
+capability. The SDK keeps only one business-agnostic generic seam -- [`ContextProvider`]: when the `Agent` assembles
+each round's request it calls it and appends the returned text as a system message **at the end**. The ledger is just one
+application-layer implementation of that seam (`TodoContextProvider`).
 
 ---
 
-**二、三个核心决策（先定调）**
+**1. What it solves**
 
-**决策 1：账本由模型写，不做程序化推断。**
+Compaction is **lossy** (`compaction.md` cites Tirmazi et al.'s information-theoretic conclusion: exact information is
+necessarily lost in a summary). What is lost is not only "what the user said", but also **the model's own progress state**:
 
-"任务拆成了哪几步""什么算已完成的结论"没有通用判据，写死程序只会猜错。所以账本是
-**模型自己维护**的：SDK 暴露一个 `todo` 工具，模型自己决定何时更新——**状态判断发生在 AI 层，比任何程序规则准**。
+- what my goal for this round is, how it was broken into steps, which steps are done;
+- what facts I have already verified (which file I read, what command I ran, what conclusion I reached);
+- what questions remain unresolved.
 
-**决策 2：账本不进 `self.messages`，每轮作为 system 追加在末尾注入。**
+This information was originally scattered across the assistant body, reasoning, and tool calls. After compaction clears
+tool output and compresses the conversation into a summary, the model cannot see "I have already done X", so:
 
-- **不进工作集**：`self.messages` 是压缩重建的对象，账本放进去就会被压掉——那正是要避免的。
-  账本单独持有，压缩碰不到它，天然跨压缩存活。
-- **注入位置选末尾**：`active_messages()` 在组装请求时把账本渲染成一条 `System` 消息
-  **追加在最后**。理由：
-  - 追加在尾部**不动前面的前缀**——账本内容稳定时，KV 前缀缓存照常命中
-    （`responses-api.md` 里"system 原位保留、不上提到 `instructions`"就是为了这个）；
-  - 账本只在模型调用 `todo` 时变化，届时前缀才失效。这是"必须每轮可见"的固有代价，
-    无法避免，只能把变化点压到最小。
-  - 位置在末尾也符合"最近可见"：模型读到最新的任务状态。
+```
+compaction -> forget X was done -> re-explore X -> context grows again -> compact again -> ...
+```
 
-> **注意**：账本注入的是一条 **`System`** 消息，不是 `ContextSummary`。它不参与
-> `active_messages()` 的"最后一条 summary 之后"裁剪——因为它是函数**末尾追加**的，
-> 不来自 `self.messages`。三个适配器（ChatCompletions / Responses / Anthropic）都已能
-> 处理任意位置的 system：ChatCompletions 原样输出，Responses 原位保留为 system item，
-> Anthropic 会把它摘到顶层 `system`（Anthropic 协议本身没有 mid-list system）。
+The ledger takes a different path: it **pulls the "progress state" out of the conversation and holds it separately**,
+injecting it unconditionally every round, so the model does not need to "remember to look it up" -- it is always in front of it.
 
-**决策 3：补丁语义，只动显式提供的字段。**
+---
 
-`todo` 工具的入参是**补丁**，不是全量覆盖：
+**2. Three core decisions (set the tone first)**
 
-| 字段 | 语义 | 理由 |
+**Decision 1: the ledger is written by the model; no programmatic inference.**
+
+"How many steps a task was broken into" and "what counts as a completed conclusion" have no generic criterion; hard-coding
+a program would only guess wrong. So the ledger is **maintained by the model itself**: the SDK exposes a `todo` tool, and
+the model decides when to update -- **state judgment happens at the AI layer, more accurately than any program rule**.
+
+**Decision 2: the ledger does not go into `self.messages`; each round it is injected as a system message appended at the end.**
+
+- **Does not enter the working set**: `self.messages` is the object that compaction rebuilds; putting the ledger in would
+  let it be compacted away -- which is exactly what we want to avoid. The ledger is held separately, compaction cannot touch
+  it, and it naturally survives compaction.
+- **Injection position is the end**: `active_messages()` renders the ledger into a `System` message when assembling the
+  request and **appends it last**. Reasons:
+  - appending at the tail **does not move the earlier prefix** -- when the ledger content is stable, the KV prefix cache
+    still hits (this is exactly why `responses-api.md` says "keep system in place, do not hoist it to `instructions`");
+  - the ledger only changes when the model calls `todo`, and only then does the prefix invalidate. This is the inherent cost
+    of "must be visible every round"; it cannot be avoided, only minimized by compressing the change points.
+  - the position at the end also matches "most recently visible": the model reads the latest task state.
+
+> **Note**: the ledger is injected as a **`System`** message, not a `ContextSummary`. It does not participate in
+> `active_messages()`'s "after the last summary" trimming -- because it is **appended at the end** by the function and does
+> not come from `self.messages`. All three adapters (ChatCompletions / Responses / Anthropic) can already handle a system
+> at any position: ChatCompletions outputs it as-is, Responses keeps it in place as a system item, and Anthropic extracts it
+> to the top-level `system` (the Anthropic protocol itself has no mid-list system).
+
+**Decision 3: patch semantics; only touch the explicitly provided fields.**
+
+The `todo` tool's input is a **patch**, not a full overwrite:
+
+| Field | Semantics | Reason |
 | --- | --- | --- |
-| `goal` | 设置 / 替换目标 | 目标通常稳定，偶尔改 |
-| `steps` | **整体替换**清单 | 清单短，每轮重发全量，模型天然自纠（漏了哪步下一轮补） |
-| `add_findings` | **追加**结论 | "我又发现了 X"更自然，追加不会丢历史 |
-| `add_open_questions` | **追加**问题 | 同上 |
-| `clear` | 重置整个账本 | 任务切换时清场 |
+| `goal` | set / replace the goal | the goal is usually stable, changed occasionally |
+| `steps` | **whole replacement** of the list | the list is short; resending the full list each round lets the model self-correct naturally (a missed step is added next round) |
+| `add_findings` | **append** a conclusion | "I found X again" is more natural; appending does not lose history |
+| `add_open_questions` | **append** a question | same as above |
+| `clear` | reset the whole ledger | clear the field when switching tasks |
 
-未提供的字段保持原样。这样模型可以只更新变化的部分（"这一步做完了"= 重发 `steps`），
-不必每轮重发整个账本。
+Unprovided fields stay as-is. This way the model can update only the changed part ("this step is done" = resend `steps`),
+without resending the whole ledger every round.
 
 ---
 
-**三、数据结构与渲染**
+**3. Data structures and rendering**
 
 **3.1 `TodoStore`**
 
@@ -92,96 +94,100 @@ struct TaskState {
 }
 ```
 
-`Arc` 共享（runtime 与 `todo` 工具各持一份 `Arc`），内部可变性走
-`Mutex`，`&self` 即可写（`apply` / `clear` / `render`）。持久化留空。
+Shared via `Arc` (the runtime and the `todo` tool each hold one `Arc`); interior mutability goes through `Mutex`, so
+`&self` suffices to write (`apply` / `clear` / `render`). Persistence is left empty.
 
-**3.2 渲染成 XML**
+**3.2 Rendered as XML**
 
-`render()` 把账本拼成 XML 块（`plan.md`：标签形式提升模型对结构信息的注意力）：
+`render()` assembles the ledger into an XML block (`plan.md`: tag form improves the model's attention to structured information):
 
 ```xml
 <task_state>
-<goal>把 TS 后端迁移到 Rust</goal>
+<goal>Migrate the TS backend to Rust</goal>
 <steps>
-- [x] 梳理现有路由
-- [ ] 迁移用户模块
+- [x] Survey the existing routes
+- [ ] Migrate the user module
 </steps>
 <findings>
-- 鉴权逻辑在 src/auth.rs，用 JWT
+- The auth logic is in src/auth.rs, using JWT
 </findings>
 <open_questions>
-- 数据库连接池用哪个 crate？
+- Which crate to use for the DB connection pool?
 </open_questions>
 </task_state>
 ```
 
-要点：
+Key points:
 
-- **空账本不注入**（`render()` 返回 `None`）——避免每轮多一条无意义的 system。
-- **XML 转义**：`&` / `<` / `>` 转义，防止模型写入的内容破坏标签结构。
-- **字符上限** `MAX_RENDER_CHARS = 4000`：超限截断并显式标注
-  `... (task ledger truncated; keep it concise)`——账本自己也会占上下文，防它垄断。
-- 注入时前面加一行 `TASK_STATE_HEADER` 说明（"这是你的任务账本，跨压缩存活，用 `todo`
-  工具更新，别重复已完成的工作"）——与 `render()` 分开，工具结果里不需要重复这段说明。
+- **An empty ledger is not injected** (`render()` returns `None`) -- to avoid an extra meaningless system message every round.
+- **XML escaping**: `&` / `<` / `>` are escaped, to prevent model-written content from breaking the tag structure.
+- **Character cap** `MAX_RENDER_CHARS = 4000`: truncated over the limit with an explicit marker
+  `... (task ledger truncated; keep it concise)` -- the ledger itself takes context too; prevent it from monopolizing.
+- When injecting, prepend a line of `TASK_STATE_HEADER` explanation ("this is your task ledger, survives compaction, update
+  it with the `todo` tool, do not repeat completed work") -- kept separate from `render()`; the tool result does not need
+  to repeat this explanation.
 
-**3.3 `todo` 工具**
+**3.3 The `todo` tool**
 
-手写 `impl Tool`：状态 `Arc<TodoStore>` 由工具自己持有，
-构造时绑定，不走 `ToolContext` 注入。`invoke` 反序列化 `TodoUpdate` → `store.apply()`
-→ 返回**更新后的完整账本**（让模型确认更新生效、据此续接）。参数 schema 手写 JSON Schema。
+Hand-written `impl Tool`: the state `Arc<TodoStore>` is held by the tool itself, bound at construction, not going through
+`ToolContext` injection. `invoke` deserializes `TodoUpdate` -> `store.apply()` -> returns the **full updated ledger** (so the
+model can confirm the update took effect and continue accordingly). The parameter schema is a hand-written JSON Schema.
 
 ---
 
-**四、与压缩的关系**
+**4. Relationship to compaction**
 
-两者职责不重叠：
+The two do not overlap in responsibility:
 
-| 能力 | 记什么 | 谁触发 | 恢复方式 |
+| Capability | What it records | Who triggers | How it recovers |
 | --- | --- | --- | --- |
-| compaction | 对话摘要 | 自动（80% 阈值） | 摘要本身 |
-| **todo** | **任务进度状态（目标 / 步骤 / 结论 / 待决）** | **AI 主动更新** | **每轮无条件注入** |
+| compaction | a conversation summary | automatic (80% threshold) | the summary itself |
+| **todo** | **task progress state (goal / steps / findings / open questions)** | **the AI updates proactively** | **injected unconditionally every round** |
 
-- **账本不是"再摘要一遍"**：摘要是有损的（那是二次损失），而账本里写的是模型**自己
-  确认过的事实**，是"提炼"不是"压缩"。
-- **账本不入 `self.messages`**：它单独持有，跨压缩存活。
-- **切换会话天然隔离**：多会话落地后每个会话自持独立 `Agent`（`SessionManager`），
-  账本随 `Agent` 一并搁置——旧会话的任务状态不会残留到新会话。
-  （单会话时代曾有 `Agent::switch_session` 里的显式 `todo.clear()`，该接缝已移除。）
-
----
-
-**五、生命周期**
-
-- **注册**：`Agent::new` 里 `tools.register(TodoTool::new(todo.clone()))`。
-  应用层 `main.rs` 一行不用改。
-- **注入**：`active_messages()` 末尾追加（见决策 2）。
-- **清空**：随会话切换（每会话独立 `Agent`）天然隔离；无跨会话残留。
-- **持久化**：留空（进程结束即失）。若将来要做持久化，
-  `TodoStore` 的接口（`apply` / `render` / `clear`）已足够挂载后端。
+- **The ledger is not "summarize it again"**: a summary is lossy (that would be a second loss), while what is written in the
+  ledger is facts the model **has itself confirmed** -- it is "distillation", not "compression".
+- **The ledger does not enter `self.messages`**: it is held separately and survives compaction.
+- **Session switching is naturally isolated**: after multi-session landed, each session holds its own independent `Agent`
+  (`SessionManager`), and the ledger is shelved along with the `Agent` -- the old session's task state does not linger into
+  the new session. (In the single-session era there was an explicit `todo.clear()` in `Agent::switch_session`; that seam has
+  been removed.)
 
 ---
 
-**六、实现位置**
+**5. Lifecycle**
 
-| 文件 | 职责 |
+- **Registration**: in `Agent::new`, `tools.register(TodoTool::new(todo.clone()))`. The application layer's `main.rs` needs
+  no changes.
+- **Injection**: appended at the end of `active_messages()` (see decision 2).
+- **Clearing**: naturally isolated with session switching (each session has an independent `Agent`); no cross-session residue.
+- **Persistence**: left empty (lost when the process ends). If persistence is needed in the future, `TodoStore`'s interface
+  (`apply` / `render` / `clear`) is already enough to attach a backend.
+
+---
+
+**6. Implementation locations**
+
+| File | Responsibility |
 | --- | --- |
-| `src/todo.rs`（**应用层**） | `TodoStore` / `TodoStatus` / `TodoUpdate` / `TodoStep` / `TodoTool` / `TodoContextProvider` / `TASK_STATE_HEADER` / `TODO_NAG_REMINDER` / 单测 |
-| `src/bootstrap.rs`（应用层） | `build_agent` 每个 `Agent` 新建一份 `Arc<TodoStore>`，注册 `TodoTool` 并作为 `context_provider` 注入 `TodoContextProvider`（两者共享同一 `Arc`） |
-| `crates/shirley-agent-sdk/src/runtime/context.rs`（SDK） | 通用接缝 `ContextProvider`（`context() -> Option<String>`）；`agent.rs` 在 `active_messages()` 末尾调用它 |
-| `crates/shirley-agent-sdk/src/runtime/agent.rs`（SDK） | 持有 `Option<Arc<dyn ContextProvider>>`、`active_messages()` 末尾注入返回文本 |
+| `src/todo.rs` (**application layer**) | `TodoStore` / `TodoStatus` / `TodoUpdate` / `TodoStep` / `TodoTool` / `TodoContextProvider` / `TASK_STATE_HEADER` / `TODO_NAG_REMINDER` / unit tests |
+| `src/bootstrap.rs` (application layer) | `build_agent` creates a fresh `Arc<TodoStore>` per `Agent`, registers `TodoTool`, and injects `TodoContextProvider` as `context_provider` (the two share the same `Arc`) |
+| `crates/shirley-agent-sdk/src/runtime/context.rs` (SDK) | the generic seam `ContextProvider` (`context() -> Option<String>`); `agent.rs` calls it at the end of `active_messages()` |
+| `crates/shirley-agent-sdk/src/runtime/agent.rs` (SDK) | holds `Option<Arc<dyn ContextProvider>>`, injects the returned text at the end of `active_messages()` |
 
-**不再对外导出**：`TodoStore` / `TodoTool` 等已随模块移出 SDK（`lib.rs` 不再 re-export）。
-SDK 只导出通用接缝 `ContextProvider`。
+**No longer exported**: `TodoStore` / `TodoTool` etc. have moved out of the SDK along with the module (`lib.rs` no longer
+re-exports them). The SDK only exports the generic seam `ContextProvider`.
 
 ---
 
-**七、已知缺口**
+**7. Known gaps**
 
-1. **无持久化**：进程结束即失。恢复会话时账本不重建——冷启动的
-   会话没有任务状态，模型需要重新 `todo` 一遍（若有会话日志，未来可从最后一段重建）。
-2. **无自动清理**：账本只在模型调 `todo {clear: true}` 或切换会话时清空。长任务里
-   若模型忘记清理，账本会一直增长（`MAX_RENDER_CHARS` 兜底截断）。
-3. **注入即失前缀缓存**：模型每次调 `todo` 都会让"账本那条 system 之后的"前缀失效。
-   这是"每轮可见"的固有代价，目前用"账本放末尾 + 只写变化"把影响压到最小。
-4. **模型可能不用**：是否更新账本完全由模型决定。若模型不调用 `todo`，账本为空、
-   不注入，行为退回现状（不劣化）。
+1. **No persistence**: lost when the process ends. The ledger is not rebuilt when restoring a session -- a cold-started
+   session has no task state, and the model needs to `todo` again (if there is a session log, it could be rebuilt from the
+   last segment in the future).
+2. **No automatic cleanup**: the ledger is cleared only when the model calls `todo {clear: true}` or on session switching.
+   In a long task, if the model forgets to clean up, the ledger keeps growing (`MAX_RENDER_CHARS` is the fallback truncation).
+3. **Injection loses the prefix cache**: every time the model calls `todo`, the prefix "after that ledger system message"
+   invalidates. This is the inherent cost of "visible every round"; currently minimized by "put the ledger at the end + write
+   only the changes".
+4. **The model may not use it**: whether to update the ledger is entirely up to the model. If the model does not call `todo`,
+   the ledger stays empty and is not injected, and behavior falls back to the status quo (no degradation).

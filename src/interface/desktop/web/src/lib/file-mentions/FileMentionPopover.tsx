@@ -5,9 +5,10 @@ import { cn } from "@/ui/utils";
 import type { FileReference } from "./types";
 
 /**
- * `@` 引用候选浮层。迁移自 shiwen 的 EntityMentionPopover，剥掉了
- * OCR / 删除资料 / 分组（article/space/document…）等 shiwen 定制逻辑，
- * 只留「一个搜索框 + 一列文件/目录结果 + 键盘选择」。
+ * `@` reference candidate popover. Migrated from shiwen's EntityMentionPopover, stripping
+ * shiwen-specific logic such as OCR / deleting material / grouping
+ * (article/space/document...), keeping only "a search box + a column of file/dir results +
+ * keyboard selection".
  */
 export function FileMentionPopover({
   open,
@@ -32,7 +33,7 @@ export function FileMentionPopover({
   onQueryChange?: (query: string) => void;
   onKeyDown?: (event: React.KeyboardEvent<HTMLInputElement>) => boolean;
   onRetry: () => void;
-  /** 是否渲染自带的搜索框。富输入框内联引用时 query 由编辑区承载，这里传 false。 */
+  /** Whether to render the built-in search box. For inline references in the rich input, the query is carried by the editor, so pass false here. */
   showSearch?: boolean;
 }) {
   const viewportRef = useRef<HTMLDivElement>(null);
@@ -56,7 +57,7 @@ export function FileMentionPopover({
   return (
     <div
       role="listbox"
-      aria-label="引用工作区文件"
+      aria-label="Reference workspace files"
       className="z-50 w-full min-w-0 overflow-hidden rounded-card border border-line bg-surface shadow-lg"
       data-file-mention-popover
     >
@@ -67,9 +68,9 @@ export function FileMentionPopover({
             type="text"
             value={query}
             onChange={(event) => onQueryChange?.(event.target.value)}
-            placeholder="搜索工作区文件…"
+            placeholder="Search workspace files..."
             className="w-full bg-transparent text-body-sm text-ink outline-none placeholder:text-muted"
-            aria-label="搜索要引用的文件"
+            aria-label="Search files to reference"
             onKeyDown={(event) => {
               if (event.key === "Enter") event.preventDefault();
               event.stopPropagation();
@@ -87,7 +88,7 @@ export function FileMentionPopover({
           {loading && (
             <div className="flex items-center gap-2 px-3 py-2 text-body-sm text-muted">
               <Loader2 className="size-3.5 animate-spin" />
-              搜索中…
+              Searching...
             </div>
           )}
           {error && (
@@ -102,12 +103,12 @@ export function FileMentionPopover({
                 className="flex w-fit items-center gap-1 rounded bg-quiet px-2 py-1 text-label text-ink hover:bg-overlay"
               >
                 <RefreshCw className="size-3" />
-                点击重试
+                Click to retry
               </button>
             </div>
           )}
           {showEmpty && (
-            <div className="px-3 py-2 text-body-sm text-muted">没有找到匹配的文件</div>
+            <div className="px-3 py-2 text-body-sm text-muted">No matching files found</div>
           )}
           {!loading &&
             !error &&

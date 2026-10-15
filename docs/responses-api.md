@@ -1,96 +1,96 @@
-**Shirley 技术方案 · Responses 协议适配**
+**Shirley technical design · Responses protocol adapter**
 
-本文把 DeepSeek 的 Responses API（`POST /responses`）沉淀为可落地的适配方案。
-协议依据：
+This document distills DeepSeek's Responses API (`POST /responses`) into a landable adapter plan.
+Protocol references:
 
-- 指南：<https://api-docs.deepseek.com/guides/responses_api/>
-- 接口：<https://api-docs.deepseek.com/zh-cn/api/create-response>
+- Guide: <https://api-docs.deepseek.com/guides/responses_api/>
+- API: <https://api-docs.deepseek.com/zh-cn/api/create-response>
 
-Responses 与 ChatCompletions 是**两套 wire 协议，不是同一个协议的别名**。本文只描述
-"多一份协议实现"，抽象层本身的重构见 `docs/adapter-layer.md`。
+Responses and ChatCompletions are **two different wire protocols, not aliases of the same protocol**. This document only describes
+"one more protocol implementation"; the refactor of the abstraction layer itself is in `docs/adapter-layer.md`.
 
-> **状态：已实现**（`crates/shirley-agent-sdk/src/adapter/responses/`）。
-> 落地时的两点取舍：
-> 1. `codec` 从 `(Encoder, Decoder)` 扩成 `(Encoder, Decoder, StreamDecoder)`，
->    流式解码也纳入抽象，`invoke` 里不再按协议硬分支；
-> 2. 流式**只认终态事件**（`response.completed` / `incomplete` / `failed`），
->    delta 仅用于实时渲染，不做 `function_call_arguments` 分片聚合——因为终态对象
->    已携带完整 `output`，比靠 delta 拼更可靠（本文四.4 的"双轨、以终态为准"）。
+> **Status: implemented** (`crates/shirley-agent-sdk/src/adapter/responses/`).
+> Two trade-offs made at landing time:
+> 1. `codec` was extended from `(Encoder, Decoder)` to `(Encoder, Decoder, StreamDecoder)`,
+>    bringing streaming decoding into the abstraction too, so `invoke` no longer hard-branches by protocol;
+> 2. streaming **only trusts terminal events** (`response.completed` / `incomplete` / `failed`),
+>    deltas are only used for live rendering, and `function_call_arguments` fragments are not aggregated -- because the terminal object
+>    already carries the full `output`, which is more reliable than piecing it together from deltas (section 4.4 "dual-track, terminal state wins").
 >
-> **按 OpenAI 官方 schema 对齐的修正**（DeepSeek 本质是 OpenAI 兼容实现）：
-> reasoning 以 `summary` 为主、`content` 为回退；流式补认
-> `response.reasoning_summary_text.delta`；非流式 `failed` 与流式一样转 `AdapterError`；
-> 历史 assistant 文本改用纯字符串 content。
+> **Corrections aligned with the official OpenAI schema** (DeepSeek is essentially an OpenAI-compatible implementation):
+> reasoning uses `summary` primarily and `content` as a fallback; streaming additionally recognizes
+> `response.reasoning_summary_text.delta`; non-streaming `failed` turns into `AdapterError` just like streaming;
+> historical assistant text uses plain-string content.
 
 ---
 
-**一、与 ChatCompletions 的差异总览**
+**1. Overview of the differences from ChatCompletions**
 
-先把"为什么不能复用现有 codec"讲清楚。差异集中在四处：
+First, let us make clear "why we cannot reuse the existing codec". The differences are concentrated in four places:
 
-| 维度 | ChatCompletions | Responses |
+| Dimension | ChatCompletions | Responses |
 | --- | --- | --- |
-| 端点 | `POST /v1/chat/completions` | `POST /responses` |
-| 消息 | `messages: [{role, content}]` | `input: string \| item[]`，system 作为 `{role:"system"}` item 留在原位 |
-| 工具调用 | assistant 上的 `tool_calls[]`；结果走 `role:"tool"` | 顶层 `function_call` / `function_call_output` item；结果按 `call_id` 配对 |
-| 工具参数 | `tools[].function.parameters` | `tools[].parameters`（少一层 `function` 包装） |
-| 流式结束 | `data: [DONE]` | **没有 `[DONE]`**，以 `response.completed/incomplete/failed` 收尾 |
-| token 用量 | `prompt_tokens` / `completion_tokens` | `input_tokens` / `output_tokens` |
+| Endpoint | `POST /v1/chat/completions` | `POST /responses` |
+| Messages | `messages: [{role, content}]` | `input: string \| item[]`, system stays in place as a `{role:"system"}` item |
+| Tool calls | `tool_calls[]` on the assistant; results go through `role:"tool"` | top-level `function_call` / `function_call_output` items; results paired by `call_id` |
+| Tool parameters | `tools[].function.parameters` | `tools[].parameters` (one less `function` wrapper) |
+| Streaming end | `data: [DONE]` | **no `[DONE]`**, ends with `response.completed/incomplete/failed` |
+| Token usage | `prompt_tokens` / `completion_tokens` | `input_tokens` / `output_tokens` |
 
-**关键结论**：`input` 是一个 **item 列表**，而不是"消息列表"。一轮对话在这里被
-摊平成扁平的 item 序列——assistant 的文本、它发出的 `function_call`、以及工具回传的
-`function_call_output` 是**并列的兄弟 item**，而不是嵌套在一条 assistant 消息里。
-这决定了编码器不能沿用"Message → 一条 wire 消息"的一对一映射。
+**Key conclusion**: `input` is an **item list**, not a "message list". A round of conversation is
+flattened here into a flat item sequence -- the assistant's text, the `function_call` it emits, and the tool-returned
+`function_call_output` are **parallel sibling items**, not nested in a single assistant message.
+This determines that the encoder cannot reuse a one-to-one "Message -> one wire message" mapping.
 
 ---
 
-**二、请求编码**
+**2. Request encoding**
 
-**2.1 顶层参数**
+**2.1 Top-level parameters**
 
-| 我们的字段 | Responses 键 | 说明 |
+| Our field | Responses key | Notes |
 | --- | --- | --- |
-| `model` | `model` | 必填 |
-| system prompt | input 里的 `{type:"message", role:"system", content}` | 作为普通 item 留在原位（**不用顶层 `instructions`**：它会被服务端插到 `input` 之前，把中段/末尾 system 搬到最前，破坏前缀缓存） |
-| `stream` | `stream` | 布尔 |
-| `temperature` | `temperature` | 范围 `[0, 2]`；思考模式下不生效 |
-| `max_output_tokens` | `max_output_tokens` | 含可见输出 + 思维链 token |
-| `reasoning_effort` | `reasoning.effort` | **嵌套对象**，取值 `none`/`low`/`high`/`max`；`minimal→low`、`medium`/`xhigh→high` 由服务端兼容映射 |
-| `tool_choice` | `tool_choice` | `none`/`auto`/`required` 或 `{type:"function", name}` |
-| `extra_body` | 浅合并 | 逃生口，语义同 gap-4 |
+| `model` | `model` | required |
+| system prompt | the `{type:"message", role:"system", content}` in input | stays in place as an ordinary item (**do not use the top-level `instructions`**: it is inserted before `input` by the server, moving a mid/late system to the very front, breaking the prefix cache) |
+| `stream` | `stream` | boolean |
+| `temperature` | `temperature` | range `[0, 2]`; has no effect in thinking mode |
+| `max_output_tokens` | `max_output_tokens` | includes visible output + chain-of-thought tokens |
+| `reasoning_effort` | `reasoning.effort` | **nested object**, values `none`/`low`/`high`/`max`; `minimal->low`, `medium`/`xhigh->high` are compatibly mapped by the server |
+| `tool_choice` | `tool_choice` | `none`/`auto`/`required` or `{type:"function", name}` |
+| `extra_body` | shallow merge | escape hatch, same semantics as gap-4 |
 
-注意两个易错点：
+Note two pitfalls:
 
-1. `reasoning_effort` 在 ChatCompletions 是**顶层字符串**，在 Responses 要包成
-   `{"reasoning": {"effort": "..."}}`。同一个 `ModelConfig` 字段，两个协议两种形状。
-2. `max_output_tokens` 键名在这里**就是** `max_output_tokens`（ChatCompletions 是
-   `max_tokens`）——正好与我们的内部字段名一致，别被 gap-4 的映射经验带偏。
+1. `reasoning_effort` is a **top-level string** in ChatCompletions, but in Responses it must be wrapped as
+   `{"reasoning": {"effort": "..."}}`. The same `ModelConfig` field has two shapes in two protocols.
+2. The key name of `max_output_tokens` here **is** `max_output_tokens` (in ChatCompletions it is
+   `max_tokens`) -- which happens to match our internal field name, so do not be misled by the gap-4 mapping experience.
 
-**2.2 消息 → input items**
+**2.2 Message -> input items**
 
-`encode_messages` 在本协议下要产出 item 序列。映射规则：
+Under this protocol `encode_messages` must produce an item sequence. Mapping rules:
 
-| 内部 Message | 产出 item |
+| Internal Message | Produced item |
 | --- | --- |
-| `System` | `{type:"message", role:"system", content:"<字符串>"}`，**原位保留** |
-| `ContextSummary` | 同 `System`（我们内部用它承载压缩摘要，语义上就是 system 级指令） |
+| `System` | `{type:"message", role:"system", content:"<string>"}`, **kept in place** |
+| `ContextSummary` | same as `System` (we use it internally to carry the compaction summary, semantically a system-level instruction) |
 | `User` | `{type:"message", role:"user", content: <string>}` |
-| `Assistant`（有文本） | `{type:"message", role:"assistant", content:"<纯字符串>"}`（历史文本用字符串，`output_text` 只属**输出** item，输入侧 `EasyInputMessage` 不接受它） |
-| `Assistant`（有 tool_calls） | 每个调用产出一个 `{type:"function_call", call_id, name, arguments}` item |
-| `Assistant`（既有文本又有 tool_calls） | 文本 item + 若干 `function_call` item（兄弟关系） |
+| `Assistant` (with text) | `{type:"message", role:"assistant", content:"<plain string>"}` (historical text uses a string; `output_text` belongs only to **output** items, and the input side's `EasyInputMessage` does not accept it) |
+| `Assistant` (with tool_calls) | each call produces a `{type:"function_call", call_id, name, arguments}` item |
+| `Assistant` (both text and tool_calls) | a text item + several `function_call` items (sibling relationship) |
 | `Tool` | `{type:"function_call_output", call_id, output: <string>}` |
 
-**关键点**：
+**Key points**:
 
-- 文本内容块类型是 `output_text`（assistant 侧）或 `input_text`（user 侧）。DeepSeek 对
-  两者都接受，但我们按角色区分更贴合 OpenAI 语义。
-- `function_call` 的 `arguments` 是**字符串形式的 JSON**，与 ChatCompletions 一致，直接透传。
-- `call_id` 必须非空、唯一，且**每个 `function_call` 必须有配对的 `function_call_output`**。
-  我们的 `Message::Tool` 已经带 `tool_call_id`，直接当 `call_id` 用。
-- 一条 assistant 同时有文本和工具调用时，会被**拆成多个 item**——这是与
-  ChatCompletions 最本质的结构差异，编码器要能一对多展开。
+- The text content block type is `output_text` (assistant side) or `input_text` (user side). DeepSeek accepts
+  both, but distinguishing them by role is more faithful to OpenAI semantics.
+- The `arguments` of `function_call` is **a JSON string**, consistent with ChatCompletions, passed through directly.
+- `call_id` must be non-empty and unique, and **every `function_call` must have a paired `function_call_output`**.
+  Our `Message::Tool` already carries `tool_call_id`, used directly as `call_id`.
+- When a single assistant has both text and tool calls, it is **split into multiple items** -- this is the most fundamental
+  structural difference from ChatCompletions, and the encoder must be able to expand one-to-many.
 
-**2.3 工具定义**
+**2.3 Tool definitions**
 
 ```json
 // ChatCompletions
@@ -99,18 +99,18 @@ Responses 与 ChatCompletions 是**两套 wire 协议，不是同一个协议的
 { "type": "function", "name", "description", "parameters" }
 ```
 
-少了 `function` 这一层包装，`name`/`description`/`parameters` 直接平铺。
-`parameters` 仍是 JSON Schema 对象——**印证 `docs/adapter-layer.md` 的判断：
-JSON Schema 本身就是跨协议的中间表示，差异只在包装层**。因此工具 schema 的
-编码只需一个 `encode_tool_schema` 变体，无需重建参数模型。
+There is one less `function` wrapper layer; `name`/`description`/`parameters` are directly flattened.
+`parameters` is still a JSON Schema object -- **confirming the judgment in `docs/adapter-layer.md`:
+JSON Schema itself is the cross-protocol intermediate representation, and the difference is only in the wrapper layer**. Therefore tool schema
+encoding only needs an `encode_tool_schema` variant, with no need to rebuild the parameter model.
 
-约束：函数名非空、≤128 字符、匹配 `^[a-zA-Z0-9_-]+$`、全局唯一。
+Constraints: the function name is non-empty, ≤128 characters, matches `^[a-zA-Z0-9_-]+$`, and is globally unique.
 
 ---
 
-**三、非流式响应解码**
+**3. Non-streaming response decoding**
 
-响应对象（`object: "response"`）关键字段：
+Key fields of the response object (`object: "response"`):
 
 ```json
 {
@@ -133,53 +133,53 @@ JSON Schema 本身就是跨协议的中间表示，差异只在包装层**。因
 }
 ```
 
-**解码规则**：遍历 `output[]`，按 `type` 分派：
+**Decoding rules**: walk `output[]`, dispatching by `type`:
 
-- `reasoning` → 取 `summary[].text`（`summary_text` 块）为 `reasoning_content`；
-  OpenAI 系推理模型默认**只回 `summary`**（schema 里 `summary` 是 required，`content`
-  才是可选），`content`（`reasoning_text`，原始 CoT）通常为空。DeepSeek 等实现走
-  `content`。两者取非空者、互为回退——不要只读 `content`，否则对 OpenAI 系模型
-  `reasoning_content` 恒为空。
-- `message` → 拼接 `content[].text`（`output_text` 块）为 `content`。
-- `function_call` → 收集为 `tool_calls[]`，`call_id`/`name`/`arguments` 直接映射。
+- `reasoning` -> take `summary[].text` (the `summary_text` block) as `reasoning_content`;
+  OpenAI-family reasoning models by default **only return `summary`** (in the schema `summary` is required, `content`
+  is the optional one), and `content` (`reasoning_text`, the raw CoT) is usually empty. Implementations such as DeepSeek go through
+  `content`. Take the non-empty one of the two, falling back to each other -- do not read only `content`, otherwise for OpenAI-family models
+  `reasoning_content` would always be empty.
+- `message` -> concatenate `content[].text` (the `output_text` blocks) as `content`.
+- `function_call` -> collect as `tool_calls[]`, mapping `call_id`/`name`/`arguments` directly.
 
-三者可同时出现，最终合成**一条** `Message::Assistant { content, reasoning_content, tool_calls }`。
-这正是内部模型"一条 assistant 消息可同时承载文本 + 思考 + 工具调用"能自然容纳的形状——
-解码方向是**多对一**，比编码方向的**一对多**简单。
+The three may appear at the same time, and are ultimately synthesized into **one** `Message::Assistant { content, reasoning_content, tool_calls }`.
+This is exactly the shape that the internal model "one assistant message can carry text + reasoning + tool calls at the same time" can naturally accommodate --
+the decoding direction is **many-to-one**, simpler than the encoding direction's **one-to-many**.
 
-**finish_reason 映射**（`status` + `incomplete_details`）：
+**finish_reason mapping** (`status` + `incomplete_details`):
 
-| 响应状态 | `ModelFinishReason` |
+| Response status | `ModelFinishReason` |
 | --- | --- |
-| `completed` 且 `output` 含 `function_call` | `ToolCalls` |
-| `completed` 否则 | `Stop` |
-| `incomplete` 且 `incomplete_details.reason == "max_output_tokens"` | `Length` |
-| `failed` | 映射为 `AdapterError`（携带 `error`）——非流式与流式**一致** |
-| `cancelled` / `queued` | `Other(status)`，不误报 `Stop` |
+| `completed` and `output` contains `function_call` | `ToolCalls` |
+| `completed` otherwise | `Stop` |
+| `incomplete` and `incomplete_details.reason == "max_output_tokens"` | `Length` |
+| `failed` | mapped to `AdapterError` (carrying `error`) -- non-streaming and streaming are **consistent** |
+| `cancelled` / `queued` | `Other(status)`, no false `Stop` |
 
-注意：Responses **没有 `finish_reason` 字段**，判定工具调用要**看 output 里有没有
-`function_call` item**，不能像 ChatCompletions 那样读一个字符串。
+Note: Responses **has no `finish_reason` field**; deciding a tool call requires **looking at whether `output` contains a
+`function_call` item**, not reading a string like ChatCompletions does.
 
-**usage 映射**：
+**usage mapping**:
 
-| 内部 `Usage` 字段 | 来源 |
+| Internal `Usage` field | Source |
 | --- | --- |
 | `input_tokens` | `usage.input_tokens` |
 | `output_tokens` | `usage.output_tokens` |
 | `cached_input_tokens` | `usage.input_tokens_details.cached_tokens` |
-| `cache_reported_input_tokens` | 同上命中时 = `input_tokens`（沿用"上报了才算分母"的契约） |
+| `cache_reported_input_tokens` | same as above, when hit = `input_tokens` (following the "only reported counts as denominator" contract) |
 | `reasoning_tokens` | `usage.output_tokens_details.reasoning_tokens` |
 
-**与既有契约一致**：`cached_tokens` 缺失时 `cached_input_tokens = None`（不是 0），
-`cache_hit_rate()` 相应返回 `None`。别为了省事 `unwrap_or(0)`。
+**Consistent with the existing contract**: when `cached_tokens` is missing, `cached_input_tokens = None` (not 0),
+and `cache_hit_rate()` accordingly returns `None`. Do not `unwrap_or(0)` just for convenience.
 
 ---
 
-**四、流式解码**
+**4. Streaming decoding**
 
-**4.1 SSE 形态**
+**4.1 SSE shape**
 
-每个事件同时带 `event:` 行与 `data:` 行，`data` 里也含 `type`（冗余但可自描述）：
+Each event carries both an `event:` line and a `data:` line, and `data` also contains `type` (redundant but self-describing):
 
 ```
 event: response.output_text.delta
@@ -187,70 +187,70 @@ data: {"type":"response.output_text.delta","sequence_number":11,
        "item_id":"msg_1","output_index":1,"content_index":0,"delta":"Hello"}
 ```
 
-`sequence_number` 单调递增。**流以 `response.completed` / `response.incomplete` /
-`response.failed` 结束，没有 `data: [DONE]`**——现有 ChatCompletions 的
-`payload == "[DONE]"` 跳过逻辑在这里永远不会命中，收尾必须靠**事件类型**驱动。
+`sequence_number` increases monotonically. **The stream ends with `response.completed` / `response.incomplete` /
+`response.failed`, with no `data: [DONE]`** -- the existing ChatCompletions `payload == "[DONE]"` skip logic
+will never hit here, and the ending must be driven by the **event type**.
 
-**4.2 事件表**
+**4.2 Event table**
 
-| 事件 | 我们的处理 |
+| Event | Our handling |
 | --- | --- |
-| `response.created` | 忽略（或记 id） |
-| `response.in_progress` | 忽略 |
-| `response.output_item.added` / `.done` | 记录 item 边界（见下） |
-| `response.content_part.added` / `.done` | 忽略 |
-| `response.reasoning_text.delta` | → `AdapterEvent::ReasoningDelta(delta)` |
-| `response.reasoning_summary_text.delta` | → `AdapterEvent::ReasoningDelta(delta)`（OpenAI 系推理流的**摘要**增量，字段是 `summary_index`） |
-| `response.reasoning_text.done` | 忽略（delta 已累计） |
-| `response.output_text.delta` | → `AdapterEvent::ContentDelta(delta)` |
-| `response.output_text.done` | 忽略 |
-| `response.function_call_arguments.delta` | 累积到对应 `call_id` 的 arguments |
-| `response.function_call_arguments.done` | 可用其完整 arguments 兜底校验 |
-| `response.completed` | → `AdapterEvent::Finished(ModelResponse)`（含 usage） |
-| `response.incomplete` | → `Finished`，`finish_reason = Length` |
-| `response.failed` | → `Err(AdapterError)`，携带 `response.error` |
+| `response.created` | ignore (or record the id) |
+| `response.in_progress` | ignore |
+| `response.output_item.added` / `.done` | record item boundaries (see below) |
+| `response.content_part.added` / `.done` | ignore |
+| `response.reasoning_text.delta` | -> `AdapterEvent::ReasoningDelta(delta)` |
+| `response.reasoning_summary_text.delta` | -> `AdapterEvent::ReasoningDelta(delta)` (the **summary** increment of the OpenAI-family reasoning stream, field is `summary_index`) |
+| `response.reasoning_text.done` | ignore (deltas already accumulated) |
+| `response.output_text.delta` | -> `AdapterEvent::ContentDelta(delta)` |
+| `response.output_text.done` | ignore |
+| `response.function_call_arguments.delta` | accumulate into the arguments of the corresponding `call_id` |
+| `response.function_call_arguments.done` | its complete arguments can be used for fallback validation |
+| `response.completed` | -> `AdapterEvent::Finished(ModelResponse)` (including usage) |
+| `response.incomplete` | -> `Finished`, `finish_reason = Length` |
+| `response.failed` | -> `Err(AdapterError)`, carrying `response.error` |
 
-**4.3 工具调用的流式拼装**
+**4.3 Streaming assembly of tool calls**
 
-ChatCompletions 用 `delta.tool_calls[].index` 做分片聚合；Responses 改用
-**`call_id` + `output_index`**：
+ChatCompletions uses `delta.tool_calls[].index` for fragment aggregation; Responses instead uses
+**`call_id` + `output_index`**:
 
-- `response.output_item.added`（item.type == `function_call`）先给出
-  `call_id` / `name`，此时 arguments 为空；
-- 后续 `response.function_call_arguments.delta` 按 `call_id`（或 `item_id`/`output_index`）
-  累积 arguments 分片；
-- `response.output_item.done` 时该调用完整。
+- `response.output_item.added` (item.type == `function_call`) first gives
+  `call_id` / `name`, with arguments empty at this point;
+- subsequent `response.function_call_arguments.delta` accumulates argument fragments
+  by `call_id` (or `item_id`/`output_index`);
+- at `response.output_item.done` the call is complete.
 
-所以聚合容器要从 `BTreeMap<usize, ToolCall>` 换成按 `call_id` 索引。
-**不依赖到达顺序**（虽然 `sequence_number` 保证有序，但别把正确性押在它上面）。
+So the aggregation container changes from `BTreeMap<usize, ToolCall>` to indexing by `call_id`.
+**Do not depend on arrival order** (although `sequence_number` guarantees order, do not stake correctness on it).
 
-**4.4 收尾的差异（必须处理）**
+**4.4 The ending difference (must be handled)**
 
-现有 `decode_stream_response` 的收尾逻辑是：
+The existing `decode_stream_response` ending logic is:
 
 ```rust
 if let Some(finish_reason) = finish_reason { /* yield Finished */ }
 ```
 
-它**依赖 ChatCompletions 每轮都会给 `finish_reason`**。Responses 没有这个字段，
-如果照搬，`Finished` 永远不会发出。正确做法是：
+It **depends on ChatCompletions giving a `finish_reason` every round**. Responses has no such field, and if copied verbatim,
+`Finished` would never be emitted. The correct approach is:
 
-- 遇到 `response.completed/incomplete` 时，**直接用该事件携带的完整 `response` 对象**
-  构造 `Finished`——`response.output` 是权威结果，比"靠 delta 拼"更可靠；
-- delta 只用于**实时渲染**，最终态以 `response.completed` 里的 `output` 为准。
-  这与 `plan.md` 第 101 行的既有设计意图一致："当 finish_reason 出现时，将本轮
-  完整消息通过 Finished 抛出"。
+- when encountering `response.completed/incomplete`, **directly use the complete `response` object carried by that event**
+  to construct `Finished` -- `response.output` is the authoritative result, more reliable than "piecing it together from deltas";
+- deltas are only used for **live rendering**; the final state is governed by the `output` in `response.completed`.
+  This is consistent with the existing design intent on line 101 of `plan.md`: "when finish_reason appears, throw the
+  complete message of this round out through Finished".
 
-> 建议：delta 累计与终态对象**双轨**。若终态 `output` 与累计值不一致，**以终态为准**，
-> 并在测试里锁死这个行为。
+> Suggestion: run the delta accumulation and the terminal object **dual-track**. If the terminal `output` disagrees with the accumulated value,
+> **the terminal state wins**, and lock this behavior in tests.
 
 ---
 
-**五、落地方式**
+**5. How to land it**
 
-**5.1 接入点**
+**5.1 Integration point**
 
-现有 `codec(protocol)` 返回 `(Encoder, Decoder)` 函数对。Responses 需要**三处**：
+The existing `codec(protocol)` returns an `(Encoder, Decoder)` function pair. Responses needs **three places**:
 
 ```rust
 fn codec(protocol) -> Result<(Encoder, Decoder), AdapterError> {
@@ -262,7 +262,7 @@ fn codec(protocol) -> Result<(Encoder, Decoder), AdapterError> {
 }
 ```
 
-但流式解码当前是 `invoke()` 里 `match config.protocol` 硬分支：
+But streaming decoding is currently a hard `match config.protocol` branch inside `invoke()`:
 
 ```rust
 let mut stream = match &config.protocol {
@@ -271,89 +271,89 @@ let mut stream = match &config.protocol {
 };
 ```
 
-**这里要一并改造**：把流式解码也纳入 codec 抽象，否则每加一个协议就多一个硬分支。
-建议扩成三元组或一个小 trait：
+**This must be refactored together**: bring streaming decoding into the codec abstraction too, otherwise every added protocol means one more hard branch.
+It is suggested to extend it to a triple or a small trait:
 
 ```rust
 type StreamDecoder = fn(reqwest::Response)
     -> Pin<Box<dyn Stream<Item = Result<AdapterEvent, AdapterError>> + Send>>;
 ```
 
-**5.2 新文件**
+**5.2 New files**
 
-`crates/shirley-agent-sdk/src/adapter/responses/{mod.rs, dto.rs}`，结构与
-`chat_completions/` 对称：`mod.rs` 放 `encode_request` / `decode_response` /
-`decode_stream_response`，`dto.rs` 放反序列化结构。
+`crates/shirley-agent-sdk/src/adapter/responses/{mod.rs, dto.rs}`, structured symmetrically with
+`chat_completions/`: `mod.rs` holds `encode_request` / `decode_response` /
+`decode_stream_response`, `dto.rs` holds the deserialization structures.
 
-**5.3 复用与不复用**
+**5.3 Reuse and non-reuse**
 
-| 复用 | 不复用 |
+| Reuse | Do not reuse |
 | --- | --- |
-| `message::Message` / `ToolCall` / `Usage` | 消息编码（input item 结构不同） |
-| `PreparedRequest` / `ensure_success` / `apply_extra_body` | 工具定义编码（少一层 `function`） |
-| SSE 分帧逻辑（按 `\n\n` 切段） | 事件分派与聚合键（`call_id` vs `index`） |
-| `ModelFinishReason` / `AdapterEvent` | finish 判定（看 output，不读字符串） |
+| `message::Message` / `ToolCall` / `Usage` | message encoding (the input item structure differs) |
+| `PreparedRequest` / `ensure_success` / `apply_extra_body` | tool-definition encoding (one less `function`) |
+| SSE framing logic (splitting by `\n\n`) | event dispatch and aggregation key (`call_id` vs `index`) |
+| `ModelFinishReason` / `AdapterEvent` | finish determination (look at output, do not read a string) |
 
-SSE 分帧可以抽成公共工具函数，但**事件语义必须各写各的**——两协议的 payload 形状
-完全不同，硬套一个泛型解码器只会更绕。
+SSE framing can be extracted into a shared utility function, but **event semantics must be written separately for each** -- the payload shapes of the two protocols
+are completely different, and forcing them into one generic decoder would only be more convoluted.
 
-**5.4 配置接线**
+**5.4 Configuration wiring**
 
-- `ModelProtocol::Responses` 已存在，只需让 `codec` 认它。
-- `settings.rs` 解析 `protocol` 时补 `"responses"` 分支（现只有 chat 与 anyhtopic）。
-- `main.rs` 构造 `ModelConfig` 时若协议为 Responses，`base_url` 指向 `/responses`。
-- `extra_body` 逃生口照常生效，用于厂商私有字段。
+- `ModelProtocol::Responses` already exists; just make `codec` recognize it.
+- `settings.rs` adds a `"responses"` branch when parsing `protocol` (currently only chat and anyhtopic).
+- When `main.rs` constructs `ModelConfig`, if the protocol is Responses, `base_url` points to `/responses`.
+- The `extra_body` escape hatch still works as usual, for vendor-private fields.
 
 ---
 
-**六、验证清单**
+**6. Verification checklist**
 
-1. **编码**：一条含 system + user + assistant(文本+tool_calls) + tool 的对话，
-   `input` 展开为正确的 item 序列，`System` 作为 `role:"system"` item 在 `input` 原位。
-2. **编码**：`reasoning_effort` 包成 `{"reasoning":{"effort":...}}`；
-   `max_output_tokens` 键名正确。
-3. **解码（非流式）**：`output` 含 reasoning + message + function_call 时，
-   合成一条 assistant，三部分齐全；usage 各字段（含 cached/reasoning）正确。
-4. **解码（非流式）**：`incomplete` → `Length`；`failed` → 错误而非 `Other`。
-5. **流式**：`output_text.delta` 序列 → 一串 `ContentDelta`；
-   `reasoning_text.delta` → `ReasoningDelta`。
-6. **流式**：`function_call` 分片按 `call_id` 聚合正确；
-   `response.completed` 产出的 `Finished` 与 `output` 一致。
-7. **流式收尾**：**没有 `[DONE]`** 也能正确 `Finished`；`failed` 事件转为错误。
-8. **契约**：`cached_tokens` 缺失时 `cached_input_tokens == None`，
-   `cache_hit_rate()` 返回 `None`（不是 0）。
-9. **回归**：ChatCompletions 路径行为完全不变。
+1. **Encoding**: a conversation with system + user + assistant(text+tool_calls) + tool,
+   `input` expands into the correct item sequence, and `System` stays in place in `input` as a `role:"system"` item.
+2. **Encoding**: `reasoning_effort` is wrapped as `{"reasoning":{"effort":...}}`;
+   the `max_output_tokens` key name is correct.
+3. **Decoding (non-streaming)**: when `output` contains reasoning + message + function_call,
+   synthesize one assistant with all three parts present; usage fields (including cached/reasoning) are correct.
+4. **Decoding (non-streaming)**: `incomplete` -> `Length`; `failed` -> an error rather than `Other`.
+5. **Streaming**: a sequence of `output_text.delta` -> a string of `ContentDelta`;
+   `reasoning_text.delta` -> `ReasoningDelta`.
+6. **Streaming**: `function_call` fragments are aggregated correctly by `call_id`;
+   the `Finished` produced by `response.completed` is consistent with `output`.
+7. **Streaming ending**: **without `[DONE]`** it still correctly emits `Finished`; a `failed` event turns into an error.
+8. **Contract**: when `cached_tokens` is missing, `cached_input_tokens == None`, and
+   `cache_hit_rate()` returns `None` (not 0).
+9. **Regression**: the ChatCompletions path behavior is completely unchanged.
 
-**验证状态**：1–9 条均已由单测覆盖（`adapter::responses::tests`，12 条 + `adapter::sse` 3 条）。
-此外有 **3 条真实网络测试**（默认 `#[ignore]`），已对 `https://api.deepseek.com` 跑通：
+**Verification status**: items 1-9 are all covered by unit tests (`adapter::responses::tests`, 12 tests + `adapter::sse` 3 tests).
+In addition there are **3 real network tests** (by default `#[ignore]`), which have been run successfully against `https://api.deepseek.com`:
 
 ```sh
 export DEEPSEEK_API_KEY=...
-# 可选：SHIRLEY_RESPONSES_BASE_URL / SHIRLEY_RESPONSES_MODEL
+# optional: SHIRLEY_RESPONSES_BASE_URL / SHIRLEY_RESPONSES_MODEL
 cargo test -p shirley-agent-sdk --lib responses::tests::live -- --ignored --nocapture
 ```
 
-| 测试 | 验证内容 | 结果 |
+| Test | Verifies | Result |
 | --- | --- | --- |
-| `live_responses_round_trip` | 流式纯文本往返 | `content="Hi"`，`finish=Stop`，usage 正确 |
-| `live_responses_tool_round_trip` | 非流式工具往返（发起 → 回传 output → 收尾） | 两轮均正确，`call_id` 配对被服务端接受 |
-| `live_responses_streaming_tool_call` | 流式工具调用 | 终态含完整 `function_call`，`finish=ToolCalls` |
+| `live_responses_round_trip` | streaming plain-text round trip | `content="Hi"`, `finish=Stop`, usage correct |
+| `live_responses_tool_round_trip` | non-streaming tool round trip (initiate -> return output -> finish) | both rounds correct, `call_id` pairing accepted by the server |
+| `live_responses_streaming_tool_call` | streaming tool call | terminal state contains a complete `function_call`, `finish=ToolCalls` |
 
-真实抓包确认的两个事实（都写进了实现）：
+Two facts confirmed by real packet capture (both written into the implementation):
 
-1. **流式终态 `response.completed` 的 `output` 携带完整 item 列表**（`reasoning` +
-   `function_call`，含完整 `call_id` / `name` / `arguments`）——所以**无需**聚合
-   `function_call_arguments.delta`，本文四.4 的"以终态为准"成立。
-2. 服务端**会上报 `cached_tokens: 0`**（而非省略），因此 `cached_input_tokens`
-   会是 `Some(0)`；这符合契约——`Some(0)` 表示"确实命中 0"，`None` 才表示"未上报"。
+1. **The `output` of the streaming terminal state `response.completed` carries the complete item list** (`reasoning` +
+   `function_call`, including the full `call_id` / `name` / `arguments`) -- so there is **no need** to aggregate
+   `function_call_arguments.delta`; section 4.4's "terminal state wins" holds.
+2. The server **does report `cached_tokens: 0`** (rather than omitting it), so `cached_input_tokens`
+   will be `Some(0)`; this conforms to the contract -- `Some(0)` means "indeed hit 0", while `None` means "not reported".
 
 ---
 
-**七、与其它文档的关系**
+**7. Relationship with other documents**
 
-- `docs/adapter-layer.md`：本文是其"五、多协议落地"里 **Responses 优先** 那一步的展开。
-  其中"债一（encode_messages 归位）"在本协议下更紧迫——因为 Responses 的
-  item 展开逻辑注定不能和 ChatCompletions 共用。
-- `docs/sdk-gaps.md`：gap-4 的 `extra_body` 逃生口在本文里继续沿用。
-- `plan.md` 第 36 行"先将适配层做了"：本文是这条路线上的具体一步。
-- `docs/anthropic-messages-api.md`：第三个协议的方案，与本文结构对称。
+- `docs/adapter-layer.md`: this document is the elaboration of the **Responses-first** step in its "5. Multi-protocol landing".
+  Among these, "debt 1 (relocating encode_messages)" is more urgent under this protocol -- because Responses's
+  item-expansion logic is inherently unable to be shared with ChatCompletions.
+- `docs/sdk-gaps.md`: gap-4's `extra_body` escape hatch continues to be used in this document.
+- Line 36 of `plan.md`, "do the adapter layer first": this document is a concrete step along that route.
+- `docs/anthropic-messages-api.md`: the plan for the third protocol, symmetric in structure with this document.

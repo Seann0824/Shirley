@@ -1,93 +1,93 @@
-//! 应用侧的配置装载（方案 A：配置文件 + 环境变量覆盖）。
+//! Application-side config loading (Plan A: config file + env var overrides).
 //!
-//! 动机（`plan.md`）：面向普通用户时，"改 `.env` 才能换模型服务"太程序员化。
-//! 把"配置从哪来"和"配置怎么用"解耦——`main.rs` 只消费最终结果，
-//! 不再直接 `std::env::var`。
+//! Motivation (`plan.md`): for ordinary users, "edit `.env` to switch model services" is too programmer-y.
+//! Decouple "where config comes from" from "how config is used" -- `main.rs` only consumes the final result,
+//! no longer calling `std::env::var` directly.
 //!
-//! **这是应用层的事，不进 SDK**：SDK 只认 `ModelConfig`，不关心它是从
-//! 环境变量、配置文件还是向导来的。
+//! **This is an application-layer concern, not SDK**: the SDK only knows `ModelConfig`, and does not care whether it came from
+//! an env var, a config file, or a wizard.
 //!
-//! # 优先级（后者覆盖前者）
+//! # Priority (later overrides earlier)
 //!
-//! 1. 内置默认（协议 `ChatCompletions`、模型 `deepseek-v4.1-flash`、
-//!    上下文窗口 `104858 >> 1`）——与旧 `main.rs` 行为一致。
-//! 2. 全局配置：`<config_dir>/shirley/config.toml`。
-//! 3. 工作区配置：`<workspace_root>/.shirley/config.toml`。
-//! 4. 环境变量：`LOCAL_API_KEY` / `LOCAL_BASE_URL` / `LOCAL_MODELS_URL` /
-//!    `LOCAL_MODEL` / `LOCAL_PROTOCOL` / `LOCAL_CONTEXT_WINDOW_TOKENS`。
+//! 1. Built-in defaults (protocol `ChatCompletions`, model `deepseek-v4.1-flash`,
+//!    context window `104858 >> 1`) -- consistent with the old `main.rs` behavior.
+//! 2. Global config: `<config_dir>/shirley/config.toml`.
+//! 3. Workspace config: `<workspace_root>/.shirley/config.toml`.
+//! 4. Env vars: `LOCAL_API_KEY` / `LOCAL_BASE_URL` / `LOCAL_MODELS_URL` /
+//!    `LOCAL_MODEL` / `LOCAL_PROTOCOL` / `LOCAL_CONTEXT_WINDOW_TOKENS`.
 //!
-//! 环境变量放在最后，是为了兼容既有的 `.env` 习惯：老用户什么都不用改，
-//! 新用户写配置文件即可。两者都留，迁移是渐进的。
+//! Env vars go last for compatibility with the existing `.env` habit: old users change nothing,
+//! new users write a config file. Keep both; the migration is gradual.
 //!
-//! # 不属于这里的东西
+//! # Things that do not belong here
 //!
-//! `SHIRLEY_WORKSPACE` **刻意不收编**：它是"这次在哪个项目跑"（会话级），
-//! 与"用户是谁 / 用哪个模型服务"（用户级）不是一类。混在一起会让配置文件
-//! 在项目间不可移植。工作区根目录仍由 `prompt::workspace_root()` 单独解析。
+//! `SHIRLEY_WORKSPACE` is **deliberately not absorbed**: it is "which project to run in this time" (session-level),
+//! which is not the same class as "who the user is / which model service to use" (user-level). Mixing them makes the config file
+//! non-portable across projects. The workspace root is still resolved separately by `prompt::workspace_root()`.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use shirley_agent_sdk::{CompressionConfig, ModelProtocol};
 
-/// 全局配置相对 `config_dir` 的位置。
+/// The location of the global config relative to `config_dir`.
 const GLOBAL_CONFIG_REL: &str = "shirley/config.toml";
-/// 工作区配置相对工作区根目录的位置。
+/// The location of the workspace config relative to the workspace root.
 const WORKSPACE_CONFIG_REL: &str = ".shirley/config.toml";
 
-/// 内置默认模型：与旧 `main.rs` 的硬编码保持一致，升级不改变默认行为。
+/// Built-in default model: consistent with the old hardcoding in `main.rs`; upgrading does not change default behavior.
 const DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
-/// 内置默认上下文窗口：`104858 >> 1`（旧 `main.rs` 的取值）。
+/// Built-in default context window: `104858 >> 1` (the value from the old `main.rs`).
 const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 104858 >> 1;
-/// 内置默认推理强度（与旧 `bootstrap.rs` 的硬编码一致）。
+/// Built-in default reasoning effort (consistent with the old hardcoding in `bootstrap.rs`).
 const DEFAULT_REASONING_EFFORT: &str = "low";
 
-/// 配置文件的结构（也是每一层覆盖的载体）。
+/// The structure of the config file (also the carrier for each override layer).
 ///
-/// 所有字段都是 `Option`：`None` 表示"这一层没管这个键"，合并时让位给更低
-/// 优先级的那层。`deny_unknown_fields` 让拼错的键直接报错，而不是被静默忽略
-/// ——配置写错了要吵，不要假装没看见。
+/// All fields are `Option`: `None` means "this layer does not manage this key", and merging yields to the lower-
+/// priority layer. `deny_unknown_fields` makes a typo'd key an immediate error rather than being silently ignored
+/// -- a misconfigured config should make noise, not pretend it was not seen.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct FileSettings {
     pub provider: ProviderSettings,
-    /// 上下文压缩策略（配置文件里的 `[compression]` 表）。
+    /// Context compression strategy (the `[compression]` table in the config file).
     pub compression: CompressionSettings,
-    /// 记忆系统配置（配置文件里的 `[memory]` 表）。
+    /// Memory system config (the `[memory]` table in the config file).
     pub memory: MemorySettings,
-    /// 单次任务的执行限制。
+    /// Execution limits for a single task.
     pub runtime: RuntimeSettings,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct RuntimeSettings {
-    /// 每轮用户任务的模型调用上限。默认 64；必须大于 0。
+    /// The model call limit per user task. Default 64; must be greater than 0.
     pub max_steps: Option<usize>,
 }
 
-/// 压缩策略配置（配置文件里的 `[compression]` 表）。
+/// Compression strategy config (the `[compression]` table in the config file).
 ///
-/// 全 `Option`：`None` 表示"这层没管这个键"，合并时让位给更低优先级 / 内置默认。
-/// 默认值即 SDK 的 [`CompressionConfig::default`]（触发 `0.80` / 保留 `0.20` /
-/// 内置摘要模板）。改这里只影响**何时压、保留多少、摘要长什么样**；领域相关的
-/// 取舍仍在 `Agent` 的 `compression_instruction`（`bootstrap.rs`）。
+/// All `Option`: `None` means "this layer does not manage this key", and merging yields to lower priority / built-in defaults.
+/// The default value is the SDK's [`CompressionConfig::default`] (trigger `0.80` / retain `0.20` /
+/// built-in summary template). Changing this only affects **when to compress, how much to retain, what the summary looks like**; domain-related
+/// trade-offs still live in the `Agent`'s `compression_instruction` (`bootstrap.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct CompressionSettings {
-    /// 触发阈值（占上下文窗口比例，`0 < r <= 1`）。默认 `0.80`。
+    /// Trigger threshold (as a ratio of the context window, `0 < r <= 1`). Default `0.80`.
     pub trigger_ratio: Option<f64>,
-    /// 保留尾部的预算口径（占上下文窗口比例，`0 < r < 1`）。默认 `0.20`。
+    /// The budget measure for retaining the tail (as a ratio of the context window, `0 < r < 1`). Default `0.20`.
     pub retain_ratio: Option<f64>,
-    /// 摘要输出模板（追加在 `compression_instruction` 之后）。默认 SDK 模板。
+    /// Summary output template (appended after `compression_instruction`). Defaults to the SDK template.
     pub template: Option<String>,
 }
 
 impl CompressionSettings {
-    /// 合并成 SDK 的 [`CompressionConfig`]：`None` 落回 SDK 默认值。
+    /// Merge into the SDK's [`CompressionConfig`]: `None` falls back to the SDK default.
     ///
-    /// 非法值（`trigger_ratio` 越界）在这里**夹到合法区间**而不是报错：
-    /// 压缩是后台能力，配错不该阻断启动；夹紧后退化成默认行为。
+    /// Invalid values (out-of-range `trigger_ratio`) are **clamped to the legal range** here rather than erroring:
+    /// compression is a background capability, and a misconfiguration should not block startup; after clamping it degrades to default behavior.
     pub fn to_sdk(&self) -> CompressionConfig {
         let mut config = CompressionConfig::default();
         if let Some(ratio) = self.trigger_ratio.filter(|r| *r > 0.0 && *r <= 1.0) {
@@ -102,7 +102,7 @@ impl CompressionSettings {
         config
     }
 
-    /// 逐层覆盖：高优先级的 `Some` 压过低优先级。
+    /// Layer-by-layer override: a higher-priority `Some` beats a lower priority.
     fn merge_into(&mut self, over: CompressionSettings) {
         if over.trigger_ratio.is_some() {
             self.trigger_ratio = over.trigger_ratio;
@@ -116,36 +116,36 @@ impl CompressionSettings {
     }
 }
 
-/// 记忆系统配置（配置文件里的 `[memory]` 表）。
+/// Memory system config (the `[memory]` table in the config file).
 ///
-/// V2 新增：允许给 curator 配**独立模型**（异源审核，`docs/memory.md` §10 / §6）——
-/// 抽取 / 整理记忆的模型与主对话模型分开，减少"自己审自己"的偏差。全 `Option`：
-/// 未配则诚实回退主模型。
+/// New in V2: allow configuring a **separate model** for the curator (cross-source review, `docs/memory.md` §10 / §6) --
+/// the model that extracts / organizes memory is separate from the main chat model, reducing "reviewing yourself" bias. All `Option`:
+/// if unconfigured, honestly falls back to the main model.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct MemorySettings {
-    /// curator 用的模型标识；缺省回退主模型。
+    /// The model identifier used by the curator; defaults to falling back to the main model.
     pub curator_model: Option<String>,
-    /// curator 的端点（含协议完整地址）；缺省回退主端点。
+    /// The curator's endpoint (full protocol address); defaults to falling back to the main endpoint.
     pub curator_base_url: Option<String>,
-    /// curator 的密钥；缺省回退主密钥。
+    /// The curator's key; defaults to falling back to the main key.
     pub curator_api_key: Option<String>,
-    /// curator 的协议名（`chat_completions` / `responses` / `anthropic_messages`）；
-    /// 缺省回退主协议。
+    /// The curator's protocol name (`chat_completions` / `responses` / `anthropic_messages`);
+    /// defaults to falling back to the main protocol.
     pub curator_protocol: Option<String>,
-    /// 条目数达到该阈值时，在 curation 后触发一次定期整理（睡眠学习）。缺省 `0` = 不自动触发。
+    /// When the entry count reaches this threshold, trigger a periodic consolidation after curation (sleep learning). Default `0` = do not auto-trigger.
     pub consolidate_after_entries: Option<usize>,
-    /// **V2.5** embedding 端点（OpenAI 兼容 `POST .../embeddings`）。**三项全配齐**才
-    /// 启用混合检索的语义腿；缺任一项 → 纯 BM25（诚实降级，绝不假装有语义腿）。
+    /// **V2.5** embedding endpoint (OpenAI-compatible `POST .../embeddings`). The semantic leg of hybrid retrieval is enabled only when **all three are configured**;
+    /// if any is missing -> pure BM25 (honest degradation, never pretend there is a semantic leg).
     pub embedding_base_url: Option<String>,
-    /// embedding 端点的密钥；缺省按"无鉴权"处理（本地服务常见）。
+    /// The embedding endpoint's key; defaults to treating it as "no auth" (common for local services).
     pub embedding_api_key: Option<String>,
-    /// embedding 模型标识。sidecar 记录它，模型变更即整份旧向量作废。
+    /// The embedding model identifier. The sidecar records it; a model change invalidates the whole old vector set.
     pub embedding_model: Option<String>,
 }
 
 impl MemorySettings {
-    /// 逐层覆盖：高优先级的 `Some` 压过低优先级。
+    /// Layer-by-layer override: a higher-priority `Some` beats a lower priority.
     fn merge_into(&mut self, over: MemorySettings) {
         macro_rules! take {
             ($($field:ident),* $(,)?) => {
@@ -165,42 +165,42 @@ impl MemorySettings {
     }
 }
 
-/// 模型服务连接配置（配置文件里的 `[provider]` 表）。
+/// Model service connection config (the `[provider]` table in the config file).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ProviderSettings {
-    /// 协议名，见 [`parse_protocol`]。
+    /// Protocol name, see [`parse_protocol`].
     pub protocol: Option<String>,
-    /// chat completions 完整地址，例如 `http://127.0.0.1:8788/v1/chat/completions`。
+    /// The full chat completions address, e.g. `http://127.0.0.1:8788/v1/chat/completions`.
     pub base_url: Option<String>,
-    /// 密钥。缺失时按"无鉴权"处理（本地服务常见）。
+    /// Key. When missing, treated as "no auth" (common for local services).
     pub api_key: Option<String>,
-    /// 模型列表接口；缺省时从 `base_url` 推导（见 `models::models_endpoint`）。
+    /// The model list endpoint; when absent, derived from `base_url` (see `models::models_endpoint`).
     pub models_url: Option<String>,
-    /// 请求用的模型标识。
+    /// The model identifier used for requests.
     pub model: Option<String>,
-    /// 上下文窗口 token 数。
+    /// The context window token count.
     pub context_window_tokens: Option<u64>,
-    /// 是否开启思考（reasoning）。缺省 `true`。
+    /// Whether to enable thinking (reasoning). Default `true`.
     ///
-    /// 真实 Anthropic 兼容端点要求 `thinking` 必须同时给 `budget_tokens`，而适配器
-    /// 只写 `{"type":"enabled"}`；这类端点需把本项设为 `false`，或用 `extra_body`
-    /// 整个覆盖 `thinking` 对象。
+    /// A real Anthropic-compatible endpoint requires `thinking` to also provide `budget_tokens`, whereas the adapter
+    /// only writes `{"type":"enabled"}`; such endpoints need this set to `false`, or use `extra_body`
+    /// to override the whole `thinking` object.
     pub thinking: Option<bool>,
-    /// 推理强度（`low` / `medium` / `high`）。缺省 `low`；Anthropic 协议下刻意忽略。
+    /// Reasoning effort (`low` / `medium` / `high`). Default `low`; deliberately ignored under the Anthropic protocol.
     pub reasoning_effort: Option<String>,
-    /// 覆盖 / 追加请求体的逃生口（浅合并，`null` 删键）。
-    /// 见 SDK `ModelConfig::extra_body`；用来填各家私有字段。
+    /// An escape hatch to override / append to the request body (shallow merge, `null` deletes a key).
+    /// See the SDK `ModelConfig::extra_body`; used to fill in vendor-private fields.
     pub extra_body: Option<toml::Value>,
-    /// 工具传输模式：`"native"`（结构化 function calling）或 `"content"`（文本协议）。
+    /// Tool transport mode: `"native"` (structured function calling) or `"content"` (text protocol).
     ///
-    /// 见 SDK `ToolCallingMode` 与 `docs/tool-calling-refactor.md`。缺省（`None`）= 未表态，
-    /// 由 `bootstrap` 按「配置 > 模型声明 > 默认 Native」解析。
+    /// See the SDK `ToolCallingMode` and `docs/tool-calling-refactor.md`. Default (`None`) = no statement,
+    /// resolved by `bootstrap` as "config > model declaration > default Native".
     pub tool_mode: Option<String>,
 }
 
 impl FileSettings {
-    /// 从 TOML 文本解析。空文本视为"空配置"。
+    /// Parse from TOML text. Empty text is treated as an "empty config".
     pub fn parse(text: &str, path: &Path) -> Result<Self, SettingsError> {
         if text.trim().is_empty() {
             return Ok(Self::default());
@@ -211,14 +211,14 @@ impl FileSettings {
         })
     }
 
-    /// 把当前文件设置写回 `path`（原子替换：先写临时文件再 `rename`）。
+    /// Write the current file settings back to `path` (atomic replacement: write a temp file then `rename`).
     ///
-    /// 写入会**整体覆盖**该文件——调用方应先把已有内容读出来、改字段、再写回，
-    /// 否则会丢掉文件里其它键。目录不存在时自动创建。
+    /// Writing **overwrites the whole file** -- the caller should read existing content, change fields, then write back,
+    /// otherwise other keys in the file are lost. Missing directories are created automatically.
     ///
-    /// 写完后把文件权限收紧到 `0600`（仅所有者可读写）：配置文件里可能有
-    /// `api_key`，默认 `0644` 会把密钥暴露给同机其他用户。收紧失败不视为致命
-    /// 错误——某些文件系统（如部分挂载卷）不支持 chmod，能写下去更重要。
+    /// After writing, tighten file permissions to `0600` (owner read/write only): the config file may contain
+    /// `api_key`, and the default `0644` would expose the key to other users on the same machine. A tightening failure is not treated as fatal
+    /// -- some filesystems (e.g. certain mounted volumes) do not support chmod, and being able to write matters more.
     pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -235,7 +235,7 @@ impl FileSettings {
         Ok(())
     }
 
-    /// 读取文件；不存在返回 `None`（缺配置不是错误，是"这层没说话"）。
+    /// Read the file; return `None` if it does not exist (missing config is not an error, it is "this layer said nothing").
     fn load_file(path: &Path) -> Result<Option<Self>, SettingsError> {
         match std::fs::read_to_string(path) {
             Ok(text) => Ok(Some(Self::parse(&text, path)?)),
@@ -245,9 +245,9 @@ impl FileSettings {
     }
 }
 
-/// 合并后的最终配置。字段都已落定，`main.rs` 直接消费。
+/// The final merged config. Fields are all settled; `main.rs` consumes it directly.
 ///
-/// 不派生 `Eq`：`compression.trigger_ratio` 是 `f64`，只有 `PartialEq`。
+/// Does not derive `Eq`: `compression.trigger_ratio` is `f64`, which only has `PartialEq`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Settings {
     pub protocol: ModelProtocol,
@@ -256,41 +256,41 @@ pub struct Settings {
     pub models_url: Option<String>,
     pub model: String,
     pub context_window_tokens: u64,
-    /// 是否开启思考（缺省 `true`）。
+    /// Whether to enable thinking (default `true`).
     pub thinking: bool,
-    /// 推理强度（缺省 `low`）。
+    /// Reasoning effort (default `low`).
     pub reasoning_effort: String,
-    /// 请求体逃生口（已转成 JSON，供 SDK 浅合并）。
+    /// Request body escape hatch (already converted to JSON, for the SDK to shallow-merge).
     pub extra_body: Option<serde_json::Value>,
-    /// 工具传输模式（已规范化小写）：`"native"` / `"content"`。`None` = 未表态。
+    /// Tool transport mode (normalized lowercase): `"native"` / `"content"`. `None` = no statement.
     pub tool_mode: Option<String>,
-    /// 压缩策略（已落定，可直接 `to_sdk()` 交给 `Agent`）。
+    /// Compression strategy (already settled, can be handed to `Agent` via `to_sdk()` directly).
     pub compression: CompressionSettings,
-    /// 记忆系统配置（curator 模型 / 定期整理阈值）。
+    /// Memory system config (curator model / periodic consolidation threshold).
     pub memory: MemorySettings,
     pub max_steps: usize,
 }
 
-/// 配置装载错误。
+/// Config loading error.
 ///
-/// 沿用项目统一的展示格式 `[前缀]: 详情`（见 `Agent.md`）。
+/// Follows the project's unified display format `[prefix]: detail` (see `Agent.md`).
 #[derive(Debug, thiserror::Error)]
 pub enum SettingsError {
-    #[error("[配置读取失败]: {0}")]
+    #[error("[config read failed]: {0}")]
     Io(#[from] std::io::Error),
 
-    #[error("[配置解析失败] {path}: {message}")]
+    #[error("[config parse failed] {path}: {message}")]
     Parse { path: PathBuf, message: String },
 
-    #[error("[配置非法]: {0}")]
+    #[error("[invalid config]: {0}")]
     Invalid(String),
 }
 
 impl Settings {
-    /// 按优先级链装载配置。
+    /// Load config along the priority chain.
     ///
-    /// `env` 是环境变量读取器（注入以便测试，不打全局 env）。
-    /// `global_path` 为 `None` 时跳过全局层（例如拿不到 `config_dir`）。
+    /// `env` is the env var reader (injected for testing, does not touch global env).
+    /// When `global_path` is `None`, skip the global layer (e.g. `config_dir` is unavailable).
     pub fn load(
         workspace_root: &Path,
         global_path: Option<&Path>,
@@ -303,20 +303,20 @@ impl Settings {
         let workspace = FileSettings::load_file(&workspace_root.join(WORKSPACE_CONFIG_REL))?;
         let env_layer = env_layer(env);
 
-        // 低优先级在前，逐层覆盖。文件层取其 `[provider]` 表，env 层本就是一个表。
+        // Lowest priority first, overridden layer by layer. The file layers take their `[provider]` table; the env layer is already a table.
         let merged = merge_all([
             global.as_ref().map(|s| s.provider.clone()),
             workspace.as_ref().map(|s| s.provider.clone()),
             Some(env_layer),
         ]);
 
-        // 压缩策略同样逐层覆盖（env 层没有对应键，仅文件两层）。
+        // The compression strategy is likewise overridden layer by layer (the env layer has no such key, only the two file layers).
         let mut compression = CompressionSettings::default();
         for layer in [&global, &workspace].into_iter().flatten() {
             compression.merge_into(layer.compression.clone());
         }
 
-        // 记忆配置同样逐层覆盖（env 层没有对应键，仅文件两层）。
+        // The memory config is likewise overridden layer by layer (the env layer has no such key, only the two file layers).
         let mut memory = MemorySettings::default();
         for layer in [&global, &workspace].into_iter().flatten() {
             memory.merge_into(layer.memory.clone());
@@ -329,13 +329,13 @@ impl Settings {
             .unwrap_or(64);
         if max_steps == 0 {
             return Err(SettingsError::Invalid(
-                "runtime.max_steps 必须大于 0".into(),
+                "runtime.max_steps must be greater than 0".into(),
             ));
         }
         Self::finalize(merged, compression, memory, max_steps)
     }
 
-    /// 便捷入口：使用真实的 `config_dir` 与进程环境变量。
+    /// Convenience entry point: uses the real `config_dir` and process env vars.
     pub fn load_default(workspace_root: &Path) -> Result<Self, SettingsError> {
         let global = dirs::config_dir().map(|dir| dir.join(GLOBAL_CONFIG_REL));
         Self::load(workspace_root, global.as_deref(), &|key| {
@@ -343,20 +343,20 @@ impl Settings {
         })
     }
 
-    /// 是否已完成模型服务配置（即 `base_url` 非空）。
+    /// Whether model service configuration is complete (i.e. `base_url` is non-empty).
     ///
-    /// 缺配置不是错误、不阻断启动：应用层据此决定是否在 TUI 里自动进入
-    /// `/login` 引导用户补齐。空 `base_url` 下模型请求会失败，所以未配置时
-    /// 不应把"能跑起来"误当成"能用"。
+    /// Missing config is not an error and does not block startup: the application layer uses this to decide whether to automatically enter
+    /// `/login` in the TUI to guide the user to fill it in. With an empty `base_url` model requests fail, so when unconfigured
+    /// "it starts" should not be mistaken for "it works".
     pub fn is_configured(&self) -> bool {
         !self.base_url.trim().is_empty()
     }
 
-    /// 把合并结果落成最终配置，补齐默认值。
+    /// Settle the merge result into the final config, filling in defaults.
     ///
-    /// 缺 `base_url` **不再报错**：那会阻断启动。此时 `base_url` 为空串，
-    /// [`Settings::is_configured`] 返回 `false`，应用层据此在 TUI 里引导用户
-    /// 走 `/login` 完成配置（见 `main.rs`）。
+    /// A missing `base_url` **no longer errors**: that would block startup. In that case `base_url` is an empty string,
+    /// [`Settings::is_configured`] returns `false`, and the application layer uses this to guide the user
+    /// through `/login` in the TUI (see `main.rs`).
     fn finalize(
         merged: ProviderSettings,
         compression: CompressionSettings,
@@ -376,7 +376,7 @@ impl Settings {
         let context_window_tokens = match merged.context_window_tokens {
             Some(0) => {
                 return Err(SettingsError::Invalid(
-                    "context_window_tokens 必须大于 0".into(),
+                    "context_window_tokens must be greater than 0".into(),
                 ));
             }
             Some(n) => n,
@@ -388,21 +388,21 @@ impl Settings {
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
 
-        // 思考开关缺省开启；推理强度缺省 `low`（与旧硬编码一致）。
+        // The thinking switch defaults to on; reasoning effort defaults to `low` (consistent with the old hardcoding).
         let thinking = merged.thinking.unwrap_or(true);
         let reasoning_effort = merged
             .reasoning_effort
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_REASONING_EFFORT.to_owned());
-        // TOML 逃生口 → JSON（SDK 的 `extra_body` 是 `serde_json::Value`）。
+        // TOML escape hatch -> JSON (the SDK's `extra_body` is `serde_json::Value`).
         let extra_body = match merged.extra_body {
             Some(value) => Some(serde_json::to_value(value).map_err(|error| {
-                SettingsError::Invalid(format!("extra_body 无法转换为 JSON: {error}"))
+                SettingsError::Invalid(format!("extra_body cannot be converted to JSON: {error}"))
             })?),
             None => None,
         };
 
-        // 工具传输模式：只接受 `native` / `content`（大小写不敏感）；其它值视为配置错误。
+        // Tool transport mode: only accepts `native` / `content` (case-insensitive); any other value is a config error.
         let tool_mode = match merged.tool_mode {
             Some(mode) => {
                 let normalized = mode.trim().to_ascii_lowercase();
@@ -410,7 +410,7 @@ impl Settings {
                     "native" | "content" => Some(normalized),
                     other => {
                         return Err(SettingsError::Invalid(format!(
-                            "tool_mode 只能是 native 或 content，收到：{other}"
+                            "tool_mode can only be native or content, got: {other}"
                         )));
                     }
                 }
@@ -436,7 +436,7 @@ impl Settings {
     }
 }
 
-/// 把文件权限收紧到仅所有者可读写（`0600`）。非 Unix 平台跳过。
+/// Tighten file permissions to owner read/write only (`0600`). Skipped on non-Unix platforms.
 fn restrict_permissions(path: &Path) {
     #[cfg(unix)]
     {
@@ -447,12 +447,12 @@ fn restrict_permissions(path: &Path) {
     let _ = path;
 }
 
-/// 把一组 provider 配置写入配置文件（**先读后改再写**，只覆盖传入的字段，
-/// 文件里其它键原样不动）。返回写入的路径，供上层反馈给用户。
+/// Write a set of provider config into the config file (**read first, modify, then write**; only overrides the passed-in fields,
+/// leaving other keys in the file untouched). Returns the written path for the caller to report to the user.
 ///
-/// 这是 `/login` 落盘的入口。路径由调用方给出：默认是工作区
-/// `<root>/.shirley/config.toml`（`/login` 的语义是"当前项目用哪个模型服务"，
-/// 落到项目里可随项目走），测试可注入临时路径。需要全局生效时换一个路径即可。
+/// This is the persistence entry point for `/login`. The path is given by the caller: by default it is the workspace
+/// `<root>/.shirley/config.toml` (the semantics of `/login` is "which model service the current project uses",
+/// landing in the project so it travels with the project); tests can inject a temp path. For global effect, just pass a different path.
 pub fn save_provider(path: &Path, provider: ProviderSettings) -> Result<PathBuf, SettingsError> {
     let mut existing = FileSettings::load_file(path)?.unwrap_or_default();
     merge_into(&mut existing.provider, provider);
@@ -460,7 +460,7 @@ pub fn save_provider(path: &Path, provider: ProviderSettings) -> Result<PathBuf,
     Ok(path.to_path_buf())
 }
 
-/// 环境变量层：把进程环境映射成一个 [`ProviderSettings`]。
+/// The env var layer: maps the process environment into a [`ProviderSettings`].
 fn env_layer(env: &dyn Fn(&str) -> Option<String>) -> ProviderSettings {
     ProviderSettings {
         protocol: env("LOCAL_PROTOCOL"),
@@ -469,7 +469,7 @@ fn env_layer(env: &dyn Fn(&str) -> Option<String>) -> ProviderSettings {
         models_url: env("LOCAL_MODELS_URL"),
         model: env("LOCAL_MODEL"),
         context_window_tokens: env("LOCAL_CONTEXT_WINDOW_TOKENS").and_then(|v| v.parse().ok()),
-        // `LOCAL_THINKING` 用常见真值写法解析；缺省不表态（None），让位给文件层 / 内置默认。
+        // `LOCAL_THINKING` is parsed with the usual truthy spellings; when absent it makes no statement (None), yielding to the file layer / built-in defaults.
         thinking: env("LOCAL_THINKING").map(|v| {
             matches!(
                 v.trim().to_ascii_lowercase().as_str(),
@@ -477,15 +477,15 @@ fn env_layer(env: &dyn Fn(&str) -> Option<String>) -> ProviderSettings {
             )
         }),
         reasoning_effort: env("LOCAL_REASONING_EFFORT"),
-        // 逃生口结构复杂，只走配置文件，不提供环境变量。
+        // The escape hatch structure is complex; it only goes through the config file, no env var is provided.
         extra_body: None,
         tool_mode: env("LOCAL_TOOL_MODE"),
     }
 }
 
-/// 逐层覆盖：高优先级的 `Some` 压过低优先级的 `Some`。
+/// Layer-by-layer override: a higher-priority `Some` beats a lower-priority `Some`.
 ///
-/// 输入按**优先级从低到高**排列；`None` 层直接跳过。
+/// Inputs are ordered **from lowest to highest priority**; `None` layers are skipped directly.
 fn merge_all(layers: [Option<ProviderSettings>; 3]) -> ProviderSettings {
     let mut merged = ProviderSettings::default();
     for layer in layers.into_iter().flatten() {
@@ -514,12 +514,12 @@ fn merge_into(base: &mut ProviderSettings, over: ProviderSettings) {
     );
 }
 
-/// 协议名解析的公开入口（供 `bootstrap` 解析 `[memory] curator_protocol`）。
+/// Public entry point for protocol-name parsing (for `bootstrap` to parse `[memory] curator_protocol`).
 pub fn parse_protocol_name(name: &str) -> Result<ModelProtocol, SettingsError> {
     parse_protocol(name)
 }
 
-/// 协议名解析。接受常见别名，未知名字报错（不静默回退）。
+/// Protocol-name parsing. Accepts common aliases; an unknown name errors (no silent fallback).
 fn parse_protocol(name: &str) -> Result<ModelProtocol, SettingsError> {
     let normalized = name.trim().to_ascii_lowercase().replace('-', "_");
     match normalized.as_str() {
@@ -527,7 +527,7 @@ fn parse_protocol(name: &str) -> Result<ModelProtocol, SettingsError> {
         "responses" => Ok(ModelProtocol::Responses),
         "anthropic_messages" | "anthropic" | "messages" => Ok(ModelProtocol::AnthropicMessages),
         other => Err(SettingsError::Invalid(format!(
-            "未知协议 `{other}`，可选：chat_completions / responses / anthropic_messages"
+            "unknown protocol `{other}`, options: chat_completions / responses / anthropic_messages"
         ))),
     }
 }
@@ -603,12 +603,12 @@ mod tests {
 
     #[test]
     fn missing_base_url_yields_unconfigured_not_error() {
-        // 缺 base_url 不再是错误（不阻断启动），而是"未配置"状态。
+        // A missing base_url is no longer an error (does not block startup), but an "unconfigured" state.
         let root = temp_root("missing");
         let settings = Settings::load(&root, None, &env_of(&[])).unwrap();
         assert_eq!(settings.base_url, "");
         assert!(!settings.is_configured());
-        // 其余字段仍填默认值，ModelConfig 仍可构造。
+        // The remaining fields still fill in defaults, so ModelConfig can still be constructed.
         assert_eq!(settings.model, DEFAULT_MODEL);
     }
 
@@ -639,7 +639,7 @@ mod tests {
         .unwrap();
 
         let settings = Settings::load(&root, Some(&global), &env_of(&[])).unwrap();
-        // 工作区覆盖 base_url，全局的 model 保留。
+        // The workspace overrides base_url; the global model is retained.
         assert_eq!(settings.base_url, "http://workspace");
         assert_eq!(settings.model, "g-model");
     }
@@ -664,9 +664,9 @@ mod tests {
             ]),
         )
         .unwrap();
-        assert_eq!(settings.base_url, "http://env", "env 应覆盖文件");
+        assert_eq!(settings.base_url, "http://env", "env should override the file");
         assert_eq!(settings.model, "env-model");
-        // 文件里有、env 里没有的键应保留。
+        // Keys present in the file but not in env should be retained.
         assert_eq!(settings.api_key.as_deref(), Some("file-key"));
     }
 
@@ -696,7 +696,7 @@ mod tests {
         )
         .unwrap();
         let err = Settings::load(&root, None, &env_of(&[])).unwrap_err();
-        assert!(matches!(err, SettingsError::Parse { .. }), "拼错的键应报错: {err}");
+        assert!(matches!(err, SettingsError::Parse { .. }), "a typo'd key should error: {err}");
     }
 
     #[test]
@@ -731,7 +731,7 @@ mod tests {
         let root = temp_root("save_preserve");
         let path = root.join(".shirley/config.toml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // 预置一个 models_url（本次不覆盖它）。
+        // Pre-set a models_url (not overridden this time).
         std::fs::write(
             &path,
             "[provider]\nmodels_url = \"http://keep/v1/models\"\nbase_url = \"http://old\"\n",
@@ -754,7 +754,7 @@ mod tests {
         assert_eq!(
             saved.provider.models_url.as_deref(),
             Some("http://keep/v1/models"),
-            "未覆盖的键应保留"
+            "keys not overridden should be retained"
         );
     }
 
@@ -770,7 +770,7 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(path.exists(), "应自动创建父目录");
+        assert!(path.exists(), "should auto-create parent directories");
     }
 
     #[test]
@@ -821,7 +821,7 @@ mod tests {
         .unwrap();
 
         let settings = Settings::load(&root, Some(&global), &env_of(&[])).unwrap();
-        // 工作区覆盖 curator_model；全局的 consolidate_after_entries 保留。
+        // The workspace overrides curator_model; the global consolidate_after_entries is retained.
         assert_eq!(settings.memory.curator_model.as_deref(), Some("ws-curator"));
         assert_eq!(settings.memory.curator_base_url.as_deref(), Some("http://c"));
         assert_eq!(settings.memory.consolidate_after_entries, Some(10));
@@ -840,7 +840,7 @@ mod tests {
         let root = temp_root("thinking_default");
         let settings =
             Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
-        assert!(settings.thinking, "缺省应开启思考");
+        assert!(settings.thinking, "default should enable thinking");
         assert_eq!(settings.reasoning_effort, "low");
         assert_eq!(settings.extra_body, None);
     }
@@ -857,7 +857,7 @@ mod tests {
         .unwrap();
 
         let settings = Settings::load(&root, None, &env_of(&[])).unwrap();
-        assert!(!settings.thinking, "thinking 应被配置为 false");
+        assert!(!settings.thinking, "thinking should be configured to false");
         assert_eq!(settings.reasoning_effort, "high");
         assert_eq!(
             settings.extra_body,

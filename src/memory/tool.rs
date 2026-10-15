@@ -1,13 +1,13 @@
-//! `recall` 工具：给主 Agent 一个**主动查记忆**的只读入口（`docs/memory.md` §4.4）。
+//! The `recall` tool: gives the main Agent a read-only entry point to **actively query memory** (`docs/memory.md` 4.4).
 //!
-//! 为什么需要它：记忆平时由 runtime 自动注入（`core.md` + 按 query 检索的相关条目），
-//! 但注入是**被动**的——模型无法主动追问"关于 X 我还记着什么"。缺这个入口时，模型会
-//! 退而用 `bash` 去翻记忆目录、甚至读源码学格式、最后自己写盘（曾真实发生）。给它一个
-//! 正规的只读工具，这个动机就消失了。
+//! Why it is needed: memory is normally injected automatically by the runtime (`core.md` + entries relevant to a query),
+//! but injection is **passive** -- the model cannot actively ask "what else do I remember about X". Without this entry point, the model
+//! would fall back to `bash` to rummage through the memory directory, even read the source to learn the format, and finally write to disk itself (this really happened). Give it a
+//! proper read-only tool and that motivation disappears.
 //!
-//! **只读**：工具不提供任何写入路径；记忆写入只由后台 curator 完成（`docs/memory.md`
-//! 决策 3）。返回命中条目的**全文**（含 `id` / 类型 / 状态 / 日期 / 主题），便于模型直接
-//! 引用，不必再去读文件。
+//! **Read-only**: the tool provides no write path whatsoever; memory writes are done only by the background curator (`docs/memory.md`
+//! decision 3). Returns the **full text** of matching entries (with `id` / type / status / date / subject), so the model can directly
+//! cite them without reading files again.
 
 use std::sync::Arc;
 
@@ -16,12 +16,12 @@ use shirley_agent_sdk::{Tool, ToolContext, ToolDefinition, ToolError, ToolFuture
 use super::format::MemoryError;
 use super::provider::{status_label, type_label, MemoryRuntime};
 
-/// 默认返回条数。
+/// Default number of results.
 const DEFAULT_LIMIT: usize = 5;
-/// 单次返回条数上限（防一次把整库倒进上下文）。
+/// Maximum number of results per call (prevents dumping the whole store into the context at once).
 const MAX_LIMIT: usize = 20;
 
-/// 主动查记忆工具（只读）。持有与 `ContextProvider` 同一份 [`MemoryRuntime`]。
+/// Active memory-query tool (read-only). Holds the same [`MemoryRuntime`] as the `ContextProvider`.
 pub struct RecallTool {
     runtime: Arc<MemoryRuntime>,
     definition: ToolDefinition,
@@ -96,7 +96,7 @@ struct RecallArgs {
     limit: Option<usize>,
 }
 
-/// 把命中渲染成纯文本（模型可直接读）。空结果给出明确文案而非空串。
+/// Render the hits as plain text (the model can read it directly). An empty result gives an explicit message rather than an empty string.
 fn render_hits(query: &str, hits: &[super::index::Scored]) -> String {
     if hits.is_empty() {
         return format!("No memories matched \"{query}\".");
@@ -122,7 +122,7 @@ fn render_hits(query: &str, hits: &[super::index::Scored]) -> String {
     out
 }
 
-/// 便于测试：把 `MemoryError` 转成工具错误（保留分类）。
+/// For tests: convert a `MemoryError` into a tool error (preserving the classification).
 #[allow(dead_code)]
 fn memory_error(error: MemoryError) -> ToolError {
     ToolError::ExecutionError(error.to_string())
@@ -175,20 +175,20 @@ mod tests {
                 "pref-rust-error",
                 "rust-error-handling",
                 EntryType::Preference,
-                "偏好用 thiserror。",
+                "Prefers thiserror.",
             ))
             .unwrap();
         store
-            .write_entry(&entry("fact-db", "database", EntryType::Fact, "项目用 Postgres。"))
+            .write_entry(&entry("fact-db", "database", EntryType::Fact, "The project uses Postgres."))
             .unwrap();
         let runtime = Arc::new(MemoryRuntime::new(store));
         let tool = RecallTool::new(runtime);
         let input = serde_json::json!({ "query": "rust error style" });
         let out = tool.invoke(input, ToolContext::new()).await.unwrap();
         let text = out.as_str().unwrap();
-        assert!(text.contains("thiserror"), "应含命中正文: {text}");
-        assert!(text.contains("[preference]"), "应含类型标签: {text}");
-        assert!(!text.contains("Postgres"), "无关条目不出现: {text}");
+        assert!(text.contains("thiserror"), "should contain the matching body: {text}");
+        assert!(text.contains("[preference]"), "should contain the type label: {text}");
+        assert!(!text.contains("Postgres"), "unrelated entries should not appear: {text}");
     }
 
     #[tokio::test]
@@ -206,14 +206,14 @@ mod tests {
         let root = tmp("nomatch");
         let store = MemoryStore::new(&root);
         store
-            .write_entry(&entry("fact-db", "database", EntryType::Fact, "项目用 Postgres。"))
+            .write_entry(&entry("fact-db", "database", EntryType::Fact, "The project uses Postgres."))
             .unwrap();
         let runtime = Arc::new(MemoryRuntime::new(store));
         let tool = RecallTool::new(runtime);
         let input = serde_json::json!({ "query": "quantum chromodynamics" });
         let out = tool.invoke(input, ToolContext::new()).await.unwrap();
         let text = out.as_str().unwrap();
-        assert!(text.contains("No memories matched"), "应给明确空结果文案: {text}");
+        assert!(text.contains("No memories matched"), "should give an explicit empty-result message: {text}");
     }
 
     #[tokio::test]
@@ -226,7 +226,7 @@ mod tests {
                     &format!("fact-rust-{i}"),
                     "rust",
                     EntryType::Fact,
-                    "Rust 相关事实。",
+                    "Facts about Rust.",
                 ))
                 .unwrap();
         }
@@ -235,6 +235,6 @@ mod tests {
         let input = serde_json::json!({ "query": "rust", "limit": 2 });
         let out = tool.invoke(input, ToolContext::new()).await.unwrap();
         let text = out.as_str().unwrap();
-        assert!(text.contains("2 memories matched"), "应受 limit 限制: {text}");
+        assert!(text.contains("2 memories matched"), "should be capped by limit: {text}");
     }
 }

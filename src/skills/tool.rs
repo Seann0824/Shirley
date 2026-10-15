@@ -1,12 +1,15 @@
-//! 技能配套工具：`activate_skill`（Tier2 激活）与 `read_skill_file`（Tier3 资源）。
+//! Skill companion tools: `activate_skill` (Tier2 activation) and `read_skill_file` (Tier3
+//! resources).
 //!
-//! 两者都是**手写 `Tool`**（与 `TodoTool` / `RecallTool` 同款），不是 `#[tool]` 宏——
-//! 因为它们的参数 schema 需要把 `name` / `skill` 限制成**枚举**（防模型幻觉出一个
-//! 不存在的 skill 名，`docs/skills.md` 决策 3、六）。宏从签名生成的 schema 表达不了
-//! 这种运行期才确定的枚举，故手写。
+//! Both are **hand-written `Tool`s** (same as `TodoTool` / `RecallTool`), not `#[tool]` macros —
+//! because their argument schema needs to constrain `name` / `skill` to an **enum** (to stop the
+//! model from hallucinating a nonexistent skill name; `docs/skills.md` decisions 3 and 6). A
+//! schema generated from a signature can't express an enum only known at runtime, hence the
+//! hand-written form.
 //!
-//! 状态由 `SkillRuntime`（`Arc` 共享）承载，与 `SkillContextProvider` 是同一份——
-//! `activate_skill` 写、`provider` 读，与 todo 的 `TodoStore` 完全同构。
+//! State is carried by `SkillRuntime` (shared via `Arc`), the same instance as
+//! `SkillContextProvider` — `activate_skill` writes and `provider` reads, exactly isomorphic to
+//! todo's `TodoStore`.
 
 use std::sync::Arc;
 
@@ -16,10 +19,11 @@ use super::catalog::SkillCatalog;
 use super::runtime::{ActivateError, SkillRuntime};
 use crate::tools::read::read_text_range;
 
-/// `activate_skill(name)`：读一个 skill 的正文（剥 frontmatter）并标记为已激活。
+/// `activate_skill(name)`: read a skill's body (stripping frontmatter) and mark it activated.
 ///
-/// 激活后，该 skill 的正文会由 `SkillContextProvider` **每轮追加注入**（跨压缩
-/// 存活）——所以工具返回值是给模型**本轮**立即看指令用的，不依赖它记住。
+/// After activation, the skill's body is **appended each turn** by `SkillContextProvider`
+/// (survives compaction) — so the tool's return value is for the model to read the instructions
+/// **immediately this turn**, not something it must remember.
 pub struct ActivateSkillTool {
     runtime: Arc<SkillRuntime>,
     definition: ToolDefinition,
@@ -27,7 +31,7 @@ pub struct ActivateSkillTool {
 
 impl ActivateSkillTool {
     pub fn new(runtime: Arc<SkillRuntime>) -> Self {
-        // name 限制为目录里真实存在的 skill（枚举），防幻觉。
+        // Constrain `name` to skills that really exist in the catalog (an enum), to prevent hallucination.
         let names = runtime.skill_names();
         let definition = ToolDefinition {
             name: "activate_skill".into(),
@@ -81,11 +85,12 @@ impl Tool for ActivateSkillTool {
     }
 }
 
-/// `read_skill_file(skill, path)`：按需读取 skill 目录里的资源（Tier3）。
+/// `read_skill_file(skill, path)`: read a resource inside a skill directory on demand (Tier3).
 ///
-/// 用户级 skill 在工作区外，`read_file` 够不到——本工具把根**钉死**在 `skill.root`，
-/// 复用 `read_file` 的读取内核（同一套行/字节上限、密钥过滤、二进制探测、越界校验），
-/// 只是换了个根（`docs/skills.md` 5.5）。
+/// User-level skills live outside the workspace, so `read_file` can't reach them — this tool
+/// **pins** the root to `skill.root` and reuses `read_file`'s reading kernel (the same line/byte
+/// limits, secret filtering, binary detection, and out-of-bounds checks), just with a different
+/// root (`docs/skills.md` 5.5).
 pub struct ReadSkillFileTool {
     catalog: Arc<SkillCatalog>,
     definition: ToolDefinition,
@@ -161,7 +166,7 @@ impl Tool for ReadSkillFileTool {
                 ))
             })?;
 
-            // display = `skill/path`，让模型看到来源；读取内核仍以 skill.root 为根校验。
+            // display = `skill/path` so the model sees the source; the reading kernel still validates against skill.root.
             let display = format!("{skill}/{path}");
             read_text_range(&meta.root, path, &display, start_line, line_count)
                 .await

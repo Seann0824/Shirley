@@ -31,7 +31,7 @@ pub struct ChatMessage {
 pub struct ToolCallView {
     pub id: String,
     pub name: String,
-    // 原始 JSON 参数，留着是为了在 TUI 里展示读了哪个文件
+    // Raw JSON arguments, kept so the TUI can show which file was read
     pub arguments: String,
 }
 
@@ -47,39 +47,39 @@ pub enum Item {
     Compact { content: String, expanded: bool },
 }
 
-/// `/model` 选择器的状态。列表已在打开时由模型目录加载完毕，
-/// 这里只保存展示所需的数据与高亮位置。
+/// State of the `/model` picker. The list is fully loaded by the model catalog when opened,
+/// so here we only store the data needed for display and the highlight position.
 pub struct ModelPicker {
     pub entries: Vec<ModelEntry>,
-    /// 当前高亮的条目下标。
+    /// Index of the currently highlighted entry.
     pub selected: usize,
-    /// 正在使用的模型值（用于在列表里打标），打开时快照一次。
+    /// The model value currently in use (for marking in the list), snapshotted once when opened.
     pub current: Option<String>,
 }
 
-/// `/session` 选择器的状态。列表已在打开时由会话目录加载完毕，
-/// 这里只保存展示所需的数据与高亮位置。
+/// State of the `/session` picker. The list is fully loaded by the session catalog when opened,
+/// so here we only store the data needed for display and the highlight position.
 ///
-/// 列表首项固定是「＋ 新建会话」哨兵（`name` 为空串），其余是真实会话；
-/// 确认时按 `name` 是否为空分流到"新建"或"切换"。
+/// The first item is fixed to the "+ New session" sentinel (`name` is the empty string), the rest are real sessions;
+/// on confirm, `name` being empty routes to "new" or "switch".
 pub struct SessionPicker {
     pub entries: Vec<SessionEntry>,
-    /// 当前高亮的条目下标。
+    /// Index of the currently highlighted entry.
     pub selected: usize,
-    /// 当前会话名（用于在列表里打标），打开时快照一次。
+    /// Current session name (for marking in the list), snapshotted once when opened.
     pub current: Option<String>,
 }
 
 impl SessionPicker {
-    /// 「新建会话」哨兵条目的名字（空串即代表新建入口）。
+    /// Name of the "new session" sentinel entry (the empty string marks the new-session entry point).
     pub const NEW_NAME: &'static str = "";
 }
 
-/// `/login` 分步流程的当前阶段。
+/// Current stage of the `/login` step-by-step flow.
 ///
-/// 顺序固定：先确认端点（base_url），再确认密钥（api_key），最后确认模型。
-/// 端点在前是因为没有它后两者无从谈起；模型放最后，因为改完端点后
-/// 通常想顺手换个默认模型。
+/// Fixed order: first confirm the endpoint (base_url), then the key (api_key), and finally the model.
+/// The endpoint comes first because the other two are meaningless without it; the model goes last because
+/// after changing the endpoint one usually wants to set a new default model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LoginStep {
     BaseUrl,
@@ -88,87 +88,87 @@ pub enum LoginStep {
 }
 
 impl LoginStep {
-    /// 该步在提示里的问法。
+    /// How this step is asked in the prompt.
     fn prompt(&self) -> &'static str {
         match self {
-            LoginStep::BaseUrl => "请输入模型服务地址 base_url",
-            LoginStep::ApiKey => "请输入 API Key（本地服务可留空，直接回车跳过）",
-            LoginStep::Model => "请输入默认模型名",
+            LoginStep::BaseUrl => "Enter the model service address base_url",
+            LoginStep::ApiKey => "Enter the API Key (leave blank for local services; press Enter to skip)",
+            LoginStep::Model => "Enter the default model name",
         }
     }
 }
 
-/// `/login` 分步流程的进行态：已收集的字段 + 当前阶段。
+/// In-progress state of the `/login` step-by-step flow: collected fields + current stage.
 ///
-/// 只活在内存里，`Esc` 或走完即清空——没走完不落盘，避免写进半截配置。
+/// Lives only in memory; cleared on `Esc` or when finished -- not persisted until complete, to avoid writing a half-finished config.
 pub struct LoginFlow {
     pub step: LoginStep,
-    /// 已确认的 base_url（第一步之后必有）。
+    /// The confirmed base_url (always present after the first step).
     pub base_url: String,
-    /// 已确认的 api_key（`None` 表示无鉴权）。
+    /// The confirmed api_key (`None` means no auth).
     pub api_key: Option<String>,
 }
 
 pub struct App {
-    /// 多会话编排器：每会话一个独立 `Agent`，`active` 指向前台。
-    /// 单会话（测试）时内部只有一个会话，`active` 恒指它。
+    /// Multi-session orchestrator: one independent `Agent` per session, `active` points to the foreground.
+    /// In single-session mode (tests) there is only one session internally and `active` always points to it.
     sessions: SessionManager,
     exit: bool,
     input: String,
     input_cursor: usize,
-    // 已发送的提示词历史，供上/下键回放。
+    // History of sent prompts, for up/down key replay.
     history: Vec<String>,
-    // None 表示不在历史浏览中；Some(i) 表示当前显示的是 history[i]。
+    // None means not browsing history; Some(i) means history[i] is currently shown.
     history_index: Option<usize>,
-    // 进入历史浏览前暂存的未发送输入，用于向下回到末尾时恢复。
+    // The unsent input stashed before entering history browsing, restored when moving back down to the end.
     history_draft: String,
-    // 是否展开工具调用的完整参数（默认收起，只显示一行摘要）。
+    // Whether to expand the full tool-call arguments (collapsed by default, showing only a one-line summary).
     show_tool_args: bool,
     pub(crate) message_cache: Option<MessageCache>,
     pub(crate) compact_hit_regions: Vec<(Rect, usize)>,
-    /// 快捷指令解析器。只作用于 TUI，不参与任何发送给 AI 的上下文。
+    /// Slash-command parser. Acts only on the TUI, never part of any context sent to the AI.
     commands: CommandManager,
-    /// `/` 触发的模糊指令候选（如 `/inti` → `init`）。空表示当前无候选。
+    /// Fuzzy command suggestions triggered by `/` (e.g. `/inti` -> `init`). Empty means no suggestions now.
     suggestions: Vec<String>,
-    /// 候选中当前高亮项的下标（↑↓ / ←→ 移动，Tab / Enter 采纳）。
+    /// Index of the currently highlighted suggestion (↑↓ / ←→ to move, Tab / Enter to accept).
     suggestion_index: usize,
-    /// 模型目录：`/model` 的模型来源。接口稳定，实现可换（静态 / 远端）。
+    /// Model catalog: the model source for `/model`. Stable interface, swappable implementation (static / remote).
     ///
-    /// 用 `Arc` 持有，便于把加载任务移到后台（远端列表不应阻塞 UI）。
+    /// Held via `Arc` to make it easy to move loading tasks to the background (a remote list must not block the UI).
     catalog: Arc<dyn ModelCatalog>,
-    /// 打开中的模型选择器；`None` 表示未打开。
+    /// The open model picker; `None` means not open.
     picker: Option<ModelPicker>,
-    /// `/model` 被触发、但模型列表尚未加载完成时置位。
-    /// 由 TUI 主循环取走并异步加载目录（列表可能来自远端）。
+    /// Set when `/model` is triggered but the model list has not finished loading.
+    /// Taken by the TUI main loop to load the catalog asynchronously (the list may come from a remote source).
     picker_requested: bool,
-    /// 打开中的会话选择器；`None` 表示未打开。
+    /// The open session picker; `None` means not open.
     session_picker: Option<SessionPicker>,
-    /// `/session` 被触发、但会话列表尚未加载完成时置位。
-    /// 由 TUI 主循环取走并加载目录后打开选择器。
+    /// Set when `/session` is triggered but the session list has not finished loading.
+    /// Taken by the TUI main loop to load the catalog and then open the picker.
     session_picker_requested: bool,
-    /// `/rewind` 已确认的回溯点：被编辑消息的 UI `items` 下标。
+    /// The confirmed `/rewind` rewind point: the UI `items` index of the edited message.
     ///
-    /// 回溯只作用于**最后一条用户消息**（`docs/session.md` 一.决策 4），
-    /// 因此只需记 UI 下标；Agent 侧回退由 `Session::rewind_last_user_turn` 确定性完成。
-    /// 下次提交前先回退到这里，再作为全新一轮发送。
+    /// Rewind acts only on the **last user message** (`docs/session.md` decision 4),
+    /// so only the UI index needs recording; the Agent-side rollback is done deterministically by `Session::rewind_last_user_turn`.
+    /// On the next submit, roll back here first, then send as a brand-new turn.
     rewind_target: Option<usize>,
-    /// 输入框提示语覆盖：指令打开的编辑态（如回溯编辑）用它说明"Enter 重发 / Esc 取消"。
-    /// 为空时用默认提示。任何普通输入都会清掉它。
+    /// Input-box hint override: a command-opened edit mode (e.g. rewind edit) uses it to say "Enter resend / Esc cancel".
+    /// When empty, the default hint is used. Any ordinary input clears it.
     command_hint: Option<String>,
-    /// 进行中的 `/login` 分步流程；`None` 表示不在登录态。
+    /// In-progress `/login` step-by-step flow; `None` means not in login state.
     login: Option<LoginFlow>,
-    /// `/login` 落盘的目标配置文件覆盖；`None` 时用工作区默认路径。
-    /// 存在的意义是让测试写到临时目录，而不是污染真实工作区。
+    /// Override for the target config file `/login` writes to; `None` uses the workspace default path.
+    /// Its purpose is to let tests write to a temp directory instead of polluting the real workspace.
     config_path: Option<std::path::PathBuf>,
-    /// 鼠标拖动选区；`None` 表示当前没有选中任何文本。
-    /// 由 `selection` 模块渲染高亮并提取文本，松开左键即复制。
+    /// Mouse drag selection; `None` means no text is currently selected.
+    /// The `selection` module renders the highlight and extracts the text; releasing the left button copies.
     selection: Option<Selection>,
 }
 
 impl std::ops::Deref for App {
     type Target = super::session::Session;
-    /// 前台会话字段的透明访问：`self.items` / `self.agent` / `self.waiting` …
-    /// 全部解析到 `sessions.active()`（"当前会话的视图"）。
+    /// Transparent access to foreground-session fields: `self.items` / `self.agent` / `self.waiting` ...
+    /// all resolve to `sessions.active()` ("the current session's view").
     fn deref(&self) -> &Self::Target {
         self.sessions.active()
     }
@@ -181,23 +181,23 @@ impl std::ops::DerefMut for App {
 }
 
 impl App {
-    /// 用内置静态模型目录构造（默认）。
+    /// Construct with the built-in static model catalog (default).
     ///
-    /// 主要供测试与不关心目录注入的场景使用；主程序走 [`App::with_manager`]。
+    /// Mainly for tests and scenarios that do not care about catalog injection; the main program goes through [`App::with_manager`].
     #[allow(dead_code)]
     pub fn new(agent: Agent) -> Self {
         Self::with_catalog(agent, Arc::new(StaticCatalog::builtin()))
     }
 
-    /// 注入模型目录构造。远端目录将来从这里传入，UI 无需改动。
+    /// Construct with an injected model catalog. A remote catalog can be passed in here in the future; the UI needs no changes.
     ///
-    /// 会话目录用空实现兜底（不落盘、列表为空），供不关心会话切换的场景使用。
+    /// The session catalog falls back to an empty implementation (nothing persisted, empty list), for scenarios that do not care about session switching.
     #[allow(dead_code)]
     pub fn with_catalog(agent: Agent, catalog: Arc<dyn ModelCatalog>) -> Self {
         Self::with_catalogs(agent, catalog, Arc::new(EmptySessionCatalog))
     }
 
-    /// 注入模型目录与会话目录构造（单会话，供测试使用）。
+    /// Construct with an injected model catalog and session catalog (single session, for tests).
     #[allow(dead_code)]
     pub fn with_catalogs(
         agent: Agent,
@@ -210,7 +210,7 @@ impl App {
         )
     }
 
-    /// 用已装配好的多会话编排器构造（TUI / desktop 走这里）。
+    /// Construct with an already-assembled multi-session orchestrator (the TUI / desktop go through here).
     pub fn with_manager(sessions: SessionManager, catalog: Arc<dyn ModelCatalog>) -> Self {
         Self {
             sessions,
@@ -256,7 +256,7 @@ impl App {
     }
 
     pub fn set_max_scroll(&mut self, max_scroll: usize) {
-        // 上限缩小时旧位置可能越界，夹回来免得停在空白
+        // When the limit shrinks the old position may be out of range; clamp it back so we do not stop on a blank area
         self.max_scroll = max_scroll;
         if !self.auto_scroll && self.scroll > max_scroll {
             self.scroll = max_scroll;
@@ -271,11 +271,11 @@ impl App {
         self.auto_scroll
     }
 
-    // 负为向上。上滚即退出跟随底部
+    // Negative is up. Scrolling up exits follow-the-bottom
     pub fn scroll_by(&mut self, delta: i32) {
         let max = self.max_scroll;
-        // 跟随底部时 self.scroll 是陈旧的（draw 每帧只在本地算有效位置），
-        // 以底部为基准，否则第一次上滚会从旧位置跳走。
+        // While following the bottom, self.scroll is stale (draw only computes the effective position locally each frame),
+        // so use the bottom as the base; otherwise the first scroll-up would jump from the stale position.
         let base = if self.auto_scroll { max } else { self.scroll };
         let clamped = if delta < 0 {
             base.saturating_sub(delta.unsigned_abs() as usize)
@@ -286,32 +286,32 @@ impl App {
         self.auto_scroll = clamped >= max;
     }
 
-    /// 开始一次鼠标拖动选区（左键按下）。
+    /// Begin a mouse drag selection (left button down).
     pub fn begin_selection(&mut self, position: Position) {
         self.selection = Some(Selection::new(position));
     }
 
-    /// 延伸当前选区到新位置（拖动中）。
+    /// Extend the current selection to a new position (while dragging).
     pub fn extend_selection(&mut self, position: Position) {
         if let Some(selection) = self.selection.as_mut() {
             selection.extend(position);
         }
     }
 
-    /// 结束当前选区（左键松开）：清空并返回选中内容（原地单击返回 `None`）。
+    /// End the current selection (left button up): clear and return the selected content (a plain click returns `None`).
     ///
-    /// 文本提取需要缓冲区，故由调用方（渲染后拿到缓冲区的主循环）负责，
-    /// 这里只负责把状态收走，避免旧选区残留到下一次拖动。
+    /// Text extraction needs the buffer, so the caller (the main loop that has the buffer after rendering) handles it;
+    /// here we only take the state away, to avoid an old selection lingering into the next drag.
     pub fn take_selection(&mut self) -> Option<Selection> {
         self.selection.take()
     }
 
-    /// 当前选区（供渲染层高亮）。
+    /// The current selection (for the render layer to highlight).
     pub fn selection(&self) -> Option<&Selection> {
         self.selection.as_ref()
     }
 
-    /// 鼠标滚轮滚动：正数向下。与键盘 `PageUp`/`PageDown` 共用同一套滚动逻辑。
+    /// Mouse-wheel scrolling: positive is down. Shares the same scrolling logic as the keyboard `PageUp`/`PageDown`.
     pub fn scroll_lines(&mut self, delta: i32) {
         self.scroll_by(delta);
     }
@@ -328,7 +328,7 @@ impl App {
         &self.input
     }
 
-    /// 输入光标的字节偏移，始终落在字符边界上。
+    /// Byte offset of the input cursor, always on a character boundary.
     pub fn input_cursor(&self) -> usize {
         self.input_cursor
     }
@@ -382,28 +382,28 @@ impl App {
     }
 
     pub fn push_input(&mut self, ch: char) {
-        // 一旦开始编辑就退出历史浏览，避免回放与草稿互相打架。
+        // As soon as editing starts, exit history browsing, so replay and draft do not fight each other.
         self.history_index = None;
         self.input.insert(self.input_cursor, ch);
         self.input_cursor += ch.len_utf8();
         self.on_input_changed();
     }
 
-    /// 粘贴：把整段文本按字面插入光标处。
-    /// 换行统一成 `\n` 作为普通字符写入，不会触发发送。
+    /// Paste: insert the whole text literally at the cursor.
+    /// Newlines are normalized to `\n` and written as ordinary characters; sending is not triggered.
     pub fn insert_input(&mut self, text: &str) {
         if text.is_empty() {
             return;
         }
         self.history_index = None;
-        // 终端可能送 CRLF，统一成 LF，避免输入框里混入 `\r`。
+        // The terminal may send CRLF; normalize to LF to avoid mixing `\r` into the input box.
         let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
         self.input.insert_str(self.input_cursor, &normalized);
         self.input_cursor += normalized.len();
         self.on_input_changed();
     }
 
-    /// 退格：删除光标前一个字符。
+    /// Backspace: delete the character before the cursor.
     pub fn pop_input(&mut self) {
         if let Some((index, _)) = self.input[..self.input_cursor].char_indices().last() {
             self.input.remove(index);
@@ -412,7 +412,7 @@ impl App {
         }
     }
 
-    /// Delete：删除光标处字符。
+    /// Delete: delete the character at the cursor.
     pub fn delete_input(&mut self) {
         if self.input_cursor < self.input.len() {
             self.input.remove(self.input_cursor);
@@ -441,8 +441,8 @@ impl App {
     }
 
     pub fn submit(&mut self) -> Option<String> {
-        // 登录流程进行中：Enter 提交的是"当前字段的值"，不是发给 AI 的 prompt。
-        // 优先于其它一切分支——登录态下输入框被临时征用为字段编辑器。
+        // Login flow in progress: Enter submits "the value of the current field", not a prompt sent to the AI.
+        // It takes precedence over all other branches -- in login state the input box is temporarily repurposed as a field editor.
         if self.login.is_some() {
             self.advance_login();
             return None;
@@ -450,11 +450,11 @@ impl App {
         if self.waiting || self.agent.is_none() || self.input.trim().is_empty() {
             return None;
         }
-        // 快捷指令：以 prefix 开头且命中内置指令时，先解析。
-        // - 展开成 prompt：把展开后内容替换回 input，UI 显示的是展开后的自然语言，
-        //   AI 收到的也只是 prompt，与直接打字无任何差别。
-        // - 本地系统消息：不打扰 AI，直接提示用户。
-        // 当前会话可见的 skill 名（动态 slash 入口）。取一次，传给解析器。
+        // Slash command: when it starts with the prefix and matches a built-in command, parse it first.
+        // - Expand into a prompt: replace the input with the expanded content; the UI shows the expanded natural language,
+        //   and the AI also receives only the prompt, with no difference from typing directly.
+        // - Local system message: do not bother the AI; hint the user directly.
+        // Skill names visible to the current session (dynamic slash entry). Fetch once and pass to the parser.
         let skill_names = self.skill_names();
         let outcome = self.commands.resolve(&self.input, &skill_names);
         match outcome {
@@ -469,18 +469,18 @@ impl App {
                 return None;
             }
             CommandOutcome::ModelPicker => {
-                // 不发送、不落历史：清空输入并请求主循环异步加载模型列表。
+                // Do not send, do not record history: clear the input and ask the main loop to load the model list asynchronously.
                 self.input.clear();
                 self.input_cursor = 0;
                 self.suggestions.clear();
-                self.command_hint = Some(" ↑↓ 选择 · Enter 确认 · Esc 取消 ".to_owned());
+                self.command_hint = Some(" ↑↓ select · Enter confirm · Esc cancel ".to_owned());
                 self.picker_requested = true;
                 return None;
             }
             CommandOutcome::Rewind => {
-                // 不发送、不落历史：直接回退最后一条用户消息，把原文填回输入框。
-                // 方案 A（`docs/session.md` 一.决策 4）：只做最新一条，故无需选择面板——
-                // 没有"选择"这个动作，选择器无存在意义。
+                // Do not send, do not record history: rewind the last user message directly and put its original text back into the input box.
+                // Option A (`docs/session.md` decision 4): only the latest one, so no selection panel is needed --
+                // there is no "select" action, so a picker would be meaningless.
                 self.input.clear();
                 self.input_cursor = 0;
                 self.suggestions.clear();
@@ -488,16 +488,16 @@ impl App {
                 return None;
             }
             CommandOutcome::SessionPicker => {
-                // 不发送、不落历史：清空输入并请求主循环加载会话列表后打开选择器。
+                // Do not send, do not record history: clear the input and ask the main loop to load the session list, then open the picker.
                 self.input.clear();
                 self.input_cursor = 0;
                 self.suggestions.clear();
-                self.command_hint = Some(" ↑↓ 选择 · Enter 切换 · Esc 取消 ".to_owned());
+                self.command_hint = Some(" ↑↓ select · Enter switch · Esc cancel ".to_owned());
                 self.session_picker_requested = true;
                 return None;
             }
             CommandOutcome::Login => {
-                // 不发送、不落历史：进入分步登录，输入框转为字段编辑器。
+                // Do not send, do not record history: enter step-by-step login; the input box becomes a field editor.
                 self.input.clear();
                 self.input_cursor = 0;
                 self.suggestions.clear();
@@ -505,30 +505,30 @@ impl App {
                 return None;
             }
             CommandOutcome::ActivateSkill { name, args } => {
-                // 动态 slash 入口：harness 直接激活 skill（确定性，跳过模型判断，
-                // `docs/skills.md` 5.6）。激活写入 `SkillRuntime`，下一轮由
-                // `SkillContextProvider` 追加注入——不新增注入接缝。
+                // Dynamic slash entry: the harness activates the skill directly (deterministic, skipping model judgment,
+                // `docs/skills.md` 5.6). Activation is written to `SkillRuntime` and injected by `SkillContextProvider`
+                // next turn -- no new injection seam is added.
                 self.suggestions.clear();
                 match self.activate_skill(&name) {
                     Ok(()) => {
                         if args.trim().is_empty() {
-                            // 无参：只激活，不打扰模型，给一条本地系统提示。
+                            // No args: just activate, do not bother the model, and give a local system hint.
                             self.input.clear();
                             self.input_cursor = 0;
                             self.add_system_message(format!(
-                                "已激活技能 `{name}`（本轮起每轮注入其指令）。"
+                                "Activated skill `{name}` (its instructions are injected every turn from now on)."
                             ));
                             return None;
                         }
-                        // 带参：激活后把参数作为本轮 prompt 正常发送。
+                        // With args: after activation, send the args as this turn's prompt normally.
                         self.input = args;
                         self.input_cursor = self.input.len();
                     }
                     Err(reason) => {
-                        // 激活失败（未知技能 / 读文件失败）：本地报错，不发模型。
+                        // Activation failed (unknown skill / file read failure): report locally, do not send to the model.
                         self.input.clear();
                         self.input_cursor = 0;
-                        self.add_system_message(format!("激活技能 `{name}` 失败：{reason}"));
+                        self.add_system_message(format!("failed to activate skill `{name}`: {reason}"));
                         return None;
                     }
                 }
@@ -536,12 +536,12 @@ impl App {
             CommandOutcome::Unknown => {}
         }
 
-        // 若处于回溯编辑态（`/rewind` 后未提交），先同步回退 Agent 与界面，
-        // 再作为全新一轮发送——保证 UI 视图与真实上下文始终一致。
-        // Agent 侧回退最后一条用户消息（及其后的 assistant/tool 链），界面侧截到
-        // 该条之前；随后本轮的 `push_message` 会把编辑后的内容作为新一条补上。
+        // If in rewind-edit mode (`/rewind` not yet submitted), first synchronously roll back the Agent and the UI,
+        // then send as a brand-new turn -- keeping the UI view and the real context always consistent.
+        // The Agent side rolls back the last user message (and the assistant/tool chain after it); the UI side truncates to
+        // before that item; the `push_message` of this turn then adds the edited content as a new item.
         if let Some(ui_index) = self.rewind_target.take() {
-            // 内存（Agent）与磁盘日志一起回退到该用户消息之前（`Session` 内完成）。
+            // Roll back memory (Agent) and the disk log together to before that user message (done inside `Session`).
             self.rewind_last_user_turn();
             self.items.truncate(ui_index);
             self.streaming_delta_start = None;
@@ -557,14 +557,14 @@ impl App {
         self.history.push(prompt.clone());
         self.history_index = None;
         self.history_draft.clear();
-        // 记录本轮起点：打断时据此把界面与上下文一起回退。
+        // Record this turn's start point: on interrupt, roll back both the UI and the context based on it.
         self.interrupt_requested = false;
         self.push_message(Role::User, prompt.clone());
         self.suggestions.clear();
         Some(prompt)
     }
 
-    /// 上键：回放到更早的一条历史。首次进入时暂存当前输入。
+    /// Up key: replay an earlier history entry. On first entry, stash the current input.
     pub fn history_prev(&mut self) {
         if self.history.is_empty() {
             return;
@@ -581,7 +581,7 @@ impl App {
         self.set_input(self.history[index].clone());
     }
 
-    /// 下键：回放到更晚的一条历史，走到末尾则恢复进入浏览前的输入。
+    /// Down key: replay a later history entry; at the end, restore the input stashed before browsing.
     pub fn history_next(&mut self) {
         let Some(index) = self.history_index else {
             return;
@@ -596,7 +596,7 @@ impl App {
         }
     }
 
-    /// 整体替换输入内容，并把光标放到末尾。
+    /// Replace the whole input content and put the cursor at the end.
     fn set_input(&mut self, text: String) {
         self.input = text;
         self.input_cursor = self.input.len();
@@ -613,95 +613,95 @@ impl App {
         session.waiting_since = None;
     }
 
-    /// 本轮回复结束（正常完成或被用户打断）后的收尾。
+    /// Wrap-up after this turn's reply ends (completed normally or interrupted by the user).
     ///
-    /// 被用户打断时**保留**本轮已产生的消息（用户消息 + 半截流式回复），
-    /// 作为下一轮发给模型的上下文参考，不再回退删除（需求 2）。
-    /// 保留等待期间已输入的草稿，等待用户发起下一轮。
+    /// On user interrupt, **keep** the messages produced this turn (the user message + the partial streaming reply),
+    /// as context reference for the next turn, without rolling back or deleting them (requirement 2).
+    /// Keep the draft typed during the wait, and wait for the user to start the next turn.
     pub fn complete_turn(&mut self) {
         self.sessions.active_mut().finish_turn();
         self.interrupt_requested = false;
         self.message_cache = None;
     }
 
-    // ---- 打断当前回复 ----
+    // ---- Interrupt the current reply ----
 
-    /// 用户按 Esc 请求打断当前回复（仅在等待回复时有效）。
+    /// The user pressed Esc to request interrupting the current reply (only effective while waiting for a reply).
     pub fn request_interrupt(&mut self) {
         if self.waiting {
             self.interrupt_requested = true;
         }
     }
 
-    /// 是否已请求打断（主循环据此向运行中的任务发送取消信号）。
+    /// Whether an interrupt has been requested (the main loop uses this to send a cancel signal to the running task).
     pub fn interrupt_requested(&self) -> bool {
         self.interrupt_requested
     }
 
-    // ---- 历史回溯（`/rewind`，方案 A：只回退最新一条用户消息）----
+    // ---- History rewind (`/rewind`, option A: only roll back the latest user message) ----
 
-    /// `/rewind` 的落点：直接回退**最后一条**用户消息，把原文填回输入框供编辑重发。
+    /// The landing point of `/rewind`: directly rewind the **last** user message and put its original text back into the input box for editing and resending.
     ///
-    /// 只做最新一条（`docs/session.md` 一.决策 4）——没有"选择"这个动作，
-    /// 因此不需要选择面板：找最后一条用户消息、进编辑态即可。
-    /// 被压缩掉的历史不在 `agent.messages` 里，天然不可回溯，语义自洽。
+    /// Only the latest one (`docs/session.md` decision 4) -- there is no "select" action,
+    /// so no selection panel is needed: find the last user message and enter edit mode.
+    /// Compressed-away history is not in `agent.messages`, so it is naturally not rewindable, and the semantics are self-consistent.
     ///
-    /// 这里**只进入编辑态**（记录回退点 + 填输入框），真正的回退推迟到 `submit`：
-    /// 这样编辑期间界面仍保留原对话，渲染层能把被编辑那条就地画成输入框
-    /// （见 `ui.rs::draw_rewind_edit`），用户看得到上下文。
+    /// Here it **only enters edit mode** (records the rewind point + fills the input box); the actual rollback is deferred to `submit`:
+    /// this way the UI keeps the original conversation during editing, and the render layer can draw the edited item in place as an input box
+    /// (see `ui.rs::draw_rewind_edit`), so the user can see the context.
     pub fn start_rewind_last_turn(&mut self) {
         let Some(agent) = self.agent.as_ref() else {
             return;
         };
-        // Agent 侧最后一条用户消息的原文。
+        // The original text of the last user message on the Agent side.
         let Some(content) = agent.messages().iter().rev().find_map(|m| match m {
             Message::User { content } => Some(content.clone()),
             _ => None,
         }) else {
-            self.add_system_message("没有可回溯的消息。".to_owned());
+            self.add_system_message("no message to rewind to.".to_owned());
             return;
         };
-        // UI 侧最后一条用户条目下标：与 Agent 用户消息一一对应（每次提交各产生一条）。
+        // The UI-side index of the last user item: one-to-one with the Agent user messages (each submit produces one).
         let Some(ui_index) = self
             .items
             .iter()
             .rposition(|item| matches!(item, Item::Message(m) if m.role == Role::User))
         else {
-            self.add_system_message("没有可回溯的消息。".to_owned());
+            self.add_system_message("no message to rewind to.".to_owned());
             return;
         };
 
         self.rewind_target = Some(ui_index);
         self.set_input(content);
         self.message_cache = None;
-        // 进入"编辑重发"态：Enter 重新发送，Esc 取消本次改动。
-        // 输入框由渲染层就地画到该消息的位置（见 `ui.rs::draw_rewind_edit`）。
-        self.command_hint = Some(" Enter 重新发送 · Esc 取消本次修改 ".to_owned());
+        // Enter "edit and resend" mode: Enter resends, Esc cancels this edit.
+        // The input box is drawn in place at that message's position by the render layer (see `ui.rs::draw_rewind_edit`).
+        self.command_hint = Some(" Enter resend · Esc cancel this edit ".to_owned());
     }
 
-    /// 指令编辑态的输入框提示覆盖（无则为 `None`）。
+    /// Input-box hint override for a command edit mode (`None` if none).
     pub fn command_hint(&self) -> Option<&str> {
         self.command_hint.as_deref()
     }
 
-    /// 是否处于"回溯编辑重发"态（已进入编辑态、等待编辑后提交）。
+    /// Whether in "rewind edit and resend" mode (already in edit mode, waiting to submit after editing).
     pub fn is_rewind_edit(&self) -> bool {
         self.rewind_target.is_some()
     }
 
-    /// 回溯编辑态下正在被编辑的 UI 条目下标（渲染层据此把该消息就地画成输入框）。
+    /// The UI item index being edited in rewind-edit mode (the render layer draws that message in place as an input box).
     pub fn rewind_edit_item(&self) -> Option<usize> {
         self.rewind_target
     }
 
-    /// 仅测试用：直接进入回溯编辑态并指向某条 UI 条目。
+    /// Test-only: enter rewind-edit mode directly and point at a UI item.
     #[cfg(test)]
     pub fn set_rewind_edit_for_test(&mut self, ui_index: usize) {
         self.rewind_target = Some(ui_index);
     }
 
-    /// 取消本次回溯编辑：清掉编辑态与输入，Agent / 界面均不改动。
-    /// 用户"不回车直接取消"的落点。
+    /// Cancel this rewind edit: clear the edit state and the input; neither the Agent nor the UI is changed.
+    /// The landing point for the user "cancelling without pressing Enter".
     pub fn cancel_rewind_edit(&mut self) {
         if self.rewind_target.take().is_some() {
             self.input.clear();
@@ -711,32 +711,32 @@ impl App {
         }
     }
 
-    // ---- 分步登录（`/login`）----
+    // ---- Step-by-step login (`/login`) ----
     //
-    // 分步问答而非表单浮层：复用现有输入框与 `submit` 链路，不需要新的渲染态。
-    // 代价是每步一次回车，收益是不碰 UI 层、可立即用（见对话记录）。
+    // Step-by-step Q&A instead of a form overlay: reuse the existing input box and `submit` chain, no new render state needed.
+    // The cost is one Enter per step; the benefit is not touching the UI layer and being immediately usable (see the conversation log).
 
-    /// 是否处于 `/login` 分步流程中（渲染层据此换输入框提示）。
+    /// Whether in the `/login` step-by-step flow (the render layer switches the input-box hint based on this).
     pub fn is_login(&self) -> bool {
         self.login.is_some()
     }
 
-    /// 覆盖 `/login` 的落盘目标（默认写工作区 `.shirley/config.toml`）。
-    /// 供测试注入临时路径，避免污染真实工作区。
+    /// Override `/login`'s persistence target (defaults to the workspace `.shirley/config.toml`).
+    /// Lets tests inject a temp path to avoid polluting the real workspace.
     #[cfg(test)]
     pub fn set_config_path(&mut self, path: impl Into<std::path::PathBuf>) {
         self.config_path = Some(path.into());
     }
 
-    /// `/login` 的当前阶段（供 UI / 测试查看）。
+    /// Current stage of `/login` (for the UI / tests to inspect).
     #[cfg(test)]
     pub fn login_step(&self) -> Option<LoginStep> {
         self.login.as_ref().map(|flow| flow.step)
     }
 
-    /// 进入分步登录：以当前配置为默认值，从 base_url 开始问。
+    /// Enter step-by-step login: default to the current config and start by asking for base_url.
     ///
-    /// 输入框预填当前值，用户直接回车即"保持不变"；想改就编辑。
+    /// The input box is pre-filled with the current value; pressing Enter directly means "keep unchanged"; edit to change.
     pub fn start_login(&mut self) {
         let (base_url, api_key) = match self.agent.as_ref() {
             Some(agent) => {
@@ -750,22 +750,22 @@ impl App {
             base_url,
             api_key,
         });
-        // 预填当前 base_url，回车即保留。
+        // Pre-fill the current base_url; Enter keeps it.
         self.prompt_login_step();
     }
 
-    /// 取消登录：清掉流程与输入，Agent / 配置均不动。用户按 Esc 的落点。
+    /// Cancel login: clear the flow and the input; neither the Agent nor the config is changed. The landing point for the user pressing Esc.
     pub fn cancel_login(&mut self) {
         if self.login.take().is_some() {
             self.input.clear();
             self.input_cursor = 0;
             self.command_hint = None;
             self.suggestions.clear();
-            self.add_system_message("已取消登录。".to_owned());
+            self.add_system_message("login cancelled.".to_owned());
         }
     }
 
-    /// 把当前阶段的默认值填进输入框，并更新提示语。
+    /// Fill the current stage's default value into the input box and update the hint.
     fn prompt_login_step(&mut self) {
         let Some(step) = self.login.as_ref().map(|flow| flow.step) else {
             return;
@@ -788,11 +788,11 @@ impl App {
                 .unwrap_or_default(),
         };
         self.set_input(current);
-        self.command_hint = Some(format!(" {} · Enter 确认 · Esc 取消 ", step.prompt()));
-        self.add_system_message(format!("{}（回车保留当前值）：", step.prompt()));
+        self.command_hint = Some(format!(" {} · Enter confirm · Esc cancel ", step.prompt()));
+        self.add_system_message(format!("{} (Enter keeps the current value):", step.prompt()));
     }
 
-    /// 提交当前字段，推进到下一步；走完则落盘并热更新。
+    /// Submit the current field and advance to the next step; when finished, persist and hot-update.
     fn advance_login(&mut self) {
         let Some(mut flow) = self.login.take() else {
             return;
@@ -805,8 +805,8 @@ impl App {
             LoginStep::BaseUrl => {
                 let trimmed = value.trim();
                 if trimmed.is_empty() {
-                    // 空端点无意义：留在本步重问，不推进。
-                    self.add_system_message("base_url 不能为空，请重新输入。".to_owned());
+                    // An empty endpoint is meaningless: stay on this step and re-ask, do not advance.
+                    self.add_system_message("base_url cannot be empty, please enter again.".to_owned());
                     self.login = Some(flow);
                     self.prompt_login_step();
                     return;
@@ -818,7 +818,7 @@ impl App {
             }
             LoginStep::ApiKey => {
                 let trimmed = value.trim();
-                // 空输入 = 无鉴权（本地服务常见），与"保留旧值"不同——这里明确清空。
+                // Empty input = no auth (common for local services), different from "keep the old value" -- here it is explicitly cleared.
                 flow.api_key = (!trimmed.is_empty()).then(|| trimmed.to_owned());
                 flow.step = LoginStep::Model;
                 self.login = Some(flow);
@@ -832,14 +832,14 @@ impl App {
         }
     }
 
-    /// 落盘 + 热更新：写工作区配置，并让 Agent 立即用上新端点。
+    /// Persist + hot-update: write the workspace config and make the Agent immediately use the new endpoint.
     fn finish_login(&mut self, flow: &LoginFlow, model: Option<String>) {
         self.command_hint = None;
         self.message_cache = None;
 
-        // 热更新 Agent：端点 / 密钥立即生效（模型可选，未填则沿用当前）。
-        // 协议按同一入口重判并**一次性下发**——从 content 端点换走后回配置默认，
-        // 不残留（`docs/tool-calling-refactor.md` Step 3）。
+        // Hot-update the Agent: the endpoint / key take effect immediately (the model is optional; if blank, the current one is kept).
+        // The protocol is re-decided at the same entry point and **issued in one shot** -- switching away from a content endpoint returns to the config default,
+        // with no residue (`docs/tool-calling-refactor.md` Step 3).
         let config = self.sessions.factory().map(|factory| {
             factory.model_config_for_login(
                 flow.base_url.clone(),
@@ -859,8 +859,8 @@ impl App {
             }
         }
 
-        // 落盘：写配置文件（先读后改再写，不动其它键）。默认工作区路径，
-        // 测试可覆盖成临时路径（见 `set_config_path`）。
+        // Persist: write the config file (read, modify, then write; other keys untouched). The workspace path by default;
+        // tests can override it to a temp path (see `set_config_path`).
         let target = self
             .config_path
             .clone()
@@ -872,7 +872,7 @@ impl App {
             models_url: None,
             model: model.clone(),
             context_window_tokens: None,
-            // `/login` 只改端点 / 密钥 / 模型，思考与逃生口保持原样（None = 不覆盖）。
+            // `/login` only changes the endpoint / key / model; thinking and the escape hatch stay as-is (None = do not override).
             thinking: None,
             reasoning_effort: None,
             extra_body: None,
@@ -880,52 +880,52 @@ impl App {
         };
         match crate::settings::save_provider(&target, provider) {
             Ok(path) => {
-                let model_note = model.map(|m| format!("，模型 {m}")).unwrap_or_default();
+                let model_note = model.map(|m| format!(", model {m}")).unwrap_or_default();
                 self.add_system_message(format!(
-                    "已登录：{}（已写入 {}）{}",
+                    "logged in: {} (written to {}){}",
                     flow.base_url,
                     path.display(),
                     model_note
                 ));
             }
             Err(error) => {
-                // 热更新已生效，只是没落盘——如实告诉用户，不假装成功。
+                // The hot-update already took effect; it just was not persisted -- tell the user honestly, do not pretend success.
                 self.add_system_message(format!(
-                    "已切换服务（{}），但写入配置失败：{error}",
+                    "switched service ({}), but writing the config failed: {error}",
                     flow.base_url
                 ));
             }
         }
     }
 
-    /// 把一条 `AgentEvent` 累加到当前前台会话（共享 `Session::apply_event`）。
+    /// Accumulate one `AgentEvent` into the current foreground session (shared `Session::apply_event`).
     ///
-    /// TUI 与 desktop 走同一条累加路径：事件处理只此一处，界面只读结果。
-    /// `Err` 是运行期错误文案，渲染成错误条目。
+    /// The TUI and desktop go through the same accumulation path: event handling is only here, and the UI only reads results.
+    /// `Err` is a runtime error message, rendered as an error item.
     pub fn apply_event(&mut self, event: Result<AgentEvent, String>) {
         self.sessions.active_mut().apply_event(event);
         self.message_cache = None;
     }
 
-    /// 追加一条消息条目（并失效渲染缓存）。
+    /// Append a message item (and invalidate the render cache).
     fn push_message(&mut self, role: Role, content: String) {
         self.sessions.active_mut().push_message(role, content);
         self.message_cache = None;
     }
 
-    /// 从一条落库消息重建条目（测试与历史回放用；`apply_event` 内部走 `Session`）。
+    /// Rebuild items from a persisted message (for tests and history replay; `apply_event` goes through `Session` internally).
     pub fn add_message(&mut self, message: Message) {
         self.sessions.active_mut().add_message(message);
         self.message_cache = None;
     }
 
-    /// TUI 本地系统提示（如指令反馈），不进入发送给 AI 的上下文。
+    /// TUI-local system hint (e.g. command feedback), not part of the context sent to the AI.
     pub fn add_system_message(&mut self, content: String) {
         self.push_message(Role::System, content);
     }
 
-    /// 根据当前输入刷新模糊指令候选。仅在输入以 prefix 开头且未精确命中时给出。
-    /// 无候选时清空。每次编辑输入后调用。
+    /// Refresh the fuzzy command suggestions from the current input. Only offered when the input starts with the prefix and has no exact match.
+    /// Cleared when there are no suggestions. Called after every input edit.
     pub fn refresh_suggestions(&mut self) {
         let skill_names = self.skill_names();
         self.suggestions = self
@@ -934,13 +934,13 @@ impl App {
             .into_iter()
             .map(|(n, _)| n)
             .collect();
-        // 候选集变了，高亮回到第一项。
+        // The suggestion set changed, so the highlight returns to the first item.
         self.suggestion_index = 0;
     }
 
-    /// 当前会话可见的 skill 名（动态 slash 入口候选）。
+    /// Skill names visible to the current session (candidates for the dynamic slash entry).
     ///
-    /// 目录跨会话共享 → 名字恒定；这里从前台会话的 `SkillRuntime` 取。
+    /// The catalog is shared across sessions -> names are constant; fetched here from the foreground session's `SkillRuntime`.
     fn skill_names(&self) -> Vec<String> {
         self.sessions
             .active()
@@ -950,40 +950,40 @@ impl App {
             .unwrap_or_default()
     }
 
-    /// 在当前会话的 `SkillRuntime` 上激活一个 skill（slash 入口）。
+    /// Activate a skill on the current session's `SkillRuntime` (slash entry).
     ///
-    /// 复用 P1 的运行时：激活只写运行时集合，正文由 `SkillContextProvider`
-    /// 在下一轮组装请求时**追加注入**——`render()` 的追加语义保证 KV 前缀稳定。
+    /// Reuses the P1 runtime: activation only writes the runtime set; the body is **appended** by `SkillContextProvider`
+    /// when assembling the next request -- `render()`'s append semantics keep the KV prefix stable.
     fn activate_skill(&self, name: &str) -> Result<(), String> {
         let runtime = self
             .sessions
             .active()
             .skills
             .as_ref()
-            .ok_or_else(|| "当前会话未启用技能".to_owned())?;
+            .ok_or_else(|| "skills are not enabled for the current session".to_owned())?;
         runtime
             .activate(name)
             .map(|_| ())
             .map_err(|error| match error {
                 crate::skills::runtime::ActivateError::UnknownSkill(name) => {
-                    format!("未知技能 `{name}`")
+                    format!("unknown skill `{name}`")
                 }
                 crate::skills::runtime::ActivateError::ReadFailed(reason) => reason,
             })
     }
 
-    /// 当前指令候选（按匹配度排序）。
+    /// Current command suggestions (sorted by match quality).
     pub fn suggestions(&self) -> &[String] {
         &self.suggestions
     }
 
-    /// 当前高亮的候选下标（渲染层据此画 `▶`）。
+    /// Index of the currently highlighted suggestion (the render layer draws `▶` based on it).
     pub fn suggestion_index(&self) -> usize {
         self.suggestion_index
     }
 
-    /// 移动候选高亮（`delta` 为 -1 / +1）。夹在 `[0, len-1]`，到边界不绕回。
-    /// 无候选时不动。
+    /// Move the suggestion highlight (`delta` is -1 / +1). Clamped to `[0, len-1]`, no wrap at the ends.
+    /// No-op when there are no suggestions.
     pub fn suggestion_move(&mut self, delta: isize) {
         if self.suggestions.is_empty() {
             return;
@@ -993,14 +993,14 @@ impl App {
         self.suggestion_index = next.clamp(0, last as isize) as usize;
     }
 
-    /// 放弃当前候选浮层（Esc）：只清候选，不动输入本身。
+    /// Dismiss the current suggestion popup (Esc): clears only the suggestions, leaving the input itself untouched.
     pub fn dismiss_suggestions(&mut self) {
         self.suggestions.clear();
         self.suggestion_index = 0;
     }
 
-    /// Tab / Enter 补全：采纳**当前高亮**的候选，把输入替换为 `/<name> ` 并清空候选，
-    /// 继续编辑参数。
+    /// Tab / Enter completion: accept the **currently highlighted** suggestion, replace the input with `/<name> ` and clear the suggestions,
+    /// then continue editing the arguments.
     pub fn accept_suggestion(&mut self) {
         let index = self
             .suggestion_index
@@ -1013,23 +1013,23 @@ impl App {
         }
     }
 
-    // ---- 模型选择器（`/model`）----
+    // ---- Model picker (`/model`) ----
 
-    /// 主循环取走"需要加载模型列表"的请求。
+    /// The main loop takes away the "need to load the model list" request.
     pub fn take_picker_request(&mut self) -> bool {
         std::mem::take(&mut self.picker_requested)
     }
 
-    /// 模型目录句柄（供主循环移入后台任务异步加载）。接口稳定，实现可换。
+    /// Model catalog handle (for the main loop to move into a background task for async loading). Stable interface, swappable implementation.
     pub fn catalog(&self) -> Arc<dyn ModelCatalog> {
         Arc::clone(&self.catalog)
     }
 
-    /// 用加载好的模型列表打开选择器，高亮当前正在使用的模型。
+    /// Open the picker with a loaded model list, highlighting the model currently in use.
     pub fn open_picker(&mut self, entries: Vec<ModelEntry>) {
         if entries.is_empty() {
             self.command_hint = None;
-            self.add_system_message("没有可用的模型。".to_owned());
+            self.add_system_message("no models available.".to_owned());
             return;
         }
         let current = self.current_model();
@@ -1045,7 +1045,7 @@ impl App {
         self.message_cache = None;
     }
 
-    /// 当前模型值（来自 Agent 配置）。
+    /// Current model value (from the Agent config).
     pub fn current_model(&self) -> Option<String> {
         self.agent
             .as_ref()
@@ -1056,7 +1056,7 @@ impl App {
         self.picker.as_ref()
     }
 
-    /// 选择器上下移动高亮。
+    /// Move the picker highlight up/down.
     pub fn picker_move(&mut self, delta: i32) {
         let Some(picker) = self.picker.as_mut() else {
             return;
@@ -1069,15 +1069,15 @@ impl App {
         picker.selected = next as usize;
     }
 
-    /// 确认选择：切换 Agent 的模型并关闭面板。返回被选中的模型值。
+    /// Confirm the selection: switch the Agent's model and close the panel. Returns the selected model value.
     pub fn picker_confirm(&mut self) -> Option<String> {
         let picker = self.picker.take()?;
         self.message_cache = None;
         self.command_hint = None;
         let entry = picker.entries.get(picker.selected).cloned()?;
-        // 按模型条目算一份完整 `ModelConfig`（模型值 + 工具协议），**一次性下发**——
-        // 与 desktop 的 `agent_set_model` 同语义（`docs/tool-calling-refactor.md` Step 3）。
-        // 无工厂（单会话退化 / 测试）时退化为只改模型名。
+        // Compute a full `ModelConfig` from the model entry (model value + tool protocol) and **issue it in one shot** --
+        // same semantics as desktop's `agent_set_model` (`docs/tool-calling-refactor.md` Step 3).
+        // Without a factory (single-session fallback / tests), it degrades to changing only the model name.
         let config = self
             .sessions
             .factory()
@@ -1088,11 +1088,11 @@ impl App {
                 None => agent.set_model(entry.value.clone()),
             }
         }
-        self.add_system_message(format!("已切换模型：{}", entry.label));
+        self.add_system_message(format!("switched model: {}", entry.label));
         Some(entry.value)
     }
 
-    /// 取消选择。
+    /// Cancel the selection.
     pub fn picker_cancel(&mut self) {
         if self.picker.take().is_some() {
             self.message_cache = None;
@@ -1100,50 +1100,50 @@ impl App {
         self.command_hint = None;
     }
 
-    /// 选择器是否打开（主循环据此把按键导向面板而非输入框）。
+    /// Whether the picker is open (the main loop routes keys to the panel instead of the input box based on this).
     pub fn is_picker_open(&self) -> bool {
         self.picker.is_some()
     }
 
-    // ---- 会话选择器（`/session`）----
+    // ---- Session picker (`/session`) ----
 
-    /// 主循环取走"需要加载会话列表"的请求。
+    /// The main loop takes away the "need to load the session list" request.
     pub fn take_session_picker_request(&mut self) -> bool {
         std::mem::take(&mut self.session_picker_requested)
     }
 
-    /// 会话目录句柄（供主循环加载列表）。
+    /// Session catalog handle (for the main loop to load the list).
     pub fn session_catalog(&self) -> Arc<dyn SessionCatalog> {
         self.sessions.catalog()
     }
 
-    /// 退出程序前对前台会话跑一次记忆 curation（`docs/memory.md` §5.1）。
+    /// Run one memory curation for the foreground session before exiting the program (`docs/memory.md` section 5.1).
     ///
-    /// 委托给 [`SessionManager::finish`]：单会话聊到底、直接退出时切换路径永不发生，
-    /// 这是「本轮结束」唯一能触发 curation 的时机。best-effort，失败只记日志。
+    /// Delegated to [`SessionManager::finish`]: when a single session is chatted to the end and the program exits directly, the switch path never happens,
+    /// so this is the only moment "the turn ends" can trigger curation. Best-effort; failures are only logged.
     pub async fn finish(&self) {
         self.sessions.finish().await;
     }
 
-    /// 当前（前台）会话名（供状态展示）。
+    /// Current (foreground) session name (for status display).
     pub fn current_session(&self) -> Option<&str> {
         self.sessions.active_name()
     }
 
-    /// 当前（前台）会话的任务账本视图（供状态行渲染任务进度）；无 / 空账本返回 `None`。
+    /// Task ledger view of the current (foreground) session (for the status line to render task progress); returns `None` for a missing / empty ledger.
     pub fn task_view(&self) -> Option<TaskView> {
         self.sessions.active().todo_view()
     }
 
-    /// 用加载好的会话列表打开选择器，高亮当前会话。
+    /// Open the picker with a loaded session list, highlighting the current session.
     ///
-    /// 列表首项固定插入「＋ 新建会话」哨兵，让"切换"与"新建"在同一个面板里完成。
+    /// The first item is fixed to the "+ New session" sentinel, so "switch" and "new" happen in the same panel.
     pub fn open_session_picker(&mut self, mut entries: Vec<SessionEntry>) {
         let current = self.sessions.active_name().map(str::to_owned);
-        // 哨兵项置顶：name 为空串代表"新建"。
+        // Put the sentinel on top: an empty name means "new".
         let mut all = vec![SessionEntry {
             name: SessionPicker::NEW_NAME.to_owned(),
-            label: "＋ 新建会话".to_owned(),
+            label: "+ New session".to_owned(),
             preview: String::new(),
             modified_ms: 0,
             turns: 0,
@@ -1165,7 +1165,7 @@ impl App {
         self.session_picker.as_ref()
     }
 
-    /// 选择器上下移动高亮（不绕回，到边界停住——列表含新建入口，绕回易误触）。
+    /// Move the picker highlight up/down (no wrap; stops at the ends -- the list contains the new-session entry, and wrapping is easy to mis-trigger).
     pub fn session_picker_move(&mut self, delta: i32) {
         let Some(picker) = self.session_picker.as_mut() else {
             return;
@@ -1175,18 +1175,18 @@ impl App {
         picker.selected = next as usize;
     }
 
-    /// 确认选择：新建或切换到目标会话，重建界面与 Agent 上下文。返回结果说明。
+    /// Confirm the selection: create or switch to the target session, rebuilding the UI and the Agent context. Returns a result message.
     ///
-    /// 返回 `Some(说明文案)` 表示已切换；`None` 表示面板未打开或切换失败
-    /// （失败时已通过系统消息提示）。
+    /// Returning `Some(message)` means a switch happened; `None` means the panel was not open or the switch failed
+    /// (on failure a system message has already been shown).
     pub fn session_picker_confirm(&mut self) -> Option<String> {
         let picker = self.session_picker.take()?;
         self.message_cache = None;
         self.command_hint = None;
         let entry = picker.entries.get(picker.selected).cloned()?;
 
-        // 编排交给 `SessionManager`：新建 / 切换都只挪 `active` 指针，
-        // **不重建 Agent**（已加载的会话直接复用其就绪 Agent；未加载的经工厂恢复）。
+        // Orchestration is handed to `SessionManager`: both new and switch only move the `active` pointer,
+        // **without rebuilding the Agent** (an already-loaded session reuses its ready Agent; an unloaded one is restored via the factory).
         let result = if entry.name == SessionPicker::NEW_NAME {
             self.sessions.create_new(None)
         } else {
@@ -1195,19 +1195,19 @@ impl App {
         let name = match result {
             Ok(name) => name,
             Err(error) => {
-                self.add_system_message(format!("切换会话失败：{error}"));
+                self.add_system_message(format!("failed to switch session: {error}"));
                 return None;
             }
         };
-        // 会话已换：界面重放新会话历史，并重置与会话绑定的统计量。
+        // Session changed: replay the new session's history in the UI and reset session-bound statistics.
         self.rebuild_items_from_agent();
         self.reset_session_stats();
-        let message = format!("已切换到会话：{name}");
+        let message = format!("switched to session: {name}");
         self.add_system_message(message.clone());
         Some(message)
     }
 
-    /// 取消选择。
+    /// Cancel the selection.
     pub fn session_picker_cancel(&mut self) {
         if self.session_picker.take().is_some() {
             self.message_cache = None;
@@ -1215,15 +1215,15 @@ impl App {
         self.command_hint = None;
     }
 
-    /// 会话选择器是否打开（主循环据此把按键导向面板而非输入框）。
+    /// Whether the session picker is open (the main loop routes keys to the panel instead of the input box based on this).
     pub fn is_session_picker_open(&self) -> bool {
         self.session_picker.is_some()
     }
 
-    /// 从 Agent 当前消息表重放界面条目（切换会话后调用）。
+    /// Replay UI items from the Agent's current message list (called after switching sessions).
     ///
-    /// 界面条目是 Agent 消息的视图；换会话等于换了整份历史，视图必须整体重建，
-    /// 不能增量。`add_message` 天然跳过 system / tool（与展示口径一致）。
+    /// UI items are a view of the Agent messages; switching sessions swaps the whole history, so the view must be rebuilt entirely,
+    /// not incrementally. `add_message` naturally skips system / tool (consistent with the display scope).
     pub fn rebuild_items_from_agent(&mut self) {
         self.items.clear();
         self.streaming_delta_start = None;
@@ -1240,7 +1240,7 @@ impl App {
         self.message_cache = None;
     }
 
-    /// 切换会话后重置与会话绑定的统计（usage / 上下文占用）。
+    /// Reset session-bound statistics (usage / context usage) after switching sessions.
     fn reset_session_stats(&mut self) {
         self.last_usage = None;
         self.total_usage = Usage::default();
@@ -1248,10 +1248,10 @@ impl App {
         self.compressing = false;
     }
 
-    /// 输入变化时重算候选（在 push/insert/pop/delete/move 等之后统一调用）。
+    /// Recompute suggestions on input change (called uniformly after push/insert/pop/delete/move etc.).
     pub fn on_input_changed(&mut self) {
-        // 回溯编辑态与登录态下都保留各自的提示——用户改动的是"待重发内容"或
-        // "正在填的字段"，这两种态仍然成立；其余情况一旦改动输入即恢复默认提示。
+        // Both rewind-edit mode and login mode keep their own hints -- what the user is changing is "the content to resend" or
+        // "the field being filled in", and both states still hold; otherwise any input change restores the default hint.
         if !self.is_rewind_edit() && !self.is_login() {
             self.command_hint = None;
         }
@@ -1273,8 +1273,8 @@ mod tests {
         App::new(Agent::builder().model_config(config).build().unwrap())
     }
 
-    /// 带工厂的测试 App（切换模型要走 `factory.model_config_for` 一次性下发）。
-    /// 用唯一临时工作区装配工厂，避免并发测试互相污染。
+    /// Test App with a factory (switching models goes through `factory.model_config_for` for a one-shot issue).
+    /// Assemble the factory with a unique temp workspace to avoid concurrent tests polluting each other.
     fn app_with_factory(tag: &str) -> App {
         let root = std::env::temp_dir().join(format!(
             "shirley_app_{tag}_{}_{:?}",
@@ -1300,8 +1300,8 @@ mod tests {
         App::with_manager(sessions, catalog)
     }
 
-    /// 测试用 App：把 `/login` 落盘目标指向唯一临时文件，避免污染真实工作区
-    /// （并发的测试若都写同一文件还会互相截断）。
+    /// Test App: point `/login`'s persistence target at a unique temp file to avoid polluting the real workspace
+    /// (concurrent tests all writing the same file would also truncate each other).
     fn app_with_temp_config(tag: &str) -> App {
         let mut app = app();
         let dir = std::env::temp_dir().join(format!(
@@ -1320,10 +1320,10 @@ mod tests {
         for ch in "/session".chars() {
             app.push_input(ch);
         }
-        assert!(app.submit().is_none(), "/session 不应作为 prompt 发送");
-        assert!(app.take_session_picker_request(), "应请求加载会话列表");
-        assert!(!app.is_waiting(), "不应进入等待回复状态");
-        assert!(app.input().is_empty(), "输入应被清空");
+        assert!(app.submit().is_none(), "/session should not be sent as a prompt");
+        assert!(app.take_session_picker_request(), "should request loading the session list");
+        assert!(!app.is_waiting(), "should not enter the waiting-for-reply state");
+        assert!(app.input().is_empty(), "the input should be cleared");
     }
 
     #[test]
@@ -1332,14 +1332,14 @@ mod tests {
         app.open_session_picker(vec![SessionEntry {
             name: "20240101-000000".into(),
             label: "20240101-000000".into(),
-            preview: "旧对话".into(),
+            preview: "old conversation".into(),
             modified_ms: 0,
             turns: 1,
         }]);
         assert!(app.is_session_picker_open());
-        // 首项固定是「新建」哨兵。
+        // The first item is fixed to the "new" sentinel.
         assert_eq!(app.session_picker().unwrap().entries[0].name, "");
-        // 无当前会话 → 高亮新建项。
+        // No current session -> highlight the new-session entry.
         assert_eq!(app.session_picker().unwrap().selected, 0);
         app.session_picker_cancel();
         assert!(!app.is_session_picker_open());
@@ -1364,18 +1364,18 @@ mod tests {
                 turns: 0,
             },
         ]);
-        // 共 3 项（新建 + a + b）。
+        // 3 items in total (new + a + b).
         app.session_picker_move(-1);
         assert_eq!(
             app.session_picker().unwrap().selected,
             0,
-            "到顶应停住，不绕回"
+            "should stop at the top, no wrap"
         );
         app.session_picker_move(5);
         assert_eq!(
             app.session_picker().unwrap().selected,
             2,
-            "到底应停住，不绕回"
+            "should stop at the bottom, no wrap"
         );
     }
 
@@ -1385,10 +1385,10 @@ mod tests {
         for ch in "/model".chars() {
             app.push_input(ch);
         }
-        assert!(app.submit().is_none(), "/model 不应作为 prompt 发送");
-        assert!(app.take_picker_request(), "应请求加载模型列表");
-        assert!(!app.is_waiting(), "不应进入等待回复状态");
-        assert!(app.input().is_empty(), "输入应被清空");
+        assert!(app.submit().is_none(), "/model should not be sent as a prompt");
+        assert!(app.take_picker_request(), "should request loading the model list");
+        assert!(!app.is_waiting(), "should not enter the waiting-for-reply state");
+        assert!(app.input().is_empty(), "the input should be cleared");
     }
 
     #[test]
@@ -1400,25 +1400,25 @@ mod tests {
         ];
         app.open_picker(entries);
         assert!(app.is_picker_open());
-        // 当前模型是 "test"，不在列表里 → 默认高亮第 0 项。
+        // The current model is "test", not in the list -> default highlight item 0.
         assert_eq!(app.picker().unwrap().selected, 0);
 
         app.picker_move(1);
         assert_eq!(app.picker().unwrap().selected, 1);
-        // 环回：再下移回到 0。
+        // Wrap-around: moving down again returns to 0.
         app.picker_move(1);
         assert_eq!(app.picker().unwrap().selected, 0);
 
         app.picker_move(1);
         let chosen = app.picker_confirm();
         assert_eq!(chosen.as_deref(), Some("model-b"));
-        assert!(!app.is_picker_open(), "确认后应关闭面板");
+        assert!(!app.is_picker_open(), "the panel should close after confirm");
         assert_eq!(app.current_model().as_deref(), Some("model-b"));
     }
 
-    /// `/model` 切换时按模型条目算一份完整 `ModelConfig` 一次性下发
+    /// On `/model` switch, compute a full `ModelConfig` from the model entry and issue it in one shot
     /// （`docs/tool-calling-refactor.md` Step 3）：
-    /// 声明 content → 切到 content 协议；未声明 → 回退配置层默认（Native）。
+    /// (`docs/tool-calling-refactor.md` Step 3):
     #[test]
     fn picker_confirm_applies_model_tool_mode() {
         let mut app = app_with_factory("model_tool_mode");
@@ -1431,14 +1431,14 @@ mod tests {
         let config = app.agent.as_ref().unwrap().model_config();
         assert!(
             config.tool_calling.is_content(),
-            "声明 content 应切到 content 协议"
+            "declaring content should switch to the content protocol"
         );
 
-        // 切回未声明的模型 → 回退默认（Native）。
+        // Switch back to an undeclared model -> fall back to the default (Native).
         app.open_picker(vec![ModelEntry::new("plain", "plain", "p")]);
         app.picker_confirm();
         let config = app.agent.as_ref().unwrap().model_config();
-        assert!(!config.tool_calling.is_content(), "未声明应回退默认 Native");
+        assert!(!config.tool_calling.is_content(), "undeclared should fall back to the default Native");
     }
 
     #[test]
@@ -1448,13 +1448,13 @@ mod tests {
         app.open_picker(vec![ModelEntry::new("x", "x", "p")]);
         app.picker_cancel();
         assert!(!app.is_picker_open());
-        assert_eq!(app.current_model(), before, "取消不应改变模型");
+        assert_eq!(app.current_model(), before, "cancel should not change the model");
     }
 
     #[test]
     fn picker_highlights_active_model_entry() {
         let mut app = app();
-        // 把当前模型加进列表，应高亮它而不是第 0 项。
+        // Add the current model to the list; it should be highlighted instead of item 0.
         app.open_picker(vec![
             ModelEntry::new("other", "other", "p"),
             ModelEntry::new("test", "test", "p"),
@@ -1462,7 +1462,7 @@ mod tests {
         assert_eq!(app.picker().unwrap().selected, 1);
     }
 
-    // ---- 分步登录（`/login`）----
+    // ---- Step-by-step login (`/login`) ----
 
     #[test]
     fn login_command_enters_flow_without_sending() {
@@ -1470,11 +1470,11 @@ mod tests {
         for ch in "/login".chars() {
             app.push_input(ch);
         }
-        assert!(app.submit().is_none(), "/login 不应作为 prompt 发送");
-        assert!(app.is_login(), "应进入登录流程");
+        assert!(app.submit().is_none(), "/login should not be sent as a prompt");
+        assert!(app.is_login(), "should enter the login flow");
         assert_eq!(app.login_step(), Some(LoginStep::BaseUrl));
-        assert!(!app.is_waiting(), "不应进入等待回复状态");
-        // 输入框预填当前 base_url，回车即保留。
+        assert!(!app.is_waiting(), "should not enter the waiting-for-reply state");
+        // The input box is pre-filled with the current base_url; Enter keeps it.
         assert_eq!(app.input(), "http://localhost");
     }
 
@@ -1483,22 +1483,22 @@ mod tests {
         let mut app = app_with_temp_config("collect");
         app.start_login();
 
-        // 第一步：改 base_url。
+        // Step 1: change base_url.
         app.set_input("http://new-endpoint".into());
         app.submit();
         assert_eq!(app.login_step(), Some(LoginStep::ApiKey));
-        assert_eq!(app.input(), "", "api_key 默认空");
+        assert_eq!(app.input(), "", "api_key defaults to empty");
 
-        // 第二步：填 key。
+        // Step 2: fill in the key.
         app.set_input("sk-secret".into());
         app.submit();
         assert_eq!(app.login_step(), Some(LoginStep::Model));
-        assert_eq!(app.input(), "test", "模型默认当前值");
+        assert_eq!(app.input(), "test", "the model defaults to the current value");
 
-        // 第三步：改模型 → 结束。
+        // Step 3: change the model -> finish.
         app.set_input("new-model".into());
         app.submit();
-        assert!(!app.is_login(), "走完应退出登录态");
+        assert!(!app.is_login(), "finishing should exit the login state");
         let agent = app.take_agent().unwrap();
         assert_eq!(agent.model_config().base_url, "http://new-endpoint");
         assert_eq!(agent.model_config().api_key.as_deref(), Some("sk-secret"));
@@ -1511,7 +1511,7 @@ mod tests {
         app.start_login();
         app.set_input("   ".into());
         app.submit();
-        // 空端点无意义：留在本步。
+        // An empty endpoint is meaningless: stay on this step.
         assert_eq!(app.login_step(), Some(LoginStep::BaseUrl));
         assert!(app.is_login());
     }
@@ -1522,7 +1522,7 @@ mod tests {
         app.start_login();
         app.set_input("http://x".into());
         app.submit();
-        // api_key 直接回车 → 无鉴权。
+        // api_key with a direct Enter -> no auth.
         app.submit();
         app.set_input("m".into());
         app.submit();
@@ -1537,12 +1537,12 @@ mod tests {
         app.set_input("http://changed".into());
         app.cancel_login();
         assert!(!app.is_login());
-        assert!(app.input().is_empty(), "取消应清空输入");
+        assert!(app.input().is_empty(), "cancel should clear the input");
         let agent = app.take_agent().unwrap();
         assert_eq!(
             agent.model_config().base_url,
             "http://localhost",
-            "取消不应改变配置"
+            "cancel should not change the config"
         );
     }
 
@@ -1550,10 +1550,10 @@ mod tests {
     fn login_enter_keeps_existing_values() {
         let mut app = app_with_temp_config("keep");
         app.start_login();
-        // 三步全部回车 → 保留原值。
-        app.submit(); // base_url 保留
-        app.submit(); // api_key 保留（None → 空 → None）
-        app.submit(); // model 保留
+        // Entering through all three steps -> keep the original values.
+        app.submit(); // base_url kept
+        app.submit(); // api_key kept (None -> empty -> None)
+        app.submit(); // model kept
         let agent = app.take_agent().unwrap();
         assert_eq!(agent.model_config().base_url, "http://localhost");
         assert_eq!(agent.model_config().model, "test");
@@ -1574,7 +1574,7 @@ mod tests {
 
     #[test]
     fn interrupt_preserves_turn_as_reference() {
-        // Agent 已有一条用户消息（模拟 run_stream 已把本轮 User 落库）。
+        // The Agent already has one user message (simulating run_stream having persisted this turn's User).
         let mut app = App::new(agent_with_users(vec![Message::User {
             content: "hello".into(),
         }]));
@@ -1588,29 +1588,29 @@ mod tests {
         assert!(app.interrupt_requested());
         app.complete_turn();
 
-        assert!(!app.is_waiting(), "打断后应结束等待");
-        // 需求 2：打断**保留**本轮消息作为下一轮参考，不回退、不退回输入框。
+        assert!(!app.is_waiting(), "waiting should end after an interrupt");
+        // Requirement 2: an interrupt **keeps** this turn's messages as reference for the next turn, without rolling back or returning to the input box.
         assert!(
             app.input().is_empty(),
-            "打断后输入框应清空（turn 被保留而非重发）"
+            "the input box should be cleared after an interrupt (the turn is kept, not resent)"
         );
-        // 界面保留本轮用户条目（不 truncate items）。
-        assert!(!app.items().is_empty(), "打断后应保留本轮的界面条目");
+        // The UI keeps this turn's user item (items are not truncated).
+        assert!(!app.items().is_empty(), "this turn's UI items should be kept after an interrupt");
         assert!(
             app.items().iter().any(|item| matches!(
                 item,
                 Item::Message(m) if m.role == Role::User
             )),
-            "打断后界面应仍含本轮用户消息"
+            "the UI should still contain this turn's user message after an interrupt"
         );
-        // Agent 侧本轮用户消息也保留（不 truncate agent / 不截尾日志）。
+        // The Agent side also keeps this turn's user message (the agent is not truncated / the log is not truncated).
         let agent = app.take_agent().unwrap();
         assert!(
             agent
                 .messages()
                 .iter()
                 .any(|m| matches!(m, Message::User { .. })),
-            "Agent 侧本轮用户消息应被保留"
+            "the Agent-side user message for this turn should be kept"
         );
     }
 
@@ -1624,7 +1624,7 @@ mod tests {
                 content: "second".into(),
             },
         ]));
-        // 让 UI 也有对应的两条用户条目。
+        // Give the UI two corresponding user items too.
         app.add_message(Message::User {
             content: "first".into(),
         });
@@ -1633,11 +1633,11 @@ mod tests {
         });
 
         app.start_rewind_last_turn();
-        // 只回退最新一条：输入框应填 "second"，编辑点指向第 1 条 UI 条目。
-        assert_eq!(app.input(), "second", "应填回最后一条用户消息");
-        assert!(app.is_rewind_edit(), "应进入回溯编辑态");
-        assert_eq!(app.rewind_edit_item(), Some(1), "应定位到被编辑的消息条目");
-        assert!(app.command_hint().is_some(), "应给出重发提示");
+        // Only the latest one is rolled back: the input box should be filled with "second", and the edit point points at UI item 1.
+        assert_eq!(app.input(), "second", "should fill back the last user message");
+        assert!(app.is_rewind_edit(), "should enter rewind-edit mode");
+        assert_eq!(app.rewind_edit_item(), Some(1), "should point at the message item being edited");
+        assert!(app.command_hint().is_some(), "should give a resend hint");
     }
 
     #[test]
@@ -1657,12 +1657,12 @@ mod tests {
             content: "second".into(),
         });
 
-        app.start_rewind_last_turn(); // 回退 "second"
-        // 编辑后提交。
+        app.start_rewind_last_turn(); // rewind "second"
+        // Submit after editing.
         app.push_input('!');
         assert_eq!(app.submit().as_deref(), Some("second!"));
 
-        // 界面只剩回退点之前的条目 + 新提交的这条。
+        // The UI is left with the items before the rewind point + this newly submitted one.
         let user_items = app
             .items()
             .iter()
@@ -1678,7 +1678,7 @@ mod tests {
     fn rewind_without_user_message_is_noop() {
         let mut app = App::new(agent_with_users(vec![]));
         app.start_rewind_last_turn();
-        assert!(!app.is_rewind_edit(), "无可回溯消息不应进入编辑态");
+        assert!(!app.is_rewind_edit(), "no rewindable message should not enter edit mode");
         assert!(app.input().is_empty());
     }
 
@@ -1693,11 +1693,11 @@ mod tests {
         for ch in "/rewind".chars() {
             app.push_input(ch);
         }
-        assert!(app.submit().is_none(), "/rewind 不应作为 prompt 发送");
-        assert!(app.is_rewind_edit(), "应进入回溯编辑态");
-        assert!(!app.is_waiting(), "不应进入等待回复状态");
-        assert_eq!(app.input(), "only", "应填回最后一条用户消息");
-        assert!(app.command_hint().is_some(), "应给出重发提示");
+        assert!(app.submit().is_none(), "/rewind should not be sent as a prompt");
+        assert!(app.is_rewind_edit(), "should enter rewind-edit mode");
+        assert!(!app.is_waiting(), "should not enter the waiting-for-reply state");
+        assert_eq!(app.input(), "only", "should fill back the last user message");
+        assert!(app.command_hint().is_some(), "should give a resend hint");
     }
 
     #[test]
@@ -1714,22 +1714,22 @@ mod tests {
         app.submit();
         assert_eq!(app.input(), "first");
 
-        // Esc：取消本次改动——清输入、退出编辑态，且不发送。
+        // Esc: cancel this edit -- clear the input, exit edit mode, and do not send.
         app.cancel_rewind_edit();
-        assert!(!app.is_rewind_edit(), "取消后应退出编辑态");
-        assert!(app.input().is_empty(), "取消应清空输入");
-        assert!(app.command_hint().is_none(), "取消应清掉提示");
+        assert!(!app.is_rewind_edit(), "cancel should exit edit mode");
+        assert!(app.input().is_empty(), "cancel should clear the input");
+        assert!(app.command_hint().is_none(), "cancel should clear the hint");
 
-        // 再来一次，这次编辑后回车重发。
+        // Try again, this time editing and pressing Enter to resend.
         app.start_rewind_last_turn();
         app.push_input('!');
-        assert!(app.command_hint().is_some(), "编辑态应保留重发提示");
+        assert!(app.command_hint().is_some(), "edit mode should keep the resend hint");
         assert_eq!(
             app.submit().as_deref(),
             Some("first!"),
-            "回车应重发编辑后的内容"
+            "Enter should resend the edited content"
         );
-        assert!(app.is_waiting(), "重发应进入等待回复状态");
+        assert!(app.is_waiting(), "resending should enter the waiting-for-reply state");
     }
 
     #[test]
@@ -1759,10 +1759,10 @@ mod tests {
         }
         app.move_cursor_left();
         app.move_cursor_left();
-        app.pop_input(); // 删除 'b'
+        app.pop_input(); // delete 'b'
         assert_eq!(app.input(), "acd");
         assert_eq!(app.input_cursor(), 1);
-        app.delete_input(); // 删除光标处 'c'
+        app.delete_input(); // delete 'c' at the cursor
         assert_eq!(app.input(), "ad");
         assert_eq!(app.input_cursor(), 1);
     }
@@ -1788,7 +1788,7 @@ mod tests {
                 app.push_input(ch);
             }
             app.submit();
-            // 模拟回复结束，允许下一次提交。
+            // Simulate the reply ending, allowing the next submit.
             app.restore_agent(
                 Agent::builder()
                     .model_config(
@@ -1803,7 +1803,7 @@ mod tests {
             );
         }
 
-        // 输入一半的草稿，再上翻历史。
+        // Type half a draft, then scroll up through history.
         app.push_input('d');
         app.push_input('r');
         app.push_input('a');
@@ -1814,12 +1814,12 @@ mod tests {
         assert_eq!(app.input(), "second");
         app.history_prev();
         assert_eq!(app.input(), "first");
-        // 到头再上翻仍是第一条。
+        // Scrolling up again at the top still shows the first entry.
         app.history_prev();
         assert_eq!(app.input(), "first");
         app.history_next();
         assert_eq!(app.input(), "second");
-        // 下翻越过末尾恢复草稿。
+        // Scrolling down past the end restores the draft.
         app.history_next();
         assert_eq!(app.input(), "draft");
     }
@@ -1847,7 +1847,7 @@ mod tests {
         assert_eq!(app.input(), "hello");
         app.push_input('!');
         assert_eq!(app.input(), "hello!");
-        // 编辑后下键不再回放历史。
+        // After editing, the down key no longer replays history.
         app.history_next();
         assert_eq!(app.input(), "hello!");
     }
@@ -1856,7 +1856,7 @@ mod tests {
     fn scroll_up_from_bottom_starts_at_bottom() {
         let mut app = app();
         app.set_max_scroll(100);
-        // 自动跟随底部时 self.scroll 陈旧为 0，上滚应以底部为基准。
+        // While auto-following the bottom, self.scroll is stale at 0; scrolling up should be based on the bottom.
         app.scroll_by(-3);
         assert_eq!(app.scroll(), 97);
         assert!(!app.auto_scroll());
@@ -1867,10 +1867,10 @@ mod tests {
         let mut app = app();
         app.push_input('a');
         app.insert_input("b\nc\r\nd\r");
-        // CRLF 与 CR 都归一为 LF。
+        // Both CRLF and CR are normalized to LF.
         assert_eq!(app.input(), "ab\nc\nd\n");
         assert_eq!(app.input_cursor(), "ab\nc\nd\n".len());
-        // 粘贴不应触发发送，仍处于编辑态。
+        // Pasting should not trigger sending; still in edit mode.
         assert!(!app.is_waiting());
     }
 
@@ -1890,18 +1890,18 @@ mod tests {
     fn suggestion_move_clamps_and_selects_highlight() {
         let mut app = app();
         app.push_input('/');
-        // 输入 `/` 会列出全部指令。
+        // Typing `/` lists all commands.
         assert!(app.suggestions().len() >= 3);
         assert_eq!(app.suggestion_index(), 0);
 
         app.suggestion_move(1);
         assert_eq!(app.suggestion_index(), 1);
-        // 到顶后不再上移。
+        // After reaching the top, no further move up.
         app.suggestion_move(-1);
         app.suggestion_move(-1);
         assert_eq!(app.suggestion_index(), 0);
 
-        // 到底后不再下移。
+        // After reaching the bottom, no further move down.
         for _ in 0..10 {
             app.suggestion_move(1);
         }
@@ -1917,7 +1917,7 @@ mod tests {
         let picked = names[1].clone();
         app.accept_suggestion();
         assert_eq!(app.input(), format!("/{picked} "));
-        assert!(app.suggestions().is_empty(), "采纳后应清空候选");
+        assert!(app.suggestions().is_empty(), "the suggestions should be cleared after accepting");
         assert_eq!(app.suggestion_index(), 0);
     }
 
@@ -1927,7 +1927,7 @@ mod tests {
         app.push_input('/');
         app.suggestion_move(1);
         assert_eq!(app.suggestion_index(), 1);
-        // 继续打字 → 候选刷新，高亮回到第一项。
+        // Continue typing -> suggestions refresh and the highlight returns to the first item.
         app.push_input('i');
         assert_eq!(app.suggestion_index(), 0);
     }
@@ -1940,6 +1940,6 @@ mod tests {
         assert!(!app.suggestions().is_empty());
         app.dismiss_suggestions();
         assert!(app.suggestions().is_empty());
-        assert_eq!(app.input(), "/r", "Esc 只关浮层，不动输入");
+        assert_eq!(app.input(), "/r", "Esc only closes the popup, does not touch the input");
     }
 }

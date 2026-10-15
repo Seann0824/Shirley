@@ -1,19 +1,19 @@
-//! 任务账本（todo）：模型自己维护、跨上下文压缩存活的任务状态。
+//! Task ledger (todo): task state maintained by the model itself, surviving context compaction.
 //!
-//! **这是应用层能力，不是 SDK 基础能力**。账本属于"coding agent 这个产品"
-//! 的功能取舍（记什么、怎么催、注入什么文案），SDK 只提供通用接缝
-//! [`shirley_agent_sdk::ContextProvider`]——"每轮请求末尾追加一条 system"。
-//! 本模块实现两件事：
+//! **This is an application-layer capability, not an SDK base capability.** The ledger belongs to "the coding agent product"
+//! as a feature tradeoff (what to record, how to nag, what text to inject); the SDK only provides the generic seam
+//! [`shirley_agent_sdk::ContextProvider`] -- "append one system message at the end of every request".
+//! This module implements two things:
 //!
-//! - [`TodoTool`]：暴露给模型的 `todo` 工具（模型自己决定何时更新）；
-//! - [`TodoContextProvider`]：把账本渲染成一条 system，经 `ContextProvider`
-//!   接缝**追加在每轮请求末尾**（不参与压缩、跨压缩存活、不动前缀缓存）。
+//! - [`TodoTool`]: the `todo` tool exposed to the model (the model decides when to update it);
+//! - [`TodoContextProvider`]: renders the ledger into one system message, appended **at the end of every request**
+//!   via the `ContextProvider` seam (does not participate in compaction, survives compaction, does not touch the prefix cache).
 //!
-//! **为什么需要它**：压缩会把对话压成有损摘要，模型因此丢失"我做到哪了、
-//! 已经知道什么"，于是重新探索、再压缩，形成正反馈回路。账本把"目标 / 步骤 /
-//! 已得结论 / 待决问题"记在**对话之外**，压缩碰不到它。
+//! **Why it is needed**: compaction squashes the conversation into a lossy summary, so the model loses "where I got to and
+//! what I already know", and re-explores and re-compacts, forming a positive feedback loop. The ledger records "goal / steps /
+//! conclusions reached / open questions" **outside the conversation**, where compaction cannot touch it.
 //!
-//! 账本不是"再摘要一遍"（那是二次损失）：写进去的是模型自己确认过的事实。
+//! The ledger is not "summarizing again" (that would be a second loss): what is written in is a fact the model itself confirmed.
 
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -23,21 +23,21 @@ use shirley_agent_sdk::{
     ContextProvider, Tool, ToolContext, ToolDefinition, ToolError, ToolFuture,
 };
 
-/// 账本渲染成注入文本时的字符上限。
+/// Character cap when rendering the ledger into the injected text.
 ///
-/// 账本本身也会占上下文，超限截断并显式标注（防它自己垄断上下文）。
+/// The ledger itself consumes context too; over the cap it is truncated and explicitly marked (so it does not monopolize the context).
 const MAX_RENDER_CHARS: usize = 4000;
 
-/// 连续多少轮没更新账本就注入 nag 提醒。
+/// How many consecutive rounds without updating the ledger before the nag reminder is injected.
 ///
-/// 取 3 与开源实现（learn-claude-code）一致：太早会打断正常节奏，
-/// 太晚则漂移已经发生。
+/// A value of 3 matches the open-source implementation (learn-claude-code): too early interrupts the normal rhythm,
+/// too late and the drift has already happened.
 pub const TODO_NAG_AFTER_ROUNDS: usize = 3;
 
-/// 任务账本的内存存储。
+/// In-memory storage for the task ledger.
 ///
-/// `Arc` 共享（注入提供者与 `todo` 工具各持一份），内部可变性走 `Mutex`。
-/// 持久化留空（进程结束即失，与会话日志无关）。
+/// Shared via `Arc` (the injection provider and the `todo` tool each hold one), internal mutability via `Mutex`.
+/// Persistence is left out (lost when the process ends, unrelated to session logs).
 pub struct TodoStore {
     inner: Mutex<TaskState>,
     revision: AtomicUsize,
@@ -51,10 +51,10 @@ struct TaskState {
     open_questions: Vec<String>,
 }
 
-/// 一步的完成状态（对齐 Claude Code `TodoWrite` 的三态）。
+/// Completion state of a step (aligned with Claude Code `TodoWrite`'s three states).
 ///
-/// `InProgress` 是"防漂移"的锚点：同一时刻至多一步处于此态，逼模型
-/// 做完一件再开下一件。
+/// `InProgress` is the "anti-drift" anchor: at most one step may be in this state at a time, forcing the model
+/// to finish one thing before starting the next.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TodoStatus {
@@ -70,12 +70,12 @@ struct Step {
     status: TodoStatus,
 }
 
-/// 账本更新指令（`todo` 工具的入参）。
+/// Ledger update command (the `todo` tool's input).
 ///
-/// **补丁语义**：只处理显式提供的字段；未提供的字段保持原样。
-/// - `goal` / `steps`：整体替换（`steps` 是清单，模型每轮重发全量，天然自纠）；
-/// - `add_findings` / `add_open_questions`：追加；
-/// - `clear`：重置整个账本。
+/// **Patch semantics**: only handles explicitly provided fields; fields not provided are left as is.
+/// - `goal` / `steps`: whole replacement (`steps` is a checklist; the model resends the full list every round, so it self-corrects naturally);
+/// - `add_findings` / `add_open_questions`: append;
+/// - `clear`: reset the entire ledger.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TodoUpdate {
@@ -91,32 +91,32 @@ pub struct TodoUpdate {
     pub clear: Option<bool>,
 }
 
-/// 清单里的一步。
+/// One step in the checklist.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TodoStep {
     pub text: String,
-    /// 缺省视为 `pending`。三态见 [`TodoStatus`]；同一时刻至多一步 `in_progress`。
+    /// Defaults to `pending`. Three states as in [`TodoStatus`]; at most one step `in_progress` at a time.
     #[serde(default)]
     pub status: TodoStatus,
 }
 
-/// 供 UI 渲染的任务账本结构化视图（与注入给模型的 XML 无关）。
+/// Structured view of the task ledger for UI rendering (unrelated to the XML injected to the model).
 ///
-/// `TodoStore` 是纯内存状态，UI 侧需要「目标 + 步骤进度」这类可序列化的只读快照，
-/// 而不是解析注入文本。空账本（无 goal 且无 steps）返回 `None`，UI 据此不显示任务卡。
+/// `TodoStore` is pure in-memory state; the UI side needs a serializable read-only snapshot like "goal + step progress",
+/// rather than parsing the injected text. An empty ledger (no goal and no steps) returns `None`, so the UI hides the task card.
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskView {
     pub goal: Option<String>,
     pub steps: Vec<TaskStepView>,
-    /// 已完成步数（供「3/7」进度显示）。
+    /// Number of completed steps (for the "3/7" progress display).
     pub completed: usize,
     pub total: usize,
-    /// 当前进行中的那一步（至多一条）。
+    /// The step currently in progress (at most one).
     pub current: Option<String>,
 }
 
-/// 视图里的一步。
+/// One step in the view.
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskStepView {
     pub text: String,
@@ -131,10 +131,10 @@ impl TodoStore {
         }
     }
 
-    /// 应用一次更新，返回更新后的账本渲染文本（空账本返回 `None`）。
+    /// Apply one update, returning the rendered ledger text after the update (empty ledger returns `None`).
     ///
-    /// 校验失败（同一时刻超过一步 `in_progress`）返回 `Err`，且**不产生任何
-    /// 副作用**——校验先于写入，避免半更新的脏账本。
+    /// Validation failure (more than one step `in_progress` at a time) returns `Err`, with **no side effects**
+    /// -- validation happens before the write, avoiding a half-updated dirty ledger.
     pub fn apply(&self, update: TodoUpdate) -> Result<Option<String>, ToolError> {
         if let Some(steps) = &update.steps {
             let in_progress = steps
@@ -179,9 +179,9 @@ impl TodoStore {
         Ok(self.render())
     }
 
-    /// 把账本渲染成注入文本；空账本返回 `None`（不注入空内容）。
+    /// Render the ledger into the injected text; an empty ledger returns `None` (no empty content is injected).
     ///
-    /// 用 XML 标签包裹（`plan.md`：标签形式能提升模型对结构信息的注意力）。
+    /// Wrapped in XML tags (`plan.md`: the tag form improves the model's attention to structured information).
     pub fn render(&self) -> Option<String> {
         let state = self.inner.lock().expect("todo lock poisoned");
         let mut body = String::new();
@@ -225,10 +225,10 @@ impl TodoStore {
         Some(rendered)
     }
 
-    /// 结构化只读视图（供 UI 渲染任务进度）。空账本（无 goal 且无 steps）返回 `None`。
+    /// Structured read-only view (for UI rendering of task progress). An empty ledger (no goal and no steps) returns `None`.
     ///
-    /// findings / open_questions 不进视图：UI 的任务卡只关心「目标 + 步骤进度」，
-    /// 结论与待决问题已由模型在正文里交代，堆进状态行只会稀释信号。
+    /// findings / open_questions do not enter the view: the UI task card only cares about "goal + step progress";
+    /// conclusions and open questions are already conveyed by the model in the body text, and piling them into the status line only dilutes the signal.
     pub fn view(&self) -> Option<TaskView> {
         let state = self.inner.lock().expect("todo lock poisoned");
         if state.goal.is_none() && state.steps.is_empty() {
@@ -275,19 +275,19 @@ impl Default for TodoStore {
     }
 }
 
-/// 注入请求时给账本加的一行说明（模型据此知道这是什么、该怎么做）。
+/// A one-line description added to the ledger when injecting the request (so the model knows what this is and what to do).
 ///
-/// 与 [`TodoStore::render`] 分开：工具结果里不需要重复这段说明。
+/// Separate from [`TodoStore::render`]: the tool result does not need this description repeated.
 pub const TASK_STATE_HEADER: &str = include_str!("../prompts/todo_header.md");
 
-/// 模型连续多轮没更新账本时注入的催促提醒（nag）。
+/// The nudge reminder (nag) injected when the model has not updated the ledger for several rounds.
 ///
-/// 与 `TASK_STATE_HEADER` 分开：这条只在**空账本**或**久未更新**时出现，
-/// 是"冷启动护栏"——账本为空时没有 header 可注入，模型开局缺一条明确的
-/// 触发指令，靠它补上。
+/// Separate from `TASK_STATE_HEADER`: this one appears only when the ledger is **empty** or has **gone stale**,
+/// as a "cold-start guardrail" -- when the ledger is empty there is no header to inject, so the model lacks an explicit
+/// trigger instruction at the start; this fills it in.
 pub const TODO_NAG_REMINDER: &str = include_str!("../prompts/todo_nag.md");
 
-/// XML 文本转义：防止模型写入的 `<` / `&` 破坏标签结构。
+/// XML text escaping: prevents the model's `<` / `&` from breaking the tag structure.
 fn escape(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -295,10 +295,10 @@ fn escape(input: &str) -> String {
         .replace('>', "&gt;")
 }
 
-/// `todo` 工具：模型维护自己任务账本的唯一入口。
+/// The `todo` tool: the model's only entry point to maintain its own task ledger.
 ///
-/// 手写实现 `Tool`：状态（`Arc<TodoStore>`）由工具自己持有，与
-/// [`TodoContextProvider`] 共享同一份 `Arc`。
+/// Hand-written `Tool` impl: the state (`Arc<TodoStore>`) is held by the tool itself, sharing the same `Arc`
+/// with [`TodoContextProvider`].
 pub struct TodoTool {
     store: Arc<TodoStore>,
     definition: ToolDefinition,
@@ -387,13 +387,13 @@ impl Tool for TodoTool {
     }
 }
 
-/// 每轮请求末尾注入任务账本的提供者。
+/// Provider that injects the task ledger at the end of every request.
 ///
-/// 非空账本每轮注入；空账本或已有账本连续多轮无有效更新时提醒。
-/// 摘要快照只读账本，不影响正常请求计数。
+/// A non-empty ledger is injected every round; an empty ledger, or one that has had no valid update for several rounds, triggers a reminder.
+/// Summary snapshots only read the ledger and do not affect the normal request count.
 pub struct TodoContextProvider {
     store: Arc<TodoStore>,
-    /// 上次观察到的 revision 与距上次有效更新的正常请求数。
+    /// The last observed revision and the number of normal requests since the last valid update.
     progress: Mutex<(usize, usize)>,
 }
 
@@ -445,24 +445,24 @@ mod tests {
         assert!(store.render().is_none());
         let rendered = store
             .apply(TodoUpdate {
-                goal: Some("实现 todo 工具".into()),
+                goal: Some("implement the todo tool".into()),
                 steps: Some(vec![
                     TodoStep {
-                        text: "建模块".into(),
+                        text: "build the module".into(),
                         status: TodoStatus::Completed,
                     },
                     TodoStep {
-                        text: "接运行时".into(),
+                        text: "wire up the runtime".into(),
                         status: TodoStatus::Pending,
                     },
                 ]),
                 ..Default::default()
             })
             .unwrap()
-            .expect("非空账本应渲染");
-        assert!(rendered.contains("<goal>实现 todo 工具</goal>"));
-        assert!(rendered.contains("- [x] 建模块"));
-        assert!(rendered.contains("- [ ] 接运行时"));
+            .expect("a non-empty ledger should render");
+        assert!(rendered.contains("<goal>implement the todo tool</goal>"));
+        assert!(rendered.contains("- [x] build the module"));
+        assert!(rendered.contains("- [ ] wire up the runtime"));
     }
 
     #[test]
@@ -470,19 +470,19 @@ mod tests {
         let store = TodoStore::new();
         store
             .apply(TodoUpdate {
-                goal: Some("目标".into()),
+                goal: Some("goal".into()),
                 ..Default::default()
             })
             .unwrap();
         store
             .apply(TodoUpdate {
-                add_findings: Some(vec!["发现 A".into()]),
+                add_findings: Some(vec!["finding A".into()]),
                 ..Default::default()
             })
             .unwrap();
         let rendered = store.render().unwrap();
-        assert!(rendered.contains("<goal>目标</goal>"), "goal 应保留");
-        assert!(rendered.contains("- 发现 A"));
+        assert!(rendered.contains("<goal>goal</goal>"), "goal should be preserved");
+        assert!(rendered.contains("- finding A"));
     }
 
     #[test]
@@ -490,7 +490,7 @@ mod tests {
         let store = TodoStore::new();
         store
             .apply(TodoUpdate {
-                goal: Some("目标".into()),
+                goal: Some("goal".into()),
                 ..Default::default()
             })
             .unwrap();
@@ -522,7 +522,7 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, ToolError::ArgumentsError(_)));
-        assert!(store.render().is_none(), "校验失败不应产生副作用");
+        assert!(store.render().is_none(), "validation failure should not produce side effects");
     }
 
     #[test]
@@ -543,23 +543,23 @@ mod tests {
     fn provider_injects_ledger_when_non_empty() {
         let store = Arc::new(TodoStore::new());
         let provider = TodoContextProvider::new(store.clone());
-        assert!(provider.context().is_none(), "空账本首轮不注入");
+        assert!(provider.context().is_none(), "an empty ledger is not injected in the first round");
         store
             .apply(TodoUpdate {
-                goal: Some("做点事".into()),
+                goal: Some("do something".into()),
                 ..Default::default()
             })
             .unwrap();
-        let text = provider.context().expect("非空账本应注入");
+        let text = provider.context().expect("a non-empty ledger should be injected");
         assert!(text.contains(TASK_STATE_HEADER));
-        assert!(text.contains("<goal>做点事</goal>"));
+        assert!(text.contains("<goal>do something</goal>"));
     }
 
     #[test]
     fn provider_nags_after_threshold_when_empty() {
         let store = Arc::new(TodoStore::new());
         let provider = TodoContextProvider::new(store);
-        // 前几轮不注入，超过阈值后开始 nag。
+        // No injection for the first few rounds; nagging starts after the threshold.
         let mut nagged = false;
         for _ in 0..=TODO_NAG_AFTER_ROUNDS {
             if let Some(text) = provider.context() {
@@ -568,7 +568,7 @@ mod tests {
                 break;
             }
         }
-        assert!(nagged, "空账本久未更新应触发 nag");
+        assert!(nagged, "an empty ledger left stale should trigger a nag");
     }
 
     #[test]
@@ -576,15 +576,15 @@ mod tests {
         let store = Arc::new(TodoStore::new());
         store
             .apply(TodoUpdate {
-                goal: Some("修复 session 切换".into()),
-                add_findings: Some(vec!["active_agent 在运行中为空".into()]),
+                goal: Some("fix session switching".into()),
+                add_findings: Some(vec!["active_agent is empty while running".into()]),
                 ..Default::default()
             })
             .unwrap();
         let provider = TodoContextProvider::new(store.clone());
         assert!(!provider.context().unwrap().contains("<reminder>"));
         for _ in 0..TODO_NAG_AFTER_ROUNDS {
-            // 摘要快照不应推进/重置正常请求计数。
+            // Summary snapshots should not advance/reset the normal request count.
             assert!(
                 !provider
                     .compaction_context()
@@ -596,25 +596,25 @@ mod tests {
         assert!(provider.context().unwrap().contains("<reminder>"));
         store
             .apply(TodoUpdate {
-                add_findings: Some(vec![" active_agent 在运行中为空 ".into()]),
+                add_findings: Some(vec![" active_agent is empty while running ".into()]),
                 ..Default::default()
             })
             .unwrap();
         assert!(
             provider.context().unwrap().contains("<reminder>"),
-            "重复结论不算推进"
+            "a duplicate conclusion does not count as progress"
         );
         assert_eq!(
             store
                 .render()
                 .unwrap()
-                .matches("active_agent 在运行中为空")
+                .matches("active_agent is empty while running")
                 .count(),
             1
         );
         store
             .apply(TodoUpdate {
-                add_findings: Some(vec!["modelName 返回空字符串".into()]),
+                add_findings: Some(vec!["modelName returns an empty string".into()]),
                 ..Default::default()
             })
             .unwrap();

@@ -14,10 +14,10 @@ mod todo;
 mod tools;
 mod workspace_search;
 
-/// 界面模式：TUI（默认）或桌面界面。
+/// Interface mode: TUI (default) or the desktop interface.
 ///
-/// 通过启动参数 `--desktop` 选择，环境变量 `SHIRLEY_INTERFACE=desktop` 亦可。
-/// 两个界面共享同一份 [`bootstrap::AgentFactory`] 装配产物（见 `docs/desktop-interface.md`）。
+/// Selected by the `--desktop` launch flag; the `SHIRLEY_INTERFACE=desktop` env var works too.
+/// Both interfaces share the same [`bootstrap::AgentFactory`] assembly (see `docs/desktop-interface.md`).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
     Tui,
@@ -40,18 +40,18 @@ impl Mode {
 async fn main() -> Result<(), AgentError> {
     dotenvy::dotenv().ok();
 
-    // 工作区根目录：决定"这次在哪个项目跑"，也是工作区级配置的来源。
+    // Workspace root: decides "which project this run is for", and is the source of workspace-level config.
     let working_dir = prompt::workspace_root();
 
-    // 应用装配（配置 / 模型目录 / 工具 / 会话 / Agent）——两个界面共用。
+    // Application assembly (config / model catalog / tools / sessions / Agent) — shared by both interfaces.
     let factory = bootstrap::AgentFactory::assemble(working_dir)?;
 
-    // 后台预热模型目录：让首次打开 `/model` 不必等一次网络往返。
+    // Warm the model catalog in the background so the first `/model` open doesn't wait on a network round trip.
     factory.prewarm_model_catalog();
 
     match Mode::from_env_and_args() {
         Mode::Tui => interface::run(factory).await,
-        // 桌面界面：进入 Tauri 事件循环（阻塞主线程）。
+        // Desktop interface: enter the Tauri event loop (blocks the main thread).
         Mode::Desktop => interface::desktop::run(factory),
     }
     .map_err(|error| AgentError::Other(Box::new(error)))?;

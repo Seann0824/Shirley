@@ -1,3 +1,3 @@
-你在为 coding agent 压缩对话上下文。请忠实保留用户下达的原始指令与约束，
-以及继续任务所必需的信息：关键决策及其原因、当前进度与状态、未解决的问题、
-涉及的文件路径、执行过的命令、遇到的错误和测试结果。删除重复、闲聊与过时的中间想法。
+You are compressing the conversation context for a coding agent. Faithfully preserve the original instructions and constraints
+given by the user, along with the information needed to continue the task: key decisions and their reasons, current progress and state, open questions,
+file paths involved, commands run, errors encountered, and test results. Remove duplication, chit-chat, and stale intermediate ideas.

@@ -1,25 +1,30 @@
-//! Tauri 2 壳：把 `AgentFactory` 造出的多会话 `Agent` 接进 webview。
+//! Tauri 2 shell: wires the multi-session `Agent`s built by `AgentFactory` into the webview.
 //!
-//! # 多项目（多工作区）
+//! # Multiple projects (multiple workspaces)
 //!
-//! Shirley 作为独立 app 不绑定单一目录：用户可把多个工作区登记为「项目」，每个
-//! 项目下挂自己的会话。注册表（[`ProjectRegistry`]）只记「项目在哪」，落
-//! `<config_dir>/shirley/projects.json`；**每个项目一个 [`AgentFactory`]**（各自
-//! 读该项目 `<root>/.shirley/config.toml`），会话日志仍落各项目自己的
-//! `<root>/.shirley/sessions/`（随仓库走）。
+//! Shirley as a standalone app is not bound to a single directory: the user can
+//! register multiple workspaces as "projects", each with its own sessions. The
+//! registry ([`ProjectRegistry`]) only records "where the project is", persisted to
+//! `<config_dir>/shirley/projects.json`; **one [`AgentFactory`] per project** (each
+//! reading that project's `<root>/.shirley/config.toml`), and session logs still go
+//! to each project's own `<root>/.shirley/sessions/` (traveling with the repo).
 //!
-//! 「移除项目」= **归档**：只置 `archived` 标志，不删磁盘数据，可从归档列表恢复。
+//! "Remove project" = **archive**: only sets the `archived` flag, never deletes disk
+//! data, and can be restored from the archive list.
 //!
-//! # 事件契约（与 `web/src/lib/bridge.ts` 对齐）
+//! # Event contract (aligned with `web/src/lib/bridge.ts`)
 //!
-//! - command `agent_send { project, session?, text, references? }`：发起指定会话的一轮
-//!   `run_stream`，事件经 `agent://event` 推送并带来源 `project` + `session`。
-//! - command `agent_subscribe { project, session }`：订阅一个会话（返回快照 + 起 pump）。
-//! - command `agent_list_projects { archived? }` / `agent_add_project`（原生文件夹选择器）
-//!   / `agent_rename_project` / `agent_archive_project` / `agent_restore_project`。
-//! - command `agent_cancel { project, session }`：取消指定会话正在跑的一轮——向驱动
-//!   该会话 `run_stream` 的任务发取消信号，任务 drop 掉流、回退 Agent 状态并以
-//!   `Finished(Cancelled)` 收尾。
+//! - command `agent_send { project, session?, text, references? }`: starts one
+//!   `run_stream` turn for the given session; events are pushed via `agent://event`
+//!   tagged with source `project` + `session`.
+//! - command `agent_subscribe { project, session }`: subscribe to a session (returns a
+//!   snapshot + starts a pump).
+//! - command `agent_list_projects { archived? }` / `agent_add_project` (native folder picker)
+//!   / `agent_rename_project` / `agent_archive_project` / `agent_restore_project`.
+//! - command `agent_cancel { project, session }`: cancel the running turn of the given
+//!   session — sends a cancel signal to the task driving that session's `run_stream`;
+//!   the task drops the stream, rolls back Agent state, and finishes with
+//!   `Finished(Cancelled)`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -40,52 +45,73 @@ use crate::session::{
     SessionCatalog, SessionEntry, first_user_message, sanitize_title, title_prompt,
 };
 
-/// webview 侧监听的统一事件名。
+/// The single event name the webview listens on.
 const EVENT_NAME: &str = "agent://event";
 
-/// 单个项目的运行时：一份装配好的工厂 + 它的多会话编排器。
+/// Pseudo project id for Chat mode: **not associated with any user project**, but
+/// reuses the same project-scoped commands (`agent_send` / `agent_subscribe` /
+/// `agent_list_sessions` ...). It never enters [`ProjectRegistry`], so it never shows
+/// up in the project list; sessions land in
+/// `<config_dir>/shirley/chat/.shirley/sessions/` (same root as global memory, not
+/// bound to a repo).
+const CHAT_PROJECT_ID: &str = "__chat__";
+
+/// Chat mode workspace root: `<config_dir>/shirley/chat`. Falls back to a temp dir when `config_dir` is unavailable.
+fn chat_root() -> PathBuf {
+    dirs::config_dir()
+        .map(|dir| dir.join("shirley").join("chat"))
+        .unwrap_or_else(|| std::env::temp_dir().join("shirley-chat"))
+}
+
+/// Runtime for a single project: one assembled factory + its multi-session orchestrator.
 ///
-/// 会话日志目录 / 系统提示词 / 记忆根都随 `factory`（即该项目的 `working_dir`）走；
-/// 因此不同项目天然隔离，互不共享可变状态。
+/// The session log directory / system prompt / memory root all follow `factory` (i.e.
+/// that project's `working_dir`); so different projects are naturally isolated and
+/// share no mutable state.
 struct ProjectRuntime {
     factory: Arc<AgentFactory>,
     sessions: SessionManager,
 }
 
-/// Tauri 管理的运行时状态（多项目）。
+/// Tauri-managed runtime state (multiple projects).
 ///
-/// - `registry`：项目注册表（哪些目录是项目）。
-/// - `runtimes`：**已打开**项目的运行时，按项目 id 懒加载（`ensure_runtime`）。
-///   关掉 / 归档项目即从表里移除，其内存态会话随之释放。
-/// - `pumps`：每个「项目::会话」的事件 pump 句柄。
+/// - `registry`: the project registry (which directories are projects).
+/// - `runtimes`: runtimes of **opened** projects, lazily loaded by project id
+///   (`ensure_runtime`). Closing / archiving a project removes it from the map and
+///   releases its in-memory sessions.
+/// - `pumps`: the event pump handle for each "project::session".
 struct DesktopState {
     registry: Arc<Mutex<ProjectRegistry>>,
     runtimes: Arc<Mutex<HashMap<String, Arc<Mutex<ProjectRuntime>>>>>,
     pumps: Arc<Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
-    /// 每个「项目::会话」正在运行一轮时的取消句柄。`agent_send` 发起一轮时插入，
-    /// 结束（正常 / 取消 / 出错）时移除；`agent_cancel` 取出并 `send(())` 触发打断。
-    /// 键与 `pumps` 一致（`route_key`）。
+    /// Cancel handle for each "project::session" while a turn is running. Inserted
+    /// when `agent_send` starts a turn, removed when it ends (normal / cancelled /
+    /// error); `agent_cancel` takes it out and `send(())` to interrupt. The key
+    /// matches `pumps` (`route_key`).
     cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
 }
 
-/// 事件 pump 的键：跨项目不重名（会话名在项目内唯一，项目 id 全局唯一）。
+/// Event pump key: unique across projects (session names are unique within a project, project ids globally).
 fn route_key(project: &str, session: &str) -> String {
     format!("{project}::{session}")
 }
 
-/// 用一份现成工厂造一个项目运行时。
+/// Build a project runtime from an existing factory.
 ///
-/// **恢复语义**：优先打开该项目**最近修改**的会话（`SessionCatalog::list` 已按
-/// `modified_ms` 降序），把它作为前台会话恢复；项目**没有任何会话**时才惰性开一份
-/// 空会话（此刻只定名、不落盘）。
+/// **Resume semantics**: prefer opening the project's **most recently modified**
+/// session (`SessionCatalog::list` is sorted by `modified_ms` descending) and restore
+/// it as the foreground session; only when the project has **no sessions at all** do
+/// we lazily open an empty session (naming it only, without writing to disk).
 ///
-/// 这里必须"恢复最近会话"而不是无条件新建：`ensure_runtime` 在项目**首次懒加载**
-/// 时就会调用本函数（前端切项目 / 侧栏轮询 `agent_list_sessions` 都会触发），若总是
-/// `create_lazy(None)`，`agent_current_session` 就会把一个**刚凭空造出的空会话**报给
-/// 前端，表现为"切项目把当前选中 session 切成 new session"。
+/// We must "resume the latest session" rather than unconditionally create a new one:
+/// `ensure_runtime` calls this on the project's **first lazy load** (triggered by the
+/// frontend switching projects / the sidebar polling `agent_list_sessions`). If it
+/// always did `create_lazy(None)`, `agent_current_session` would report a **freshly
+/// conjured empty session** to the frontend, manifesting as "switching projects turns
+/// the selected session into new session".
 fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime, String> {
     let catalog = factory.session_catalog.clone();
-    // 最近修改的会话优先；没有会话才新建惰性空会话。
+    // Most recently modified session first; only create a lazy empty session when there are none.
     let latest = catalog
         .list()
         .map_err(|e| e.to_string())?
@@ -113,30 +139,53 @@ fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime, St
         Some(built.skills),
         Some(built.todo),
     );
-    // 从磁盘恢复的会话：其 `Agent` 已带全量历史，但视图条目还是空的——重建一次，
-    // 快照 / 渲染才有内容（与 `SessionManager::switch_to` 的恢复路径一致）。
+    // A session restored from disk: its `Agent` already has the full history, but the
+    // view items are still empty — rebuild once so snapshots / rendering have content
+    // (same as `SessionManager::switch_to`'s resume path).
     if from_disk {
         sessions.active_mut().rebuild_items_from_agent();
     }
     Ok(ProjectRuntime { factory, sessions })
 }
 
-/// 对任意目录装配一份新工厂并造运行时（「新建项目」）。
+/// Assemble a new factory for an arbitrary directory and build its runtime ("new project").
 fn build_runtime(root: PathBuf) -> Result<ProjectRuntime, String> {
     let factory = Arc::new(AgentFactory::assemble(root).map_err(|e| e.to_string())?);
     runtime_from_factory(factory)
 }
 
-/// 取（必要时懒加载）指定项目的运行时，并刷新其 `last_opened_ms`。
+/// Get (lazily loading if needed) the given project's runtime and refresh its `last_opened_ms`.
 ///
-/// 未加载 → 查注册表拿到路径、`build_runtime` 后插入。项目不存在 / 目录已失效
-/// 返回错误。
+/// Not loaded → look up the path in the registry, `build_runtime`, then insert. Returns
+/// an error if the project does not exist / the directory is invalid.
 async fn ensure_runtime(
     state: &DesktopState,
     project: &str,
 ) -> Result<Arc<Mutex<ProjectRuntime>>, String> {
     if let Some(rt) = state.runtimes.lock().await.get(project).cloned() {
-        state.registry.lock().await.touch(project);
+        // The Chat pseudo project is not in the registry, so there is no `last_opened_ms` to refresh.
+        if project != CHAT_PROJECT_ID {
+            state.registry.lock().await.touch(project);
+        }
+        return Ok(rt);
+    }
+    // Chat mode: the pseudo project bypasses the registry and assembles a runtime
+    // directly from `<config_dir>/shirley/chat`. This lets all project-scoped commands
+    // be reused unchanged (session logs also land in that directory's `.shirley`).
+    if project == CHAT_PROJECT_ID {
+        let root = chat_root();
+        let runtime = tauri::async_runtime::spawn_blocking(move || {
+            let _ = std::fs::create_dir_all(&root);
+            build_runtime(root)
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let rt = {
+            let mut map = state.runtimes.lock().await;
+            map.entry(project.to_owned())
+                .or_insert_with(|| Arc::new(Mutex::new(runtime)))
+                .clone()
+        };
         return Ok(rt);
     }
     let entry = state
@@ -145,7 +194,7 @@ async fn ensure_runtime(
         .await
         .get(project)
         .cloned()
-        .ok_or_else(|| format!("项目不存在：{project}"))?;
+        .ok_or_else(|| format!("project not found: {project}"))?;
     let path = entry.path.clone();
     let runtime = tauri::async_runtime::spawn_blocking(move || build_runtime(path))
         .await
@@ -156,12 +205,12 @@ async fn ensure_runtime(
             .or_insert_with(|| Arc::new(Mutex::new(runtime)))
             .clone()
     };
-    // 先释放 runtimes 锁再 touch（避免 registry/runtimes 嵌套加锁）。
+    // Release the runtimes lock before touch (avoid nested registry/runtimes locking).
     state.registry.lock().await.touch(project);
     Ok(rt)
 }
 
-/// 前端消费的模型条目（与 `web/src/lib/bridge.ts` 的 `ModelEntry` 对齐）。
+/// Model entry consumed by the frontend (aligned with `ModelEntry` in `web/src/lib/bridge.ts`).
 #[derive(Debug, Clone, Serialize)]
 struct ModelEntryWire {
     label: String,
@@ -169,7 +218,7 @@ struct ModelEntryWire {
     provider: String,
 }
 
-/// `@` 引用可选的条目（与 `web/src/lib/bridge.ts` 的 `FileEntry` 对齐）。
+/// Entry selectable for `@` references (aligned with `FileEntry` in `web/src/lib/bridge.ts`).
 #[derive(Debug, Clone, Serialize)]
 struct FileEntryWire {
     path: String,
@@ -177,14 +226,14 @@ struct FileEntryWire {
     kind: &'static str,
 }
 
-/// `/` 技能候选条目（与 `web/src/lib/bridge.ts` 的 `SkillEntry` 对齐）。
+/// `/` skill candidate entry (aligned with `SkillEntry` in `web/src/lib/bridge.ts`).
 #[derive(Debug, Clone, Serialize)]
 struct SkillEntryWire {
     name: String,
     description: String,
 }
 
-/// 前端消费的项目条目（与 `web/src/lib/bridge.ts` 的 `ProjectEntry` 对齐）。
+/// Project entry consumed by the frontend (aligned with `ProjectEntry` in `web/src/lib/bridge.ts`).
 #[derive(Debug, Clone, Serialize)]
 struct ProjectEntryWire {
     id: String,
@@ -206,10 +255,11 @@ impl From<&ProjectEntry> for ProjectEntryWire {
     }
 }
 
-/// 前端消费的会话条目（与 `web/src/lib/bridge.ts` 的 `SessionEntry` 对齐）。
+/// Session entry consumed by the frontend (aligned with `SessionEntry` in `web/src/lib/bridge.ts`).
 ///
-/// `label` 是展示用标题（自定义标题优先，否则回落 `name`）；`preview` 是首条
-/// 用户消息；`modified_ms` / `turns` 对齐 Codex resume picker 的时间与轮数。
+/// `label` is the display title (custom title first, otherwise falls back to `name`);
+/// `preview` is the first user message; `modified_ms` / `turns` match Codex's resume
+/// picker time and turn count.
 #[derive(Debug, Clone, Serialize)]
 struct SessionEntryWire {
     name: String,
@@ -217,7 +267,7 @@ struct SessionEntryWire {
     preview: String,
     modified_ms: u64,
     turns: usize,
-    /// 该会话当前是否在跑一轮（后台活跃）——列表据此显示 loading 转圈。
+    /// Whether this session is currently running a turn (active in the background) — the list shows a loading spinner based on this.
     running: bool,
 }
 
@@ -234,15 +284,15 @@ impl From<SessionEntry> for SessionEntryWire {
     }
 }
 
-/// 恢复会话时回放给前端的一条历史消息（与 `web/src/lib/bridge.ts` 的
-/// `HistoryMessage` 对齐）。只透出可展示的 User / Assistant 正文。
+/// A history message replayed to the frontend when restoring a session (aligned with
+/// `HistoryMessage` in `web/src/lib/bridge.ts`). Only exposes displayable User / Assistant bodies.
 #[derive(Debug, Clone, Serialize)]
 struct HistoryMessageWire {
     role: &'static str,
     content: String,
 }
 
-/// 从 `Agent` 当前消息表提取可展示的历史（跳 system / tool / context_summary）。
+/// Extract displayable history from the `Agent`'s current message list (skips system / tool / context_summary).
 fn history_from_messages(messages: &[Message]) -> Vec<HistoryMessageWire> {
     messages
         .iter()
@@ -263,13 +313,13 @@ fn history_from_messages(messages: &[Message]) -> Vec<HistoryMessageWire> {
         .collect()
 }
 
-/// 把消息正文与 `@` 引用拼成这一轮发给 Agent 的 prompt。
+/// Compose the message body and `@` references into the prompt sent to the Agent this turn.
 fn compose_prompt(text: &str, references: &[String]) -> String {
     if references.is_empty() {
         return text.to_owned();
     }
     let mut prompt = String::new();
-    prompt.push_str("引用的工作区文件/目录：\n");
+    prompt.push_str("Referenced workspace files/directories:\n");
     for reference in references {
         prompt.push_str("- ");
         prompt.push_str(reference);
@@ -281,10 +331,10 @@ fn compose_prompt(text: &str, references: &[String]) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// 项目 commands
+// Project commands
 // ---------------------------------------------------------------------------
 
-/// 列出项目（按最近打开降序）。`archived = true` 时包含归档项目（供归档列表）。
+/// List projects (most recently opened first). `archived = true` includes archived projects (for the archive list).
 #[tauri::command]
 async fn agent_list_projects(
     state: State<'_, DesktopState>,
@@ -299,16 +349,16 @@ async fn agent_list_projects(
         .collect())
 }
 
-/// 打开原生文件夹选择器新建项目；取消返回 `None`。
+/// Open the native folder picker to create a new project; returns `None` if cancelled.
 ///
-/// 已登记的目录按 id 去重：已归档则「恢复并改名」，未归档则只刷新打开时间——
-/// 不会重复登记。
+/// Already-registered directories are deduplicated by id: if archived, "restore and
+/// rename"; otherwise only refresh the open time — never double-register.
 #[tauri::command]
 async fn agent_add_project(
     app: AppHandle,
     state: State<'_, DesktopState>,
 ) -> Result<Option<ProjectEntryWire>, String> {
-    // 原生对话框是阻塞调用，移到阻塞线程池（内部会切回主线程显示）。
+    // The native dialog is a blocking call; move it to the blocking thread pool (it internally hops back to the main thread to display).
     let picked =
         tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
             .await
@@ -323,7 +373,7 @@ async fn agent_add_project(
         .await
         .add(path, None)
         .map_err(|e| e.to_string())?;
-    // 立即装配运行时（惰性空会话），让用户能马上在该项目下开聊。
+    // Assemble the runtime immediately (with a lazy empty session) so the user can start chatting in this project right away.
     let root = entry.path.clone();
     let runtime = tauri::async_runtime::spawn_blocking(move || build_runtime(root))
         .await
@@ -336,7 +386,7 @@ async fn agent_add_project(
     Ok(Some(ProjectEntryWire::from(&entry)))
 }
 
-/// 重命名项目（只改展示名，不动路径 / 会话数据）。
+/// Rename a project (display name only; path / session data untouched).
 #[tauri::command]
 async fn agent_rename_project(
     state: State<'_, DesktopState>,
@@ -351,7 +401,7 @@ async fn agent_rename_project(
         .map_err(|e| e.to_string())
 }
 
-/// 归档项目：只置标志、**不删磁盘数据**；同时释放其内存运行时。
+/// Archive a project: only sets the flag, **does not delete disk data**; also releases its in-memory runtime.
 #[tauri::command]
 async fn agent_archive_project(
     state: State<'_, DesktopState>,
@@ -363,12 +413,12 @@ async fn agent_archive_project(
         .await
         .archive(&project)
         .map_err(|e| e.to_string())?;
-    // 归档即关闭：丢掉运行时（会话 Agent / 内存态一并释放，磁盘数据不动）。
+    // Archive = close: drop the runtime (session Agents / in-memory state released, disk data untouched).
     state.runtimes.lock().await.remove(&project);
     Ok(())
 }
 
-/// 从归档恢复项目（刷新最近打开时间；运行时下次打开时懒加载）。
+/// Restore a project from the archive (refreshes the open time; the runtime lazily loads on next open).
 #[tauri::command]
 async fn agent_restore_project(
     state: State<'_, DesktopState>,
@@ -383,7 +433,7 @@ async fn agent_restore_project(
 }
 
 // ---------------------------------------------------------------------------
-// 会话 / 运行 commands
+// Session / run commands
 // ---------------------------------------------------------------------------
 
 #[tauri::command]
@@ -397,8 +447,9 @@ async fn agent_send(
     let runtime = ensure_runtime(&state, &project).await?;
     let prompt = compose_prompt(&text, references.as_deref().unwrap_or(&[]));
 
-    // 发起本轮：取走该会话的 `Agent`，并把**用户消息**乐观记入其视图条目
-    // （`Session::apply_event` 有意忽略 `MessageAdded(User)`，由驱动方记录）。
+    // Start this turn: take the session's `Agent` and optimistically record the
+    // **user message** into its view items (`Session::apply_event` deliberately ignores
+    // `MessageAdded(User)`, leaving it to the driver to record).
     let (mut agent, memory, session_name) = {
         let mut guard = runtime.lock().await;
         let session_name = match session.clone() {
@@ -407,12 +458,12 @@ async fn agent_send(
                 .sessions
                 .active_name()
                 .map(str::to_owned)
-                .ok_or_else(|| "当前会话尚未落盘".to_owned())?,
+                .ok_or_else(|| "current session is not yet persisted".to_owned())?,
         };
         let agent = guard
             .sessions
             .begin_turn(&session_name, text.clone())
-            .ok_or_else(|| "agent 正在运行中".to_owned())?;
+            .ok_or_else(|| "agent is currently running".to_owned())?;
         let memory = guard
             .sessions
             .session(&session_name)
@@ -425,8 +476,9 @@ async fn agent_send(
 
     let catalog = runtime.lock().await.factory.session_catalog.clone();
     let runtime_for_task = runtime.clone();
-    // 取消句柄：与本轮任务同生命周期。`agent_cancel` 取出它并发信号；任务结束
-    // （正常 / 取消 / 出错）时移除，避免残留一个指向已结束任务的 sender。
+    // Cancel handle: same lifetime as this turn's task. `agent_cancel` takes it out and
+    // signals it; removed when the task ends (normal / cancelled / error), so no sender
+    // pointing at a finished task lingers.
     let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
     let key = route_key(&project, &session_name);
     state.cancels.lock().await.insert(key.clone(), cancel_tx);
@@ -444,10 +496,12 @@ async fn agent_send(
             false
         };
 
-        // 驱动本轮：`tokio::select!` 在「流的下一个事件」与「取消信号」之间竞争。
-        // 取消分支 `break` 后 `stream` 被 drop —— SDK 的 `run_stream` 是 async-stream
-        // 生成的流，**drop 即停止**（与 TUI `run_agent` 同款手法）。没有这条路径时
-        // 后台会一直把 ReAct 循环跑到底（点 stop 只改了前端 `busy`，从未真正打断）。
+        // Drive this turn: `tokio::select!` races "next stream event" against "cancel
+        // signal". After the cancel branch `break`s, `stream` is dropped — the SDK's
+        // `run_stream` is an async-stream-generated stream, so **drop means stop** (same
+        // trick as the TUI's `run_agent`). Without this path the background would run the
+        // ReAct loop to completion (clicking stop only changed the frontend `busy` and
+        // never actually interrupted).
         let mut terminal_update = None;
         let mut cancelled = {
             let mut stream = agent.run_stream(&prompt);
@@ -455,8 +509,9 @@ async fn agent_send(
             while !cancelled {
                 tokio::select! {
                     biased;
-                    // `&mut` 借用：`select!` 每轮都会 poll 它，若按值移动会在第二轮报
-                    // `use of moved value`（oneshot::Receiver 不 Copy）。
+                    // `&mut` borrow: `select!` polls it every iteration; moving by value
+                    // would trigger `use of moved value` on the second round
+                    // (oneshot::Receiver is not Copy).
                     _ = &mut cancel_rx => {
                         cancelled = true;
                         break;
@@ -482,7 +537,7 @@ async fn agent_send(
             cancelled
         };
 
-        // 流已 drop：把半截助手回复真正写进 Agent 与日志，供下一轮参考。
+        // Stream dropped: commit the half-finished assistant reply into the Agent and the log for the next turn to reference.
         for message in agent.finish_interrupted_turn() {
             runtime_for_task
                 .lock()
@@ -491,7 +546,7 @@ async fn agent_send(
                 .apply_event(&session_name, Ok(AgentEvent::MessageAdded(message)));
         }
         if !cancelled && matches!(&terminal_update, Some(Ok(AgentEvent::Finished(_)))) {
-            // 标题生成也属于本轮等待，可随停止信号取消。
+            // Title generation also counts as part of this turn's wait and can be cancelled by the stop signal.
             cancelled = tokio::select! {
                 biased;
                 _ = &mut cancel_rx => true,
@@ -499,11 +554,13 @@ async fn agent_send(
             };
         }
         if cancelled {
-            // 需求 2：打断**保留**本轮消息（用户消息 + 半截流式回复）作为下一轮参考，
-            // 不再回退删除——与 TUI `App::complete_turn` 的打断语义对齐。
-            // 因此这里**不** truncate agent / 不截尾日志。
-            // 仍以 `Finished(Cancelled)` 收尾：让前端把本轮 assistant 标记为完成、
-            // 清掉 `busy`，并让订阅者知道本轮真的结束了。
+            // Requirement 2: interruption **keeps** this turn's messages (user message +
+            // half-finished streaming reply) for the next turn to reference, instead of
+            // rolling back and deleting them — matching the TUI `App::complete_turn`
+            // interruption semantics. So we do **not** truncate the agent / trim the log
+            // here. We still finish with `Finished(Cancelled)`: it lets the frontend mark
+            // this turn's assistant as complete, clear `busy`, and lets subscribers know
+            // the turn really ended.
             terminal_update = Some(Ok(AgentEvent::Finished(RunResult {
                 messages: Vec::new(),
                 stop_reason: StopReason::Cancelled,
@@ -511,7 +568,7 @@ async fn agent_send(
             })));
         }
 
-        // 收尾事件意味着可以立即发下一轮，因此先归还 Agent，再解锁前端。
+        // A terminal event means the next turn can start immediately, so return the Agent first, then unblock the frontend.
         cancels.lock().await.remove(&key);
         let mut runtime = runtime_for_task.lock().await;
         runtime.sessions.restore_agent(&session_name, agent);
@@ -523,7 +580,7 @@ async fn agent_send(
     Ok(())
 }
 
-/// 首轮结束后为会话自动生成标题；网页模型直接截取首条消息。
+/// Auto-generate a session title after the first turn; the web model just truncates the first message.
 async fn auto_title_session(agent: &Agent, catalog: &Arc<dyn SessionCatalog>, name: &str) {
     let probe_catalog = catalog.clone();
     let probe_name = name.to_owned();
@@ -544,8 +601,9 @@ async fn auto_title_session(agent: &Agent, catalog: &Arc<dyn SessionCatalog>, na
     let Some(first) = first_user_message(agent.messages()) else {
         return;
     };
-    // 网页模型的一次性补全会在 DeepSeek 侧新建独立对话。标题取首条消息，
-    // 避免一次 Shirley 发言在网页侧产生第二个会话。
+    // A one-shot completion for the web model creates a separate conversation on the
+    // DeepSeek side. Taking the title from the first message avoids a single Shirley
+    // utterance producing a second session on the web side.
     let raw = if agent.model_config().model == "deepseek-web" {
         first.chars().take(20).collect::<String>()
     } else {
@@ -564,7 +622,7 @@ async fn auto_title_session(agent: &Agent, catalog: &Arc<dyn SessionCatalog>, na
         .await;
 }
 
-/// 订阅一个会话：返回其视图快照，并起一个 per-会话 pump 把后续事件转线格式 emit。
+/// Subscribe to a session: return its view snapshot and start a per-session pump that emits subsequent events in wire format.
 #[tauri::command]
 async fn agent_subscribe(
     state: State<'_, DesktopState>,
@@ -578,21 +636,23 @@ async fn agent_subscribe(
     if let Some(handle) = state.pumps.lock().await.remove(&key) {
         handle.abort();
     }
-    // **同一把锁内**先订阅再取快照：`apply_event` 也要拿这把锁，故两者之间不会
-    // 插入任何事件——快照覆盖订阅前、通道覆盖订阅后，既不丢也不重。
+    // **Within the same lock**, subscribe first then take the snapshot: `apply_event`
+    // also takes this lock, so no event can be inserted between the two — the snapshot
+    // covers before-subscribe, the channel covers after-subscribe, nothing lost or duplicated.
     let (mut rx, items, running, todo) = {
         let guard = runtime.lock().await;
         let rx = guard
             .sessions
             .subscribe(&session)
-            .ok_or_else(|| format!("会话不存在：{session}"))?;
+            .ok_or_else(|| format!("session not found: {session}"))?;
         let items = guard
             .sessions
             .snapshot(&session)
-            .ok_or_else(|| format!("会话不存在：{session}"))?;
+            .ok_or_else(|| format!("session not found: {session}"))?;
         let running = guard.sessions.is_running(&session);
-        // 同一把锁内连同任务账本快照一起取——切到会话时任务卡立即可见，不必等下一次
-        // `todo` 工具完成。
+        // Take the task-ledger snapshot under the same lock — the task card is visible
+        // immediately when switching to the session, without waiting for the next `todo`
+        // tool completion.
         let todo = guard
             .sessions
             .session(&session)
@@ -609,9 +669,11 @@ async fn agent_subscribe(
         loop {
             match rx.recv().await {
                 Ok(Ok(event)) => {
-                    // `todo` 工具完成 = 任务账本变更。SDK 不发专门事件，故这里在转发
-                    // 工具事件之外，额外读一次账本快照发一条 `TodoUpdated` 给前端——
-                    // 让「任务在推进」对用户可见（账本不解析注入 XML，取结构化视图）。
+                    // `todo` tool completion = task-ledger change. The SDK emits no
+                    // dedicated event, so beyond forwarding the tool event we read the
+                    // ledger snapshot once more and send a `TodoUpdated` to the frontend —
+                    // making "the task is progressing" visible to the user (the ledger does
+                    // not parse the injected XML; it takes the structured view).
                     let is_todo = matches!(
                         &event,
                         AgentEvent::ToolFinished { name, .. } if name == "todo"
@@ -657,7 +719,7 @@ async fn agent_subscribe(
     Ok(snapshot)
 }
 
-/// 停掉一个会话的 pump（切走时调用）。不存在静默成功（幂等）。
+/// Stop a session's pump (called when switching away). Absent = silent success (idempotent).
 #[tauri::command]
 async fn agent_unsubscribe(
     state: State<'_, DesktopState>,
@@ -671,11 +733,13 @@ async fn agent_unsubscribe(
     Ok(())
 }
 
-/// 当前模型名（该项目前台会话）。
+/// Current model name (this project's foreground session).
 ///
-/// 走会话级查询（[`SessionManager::active_model_name`]），**运行期也可用**：前台
-/// 会话正在跑一轮时其 `Agent` 被 `take` 走，直接读 `active_agent()` 会拿到空串，
-/// 前端就会把模型选择器清空——这正是「切走再切回模型不恢复」的表现。
+/// Goes through the session-level query ([`SessionManager::active_model_name`]),
+/// **usable at runtime too**: while the foreground session is running a turn its
+/// `Agent` has been `take`n away, so reading `active_agent()` directly returns an empty
+/// string and the frontend clears the model selector — which is exactly the "switch
+/// away and back, the model does not restore" symptom.
 #[tauri::command]
 async fn agent_model_name(
     state: State<'_, DesktopState>,
@@ -690,7 +754,7 @@ async fn agent_model_name(
         .unwrap_or_default())
 }
 
-/// 列出当前项目端点可选的模型。
+/// List the models available from the current project's endpoint.
 #[tauri::command]
 async fn agent_list_models(
     state: State<'_, DesktopState>,
@@ -709,13 +773,14 @@ async fn agent_list_models(
         .collect())
 }
 
-/// 热切换模型：不重建 Agent，只换 `ModelConfig::model`（与 TUI 的 `/model` 同语义）。
+/// Hot-swap the model: no Agent rebuild, only `ModelConfig::model` (same semantics as the TUI's `/model`).
 ///
-/// 同时按模型声明 **自动选工具协议**（`docs/tool-calling-refactor.md` Step 3）：
-/// 从模型目录按 `model` 值反查条目，经 [`crate::bootstrap::AgentFactory::model_config_for`]
-/// 算一份完整 `ModelConfig`（模型值 + 工具协议），再一次性下发
-/// （[`shirley_agent_sdk::Agent::set_model_config`]）。
-/// 前端不感知协议——它只传模型值，选择全在 Rust 侧。
+/// Also **auto-selects the tool protocol** by model declaration
+/// (`docs/tool-calling-refactor.md` Step 3): look up the entry by `model` value in the
+/// model catalog, compute a full `ModelConfig` (model value + tool protocol) via
+/// [`crate::bootstrap::AgentFactory::model_config_for`], then apply it in one shot
+/// ([`shirley_agent_sdk::Agent::set_model_config`]). The frontend is unaware of the
+/// protocol — it only passes the model value; the selection is entirely on the Rust side.
 #[tauri::command]
 async fn agent_set_model(
     state: State<'_, DesktopState>,
@@ -723,7 +788,7 @@ async fn agent_set_model(
     model: String,
 ) -> Result<(), String> {
     let runtime = ensure_runtime(&state, &project).await?;
-    // 反查目录：先 clone 出 factory / catalog，再锁 sessions（避免持锁跨 await）。
+    // Reverse lookup in the catalog: clone out factory / catalog first, then lock sessions (avoid holding a lock across await).
     let (factory, catalog) = {
         let guard = runtime.lock().await;
         (guard.factory.clone(), guard.factory.model_catalog.clone())
@@ -733,8 +798,9 @@ async fn agent_set_model(
         .await
         .into_iter()
         .find(|entry| entry.value == model);
-    // 按模型条目算一份完整 `ModelConfig`（模型值 + 工具协议），**一次性下发**
-    // （`docs/tool-calling-refactor.md` Step 3）。目录里查不到就只改模型名。
+    // Compute a full `ModelConfig` (model value + tool protocol) from the model entry
+    // and **apply it in one shot** (`docs/tool-calling-refactor.md` Step 3). If not found
+    // in the catalog, just change the model name.
     let config = entry.as_ref().map(|entry| factory.model_config_for(entry));
 
     let mut guard = runtime.lock().await;
@@ -742,17 +808,17 @@ async fn agent_set_model(
     let agent = session
         .agent
         .as_mut()
-        .ok_or_else(|| "agent 正在运行中".to_owned())?;
+        .ok_or_else(|| "agent is currently running".to_owned())?;
     match config {
         Some(config) => agent.set_model_config(config),
         None => agent.set_model(model),
     }
-    // 同步会话的模型名镜像，运行期切走再切回时仍能显示新模型。
+    // Sync the session's model-name mirror so the new model still shows after switching away and back at runtime.
     session.remember_model();
     Ok(())
 }
 
-/// `@` 引用的工作区文件检索（该项目的工作区根）。
+/// `@` reference workspace file search (this project's workspace root).
 #[tauri::command]
 async fn agent_search_files(
     state: State<'_, DesktopState>,
@@ -779,10 +845,12 @@ async fn agent_search_files(
         .collect())
 }
 
-/// 列出某项目当前会话可见的技能（`/` 候选用）。
+/// List the skills visible to a project's current session (for `/` candidates).
 ///
-/// 技能目录跨会话共享（装配时扫一次），故取该项目任一已加载会话的 `SkillRuntime`；
-/// 优先当前前台会话。项目运行时尚未加载时，先 `ensure_runtime` 造出（会扫一次目录）。
+/// The skill catalog is shared across sessions (scanned once at assembly), so we take
+/// the `SkillRuntime` of any loaded session in the project; prefer the current
+/// foreground session. If the project runtime is not yet loaded, `ensure_runtime` first
+/// (which scans the catalog once).
 #[tauri::command]
 async fn agent_list_skills(
     state: State<'_, DesktopState>,
@@ -803,10 +871,11 @@ async fn agent_list_skills(
         .collect())
 }
 
-/// 激活某项目指定会话的一个技能（`/<skill-name>` 入口，与 TUI 同语义）。
+/// Activate a skill in a given session of a project (the `/<skill-name>` entry, same semantics as the TUI).
 ///
-/// 只写该会话的 `SkillRuntime`：下一轮由 `SkillContextProvider` 追加注入其正文
-/// （不新增注入接缝，`docs/skills.md` 5.6）。未知技能 / 读文件失败返回错误文案。
+/// Writes only that session's `SkillRuntime`: on the next turn `SkillContextProvider`
+/// appends its body (`docs/skills.md` 5.6, no new injection seam). Unknown skill /
+/// read failure returns an error message.
 #[tauri::command]
 async fn agent_activate_skill(
     state: State<'_, DesktopState>,
@@ -819,23 +888,23 @@ async fn agent_activate_skill(
     let session_ref = guard
         .sessions
         .session(&session)
-        .ok_or_else(|| format!("会话不存在：{session}"))?;
+        .ok_or_else(|| format!("session not found: {session}"))?;
     let skills = session_ref
         .skills
         .as_ref()
-        .ok_or_else(|| "当前会话不支持技能".to_owned())?;
+        .ok_or_else(|| "the current session does not support skills".to_owned())?;
     skills
         .activate(&name)
         .map(|_| ())
         .map_err(|error| match error {
             crate::skills::runtime::ActivateError::UnknownSkill(name) => {
-                format!("未知技能：{name}")
+                format!("unknown skill: {name}")
             }
             crate::skills::runtime::ActivateError::ReadFailed(reason) => reason,
         })
 }
 
-/// 列出某项目的全部会话（按最近修改降序）。
+/// List all sessions of a project (most recently modified first).
 #[tauri::command]
 async fn agent_list_sessions(
     state: State<'_, DesktopState>,
@@ -859,7 +928,7 @@ async fn agent_list_sessions(
         .collect())
 }
 
-/// 某项目当前前台会话名（供前端展示 / 打标）。
+/// A project's current foreground session name (for frontend display / tagging).
 #[tauri::command]
 async fn agent_current_session(
     state: State<'_, DesktopState>,
@@ -874,7 +943,7 @@ async fn agent_current_session(
         .map(str::to_owned))
 }
 
-/// 新建会话并可命名（`title` 为空 = 匿名）。经 `SessionManager` 惰性新建并切过去。
+/// Create a session, optionally named (`title` empty = anonymous). Lazily created via `SessionManager` and switched to.
 #[tauri::command]
 async fn agent_new_session(
     state: State<'_, DesktopState>,
@@ -893,7 +962,7 @@ async fn agent_new_session(
     })
 }
 
-/// 切换到指定会话（经 `SessionManager` 挪 `active` 指针）。
+/// Switch to the given session (moves the `active` pointer via `SessionManager`).
 #[tauri::command]
 async fn agent_switch_session(
     state: State<'_, DesktopState>,
@@ -905,7 +974,7 @@ async fn agent_switch_session(
     Ok(())
 }
 
-/// 重命名会话：**只改标题，不改标识 / 内容**。
+/// Rename a session: **changes the title only, not the identity / content**.
 #[tauri::command]
 async fn agent_rename_session(
     state: State<'_, DesktopState>,
@@ -921,7 +990,7 @@ async fn agent_rename_session(
         .map_err(|e| e.to_string())
 }
 
-/// 删除会话（连同日志与标题）。运行中拒绝。
+/// Delete a session (log and title included). Rejected while running.
 #[tauri::command]
 async fn agent_delete_session(
     state: State<'_, DesktopState>,
@@ -939,7 +1008,54 @@ async fn agent_delete_session(
     Ok(())
 }
 
-/// 回放某项目当前会话历史。
+/// Move a session to another project (cross-project session log migration).
+///
+/// Semantics: move the source session's `<name>.jsonl` and `<name>.title` from the
+/// source project's `<root>/.shirley/sessions` to the same path under the target
+/// project, and have the source `SessionManager` forget it (rejected while running).
+/// **Does not auto-switch to the target session** — avoiding an unexpected jump that
+/// interrupts the user.
+///
+/// Both source and target use the same [`SessionCatalog`] contract: `storage_dir()`
+/// locates the target directory, `move_to()` performs the migration. Error if source
+/// and target directories are the same (same project) — there is no move semantics.
+#[tauri::command]
+async fn agent_move_session(
+    state: State<'_, DesktopState>,
+    project: String,
+    name: String,
+    target_project: String,
+) -> Result<(), String> {
+    if project == target_project {
+        return Err("source and target projects are the same".to_owned());
+    }
+    let source = ensure_runtime(&state, &project).await?;
+    let target = ensure_runtime(&state, &target_project).await?;
+    // First have the source manager forget the session (rejected here while running) —
+    // so that after the session file moves, the source memory doesn't still hold an
+    // `Agent` / store handle pointing at the old path.
+    {
+        let mut guard = source.lock().await;
+        guard.sessions.forget_session(&name)?;
+    }
+    // Target directory: the target project's session directory (same `SessionCatalog` as the source).
+    let dest_dir = target
+        .lock()
+        .await
+        .factory
+        .session_catalog
+        .storage_dir()
+        .ok_or_else(|| "the target project does not support a session directory".to_owned())?;
+    let catalog = source.lock().await.factory.session_catalog.clone();
+    let move_name = name.clone();
+    tauri::async_runtime::spawn_blocking(move || catalog.move_to(&move_name, &dest_dir))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Replay a project's current session history.
 #[tauri::command]
 async fn agent_load_history(
     state: State<'_, DesktopState>,
@@ -950,15 +1066,16 @@ async fn agent_load_history(
     let agent = guard
         .sessions
         .active_agent()
-        .ok_or_else(|| "agent 正在运行中".to_owned())?;
+        .ok_or_else(|| "agent is currently running".to_owned())?;
     Ok(history_from_messages(agent.messages()))
 }
 
-/// 取消指定会话正在跑的一轮。
+/// Cancel the running turn of the given session.
 ///
-/// 取出 `agent_send` 为该会话登记的取消句柄并发信号；驱动 `run_stream` 的任务
-/// 收到后 drop 掉流、回退本轮 Agent 状态，并以 `Finished(Cancelled)` 收尾。
-/// 会话不在运行（句柄已移除 / 从未发起）时静默成功（幂等）。
+/// Take out the cancel handle registered by `agent_send` for that session and signal
+/// it; the task driving `run_stream` drops the stream, rolls back this turn's Agent
+/// state, and finishes with `Finished(Cancelled)`. Silent success (idempotent) when the
+/// session is not running (handle removed / never started).
 #[tauri::command]
 async fn agent_cancel(
     state: State<'_, DesktopState>,
@@ -967,7 +1084,7 @@ async fn agent_cancel(
 ) -> Result<(), String> {
     let key = route_key(&project, &session);
     if let Some(cancel) = state.cancels.lock().await.remove(&key) {
-        // `send` 失败 = 任务已结束（接收端已 drop），无害。
+        // `send` failure = the task already ended (receiver dropped); harmless.
         let _ = cancel.send(());
     }
     Ok(())
@@ -977,14 +1094,14 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
     let factory = Arc::new(factory);
     let working_dir = factory.working_dir.clone();
 
-    // 把当前工作区登记为默认项目（幂等：已登记则只刷新打开时间）。
+    // Register the current workspace as the default project (idempotent: only refreshes the open time if already registered).
     let mut registry =
         ProjectRegistry::load_default().map_err(|e| std::io::Error::other(e.to_string()))?;
     let default_entry = registry
         .add(working_dir, None)
         .map_err(|e| std::io::Error::other(e.to_string()))?;
     eprintln!(
-        "[desktop] 默认项目：{}（{}）",
+        "[desktop] default project: {} ({})",
         default_entry.name, default_entry.id
     );
 
@@ -1024,6 +1141,7 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
             agent_switch_session,
             agent_rename_session,
             agent_delete_session,
+            agent_move_session,
             agent_load_history
         ])
         .run(tauri::generate_context!())
@@ -1039,26 +1157,27 @@ mod tests {
         std::env::temp_dir().join(format!("shirley_shell_{tag}_{}", std::process::id()))
     }
 
-    /// 回归：懒加载一个**已有会话**的项目时，必须恢复其最近修改的会话，
-    /// 而不是凭空造一个空会话——否则前端切项目会把选中 session 变成 new session。
+    /// Regression: lazily loading a project with an **existing session** must resume
+    /// its most recently modified session, not conjure an empty one — otherwise the
+    /// frontend switching projects would turn the selected session into new session.
     #[test]
     fn runtime_from_factory_resumes_latest_session() {
         let root = tmp_root("resume_latest");
         let _ = std::fs::remove_dir_all(&root);
 
         let catalog = FileSessionCatalog::new(&root);
-        let (older, older_store) = catalog.create_named(Some("旧会话")).unwrap();
+        let (older, older_store) = catalog.create_named(Some("older session")).unwrap();
         older_store
             .append(&Message::User {
-                content: "旧".into(),
+                content: "old".into(),
             })
             .unwrap();
-        // 拉开 mtime，保证「最近修改」判定不因同毫秒而抖动。
+        // Separate the mtimes so the "most recently modified" check doesn't jitter within the same millisecond.
         std::thread::sleep(std::time::Duration::from_millis(20));
-        let (newer, newer_store) = catalog.create_named(Some("新会话")).unwrap();
+        let (newer, newer_store) = catalog.create_named(Some("newer session")).unwrap();
         newer_store
             .append(&Message::User {
-                content: "新".into(),
+                content: "new".into(),
             })
             .unwrap();
 
@@ -1068,17 +1187,17 @@ mod tests {
         assert_eq!(
             runtime.sessions.active_name(),
             Some(newer.name.as_str()),
-            "应恢复最近修改的会话，而不是新建空会话"
+            "should resume the most recently modified session, not create an empty one"
         );
         assert_ne!(runtime.sessions.active_name(), Some(older.name.as_str()));
-        // 恢复的会话视图条目应已重建（含历史），否则切回来会看到空白。
+        // The restored session's view items should already be rebuilt (with history), otherwise switching back shows a blank view.
         let snapshot = runtime.sessions.snapshot(&newer.name).unwrap();
-        assert!(!snapshot.is_empty(), "恢复会话应带历史条目");
+        assert!(!snapshot.is_empty(), "a resumed session should carry history items");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 项目**没有任何会话**时才惰性开一份空会话（只定名、不落盘）。
+    /// Only lazily open an empty session when the project has **no sessions at all** (naming only, without persisting).
     #[test]
     fn runtime_from_factory_creates_empty_session_when_none_exists() {
         let root = tmp_root("resume_empty");
@@ -1087,11 +1206,11 @@ mod tests {
         let factory = Arc::new(AgentFactory::assemble(root.clone()).unwrap());
         let runtime = runtime_from_factory(factory).unwrap();
 
-        assert!(runtime.sessions.active_name().is_some(), "应开出一份空会话");
-        // 惰性会话此刻未落盘：会话目录里不应有任何 jsonl。
+        assert!(runtime.sessions.active_name().is_some(), "an empty session should be opened");
+        // The lazy session is not persisted yet: there should be no jsonl in the session directory.
         assert!(
             FileSessionCatalog::new(&root).list().unwrap().is_empty(),
-            "惰性空会话不应立即落盘"
+            "a lazy empty session should not be persisted immediately"
         );
 
         let _ = std::fs::remove_dir_all(&root);

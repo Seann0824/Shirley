@@ -36,11 +36,13 @@
   --color-overlay: #fdfdfc;
   --color-panel: var(--color-overlay);
   --color-ink: #171715;
-  /* streamdown 把代码块 / 表格容器画成 bg-sidebar、边框 border-sidebar，
-     Shirley 原 token 没有这一项，缺它时这些类解析为空 → 容器没底色没边框。 */
+  /* streamdown draws code blocks / table containers as bg-sidebar with border-sidebar.
+     Shirley's original tokens lacked this entry; without it those classes resolve to
+     nothing -> the containers had no background and no border. */
   --color-sidebar: #f1f1ee;
-  /* 最外层框架（顶部标题栏 + 左侧栏）专用底色：刻意比 canvas 更沉，
-     让框架与内容区一眼可分；与 --color-sidebar（markdown 代码块用）解耦。 */
+  /* Dedicated background for the outermost frame (top title bar + left sidebar):
+     intentionally deeper than canvas so the frame and content area are distinguishable at
+     a glance; decoupled from --color-sidebar (used by markdown code blocks). */
   --color-frame: #e9e8e3;
   --color-muted: #676763;
   --color-line: rgb(23 23 21 / 9%);

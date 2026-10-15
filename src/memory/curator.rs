@@ -1,22 +1,22 @@
-//! 会话结束后的增量 curator（`docs/memory.md` §5）。
+//! Incremental curator after a session ends (`docs/memory.md` 5).
 //!
-//! 写入路径不靠"AI 主动调工具"（那看模型心情），而是**会话结束时**由 curator 读
-//! 轨迹、产出尽可能小的 diff（新条目 / 取代关系），再过一道**确定性自检**合入。
+//! The write path does not rely on "the AI proactively calling a tool" (that depends on the model's mood); instead, **when a session ends** the curator reads
+//! the transcript and produces the smallest possible diff (new entries / supersede relations), which then goes through a **deterministic self-check** before being merged in.
 //!
-//! V1 的三条取舍（§5.3）：
-//! - **同模型**：用 [`Agent::complete`]（一次性、无工具、非流式、不碰会话日志）。
-//!   异源审核（独立模型）留到 V2。
-//! - **确定性自检**：不靠 LLM，只查 schema / `source` / `supersedes` / 时间 / 链接。
-//!   **不通过就不合入，绝不默认放行**。
-//! - **诚实降级**：只读探测（§5.4）V1 不做，退化为纯轨迹 curation。
+//! V1's three trade-offs (5.3):
+//! - **Same model**: uses [`Agent::complete`] (one-shot, no tools, non-streaming, does not touch the session log).
+//!   Cross-source review (a separate model) is left to V2.
+//! - **Deterministic self-check**: no LLM; only checks schema / `source` / `supersedes` / time / links.
+//!   **If it fails, it is not merged in -- never pass by default**.
+//! - **Honest degradation**: read-only probing (5.4) is not done in V1, degrading to pure-transcript curation.
 //!
-//! 边界声明（照抄论文的 distiller 边界）：轨迹是**部分证据**、不是 ground truth——
-//! 一次通过不自动验证每个中间假设。这条写进给模型的提示词里。
+//! Boundary statement (copying the paper's distiller boundary): the transcript is **partial evidence**, not ground truth --
+//! one pass does not automatically validate every intermediate assumption. This is written into the prompt given to the model.
 //!
-//! **V2 新增定期整理（睡眠学习，`docs/memory.md` §5.2 / §6）**：[`consolidate`] 全量扫描
-//! 记忆库，让模型产出 merge / supersede / requalify 操作，逐条经**确定性自检**后执行，
-//! 并**回原始证据核查**（把条目 `source` 指向的 `sessions/*.jsonl` 片段喂进提示词）。
-//! 冲突**不强行收敛**——条件不同就 `requalify` 补 `scope`，证据不足就保留原样。
+//! **V2 adds periodic consolidation (sleep learning, `docs/memory.md` 5.2 / 6)**: [`consolidate`] scans the whole
+//! memory store and has the model produce merge / supersede / requalify operations, each going through a **deterministic self-check** before execution,
+//! and **checks back against the raw evidence** (feeding the `sessions/*.jsonl` snippets the entries' `source` points to into the prompt).
+//! Conflicts are **not forcibly converged** -- if conditions differ, `requalify` adds `scope`; if evidence is insufficient, keep as is.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,34 +29,34 @@ use crate::prompt_template::render;
 use super::format::{Confidence, Domain, Entry, EntryStatus, EntryType, MemoryError};
 use super::store::MemoryStore;
 
-/// curator 的错误。
+/// Curator error.
 #[derive(Debug, thiserror::Error)]
 pub enum CuratorError {
-    /// 调模型失败（收敛成字符串，避免 curator 依赖 SDK 的错误类型）。
+    /// Model call failed (collapsed to a string to avoid the curator depending on the SDK's error type).
     #[error("curator model call failed: {0}")]
     Model(String),
-    /// 模型输出不是合法 JSON。
+    /// Model output is not valid JSON.
     #[error("curator output not parseable: {0}")]
     Parse(String),
-    /// 落盘失败。
+    /// Persisting to disk failed.
     #[error(transparent)]
     Memory(#[from] MemoryError),
 }
 
-/// 一次 curation 的结果。
+/// Result of one curation.
 #[derive(Debug, Default)]
 pub struct CurateOutcome {
-    /// 成功写入的条目 id。
+    /// Ids of entries successfully written.
     pub written: Vec<String>,
-    /// 被确定性自检拒绝的候选（id 可能缺失）。
+    /// Candidates rejected by the deterministic self-check (id may be missing).
     pub rejected: Vec<Rejected>,
-    /// 模型没产出任何候选（正常：这轮没有可沉淀的东西）。
+    /// The model produced no candidates (normal: nothing worth recording this round).
     pub empty: bool,
 }
 
-/// 一条被拒绝的候选及原因。
+/// A rejected candidate and the reason.
 ///
-/// 供上层观测（`spawn_curation` 会打印计数）；V1 尚无消费方，字段为诊断保留。
+/// For upper-layer observation (`spawn_curation` prints counts); V1 has no consumer yet, fields kept for diagnostics.
 #[derive(Debug)]
 #[allow(dead_code)]
 pub struct Rejected {
@@ -64,13 +64,13 @@ pub struct Rejected {
     pub reason: String,
 }
 
-/// 模型输出的候选条目（与 [`Entry`] 解耦：模型只提供这些字段，其余由 curator 补）。
+/// A candidate entry output by the model (decoupled from [`Entry`]: the model only provides these fields, the rest is filled by the curator).
 #[derive(Debug, Clone, Deserialize)]
 pub struct Candidate {
     pub id: String,
     #[serde(rename = "type")]
     pub entry_type: EntryType,
-    /// 归属域：`personal`（默认，个人/全局）| `project`（项目/工作区）。缺省按个人。
+    /// Owning domain: `personal` (default, personal/global) | `project` (project/workspace). Defaults to personal.
     #[serde(default)]
     pub domain: Domain,
     pub subject: String,
@@ -90,7 +90,7 @@ pub struct Candidate {
     pub body: String,
 }
 
-/// 从模型文本里抽出候选数组（容忍 ```json 代码围栏与前后废话）。
+/// Extract the candidate array from the model text (tolerates ```json code fences and surrounding chatter).
 pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, CuratorError> {
     let start = text
         .find('[')
@@ -105,14 +105,14 @@ pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, CuratorError> {
         .map_err(|err| CuratorError::Parse(err.to_string()))
 }
 
-/// 确定性自检 + 补全默认字段。通过返回 [`Entry`]，否则返回拒绝原因。
+/// Deterministic self-check + filling in default fields. On pass returns an [`Entry`], otherwise returns the rejection reason.
 ///
-/// 自检项（§5.3，不靠 LLM）：
-/// - `id` / `subject` / `body` 非空，`id` 是 slug；
-/// - 时间字段是 `YYYY-MM-DD`；
-/// - `source` 非空（**stamp**：轨迹本就来自该会话，缺省时补上已知的 `session_ref`，
-///   这是补全真实来源、不是编造证据）；给了 `sessions_dir` 时还校验源文件存在；
-/// - `supersedes` 指向的 id 确实存在。
+/// Check items (5.3, no LLM):
+/// - `id` / `subject` / `body` non-empty, `id` is a slug;
+/// - time fields are `YYYY-MM-DD`;
+/// - `source` non-empty (**stamp**: the transcript already came from this session; when missing, fill in the known `session_ref`,
+///   this completes the real source, not fabricates evidence); when `sessions_dir` is given, also validates that the source file exists;
+/// - the id `supersedes` points to actually exists.
 pub fn vet(
     candidate: Candidate,
     existing: &HashMap<String, Entry>,
@@ -220,7 +220,7 @@ fn is_date(value: &str) -> bool {
     chrono::NaiveDate::parse_from_str(value, "%Y-%m-%d").is_ok()
 }
 
-/// 把一条消息渲染成 curator 可读的一行（跳过 system / 压缩摘要——不是对话内容）。
+/// Render one message into a line the curator can read (skip system / compression summaries -- not conversation content).
 pub fn render_transcript(messages: &[Message]) -> String {
     let mut out = String::new();
     for message in messages {
@@ -261,16 +261,16 @@ pub fn render_transcript(messages: &[Message]) -> String {
     out
 }
 
-/// 增量 curator 提示词模板（`prompts/curator_incremental.md`）。
+/// Incremental curator prompt template (`prompts/curator_incremental.md`).
 const CURATOR_INCREMENTAL_TEMPLATE: &str = include_str!("../../prompts/curator_incremental.md");
-/// 现有相关记忆小节模板。
+/// Existing related memories section template.
 const CURATOR_EXISTING_TEMPLATE: &str = include_str!("../../prompts/curator_existing.md");
-/// 整理（consolidate）提示词模板。
+/// Consolidate prompt template.
 const CURATOR_CONSOLIDATE_TEMPLATE: &str = include_str!("../../prompts/curator_consolidate.md");
-/// 原始证据小节模板。
+/// Raw evidence section template.
 const CURATOR_EVIDENCE_TEMPLATE: &str = include_str!("../../prompts/curator_evidence.md");
 
-/// 组装 curator 提示词：边界声明 + 现有相关记忆（摘要）+ 轨迹 + 输出格式。
+/// Assemble the curator prompt: boundary statement + existing related memories (summaries) + transcript + output format.
 pub fn build_prompt(transcript: &str, existing: &[(String, Entry)], session_ref: &str) -> String {
     let existing_section = if existing.is_empty() {
         String::new()
@@ -301,12 +301,12 @@ pub fn build_prompt(transcript: &str, existing: &[(String, Entry)], session_ref:
     )
 }
 
-/// 会话结束触发一次增量 curation。
+/// Trigger one incremental curation at session end.
 ///
-/// - `agent`：用来调模型（同模型，一次性补全）；
-/// - `store`：记忆存储（读现有条目、写新条目、重建索引）；
-/// - `messages`：本会话全量消息（curator 的输入轨迹）；
-/// - `session_ref`：本会话在 `sessions/` 下的相对文件名（用作 `source` 前缀）。
+/// - `agent`: used to call the model (same model, one-shot completion);
+/// - `store`: memory store (read existing entries, write new entries, rebuild the index);
+/// - `messages`: all messages of this session (the curator's input transcript);
+/// - `session_ref`: this session's relative file name under `sessions/` (used as the `source` prefix).
 pub async fn curate(
     agent: &Agent,
     store: &MemoryStore,
@@ -356,7 +356,7 @@ pub async fn curate(
             sessions_dir,
         ) {
             Ok(entry) => {
-                // 取代：旧条目保留，只改状态（`docs/memory.md` 决策 4：永不删历史）。
+                // Supersede: keep the old entry, only change its status (`docs/memory.md` decision 4: never delete history).
                 if let Some(old_id) = entry.supersedes.clone()
                     && let Some(old) = existing_by_id.get(&old_id)
                 {
@@ -381,10 +381,10 @@ pub async fn curate(
     Ok(outcome)
 }
 
-/// 用当前全部条目重建 `index.md`（curator 合入后调用）。
+/// Rebuild `index.md` from all current entries (called after the curator merges in).
 pub fn rebuild_index(store: &MemoryStore) -> Result<(), MemoryError> {
-    // **按根各自重建**：全局（个人）与工作区（项目）各写各的 `index.md`——
-    // 索引只收录本根的条目，不把项目条目混进全局索引（反之亦然）。
+    // **Rebuild per root**: global (personal) and workspace (project) each write their own `index.md` --
+    // the index only includes entries of this root; it does not mix project entries into the global index (or vice versa).
     for root in store.roots() {
         let entries: Vec<(String, Entry)> = store
             .list_entries_in(root)?
@@ -396,24 +396,24 @@ pub fn rebuild_index(store: &MemoryStore) -> Result<(), MemoryError> {
     Ok(())
 }
 
-/// `core.md` 常驻层硬上限（字符；≈ 500 token，`docs/memory.md` §4.3）。
+/// Hard cap of the `core.md` resident layer (characters; ~500 tokens, `docs/memory.md` 4.3).
 pub const MAX_CORE_CHARS: usize = 2000;
 
-/// 用**活跃条目**确定性重建 `core.md`（常驻层：画像 + 明确偏好 + 活跃项目）。
+/// Deterministically rebuild `core.md` from **active entries** (resident layer: profile + explicit preferences + active projects).
 ///
-/// **不靠 LLM**：常驻层必须小而稳定（前缀缓存友好），由程序按确定规则从条目投影即可，
-/// 不值得为它多一次模型调用、也不该让它随模型心情漂移。规则：
+/// **No LLM**: the resident layer must be small and stable (prefix-cache-friendly); the program can project it from entries by fixed rules,
+/// so it is not worth an extra model call, nor should it drift with the model's mood. Rules:
 ///
-/// - 只取 `status: active` 的条目（`superseded` / `unconfirmed` 不进常驻层）；
-/// - 顺序固定：`preference` → `fact` → `procedure` → `event`（画像 / 偏好在前）；
-/// - 每条一行 `- [type] <摘要>`，同类型内按时间新→旧、再按 id 稳定；
-/// - 超过 [`MAX_CORE_CHARS`] 截断并显式标注（防常驻层自己膨胀，`docs/memory.md` §4.3）。
+/// - only take entries with `status: active` (`superseded` / `unconfirmed` do not enter the resident layer);
+/// - fixed order: `preference` -> `fact` -> `procedure` -> `event` (profile / preferences first);
+/// - one line per entry `- [type] <summary>`, within the same type newest->oldest, then stable by id;
+/// - truncate beyond [`MAX_CORE_CHARS`] and mark explicitly (prevents the resident layer from bloating itself, `docs/memory.md` 4.3).
 ///
-/// 空库时删除旧 `core.md`（避免残留过时画像被继续注入）。
+/// When the store is empty, delete the old `core.md` (avoids a stale profile being injected further).
 pub fn rebuild_core(store: &MemoryStore) -> Result<(), MemoryError> {
-    // **按根各自重建**：每个根只投影**本根内**的活跃条目。全局 `core.md` 只含个人
-    // 记忆、工作区 `core.md` 只含项目记忆——注入时 [`MemoryStore::read_core`] 会按
-    // 全局→工作区顺序拼接，故两条常驻层互不污染。
+    // **Rebuild per root**: each root only projects the active entries **within that root**. The global `core.md` contains only personal
+    // memory, the workspace `core.md` only project memory -- at injection time [`MemoryStore::read_core`] concatenates in
+    // global->workspace order, so the two resident layers do not pollute each other.
     for root in store.roots() {
         let mut entries: Vec<Entry> = store
             .list_entries_in(root)?
@@ -428,7 +428,7 @@ pub fn rebuild_core(store: &MemoryStore) -> Result<(), MemoryError> {
             continue;
         }
 
-        // 固定类型顺序（画像 / 偏好在前，事件在后），组内时间新→旧、再按 id。
+        // Fixed type order (profile / preferences first, events last), within a group newest->oldest, then by id.
         let rank = |entry_type: EntryType| match entry_type {
             EntryType::Preference => 0,
             EntryType::Fact => 1,
@@ -442,7 +442,7 @@ pub fn rebuild_core(store: &MemoryStore) -> Result<(), MemoryError> {
                 .then_with(|| a.id.cmp(&b.id))
         });
 
-        let mut text = String::from("# Memory Core\n\n> 由程序维护（活跃条目投影）；勿手改。\n\n");
+        let mut text = String::from("# Memory Core\n\n> Maintained by the program (projection of active entries); do not edit by hand.\n\n");
         let mut truncated = false;
         for entry in &entries {
             let line = format!(
@@ -466,42 +466,42 @@ pub fn rebuild_core(store: &MemoryStore) -> Result<(), MemoryError> {
 }
 
 // ---------------------------------------------------------------------------
-// V2-B：定期整理（睡眠学习，`docs/memory.md` §5.2 / §6）
+// V2-B: periodic consolidation (sleep learning, `docs/memory.md` 5.2 / 6)
 // ---------------------------------------------------------------------------
 
-/// 原始证据片段注入上限（防证据自己垄断提示词）。
+/// Cap on raw evidence snippet injection (prevents evidence from monopolizing the prompt).
 pub const MAX_EVIDENCE_CHARS: usize = 6000;
 
-/// 一次定期整理的确定性结果。
+/// Deterministic result of one periodic consolidation.
 #[derive(Debug, Default)]
 pub struct ConsolidateOutcome {
-    /// 执行成功的 merge 操作数。
+    /// Number of merge operations successfully executed.
     pub merged: usize,
-    /// 被置为 superseded 的旧条目数。
+    /// Number of old entries set to superseded.
     pub superseded: usize,
-    /// 执行成功的 requalify 操作数。
+    /// Number of requalify operations successfully executed.
     pub requalified: usize,
-    /// 被自检拒绝的操作。
+    /// Operations rejected by the self-check.
     pub rejected: Vec<Rejected>,
-    /// 无可整理内容（条目不足或模型没产出操作）。
+    /// Nothing to consolidate (too few entries or the model produced no operations).
     pub empty: bool,
 }
 
-/// 一条整理操作（模型提议，程序自检后执行）。**永不删除历史**——只置 `superseded`。
+/// One consolidation operation (proposed by the model, executed after the program's self-check). **Never deletes history** -- only sets `superseded`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum ConsolidateOp {
-    /// 把 `sources` 合并成 `target` 一条新条目，旧条目全部置 superseded。
+    /// Merge `sources` into one new `target` entry; all old entries are set to superseded.
     Merge {
         target: Candidate,
         sources: Vec<String>,
     },
-    /// 用 `replacement` 取代 `id`（`id` 置 superseded）。
+    /// Supersede `id` with `replacement` (set `id` to superseded).
     Supersede {
         id: String,
         replacement: Candidate,
     },
-    /// 只改一条条目的适用场景 / 正文（补 qualification），不新建条目。
+    /// Change only one entry's applicable scenario / body (add qualification), without creating a new entry.
     Requalify {
         id: String,
         #[serde(default)]
@@ -511,7 +511,7 @@ pub enum ConsolidateOp {
     },
 }
 
-/// 从模型文本里抽出整理操作数组（容忍 ```json 围栏与前后废话）。
+/// Extract the consolidation operation array from the model text (tolerates ```json fences and surrounding chatter).
 pub fn parse_consolidate_ops(text: &str) -> Result<Vec<ConsolidateOp>, CuratorError> {
     let start = text
         .find('[')
@@ -525,10 +525,10 @@ pub fn parse_consolidate_ops(text: &str) -> Result<Vec<ConsolidateOp>, CuratorEr
     serde_json::from_str(&text[start..=end]).map_err(|err| CuratorError::Parse(err.to_string()))
 }
 
-/// 回原始证据核查（§5.2）：把每条条目 `source` 指向的会话片段摘出来，供整理提示词。
+/// Check back against the raw evidence (5.2): extract the session snippets that each entry's `source` points to, for the consolidation prompt.
 ///
-/// `source` 形如 `<会话文件>#turn:N`：给了 `#turn:N` 就取该行（1-based），否则取整文件
-/// 截断。文件缺失记 `[missing evidence]`——**不编造证据**。
+/// `source` is of the form `<session file>#turn:N`: if `#turn:N` is given, take that line (1-based); otherwise take the whole file
+/// truncated. A missing file is recorded as `[missing evidence]` -- **do not fabricate evidence**.
 pub fn collect_evidence(entries: &[(String, Entry)], sessions_dir: &Path, budget: usize) -> String {
     let mut out = String::new();
     for (_, entry) in entries {
@@ -548,7 +548,7 @@ pub fn collect_evidence(entries: &[(String, Entry)], sessions_dir: &Path, budget
     out
 }
 
-/// 摘一条证据引用对应的会话片段。
+/// Extract the session snippet corresponding to one evidence reference.
 fn evidence_snippet(ref_: &str, sessions_dir: &Path) -> String {
     let mut parts = ref_.splitn(2, '#');
     let file = parts.next().unwrap_or(ref_).trim();
@@ -580,7 +580,7 @@ fn truncate(text: &str, max: usize) -> String {
     }
 }
 
-/// 组装整理提示词：边界声明 + 全部条目 + 原始证据 + 输出格式。
+/// Assemble the consolidation prompt: boundary statement + all entries + raw evidence + output format.
 pub fn build_consolidate_prompt(entries: &[(String, Entry)], evidence: &str) -> String {
     let mut entries_text = String::new();
     for (_, entry) in entries {
@@ -606,10 +606,10 @@ pub fn build_consolidate_prompt(entries: &[(String, Entry)], evidence: &str) -> 
     )
 }
 
-/// 确定性执行整理操作（自检不通过就拒绝，绝不默认放行）。
+/// Deterministically execute consolidation operations (reject when the self-check fails, never pass by default).
 ///
-/// 与 [`vet`] 同一原则：模型只提议，程序裁决。会写盘（新条目 / 改状态 / 改 scope），
-/// 但不重建索引（由 [`consolidate`] 统一做）。
+/// Same principle as [`vet`]: the model only proposes, the program decides. It writes to disk (new entries / status changes / scope changes),
+/// but does not rebuild the index (done uniformly by [`consolidate`]).
 pub fn apply_consolidate_ops(
     store: &MemoryStore,
     ops: Vec<ConsolidateOp>,
@@ -645,7 +645,7 @@ pub fn apply_consolidate_ops(
                     });
                     continue;
                 }
-                // 证据继承：新条目没给 source 就并集旧条目的 source（真实来源，不编造）。
+                // Evidence inheritance: if the new entry gives no source, union the old entries' sources (real sources, not fabricated).
                 if target.source.is_empty() {
                     target.source = union_sources(&sources, &working);
                 }
@@ -775,10 +775,10 @@ fn union_sources(ids: &[String], working: &HashMap<String, Entry>) -> Vec<String
     out
 }
 
-/// 定期整理（睡眠学习）：全量扫描 → 模型提议 → 确定性自检 → 合入 → 重建索引。
+/// Periodic consolidation (sleep learning): full scan -> model proposal -> deterministic self-check -> merge in -> rebuild index.
 ///
-/// 条目不足 2 条时直接返回空（没什么可整理的）。`sessions_dir` 给定时做**回原始证据
-/// 核查**；给不出（如无会话目录）就退化为纯条目整理。
+/// Returns empty directly when fewer than 2 entries (nothing to consolidate). When `sessions_dir` is given, it does the **check back against raw evidence**;
+/// when it cannot (e.g. no session directory), it degrades to pure entry consolidation.
 pub async fn consolidate(
     agent: &Agent,
     store: &MemoryStore,
@@ -836,7 +836,7 @@ mod tests {
             confidence: Some(Confidence::High),
             scope: None,
             source: vec!["sessions/abc.jsonl#turn:2".into()],
-            body: "偏好用 thiserror 定义领域错误。".into(),
+            body: "Prefers thiserror for defining domain errors.".into(),
         }
     }
 
@@ -939,17 +939,17 @@ mod tests {
                 content: "ignore me".into(),
             },
             Message::User {
-                content: "你好".into(),
+                content: "hi".into(),
             },
             Message::Assistant {
-                content: Some("在".into()),
+                content: Some("here".into()),
                 reasoning_content: None,
                 tool_calls: vec![],
             },
         ];
         let text = render_transcript(&messages);
         assert!(text.contains("## User"));
-        assert!(text.contains("你好"));
+        assert!(text.contains("hi"));
         assert!(!text.contains("ignore me"));
     }
 
@@ -960,25 +960,25 @@ mod tests {
             vet(candidate("pref-a"), &HashMap::new(), "2026-05-12", None, None).unwrap(),
         )];
         let prompt = build_prompt("## User\nhi\n", &existing, "sessions/x.jsonl");
-        assert!(prompt.contains("部分证据"));
+        assert!(prompt.contains("partial evidence"));
         assert!(prompt.contains("pref-a"));
         assert!(prompt.contains("sessions/x.jsonl#turn:N"));
     }
 
     #[test]
     fn build_prompt_keeps_detail_in_body() {
-        // 回归：body 不再被要求压成一句话——首行摘要 + 空行 + 具体细节，
-        // 否则 L2「按需细节层」为空，跨会话检索不到细节（旅游规划场景）。
+        // Regression: body is no longer required to be compressed into one sentence -- first-line summary + blank line + concrete details,
+        // otherwise the L2 "on-demand detail layer" would be empty and details could not be retrieved across sessions (travel-planning scenario).
         let prompt = build_prompt("## User\nhi\n", &[], "sessions/x.jsonl");
-        assert!(prompt.contains("第一行是一句话摘要"), "应要求首行做摘要: {prompt}");
-        assert!(prompt.contains("具体细节"), "应要求正文写具体细节: {prompt}");
+        assert!(prompt.contains("one-sentence summary"), "should require the first line to be a summary: {prompt}");
+        assert!(prompt.contains("concrete details"), "should require the body to write concrete details: {prompt}");
         assert!(
-            !prompt.contains("一句话讲清"),
-            "不应再把 body 压成一句话: {prompt}"
+            !prompt.contains("sum it up in one sentence"),
+            "should no longer compress the body into one sentence: {prompt}"
         );
     }
 
-    // ---- V2-B：定期整理（consolidate）------------------------------------
+    // ---- V2-B: periodic consolidation (consolidate) --------------------
 
     fn tmpdir(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -1018,7 +1018,7 @@ mod tests {
             [("a".to_string(), a), ("b".to_string(), b)].into_iter().collect();
 
         let mut target = candidate("ab-merged");
-        target.source.clear(); // 触发从 sources 继承证据
+        target.source.clear(); // trigger evidence inheritance from sources
         let op = ConsolidateOp::Merge {
             target,
             sources: vec!["a".into(), "b".into()],
@@ -1037,7 +1037,7 @@ mod tests {
         assert_eq!(by_id["a"].status, EntryStatus::Superseded);
         assert_eq!(by_id["b"].status, EntryStatus::Superseded);
         assert_eq!(by_id["ab-merged"].status, EntryStatus::Active);
-        assert!(!by_id["ab-merged"].source.is_empty(), "证据应从旧条目继承");
+        assert!(!by_id["ab-merged"].source.is_empty(), "evidence should be inherited from the old entries");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1080,7 +1080,7 @@ mod tests {
 
         let op = ConsolidateOp::Requalify {
             id: "topic".into(),
-            scope: Some("仅在 Linux".into()),
+            scope: Some("Linux only".into()),
             body: None,
         };
         let out = apply_consolidate_ops(&store, vec![op], &existing, "2026-05-12").unwrap();
@@ -1092,8 +1092,8 @@ mod tests {
             .into_iter()
             .map(|(_, e)| (e.id.clone(), e))
             .collect();
-        assert_eq!(by_id["topic"].scope.as_deref(), Some("仅在 Linux"));
-        assert_eq!(by_id.len(), 1, "requalify 不应新建条目");
+        assert_eq!(by_id["topic"].scope.as_deref(), Some("Linux only"));
+        assert_eq!(by_id.len(), 1, "requalify should not create a new entry");
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1133,11 +1133,11 @@ mod tests {
         let prompt = build_consolidate_prompt(&[("preferences/a.md".into(), entry)], "EVIDENCE");
         assert!(prompt.contains("pref-a"));
         assert!(prompt.contains("EVIDENCE"));
-        assert!(prompt.contains("永不删除历史"));
+        assert!(prompt.contains("Never delete history"));
     }
 
 
-    // ---- V2.5：core.md 确定性重建 ----------------------------------------
+    // ---- V2.5: deterministic rebuild of core.md -----------------------
 
     fn active_entry(id: &str, entry_type: EntryType, date: &str) -> Entry {
         let mut entry = vet(candidate(id), &HashMap::new(), date, None, None).unwrap();
@@ -1155,14 +1155,14 @@ mod tests {
         store.write_entry(&active_entry("pref", EntryType::Preference, "2026-05-10")).unwrap();
 
         rebuild_core(&store).unwrap();
-        let core = store.read_core().expect("core 应已生成");
-        // 类型顺序：preference → fact → event（画像 / 偏好在前）。
-        let p = core.find("[preference]").expect("应含偏好");
-        let f = core.find("[fact]").expect("应含事实");
-        let e = core.find("[event]").expect("应含事件");
-        assert!(p < f && f < e, "core 类型顺序应为 preference < fact < event");
-        // 每条一行，含摘要（正文首行）。
-        assert!(core.contains("偏好用 thiserror 定义领域错误。"));
+        let core = store.read_core().expect("core should have been generated");
+        // Type order: preference -> fact -> event (profile / preferences first).
+        let p = core.find("[preference]").expect("should contain a preference");
+        let f = core.find("[fact]").expect("should contain a fact");
+        let e = core.find("[event]").expect("should contain an event");
+        assert!(p < f && f < e, "core type order should be preference < fact < event");
+        // One line per entry, containing the summary (first line of the body).
+        assert!(core.contains("Prefers thiserror for defining domain errors."));
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1178,8 +1178,8 @@ mod tests {
         rebuild_core(&store).unwrap();
         let core = store.read_core().unwrap();
         assert!(core.contains("[fact]"));
-        // superseded 条目不进常驻层（唯一一行应来自 keep）。
-        assert_eq!(core.matches("- [").count(), 1, "只应有 1 条活跃条目进 core");
+        // superseded entries do not enter the resident layer (the only line should come from keep).
+        assert_eq!(core.matches("- [").count(), 1, "only 1 active entry should enter core");
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1187,10 +1187,10 @@ mod tests {
     fn rebuild_core_removes_stale_core_when_no_active_entries() {
         let root = tmpdir("core_clear");
         let store = MemoryStore::new(&root);
-        store.write_core("用户是 Sean。").unwrap();
+        store.write_core("The user is Sean.").unwrap();
         assert!(store.read_core().is_some());
 
-        // 无活跃条目 → 应删除旧 core.md（避免残留过时画像被继续注入）。
+        // no active entries -> the old core.md should be deleted (avoid a stale profile being injected further).
         rebuild_core(&store).unwrap();
         assert!(store.read_core().is_none());
         let _ = std::fs::remove_dir_all(&root);

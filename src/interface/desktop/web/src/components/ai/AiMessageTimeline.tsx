@@ -17,8 +17,9 @@ export function findTurnUserMessage<T extends { role: "user" | "assistant" }>(
   return undefined;
 }
 
-/** 与时间线统一的偏移口径：按**码点**计长（`Array.from` 迭代码点），
- *  避免 emoji / 代理对被算成 2 个 UTF-16 单元而错位。 */
+/** Offset convention shared with the timeline: length is counted by **code point**
+ *  (`Array.from` iterates code points) to avoid emoji / surrogate pairs being counted as
+ *  two UTF-16 units and causing misalignment. */
 export function codePointLength(content: string) {
   return Array.from(content).length;
 }
@@ -69,7 +70,7 @@ export function AiMessageTimeline({
       })}
       {characters.length > cursor && renderChunk(characters.slice(cursor).join(""), streaming)}
       {!content && items.length === 0 && streaming && (
-        <span className="shimmer">正在操作…</span>
+        <span className="shimmer">Working...</span>
       )}
     </div>
   );

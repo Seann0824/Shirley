@@ -2,32 +2,34 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { agentBridge, type SkillEntry } from "@/lib/bridge";
 
 export type SkillSlashState = {
-  /** 是否展示候选浮层（输入形如 `/query` 时打开）。 */
+  /** Whether the candidate popover is shown (opens when input looks like `/query`). */
   open: boolean;
-  /** 当前查询（`/` 之后的文本）。 */
+  /** Current query (the text after `/`). */
   query: string;
-  /** 过滤后的候选。 */
+  /** Filtered candidates. */
   results: SkillEntry[];
   error: string | null;
   selectedIndex: number;
-  /** 随输入同步：`/xxx`（无空白）打开并更新查询，否则关闭。 */
+  /** Syncs with input: `/xxx` (no whitespace) opens and updates the query, otherwise closes. */
   sync: (text: string) => void;
   moveSelection: (delta: number) => void;
-  /** 确认当前高亮项（浮层不可确认时返回 null）。 */
+  /** Confirms the currently highlighted item (returns null when the popover cannot confirm). */
   confirmSelection: () => SkillEntry | null;
   close: () => void;
-  /** 某个技能名是否存在（提交时判断 `/name args` 是否是技能入口）。 */
+  /** Whether a skill name exists (used on submit to tell if `/name args` is a skill entry). */
   hasSkill: (name: string) => boolean;
 };
 
-/** 只在整段输入形如 `/xxx`（无空白）时算作 slash 候选。 */
+/** Only counts as a slash candidate when the whole input looks like `/xxx` (no whitespace). */
 const SLASH_PATTERN = /^\/([^\s]*)$/;
 
 /**
- * `/` 技能候选项的无头控制器：只管「候选浮层 + 过滤」，不碰输入框 DOM。
+ * Headless controller for `/` skill candidates: only handles "candidate popover + filter",
+ * never touches the input DOM.
  *
- * 技能目录随项目（工作区）变化，切换项目时重新拉取。过滤只在前端做——
- * 目录很小，不必打后端。提交时的**激活**走 `agentBridge().activateSkill`。
+ * The skill catalog varies per project (workspace) and is re-fetched when the project
+ * changes. Filtering is done on the frontend only — the catalog is small, so there is no
+ * need to hit the backend. **Activation** on submit goes through `agentBridge().activateSkill`.
  */
 export function useSkillSlashSearch(project: string | null): SkillSlashState {
   const [open, setOpen] = useState(false);
@@ -36,7 +38,7 @@ export function useSkillSlashSearch(project: string | null): SkillSlashState {
   const [error, setError] = useState<string | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
 
-  // 加载当前项目的技能目录。
+  // Load the skill catalog for the current project.
   useEffect(() => {
     if (!project) {
       setSkills([]);
@@ -104,7 +106,7 @@ export function useSkillSlashSearch(project: string | null): SkillSlashState {
     [skills],
   );
 
-  // 查询变化后若高亮越界，归零。
+  // Reset the highlight to zero if it goes out of range after the query changes.
   const lastQueryRef = useRef(query);
   useEffect(() => {
     if (lastQueryRef.current !== query) {

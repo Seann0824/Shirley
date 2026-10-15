@@ -1,51 +1,51 @@
-//! 语义向量：OpenAI 兼容 `POST /v1/embeddings` 客户端（`docs/memory.md` §10 / V2.5）。
+//! Semantic vectors: OpenAI-compatible `POST /v1/embeddings` client (`docs/memory.md` 10 / V2.5).
 //!
-//! **诚实降级**：本模块只负责"怎么调一个 OpenAI 兼容的 embeddings 接口"。是否启用
-//! 由配置决定——没配 `[memory] embedding_*` 时 [`crate::bootstrap`] 不会构造
-//! [`Embedder`]，检索退化为纯 BM25（中文已走 bigram，可用）。**绝不假装有语义腿。**
+//! **Honest degradation**: this module is only responsible for "how to call an OpenAI-compatible embeddings endpoint". Whether it is enabled
+//! is decided by configuration -- without `[memory] embedding_*` configured, [`crate::bootstrap`] will not construct
+//! an [`Embedder`], and retrieval degrades to pure BM25 (Chinese already goes through bigrams, which is usable). **Never pretend there is a semantic leg.**
 //!
-//! 安全约束对齐 `tools/web_search.rs`：不跟随重定向、连接 / 总超时、响应体封顶。
-//! 不引向量库 / 新 crate——向量落 sidecar 文件（见 [`super::vector`]）。
+//! Security constraints align with `tools/web_search.rs`: no redirect following, connect / total timeouts, capped response body.
+//! No vector database / new crate -- vectors go to a sidecar file (see [`super::vector`]).
 
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
-/// 单次请求总超时。
+/// Total timeout for a single request.
 pub const EMBED_TIMEOUT: Duration = Duration::from_secs(15);
-/// 连接超时。
+/// Connect timeout.
 pub const EMBED_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
-/// 单次请求最多嵌入的文本数（分批，防呆）。
+/// Maximum number of texts to embed per request (batched, to be safe).
 pub const MAX_BATCH: usize = 64;
-/// 错误体截断长度。
+/// Error body truncation length.
 const MAX_ERROR_BODY: usize = 300;
 
-/// embeddings 调用错误。
+/// embeddings call error.
 #[derive(Debug, thiserror::Error)]
 pub enum EmbedError {
-    /// 网络 / 构建客户端失败。
+    /// Network / client build failure.
     #[error("embedding transport error: {0}")]
     Transport(String),
-    /// 非 2xx 响应。
+    /// Non-2xx response.
     #[error("embedding endpoint returned {status}: {body}")]
     Status { status: u16, body: String },
-    /// 响应不是预期的 JSON 结构（含 base64 向量——本实现只认 float 数组）。
+    /// Response is not the expected JSON structure (e.g. base64 vectors -- this implementation only accepts float arrays).
     #[error("embedding response malformed: {0}")]
     Decode(String),
 }
 
-/// embedding 端点配置。
+/// embedding endpoint configuration.
 #[derive(Debug, Clone)]
 pub struct EmbeddingConfig {
-    /// 完整地址，例如 `http://127.0.0.1:11434/v1/embeddings`。
+    /// Full address, e.g. `http://127.0.0.1:11434/v1/embeddings`.
     pub endpoint: String,
-    /// 密钥；`None` / 空串按"无鉴权"处理（本地服务常见）。
+    /// Key; `None` / empty string is treated as "no auth" (common for local services).
     pub api_key: Option<String>,
-    /// 模型标识，例如 `text-embedding-3-small` / `bge-m3`。
+    /// Model identifier, e.g. `text-embedding-3-small` / `bge-m3`.
     pub model: String,
 }
 
-/// OpenAI 兼容 embeddings 客户端（可 `Clone`，内部 `reqwest::Client` 共享连接池）。
+/// OpenAI-compatible embeddings client (clonable; the inner `reqwest::Client` shares a connection pool).
 #[derive(Clone)]
 pub struct Embedder {
     client: reqwest::Client,
@@ -53,7 +53,7 @@ pub struct Embedder {
 }
 
 impl Embedder {
-    /// 构造客户端（校验端点非空）。
+    /// Construct the client (validates that the endpoint is non-empty).
     pub fn new(config: EmbeddingConfig) -> Result<Self, EmbedError> {
         if config.endpoint.trim().is_empty() {
             return Err(EmbedError::Transport("embedding endpoint is empty".into()));
@@ -62,7 +62,7 @@ impl Embedder {
             return Err(EmbedError::Transport("embedding model is empty".into()));
         }
         let client = reqwest::Client::builder()
-            // 安全约束：**不跟随重定向**——凭据只应发往配置里那个端点。
+            // Security constraint: **do not follow redirects** -- credentials should only be sent to the endpoint in the config.
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(EMBED_CONNECT_TIMEOUT)
             .timeout(EMBED_TIMEOUT)
@@ -72,18 +72,18 @@ impl Embedder {
         Ok(Self { client, config })
     }
 
-    /// 端点（诊断用）。
+    /// Endpoint (for diagnostics).
     #[allow(dead_code)]
     pub fn endpoint(&self) -> &str {
         &self.config.endpoint
     }
 
-    /// 模型标识（写进向量 sidecar，模型换了要让旧向量失效）。
+    /// Model identifier (written into the vector sidecar; changing the model must invalidate old vectors).
     pub fn model(&self) -> &str {
         &self.config.model
     }
 
-    /// 批量嵌入。返回顺序与 `texts` 一致（按响应里的 `index` 排序回填）。
+    /// Batch embed. Return order matches `texts` (backfilled by sorting on the response `index`).
     pub async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, EmbedError> {
         if texts.is_empty() {
             return Ok(Vec::new());
@@ -122,7 +122,7 @@ impl Embedder {
                     parsed.data.len()
                 )));
             }
-            // 有些实现乱序返回，按 `index` 归位。
+            // Some implementations return out of order; put them back by `index`.
             parsed.data.sort_by_key(|item| item.index);
             for item in parsed.data {
                 if item.embedding.is_empty() {
@@ -139,7 +139,7 @@ impl Embedder {
 struct EmbedRequest<'a> {
     model: &'a str,
     input: &'a [String],
-    /// 显式要求 float 数组；多数实现接受，不接受的会忽略该键。
+    /// Explicitly request a float array; most implementations accept it, and those that do not will ignore the key.
     encoding_format: &'a str,
 }
 
@@ -197,9 +197,9 @@ mod tests {
         assert_eq!(embedder.endpoint(), "http://127.0.0.1:11434/v1/embeddings");
     }
 
-    /// 实连本地 Ollama 的端到端冒烟测试。默认 `#[ignore]`——CI / 无 Ollama 环境不跑。
-    /// 手动验证：`cargo test -p Shirley --bin Shirley -- --ignored live_ollama`。
-    /// 端点为 Ollama 的 OpenAI 兼容入口（`nomic-embed-text`，768 维）。
+    /// End-to-end smoke test connecting to a local Ollama. `#[ignore]` by default -- not run in CI / without Ollama.
+    /// Manual verification: `cargo test -p Shirley --bin Shirley -- --ignored live_ollama`.
+    /// The endpoint is Ollama's OpenAI-compatible entry point (`nomic-embed-text`, 768 dims).
     #[test]
     #[ignore = "requires a live Ollama at localhost:11434"]
     fn live_ollama_embeds() {
@@ -209,18 +209,18 @@ mod tests {
             model: "nomic-embed-text".into(),
         })
         .unwrap();
-        // reqwest 需要 Tokio reactor；用一次性 runtime 驱动这次真实 HTTP。
+        // reqwest needs a Tokio reactor; drive this real HTTP with a one-off runtime.
         let runtime = tokio::runtime::Runtime::new().expect("tokio runtime");
         let out = runtime
             .block_on(embedder.embed(&[
-                "你好，我叫 Sean".to_string(),
-                "Shirley 是一个 Rust coding agent".to_string(),
+                "Hello, my name is Sean".to_string(),
+                "Shirley is a Rust coding agent".to_string(),
             ]))
             .expect("live ollama embedding should succeed");
         assert_eq!(out.len(), 2);
-        assert_eq!(out[0].len(), 768, "nomic-embed-text 输出 768 维");
+        assert_eq!(out[0].len(), 768, "nomic-embed-text outputs 768 dims");
         assert_eq!(out[1].len(), 768);
-        // 两个不同文本不应得到相同向量。
+        // Two different texts should not get the same vector.
         assert_ne!(out[0], out[1]);
     }
 

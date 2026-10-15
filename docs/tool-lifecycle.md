@@ -1,93 +1,93 @@
-**Shirley 技术方案 · 工具生命周期（Tool Lifecycle）**
+**Shirley technical design · Tool lifecycle (Tool Lifecycle)**
 
-> **状态：已实现。** trait 侧（`on_register` / `on_unregister` / `ToolContext::remove` /
-> `ToolManager::unregister` / `Agent::unregister_tool`）与宏侧（`#[tool(on_register = ...,
-> on_unregister = ...)]`）均已落地，`web_search` 已迁到该形态。宏侧细节见
-> `docs/tool-macro.md`；回归测试见 `crates/shirley-agent-sdk/tests/tool_lifecycle.rs`。
+> **Status: implemented.** Both the trait side (`on_register` / `on_unregister` / `ToolContext::remove` /
+> `ToolManager::unregister` / `Agent::unregister_tool`) and the macro side (`#[tool(on_register = ...,
+> on_unregister = ...)]`) have landed, and `web_search` has been migrated to this form. For macro-side details, see
+> `docs/tool-macro.md`; regression tests are in `crates/shirley-agent-sdk/tests/tool_lifecycle.rs`.
 >
-> 文档正文保留了方案期的推理过程（含被否掉的形态），**以下方"实现落地"一节的措辞为准**。
+> The body of this document preserves the reasoning from the planning phase (including rejected forms); **the wording in the "implementation landed" section below is authoritative**.
 
-**一、这份文档要解决什么**
+**1. What this document solves**
 
-`ToolContext` 曾是**应用层手动创建、和 `ToolManager` 并列**的独立 builder 参数。它带来三个具体问题：
+`ToolContext` used to be a standalone builder parameter **manually created by the application layer and sitting alongside `ToolManager`**. It brought three concrete problems:
 
-1. **职责错位**。`ToolContext` 在语义上完全依附于工具，却由应用层独立构造、独立传入，和 `tools` 并列。它没有独立存在的理由。
-2. **注册与注入会漂移**。注册工具（`tool_manager.register`）和注入依赖（`tool_context.with(state)`）是**两个手动步骤**。只做前者、忘了后者，编译不报错，直到运行时 `ctx.get` 返回 `None` 才炸。
-3. **没有注册期自检**。配置缺失 / 错误只能等到第一次调用才暴露。
+1. **Misplaced responsibility**. `ToolContext` semantically depends entirely on tools, yet it was independently constructed and passed in by the application layer, alongside `tools`. It had no reason to exist independently.
+2. **Registration and injection drift**. Registering a tool (`tool_manager.register`) and injecting a dependency (`tool_context.with(state)`) were **two manual steps**. Doing only the former and forgetting the latter does not fail to compile, and only blows up at runtime when `ctx.get` returns `None`.
+3. **No registration-time self-check**. Missing / wrong configuration could only be exposed on the first call.
 
-应用层现状（`src/main.rs`）：
+The application-layer status quo (`src/main.rs`):
 
 ```rust
 let mut tool_context = ToolContext::new();
 match tools::WebSearchState::from_env() {
     Ok(Some(state)) => {
-        let _ = tool_manager.register(tools::web_search_tool::tool());  // 注册
-        tool_context = tool_context.with(state);                        // 注入（另一步）
+        let _ = tool_manager.register(tools::web_search_tool::tool());  // register
+        tool_context = tool_context.with(state);                        // inject (another step)
     }
     Ok(None) => {}
-    Err(error) => eprintln!("[web_search] 未启用：{error}"),
+    Err(error) => eprintln!("[web_search] not enabled: {error}"),
 }
 // ...
 .tools(tool_manager)
-.tool_context(tool_context)   // ← 又一个独立顶层参数
+.tool_context(tool_context)   // <- yet another standalone top-level parameter
 ```
 
-用户诉求（原话）：希望有"工具的生命周期"——`created` / `executed` / `destroy` 分别在注册、执行、注销时调用；且 `ToolManager` 应有**移除工具**的能力，从而让 `destroy` 有真实触发路径，并在移除时**清理 `ToolContext`**。
+The user's ask (their words): they want a "tool lifecycle" -- `created` / `executed` / `destroy` called at registration, execution, and unregistration respectively; and `ToolManager` should have the ability to **remove a tool**, giving `destroy` a real trigger path, and **cleaning up `ToolContext`** on removal.
 
 ---
 
-**二、阶段映射**
+**2. Phase mapping**
 
-| 用户所述 | 实际对应 | 现状 / 本方案 |
+| As the user said it | What it actually maps to | Status / this plan |
 | --- | --- | --- |
-| **created** | 注册时 | ❌ 新增 `on_register` |
-| **executed** | **就是 `invoke`** | ✅ 已存在，无需新增 |
-| **destroy** | 注销时 | ❌ 新增 `on_unregister` + `ToolManager::unregister` |
+| **created** | at registration | ❌ add `on_register` |
+| **executed** | **it is `invoke`** | ✅ already exists, no need to add |
+| **destroy** | at unregistration | ❌ add `on_unregister` + `ToolManager::unregister` |
 
-- `executed` 不是新东西：`Tool::invoke(&self, input, ctx)` 本身就是"执行"这个生命周期事件；执行前后的可观测性已由 `AgentEvent::ToolStarted` / `ToolFinished` 提供。**再叠一层 `on_execute` 是重复。**
-- `destroy` **本方案要做**。上一版曾以"无调用方"为由不做，这个理由不成立——**可以造调用方**：`ToolManager::unregister` 就是它的触发路径。钩子与触发路径**同时落地**，见第四、五节。
+- `executed` is nothing new: `Tool::invoke(&self, input, ctx)` is itself the "execution" lifecycle event; observability before and after execution is already provided by `AgentEvent::ToolStarted` / `ToolFinished`. **Adding another `on_execute` layer is duplication.**
+- `destroy` **this plan will do**. A previous version skipped it on the grounds of "no caller", but that reason does not hold -- **you can create a caller**: `ToolManager::unregister` is its trigger path. The hook and the trigger path **land together**, see sections 4 and 5.
 
-所以本方案新增**两个**钩子：`on_register`（created）、`on_unregister`（destroy）。
-
----
-
-**三、设计目标与非目标**
-
-**目标**
-
-1. `ToolContext` 的所有权从应用层移入 SDK（`ToolManager` 持有）。
-2. 让"注册工具"和"注入依赖 / 自检配置"合成**同一步**，消除漂移。
-3. 提供**移除工具**的能力（`unregister`），并在移除时触发清理钩子、清理 `ToolContext`。
-4. 无状态工具**零改动**（向后兼容）。
-
-**非目标**
-
-1. 不做依赖注入容器 / typed provider registry（理由见第七节）。
-2. ~~不改 `#[tool]` 宏~~ → **改为：给函数宏加可选伴生钩子**。默认方法让无状态工具零改动，
-   但有状态工具（`web_search`）需要宏能把钩子 wire 进生成的 `impl Tool`——否则它只能退回
-   "手写 `impl Tool`"，而用户的核心约束是"宏是唯一入口，用户不碰工具细节"。见
-   `docs/tool-macro.md`。
-
-**一条不可消除的约束**
-
-> SDK 不可能"自己创建" `ToolContext` 的**内容**。
-
-内容（`WebSearchState`、session 句柄、凭据）是**应用层才拥有的具体类型**——读 env、建 HTTP client、拿密钥全是应用侧的事。SDK 保持通用就不能认识这些类型。所以"收到 SDK 内部"只能是：**SDK 拥有容器，应用通过注册期钩子把值放进去**。值是应用给的这一点无法消除，但创建 / 持有 / 分发 / **清理**的责任可以移进 SDK，且能让注册与注入变成同一步。
+So this plan adds **two** hooks: `on_register` (created) and `on_unregister` (destroy).
 
 ---
 
-**四、生命周期设计**
+**3. Design goals and non-goals**
 
-**4.1 `ToolContext`：补一个 `remove`（当前缺失）**
+**Goals**
 
-现状（`tool/mod.rs`）只有 `new` / `with`（插入）/ `get`。要支持"清理"，必须补 `remove`：
+1. Move ownership of `ToolContext` from the application layer into the SDK (held by `ToolManager`).
+2. Combine "register the tool" and "inject the dependency / self-check the config" into **the same step**, eliminating drift.
+3. Provide the ability to **remove a tool** (`unregister`), triggering the cleanup hook and cleaning up `ToolContext` on removal.
+4. Stateless tools need **zero changes** (backward compatible).
+
+**Non-goals**
+
+1. No dependency-injection container / typed provider registry (reasoning in section 7).
+2. ~~Do not change the `#[tool]` macro~~ -> **changed to: give the function macro optional companion hooks**. The default methods let stateless tools need zero changes,
+   but stateful tools (`web_search`) need the macro to wire the hooks into the generated `impl Tool` -- otherwise it can only fall back to
+   "hand-writing `impl Tool`", and the user's core constraint is "the macro is the only entry point, the user does not touch tool details". See
+   `docs/tool-macro.md`.
+
+**One constraint that cannot be eliminated**
+
+> The SDK cannot "create by itself" the **contents** of `ToolContext`.
+
+The contents (`WebSearchState`, a session handle, credentials) are **concrete types the application layer owns** -- reading env, building an HTTP client, getting a key are all application-side matters. The SDK, to stay generic, cannot know these types. So "moving it into the SDK" can only be: **the SDK owns the container, and the application puts values in through a registration-time hook**. That the values are given by the application cannot be eliminated, but the responsibility for creating / holding / dispatching / **cleaning up** can move into the SDK, and it can make registration and injection the same step.
+
+---
+
+**4. Lifecycle design**
+
+**4.1 `ToolContext`: add a `remove` (currently missing)**
+
+The status quo (`tool/mod.rs`) only has `new` / `with` (insert) / `get`. To support "cleanup", `remove` must be added:
 
 ```rust
 impl ToolContext {
-    /// 移除一份应用数据，返回被移除的值（不存在则 None）。
-    /// 内部是 `Arc<HashMap>` + `Arc::make_mut` 写时复制：
-    /// 若此刻有在途的工具调用持有旧 clone，`make_mut` 会复制一份，
-    /// 在途调用仍看到旧数据（安全，无悬垂）。
+    /// Remove a piece of application data and return the removed value (None if it does not exist).
+    /// Internally it is `Arc<HashMap>` + `Arc::make_mut` copy-on-write:
+    /// if an in-flight tool call currently holds an old clone, `make_mut` copies,
+    /// and the in-flight call still sees the old data (safe, no dangling).
     pub fn remove<T: Any + Send + Sync>(&mut self) -> Option<Arc<T>> {
         Arc::make_mut(&mut self.inner)
             .remove(&TypeId::of::<T>())
@@ -96,43 +96,43 @@ impl ToolContext {
 }
 ```
 
-> **注意（写进文档，避免踩坑）**：`ToolContext` 按 `TypeId` 索引。若两个工具注入了**同一类型**，其中一个注销时 `remove` 会把另一个的数据也清掉。约定：**每个工具用独立的新类型**（newtype）承载自己的状态；共享句柄（形态 B）不要由单个工具在 `on_unregister` 里移除，由应用层显式管理。
+> **Note (written into the doc to avoid a pitfall)**: `ToolContext` is indexed by `TypeId`. If two tools inject the **same type**, when one is unregistered its `remove` will also wipe the other's data. Convention: **each tool uses its own newtype** to carry its state; a shared handle (form B) should not be removed by a single tool in `on_unregister`, but managed explicitly by the application layer.
 
-**4.2 `Tool` trait：新增两个默认钩子**
+**4.2 `Tool` trait: add two default hooks**
 
 ```rust
 pub trait Tool: Send + Sync {
     fn definition(&self) -> &ToolDefinition;
 
-    /// 执行（= executed）。已有，不改。
+    /// Execution (= executed). Already exists, unchanged.
     fn invoke(&self, input: serde_json::Value, ctx: ToolContext) -> ToolFuture<'_>;
 
-    /// 注册（= created）。`ToolManager::register` 在查重通过后、插入前调用一次。
-    /// 工具在这里 (a) 把共享运行时依赖写进上下文 / 存进 self；
-    /// (b) 自检配置，缺失即 `Err` —— 注册失败，工具不入表。
-    /// 默认空实现：无状态工具零改动。
+    /// Registration (= created). Called once by `ToolManager::register` after the duplicate check passes and before insertion.
+    /// The tool here (a) writes shared runtime dependencies into the context / stores them in self;
+    /// (b) self-checks the config, returning `Err` if missing -- registration fails, the tool does not enter the table.
+    /// Default empty implementation: stateless tools need zero changes.
     fn on_register(&mut self, _ctx: &mut ToolContext) -> Result<(), ToolError> {
         Ok(())
     }
 
-    /// 注销（= destroy）。`ToolManager::unregister` 在把工具移出表之后调用一次。
-    /// 工具在这里释放自己注入的上下文项（`ctx.remove::<T>()`）等。
-    /// 默认空实现：无状态工具零改动。
+    /// Unregistration (= destroy). Called once by `ToolManager::unregister` after the tool is removed from the table.
+    /// The tool here releases the context entries it injected (`ctx.remove::<T>()`), etc.
+    /// Default empty implementation: stateless tools need zero changes.
     ///
-    /// 语义：**best-effort 清理**。无论返回 `Ok` 还是 `Err`，工具都已从表里移除
-    /// （见 4.3 的顺序）；`Err` 只用于告知调用方"清理失败"，不会让工具复活。
+    /// Semantics: **best-effort cleanup**. Regardless of whether it returns `Ok` or `Err`, the tool has already been removed
+    /// from the table (see the order in 4.3); `Err` is only used to tell the caller "cleanup failed", and does not resurrect the tool.
     fn on_unregister(&mut self, _ctx: &mut ToolContext) -> Result<(), ToolError> {
         Ok(())
     }
 }
 ```
 
-**4.3 `ToolManager`：持有 `ToolContext` + 支持移除**
+**4.3 `ToolManager`: hold `ToolContext` + support removal**
 
 ```rust
 pub struct ToolManager {
     tools: HashMap<ToolName, Box<dyn Tool>>,
-    context: ToolContext,          // ← 从 Agent 挪进来
+    context: ToolContext,          // <- moved in from Agent
 }
 
 impl ToolManager {
@@ -143,105 +143,105 @@ impl ToolManager {
                 "tool already registered: {name}"
             )));
         }
-        tool.on_register(&mut self.context)?;   // created：失败即不入表
+        tool.on_register(&mut self.context)?;   // created: failure means it does not enter the table
         self.tools.insert(name, Box::new(tool));
         Ok(())
     }
 
-    /// 移除一个工具：先移出表，再触发 `on_unregister`（可清理 `ToolContext`）。
-    /// 未注册的名字返回 `NotFoundError`。
+    /// Remove a tool: remove it from the table first, then trigger `on_unregister` (which can clean up `ToolContext`).
+    /// An unregistered name returns `NotFoundError`.
     pub fn unregister(&mut self, name: &str) -> Result<(), ToolError> {
         let mut tool = self
             .tools
             .remove(name)
             .ok_or_else(|| ToolError::NotFoundError(name.to_string()))?;
 
-        // 顺序：已移出表 → 再回调。即使回调报错，工具也不会复活。
+        // Order: already removed from the table -> then call back. Even if the callback errors, the tool is not resurrected.
         tool.on_unregister(&mut self.context)
     }
 
-    /// runtime 取上下文用（替代原 `Agent.tool_context` 字段）。
+    /// For the runtime to get the context (replacing the old `Agent.tool_context` field).
     pub fn context(&self) -> &ToolContext { &self.context }
     pub fn context_mut(&mut self) -> &mut ToolContext { &mut self.context }
 }
 ```
 
-**关键顺序**
+**Key ordering**
 
-- `register`：查重 → `on_register` → **成功才 `insert`**。初始化失败不留半注册工具。
-- `unregister`：**先 `remove`（移出表）→ 再 `on_unregister`**。清理失败不会留下"已调用 destroy 但仍在表里"的错乱状态。
+- `register`: duplicate check -> `on_register` -> **`insert` only on success**. An initialization failure leaves no half-registered tool.
+- `unregister`: **first `remove` (out of the table) -> then `on_unregister`**. A cleanup failure does not leave the inconsistent state of "destroy was called but it is still in the table".
 
-**4.4 值怎么进钩子：两条路，分场景**
+**4.4 How values get into the hooks: two paths, by scenario**
 
-钩子是 `&mut self`，它要么**自己带状态**，要么**由应用在注册时喂**。
+The hook is `&mut self`; it either **carries its own state** or **is fed by the application at registration time**.
 
-> **落地结论**：`web_search` 选了**形态 B**（保留 `#[tool]` 函数宏 + 注册钩子写 `ctx`），
-> 而不是形态 A 的手写 `impl Tool`——因为"用户不碰工具细节"是硬约束（见 `docs/tool-macro.md`）。
-> 形态 A 仍适用于 `todo`（它需要 `impl Tool` 来持有 `Arc<TodoStore>`，且是 SDK 内部工具）。
-> 下面两条形态都保留，作为"值怎么进钩子"的通用说明。
+> **Landed conclusion**: `web_search` chose **form B** (keep the `#[tool]` function macro + a registration hook writing `ctx`),
+> rather than form A's hand-written `impl Tool` -- because "the user does not touch tool details" is a hard constraint (see `docs/tool-macro.md`).
+> Form A still applies to `todo` (it needs `impl Tool` to hold an `Arc<TodoStore>`, and it is an SDK-internal tool).
+> Both forms below are kept, as a general explanation of "how values get into the hooks".
 
-- **形态 A：工具私有状态 → 工具自己持有（`TodoTool` 的既有先例）**
+- **Form A: tool-private state -> the tool holds it itself (the existing precedent of `TodoTool`)**
 
-  `TodoTool::new(store)` 就是工具直接持有 `Arc<TodoStore>`、无视 `ToolContext`——**这个形态已存在且干净**。`web_search` 适合走这条：
+  `TodoTool::new(store)` is exactly the tool directly holding an `Arc<TodoStore>` and ignoring `ToolContext` -- **this form already exists and is clean**. `web_search` fits this path:
 
   ```rust
   pub struct WebSearchTool { state: WebSearchState, definition: ToolDefinition }
 
   impl Tool for WebSearchTool {
       fn on_register(&mut self, _ctx: &mut ToolContext) -> Result<(), ToolError> {
-          self.state.validate()?;   // 注册期自检，配置坏了当场拒绝
+          self.state.validate()?;   // registration-time self-check; a broken config is rejected on the spot
           Ok(())
       }
       fn invoke(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolFuture<'_> {
-          let state = self.state.clone();   // 直接读 self，不依赖 ctx
+          let state = self.state.clone();   // read self directly, no dependence on ctx
           Box::pin(async move { /* ... */ })
       }
-      // 状态随 self drop，无需 on_unregister
+      // the state drops with self; no on_unregister needed
   }
   ```
 
-  应用侧变成"注册即自带依赖"：
+  The application side becomes "registration carries its own dependency":
 
   ```rust
   let mut tools = ToolManager::new();
   tools.register(tools::bash_tool::tool())?;
   tools.register(tools::read_file_tool::tool())?;
   match tools::WebSearchTool::from_env() {
-      Ok(Some(tool)) => { tools.register(tool)?; }   // 注册即自带依赖，无法漂移
-      Ok(None) => {}                                  // 未配置，静默跳过
-      Err(e)  => eprintln!("[web_search] 未启用：{e}"),
+      Ok(Some(tool)) => { tools.register(tool)?; }   // registration carries its own dependency, cannot drift
+      Ok(None) => {}                                  // not configured, silently skip
+      Err(e)  => eprintln!("[web_search] not enabled: {e}"),
   }
   ```
 
-- **形态 B：跨工具共享的运行时句柄 → 钩子写进 `ToolContext`**
+- **Form B: a runtime handle shared across tools -> the hook writes it into `ToolContext`**
 
-  比如多个工具都要 `Arc<Mutex<Session>>`。应用在注册时喂一次：
+  For example, multiple tools all need `Arc<Mutex<Session>>`. The application feeds it once at registration time:
 
   ```rust
   tools.register(BumpTool::new())?;
-  tools.context_mut().with(session_handle);   // 共享句柄，只放一次
+  tools.context_mut().with(session_handle);   // shared handle, placed only once
   ```
 
-  这类共享句柄由**应用层**决定生命周期，**不要在单个工具的 `on_unregister` 里 `remove`**（会误伤其它工具）。
+  Such shared handles have their lifecycle decided by the **application layer**; **do not `remove` them in a single tool's `on_unregister`** (it would hurt other tools).
 
 ---
 
-**五、生命周期时序**
+**5. Lifecycle sequence**
 
 ```mermaid
 sequenceDiagram
-    participant App as 应用层 (main.rs / 指令)
+    participant App as Application layer (main.rs / commands)
     participant TM as ToolManager
-    participant Tool as Tool 实例
+    participant Tool as Tool instance
 
     Note over App,Tool: —— created ——
     App->>TM: register(tool)
-    TM->>TM: 查重（name 冲突 → RepetitionError）
+    TM->>TM: duplicate check (name conflict -> RepetitionError)
     TM->>Tool: on_register(&mut context)
-    alt 自检失败 / 配置缺失
+    alt self-check failed / config missing
         Tool-->>TM: Err(ToolError)
-        TM-->>App: Err —— 工具不入表
-    else 成功
+        TM-->>App: Err —— tool does not enter the table
+    else success
         Tool-->>TM: Ok(())
         TM->>TM: insert(tool)
         TM-->>App: Ok(())
@@ -254,81 +254,81 @@ sequenceDiagram
 
     Note over App,Tool: —— destroy ——
     App->>TM: unregister(name)
-    TM->>TM: remove(name)（未注册 → NotFoundError）
+    TM->>TM: remove(name) (unregistered -> NotFoundError)
     TM->>Tool: on_unregister(&mut context)
-    Note right of Tool: 可 ctx.remove::<T>() 清理自己注入的项
-    Tool-->>TM: Result<(), ToolError>（best-effort）
-    TM-->>App: 结果（工具已移除，不复活）
+    Note right of Tool: can ctx.remove::<T>() to clean up its own injected entries
+    Tool-->>TM: Result<(), ToolError> (best-effort)
+    TM-->>App: result (tool already removed, not resurrected)
 ```
 
 ---
 
-**六、`unregister` 的调用方从哪来**
+**6. Where does the caller of `unregister` come from**
 
-上一版以"无调用方"否掉 `destroy`。本方案通过**同时**提供 `unregister` 造出调用方。但要诚实说明"调用方"分两层：
+A previous version rejected `destroy` on the grounds of "no caller". This plan creates a caller by providing `unregister` **at the same time**. But we must honestly explain that "caller" has two layers:
 
-1. **SDK 层**：`ToolManager::unregister` 是公开 API，`Agent` 应暴露对称的接缝（与 `set_model` / `set_provider` / `unregister_tool` 同风格）：
+1. **SDK layer**: `ToolManager::unregister` is a public API, and `Agent` should expose a symmetric seam (in the same style as `set_model` / `set_provider` / `unregister_tool`):
 
    ```rust
    impl Agent {
-       /// 移除一个已注册的工具。与 register 对称的运行时接缝。
+       /// Remove a registered tool. A runtime seam symmetric with register.
        pub fn unregister_tool(&mut self, name: &str) -> Result<(), AgentError> {
            self.tools.unregister(name).map_err(Into::into)
        }
    }
    ```
 
-2. **应用层（待定，见第九节决策 3）**：目前没有 UI 指令调用它。可选的自然调用方：
-   - `/tools` 指令列出 / 开关工具（运行期动态启停，如临时关掉 `web_search`）；
-   - 切换模型 / provider 时，某些工具不再适用。
+2. **Application layer (undecided, see decision 3 in section 9)**: currently no UI command calls it. Optional natural callers:
+   - a `/tools` command to list / toggle tools (dynamic start/stop at runtime, e.g. temporarily turning off `web_search`);
+   - when switching model / provider, some tools no longer apply.
 
-   **若最终没有应用层调用方**，`unregister` 仍作为 SDK 的**设计接缝**存在（有单测覆盖），但应在文档里标注"暂无应用层消费者"，避免下一个 Agent 误以为它是死代码。
+   **If in the end there is no application-layer caller**, `unregister` still exists as an SDK **design seam** (covered by unit tests), but the doc should note "no application-layer consumer yet", to prevent the next Agent from mistaking it for dead code.
 
 ---
 
-**七、被否掉的方案**
+**7. Rejected plans**
 
-| 方案 | 为什么不做 |
+| Plan | Why not |
 | --- | --- |
-| **依赖注入容器 / typed provider registry**（工具声明依赖类型、SDK 从注册表解析） | 把 `ToolContext` 升级成 DI 框架，正是 `plan.md` 警告的"预判所有需求"。当前只有 `web_search` 一个消费者，不值得。 |
-| **`on_execute` 钩子** | `invoke` 已是执行事件；`AgentEvent::ToolStarted/ToolFinished` 已提供可观测性。重复。 |
-| **自动清理上下文**（manager 记录每个工具注入了哪些 TypeId，注销时自动移除） | manager 拿不到"工具注入了什么"的信息，只能靠约定。显式 `ctx.remove` 更简单，且不引入追踪状态。 |
-| **`on_unregister` 用异步** | 当前清理是同步的（移除 map 项 / drop 句柄）。`Drop` 本身不能 `await`。将来若需异步 teardown，再单独设计，不提前上 async。 |
-| ~~**`#[tool]` 宏支持 `#[tool(on_register = ...)]`**~~ | **已采纳。** 当时的理由（"无消费者"）被推翻：`web_search` 就是消费者，且"用户不碰工具细节"要求宏能接线钩子。落地为可选属性 `on_register` / `on_unregister`，见 `docs/tool-macro.md`。 |
+| **Dependency-injection container / typed provider registry** (tools declare dependency types, the SDK resolves them from a registry) | Upgrading `ToolContext` into a DI framework is exactly the "anticipate every requirement" that `plan.md` warns against. There is currently only one consumer, `web_search`, so it is not worth it. |
+| **An `on_execute` hook** | `invoke` is already the execution event; `AgentEvent::ToolStarted/ToolFinished` already provides observability. Duplication. |
+| **Automatic context cleanup** (the manager records which TypeIds each tool injected, and removes them automatically on unregistration) | The manager cannot obtain the information "what a tool injected"; it can only rely on convention. An explicit `ctx.remove` is simpler and does not introduce tracking state. |
+| **Making `on_unregister` async** | Current cleanup is synchronous (removing a map entry / dropping a handle). `Drop` itself cannot `await`. If async teardown is needed in the future, design it separately; do not bring in async ahead of time. |
+| ~~**The `#[tool]` macro supporting `#[tool(on_register = ...)]`**~~ | **Adopted.** The reason at the time ("no consumer") was overturned: `web_search` is the consumer, and "the user does not touch tool details" requires the macro to wire the hooks. Landed as the optional attributes `on_register` / `on_unregister`, see `docs/tool-macro.md`. |
 
 ---
 
-**八、改动面清单**
+**8. Blast-radius checklist**
 
-| 项 | 影响 | 破坏性 |
+| Item | Impact | Breaking |
 | --- | --- | --- |
-| `ToolContext` | 新增 `remove::<T>()` | 否 |
-| `Tool` trait | 加**默认** `on_register` / `on_unregister`；无状态工具零改动 | 否 |
-| `ToolManager` | 加 `context` 字段 + `context()` / `context_mut()` / `unregister()`；`register` 调钩子 | 否 |
-| `Agent` | 删 `tool_context` 字段与 builder 参数；新增 `unregister_tool` 接缝 | **是**（`0.0.x` 语义） |
-| `main.rs` | 唯一调用方，删 `.tool_context(...)` 与装配；`web_search` 注册钩子接管状态注入 | 否 |
-| `#[tool]` 宏 | 加**可选**属性 `on_register` / `on_unregister`（引用伴生函数）；不写即空实现 | 否 |
-| 文档 | `Agent.md` 工具系统章节、`docs/web-search.md` 第二节、`docs/README.md` 索引、`docs/tool-macro.md` | 否 |
+| `ToolContext` | add `remove::<T>()` | no |
+| `Tool` trait | add **default** `on_register` / `on_unregister`; stateless tools need zero changes | no |
+| `ToolManager` | add a `context` field + `context()` / `context_mut()` / `unregister()`; `register` calls the hook | no |
+| `Agent` | remove the `tool_context` field and builder parameter; add the `unregister_tool` seam | **yes** (`0.0.x` semantics) |
+| `main.rs` | the only caller; remove `.tool_context(...)` and the assembly; the `web_search` registration hook takes over state injection | no |
+| `#[tool]` macro | add **optional** attributes `on_register` / `on_unregister` (referencing companion functions); not written means an empty impl | no |
+| Docs | the tool-system section of `Agent.md`, section 2 of `docs/web-search.md`, the `docs/README.md` index, `docs/tool-macro.md` | no |
 
 ---
 
-**九、待 review 的决策点**
+**9. Decision points pending review**
 
-1. **`web_search` 走哪条**：~~A / B 待定~~ → **已定：B**（保留 `#[tool]` 宏 + `on_register` 写
-   `ctx`）。原因：宏是唯一入口、用户不碰工具细节。
+1. **Which path `web_search` takes**: ~~A / B undecided~~ -> **decided: B** (keep the `#[tool]` macro + `on_register` writing
+   `ctx`). Reason: the macro is the only entry point, and the user does not touch tool details.
 
-2. **`Agent::builder().tool_context()`**：~~A / B 待定~~ → **已定：A（直接删）**。
-   `ToolContext` 归 `ToolManager` 所有，`Agent` 不再持有。
+2. **`Agent::builder().tool_context()`**: ~~A / B undecided~~ -> **decided: A (just delete it)**.
+   `ToolContext` is owned by `ToolManager`; `Agent` no longer holds it.
 
-3. **`unregister` 的应用层调用方**：~~A / B 待定~~ → **已定：B**。先只做 SDK 接缝
-   （`ToolManager::unregister` + `Agent::unregister_tool`）+ 单测，**暂无应用层消费者**。
+3. **The application-layer caller of `unregister`**: ~~A / B undecided~~ -> **decided: B**. For now only do the SDK seam
+   (`ToolManager::unregister` + `Agent::unregister_tool`) + unit tests, with **no application-layer consumer yet**.
 
-4. **`on_unregister` 的失败语义**：~~待确认~~ → **已定：best-effort，工具不复活**。`unregister`
-   先 `remove` 再回调，`Err` 只用于告知清理失败。
+4. **The failure semantics of `on_unregister`**: ~~to be confirmed~~ -> **decided: best-effort, the tool is not resurrected**. `unregister`
+   first `remove`s then calls back; `Err` is only used to report a cleanup failure.
 
 ---
 
-**十、与既有文档的关系**
+**10. Relationship to existing documents**
 
-- 本方案是 `docs/sdk-gaps.md` gap-1（工具上下文注入）的**续作**：gap-1 让工具"能拿到"上下文，本方案解决"上下文由谁持有、何时初始化、何时清理"。
-- 边界判定仍遵循 `Agent.md` 第八节第 4 条：`ToolContext` / `on_register` / `on_unregister` 是**通用机制**，属 SDK；具体工具（`web_search`）及其状态属**应用层**。
+- This plan is the **continuation** of `docs/sdk-gaps.md` gap-1 (tool context injection): gap-1 lets tools "get" the context; this plan solves "who holds the context, when is it initialized, and when is it cleaned up".
+- Boundary decisions still follow item 4 of section 8 of `Agent.md`: `ToolContext` / `on_register` / `on_unregister` are **generic mechanisms**, belonging to the SDK; a specific tool (`web_search`) and its state belong to the **application layer**.

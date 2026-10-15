@@ -21,7 +21,7 @@ class FlightMapErrorBoundary extends Component<{ children: ReactNode }, { failed
     if (this.state.failed) {
       return (
         <div className="my-2 rounded-lg border border-line bg-sidebar px-3 py-2 text-body-sm text-muted" role="status">
-          航线地图加载失败，其他聊天内容仍可查看。
+          Failed to load the route map. The rest of the chat is still viewable.
         </div>
       );
     }
@@ -34,7 +34,7 @@ export function FlightMapRenderer(props: CustomRendererProps) {
     <FlightMapErrorBoundary key={props.code}>
       <Suspense fallback={
         <div className="my-2 rounded-lg border border-line bg-sidebar px-3 py-2 text-body-sm text-muted" role="status">
-          正在加载航线地图…
+          Loading route map...
         </div>
       }>
         <LazyFlightMap {...props} />

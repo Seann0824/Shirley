@@ -1,142 +1,152 @@
-// SDK 接入桥：Tauri command/event <-> AgentEventWire。
+// SDK bridge: Tauri command/event <-> AgentEventWire.
 //
-// 设计原则（见 docs/desktop-interface.md、docs/multi-session.md、docs/projects.md）：
-// 前端不重新实现 agent，只消费 Rust 侧 run_stream() 产出的 AgentEvent（经 to_wire 映射）。
+// Design principles (see docs/desktop-interface.md, docs/multi-session.md, docs/projects.md):
+// The frontend does not reimplement the agent; it only consumes the AgentEvent produced
+// by the Rust side's run_stream() (mapped via to_wire).
 //
-// 多项目多会话：每个事件带来源 `project` + `session`。前端对**每个会话**开一份订阅
-// （`openSession`）：先拿该会话的视图快照重建 transcript，再叠加后续事件；切走时
-// `unsubscribe` 退订。项目是「已关联的工作区目录」——一个项目下挂多个会话。
+// Multi-project multi-session: every event carries its source `project` + `session`. The
+// frontend opens one subscription **per session** (`openSession`): first take that
+// session's view snapshot to rebuild the transcript, then layer on subsequent events;
+// `unsubscribe` on switching away. A project is an "associated workspace directory" —
+// one project hosts multiple sessions.
 
 import type { AgentEventWire, SessionSnapshot } from "@/types/wire";
 
-/** 一个会话的订阅句柄：快照 + 退订。 */
+/** Subscription handle for one session: snapshot + unsubscribe. */
 export type SessionSubscription = {
   snapshot: SessionSnapshot;
   unsubscribe: () => void;
 };
 
-/** 一个可选模型（与 Rust 侧 `ModelEntryWire` 对齐）。 */
+/** A selectable model (aligned with Rust's `ModelEntryWire`). */
 export type ModelEntry = {
   label: string;
   value: string;
   provider: string;
 };
 
-/** `@` 引用可选的条目（与 Rust 侧 `FileEntryWire` 对齐）。 */
+/** Entry selectable for `@` references (aligned with Rust's `FileEntryWire`). */
 export type FileEntry = {
   path: string;
   name: string;
   kind: "file" | "dir";
 };
 
-/** `/` 技能候选条目（与 Rust 侧 `SkillEntryWire` 对齐）。 */
+/** `/` skill candidate entry (aligned with Rust's `SkillEntryWire`). */
 export type SkillEntry = {
-  /** 技能名（`/<name>` 入口按它匹配）。 */
+  /** Skill name (matched by the `/<name>` entry). */
   name: string;
-  /** 技能描述（候选副标题）。 */
+  /** Skill description (candidate subtitle). */
   description: string;
 };
 
-/** 一个项目 = 一个已关联的工作区目录（与 Rust 侧 `ProjectEntryWire` 对齐）。 */
+/** A project = an associated workspace directory (aligned with Rust's `ProjectEntryWire`). */
 export type ProjectEntry = {
-  /** 项目标识（规范路径字符串）——改名 / 归档 / 恢复都按它。 */
+  /** Project id (canonical path string) — used for rename / archive / restore. */
   id: string;
-  /** 展示名（可改名）。 */
+  /** Display name (renameable). */
   name: string;
-  /** 工作区根目录的展示路径。 */
+  /** Display path of the workspace root. */
   path: string;
-  /** 是否已归档（归档项目默认不显示，可从归档列表恢复）。 */
+  /** Whether archived (archived projects are hidden by default and can be restored from the archive list). */
   archived: boolean;
-  /** 最近打开时间（Unix 毫秒）——列表按它降序。 */
+  /** Last opened time (Unix ms) — the list is sorted by it descending. */
   last_opened_ms: number;
 };
 
-/** 一个会话（与 Rust 侧 `SessionEntryWire` 对齐）。 */
+/** A session (aligned with Rust's `SessionEntryWire`). */
 export type SessionEntry = {
-  /** 唯一标识（文件 stem），切换 / 重命名 / 删除都按它。 */
+  /** Unique id (file stem), used for switch / rename / delete. */
   name: string;
-  /** 展示用标题：自定义标题优先，否则回落 `name`。 */
+  /** Display title: custom title first, otherwise falls back to `name`. */
   label: string;
-  /** 首条用户消息摘要（空会话为空串）。 */
+  /** First user message excerpt (empty string for an empty session). */
   preview: string;
-  /** 最近修改时间（Unix 毫秒，0 = 未知）。 */
+  /** Last modified time (Unix ms, 0 = unknown). */
   modified_ms: number;
-  /** 用户轮数。 */
+  /** Number of user turns. */
   turns: number;
-  /** 该会话当前是否在跑一轮（后台活跃）——列表据此显示 loading 转圈。 */
+  /** Whether this session is currently running a turn (active in the background) — the list shows a loading spinner based on this. */
   running: boolean;
 };
 
-/** 恢复会话时回放的一条历史消息（与 Rust 侧 `HistoryMessageWire` 对齐）。 */
+/** A history message replayed when restoring a session (aligned with Rust's `HistoryMessageWire`). */
 export type HistoryMessage = {
   role: "user" | "assistant";
   content: string;
 };
 
 export type AgentBridge = {
-  /** 列出项目。`archived = true` 时含归档项目（供归档列表）。 */
+  /** List projects. `archived = true` includes archived projects (for the archive list). */
   listProjects: (archived?: boolean) => Promise<ProjectEntry[]>;
   /**
-   * 打开原生文件夹选择器新建项目（已登记的目录按路径去重 / 归档则恢复）。
-   * 用户取消返回 `null`。
+   * Open the native folder picker to create a new project (already-registered
+   * directories are deduplicated by path / restored if archived). Returns `null` if the
+   * user cancels.
    */
   addProject: () => Promise<ProjectEntry | null>;
-  /** 重命名项目：只改展示名，不动路径 / 会话数据。 */
+  /** Rename a project: display name only; path / session data untouched. */
   renameProject: (project: string, name: string) => Promise<void>;
-  /** 归档项目：只置标志、不删磁盘数据（可从归档恢复）。 */
+  /** Archive a project: only sets the flag, no disk data deleted (restorable from the archive). */
   archiveProject: (project: string) => Promise<void>;
-  /** 从归档恢复项目。 */
+  /** Restore a project from the archive. */
   restoreProject: (project: string) => Promise<void>;
 
   /**
-   * 向指定会话发起一轮。事件经该会话的订阅（`openSession`）推回，不由 send 直接回调。
+   * Start a turn for the given session. Events are pushed back via that session's
+   * subscription (`openSession`), not through a direct send callback.
    *
-   * `references` 是 `@` 引用的工作区路径；Rust 侧会把它们拼进这一轮的 prompt。
+   * `references` are the workspace paths from `@` references; the Rust side composes
+   * them into this turn's prompt.
    */
   send: (project: string, session: string, text: string, references: string[]) => Promise<void>;
-  /** 请求取消指定会话的当前轮。 */
+  /** Request cancellation of the given session's current turn. */
   cancel: (project: string, session: string) => Promise<void>;
   /**
-   * 订阅一个会话：返回视图快照（重建 transcript）+ 退订句柄。之后该会话的事件都会
-   * 经 `onEvent` 推回（含后台会话——`project` / `session` 字段标明来源）。
+   * Subscribe to a session: returns a view snapshot (to rebuild the transcript) + an
+   * unsubscribe handle. Subsequent events for that session are pushed back via
+   * `onEvent` (including background sessions — the `project` / `session` fields mark
+   * the source).
    */
   openSession: (
     project: string,
     session: string,
     onEvent: (event: AgentEventWire) => void,
   ) => Promise<SessionSubscription>;
-  /** 指定项目当前会话的模型名，用于页脚展示。 */
+  /** Model name of the given project's current session, for footer display. */
   modelName: (project: string) => Promise<string>;
-  /** 列出当前项目端点可选的模型。 */
+  /** List the models available from the current project's endpoint. */
   listModels: (project: string) => Promise<ModelEntry[]>;
-  /** 热切换模型：不重建 Agent，只换 `ModelConfig::model`。 */
+  /** Hot-swap the model: no Agent rebuild, only `ModelConfig::model`. */
   setModel: (project: string, value: string) => Promise<void>;
-  /** 按关键词检索工作区文件（`@` 引用用，纯应用层）。 */
+  /** Search workspace files by keyword (for `@` references, pure application layer). */
   searchFiles: (project: string, query: string) => Promise<FileEntry[]>;
-  /** 列出某项目当前会话可见的技能（`/` 候选用）。 */
+  /** List the skills visible to a project's current session (for `/` candidates). */
   listSkills: (project: string) => Promise<SkillEntry[]>;
-  /** 激活某项目指定会话的一个技能（`/<skill-name>` 入口，与 TUI 同语义）。 */
+  /** Activate a skill in a given session of a project (the `/<skill-name>` entry, same semantics as the TUI). */
   activateSkill: (project: string, session: string, name: string) => Promise<void>;
-  /** 列出某项目的全部会话（按最近修改降序）。 */
+  /** List all sessions of a project (most recently modified first). */
   listSessions: (project: string) => Promise<SessionEntry[]>;
-  /** 某项目当前会话名（无则 null）。 */
+  /** A project's current session name (null if none). */
   currentSession: (project: string) => Promise<string | null>;
-  /** 新建会话并可命名（title 为空 = 匿名），并切换过去。 */
+  /** Create a session, optionally named (empty title = anonymous), and switch to it. */
   newSession: (project: string, title: string | null) => Promise<SessionEntry>;
-  /** 切换到指定会话。 */
+  /** Switch to the given session. */
   switchSession: (project: string, name: string) => Promise<void>;
-  /** 重命名会话：只改标题，不改标识 / 内容。 */
+  /** Rename a session: title only, not the identity / content. */
   renameSession: (project: string, name: string, title: string) => Promise<void>;
-  /** 删除会话（连同日志与标题）。 */
+  /** Delete a session (log and title included). */
   deleteSession: (project: string, name: string) => Promise<void>;
-  /** 回放某项目当前会话历史（切换 / 启动后重建 transcript 用）。 */
+  /** Move a session to another project (cross-project log and title migration). Does not auto-switch to the target session. */
+  moveSession: (project: string, name: string, targetProject: string) => Promise<void>;
+  /** Replay a project's current session history (used to rebuild the transcript after switching / startup). */
   loadHistory: (project: string) => Promise<HistoryMessage[]>;
 };
 
 const isTauri =
   typeof window !== "undefined" && "__TAURI_INTERNALS__" in (window as unknown as Record<string, unknown>);
 
-/** 路由键：跨项目不重名（会话名在项目内唯一，项目 id 全局唯一）。 */
+/** Route key: unique across projects (session names unique within a project, project ids globally). */
 function routeKey(project: string, session: string): string {
   return `${project}::${session}`;
 }
@@ -144,8 +154,9 @@ function routeKey(project: string, session: string): string {
 async function createTauriBridge(): Promise<AgentBridge> {
   const { invoke } = await import("@tauri-apps/api/core");
   const { listen } = await import("@tauri-apps/api/event");
-  // 每个会话一个 handler，按事件里的 `project` + `session` 路由。`listen` 只注册一次——
-  // 若每轮都注册新监听器，旧的不会注销、事件会被重复消费（曾经的 bug）。
+  // One handler per session, routed by the event's `project` + `session`. `listen` is
+  // registered only once — registering a new listener every turn would leave old ones
+  // un-unregistered and consume events multiple times (a past bug).
   const handlers = new Map<string, (event: AgentEventWire) => void>();
   await listen<AgentEventWire>("agent://event", (event) => {
     const wire = event.payload;
@@ -222,6 +233,9 @@ async function createTauriBridge(): Promise<AgentBridge> {
     async deleteSession(project, name) {
       await invoke("agent_delete_session", { project, name });
     },
+    async moveSession(project, name, targetProject) {
+      await invoke("agent_move_session", { project, name, targetProject });
+    },
     async loadHistory(project) {
       return invoke<HistoryMessage[]>("agent_load_history", { project });
     },
@@ -239,11 +253,11 @@ function createMockBridge(): AgentBridge {
         .map((p) => ({ ...p }));
     },
     async addProject() {
-      const id = `mock:/projects/新项目-${++mockProjectSeq}`;
+      const id = `mock:/projects/new-project-${++mockProjectSeq}`;
       const entry: ProjectEntry = {
         id,
-        name: `新项目-${mockProjectSeq}`,
-        path: `/projects/新项目-${mockProjectSeq}`,
+        name: `new-project-${mockProjectSeq}`,
+        path: `/projects/new-project-${mockProjectSeq}`,
         archived: false,
         last_opened_ms: Date.now(),
       };
@@ -274,9 +288,9 @@ function createMockBridge(): AgentBridge {
       };
       void (async () => {
         if (references.length > 0) {
-          emit({ type: "content_delta", text: `（mock）引用 ${references.join(", ")} · ` } as AgentEventWire);
+          emit({ type: "content_delta", text: `(mock) references ${references.join(", ")} · ` } as AgentEventWire);
         }
-        emit({ type: "content_delta", text: "（mock）收到：" } as AgentEventWire);
+        emit({ type: "content_delta", text: "(mock) received: " } as AgentEventWire);
         for (const ch of text) {
           await new Promise((r) => setTimeout(r, 20));
           if (cancelled.has(key)) return;
@@ -309,10 +323,10 @@ function createMockBridge(): AgentBridge {
       ];
     },
     async setModel() {
-      // mock：不持久化，仅让选择器有反馈。
+      // mock: no persistence, just gives the selector feedback.
     },
     async searchFiles(_project, query) {
-      // mock：返回几个假条目，让 `@` 弹层在纯浏览器下可调试。
+      // mock: return a few fake entries so the `@` popover is debuggable in a plain browser.
       const all: FileEntry[] = [
         { path: "src/main.rs", name: "main.rs", kind: "file" },
         { path: "src/bootstrap.rs", name: "bootstrap.rs", kind: "file" },
@@ -325,15 +339,15 @@ function createMockBridge(): AgentBridge {
       return all.filter((entry) => entry.path.toLowerCase().includes(q));
     },
     async listSkills() {
-      // mock：返回几个假技能，让 `/` 弹层在纯浏览器下可调试。
+      // mock: return a few fake skills so the `/` popover is debuggable in a plain browser.
       return [
-        { name: "commit", description: "按逻辑主题拆分并提交改动" },
-        { name: "review", description: "审查当前改动并给出建议" },
-        { name: "migrate", description: "把 TS 后端迁移到 Rust 的流程指引" },
+        { name: "commit", description: "Split and commit changes by logical theme" },
+        { name: "review", description: "Review the current changes and give suggestions" },
+        { name: "migrate", description: "Guidance for migrating a TS backend to Rust" },
       ];
     },
     async activateSkill() {
-      // mock：激活无副作用（后端会写 SkillRuntime）。
+      // mock: activation has no side effect (the backend writes SkillRuntime).
     },
     async listSessions(project) {
       return mockSessions(project).map((s) => ({ ...s }));
@@ -372,13 +386,26 @@ function createMockBridge(): AgentBridge {
       );
       if (mockCurrentByProject.get(project) === name) mockCurrentByProject.delete(project);
     },
+    async moveSession(project, name, targetProject) {
+      const list = mockSessionsByProject.get(project) ?? [];
+      const entry = list.find((s) => s.name === name);
+      if (!entry) return;
+      mockSessionsByProject.set(
+        project,
+        list.filter((s) => s.name !== name),
+      );
+      const target = mockSessionsByProject.get(targetProject) ?? [];
+      target.push(entry);
+      mockSessionsByProject.set(targetProject, target);
+      if (mockCurrentByProject.get(project) === name) mockCurrentByProject.delete(project);
+    },
     async loadHistory() {
       return [];
     },
   };
 }
 
-// mock 状态：纯浏览器 `npm run dev` 下让多项目 / 多会话 UI 可独立调试。
+// mock state: lets the multi-project / multi-session UI be debugged independently under a plain-browser `npm run dev`.
 let mockProjectSeq = 1;
 let mockSeq = 0;
 const mockProjects: ProjectEntry[] = [
@@ -398,7 +425,7 @@ const mockProjects: ProjectEntry[] = [
   },
   {
     id: "mock:/projects/old",
-    name: "旧项目",
+    name: "old project",
     path: "/projects/old",
     archived: true,
     last_opened_ms: Date.now() - 86_400_000,
@@ -408,14 +435,14 @@ const mockSessionsByProject = new Map<string, SessionEntry[]>([
   [
     "mock:/projects/shirley",
     [
-      { name: "mock-1", label: "迁移任务", preview: "把 TS 后端迁到 Rust", modified_ms: Date.now() - 60_000, turns: 3, running: false },
-      { name: "mock-2", label: "mock-2", preview: "写一个 bash 工具", modified_ms: Date.now() - 3_600_000, turns: 1, running: false },
+      { name: "mock-1", label: "Migration task", preview: "Migrate the TS backend to Rust", modified_ms: Date.now() - 60_000, turns: 3, running: false },
+      { name: "mock-2", label: "mock-2", preview: "Write a bash tool", modified_ms: Date.now() - 3_600_000, turns: 1, running: false },
     ],
   ],
   [
     "mock:/projects/shiwen",
     [
-      { name: "mock-3", label: "拾文 UI", preview: "对齐 markdown 渲染", modified_ms: Date.now() - 120_000, turns: 2, running: false },
+      { name: "mock-3", label: "shiwen UI", preview: "Align markdown rendering", modified_ms: Date.now() - 120_000, turns: 2, running: false },
     ],
   ],
 ]);

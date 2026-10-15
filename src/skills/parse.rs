@@ -1,38 +1,38 @@
-//! `SKILL.md` 的容错解析：YAML frontmatter + Markdown 正文。
+//! Lenient parsing of `SKILL.md`: YAML frontmatter + Markdown body.
 //!
-//! 对齐 Agent Skills 开放标准（`docs/skills.md` 第二节）：一个 skill 是一个目录，
-//! 最小形态只含一个 `SKILL.md`。本模块只把 frontmatter 里 Tier1 目录需要的字段
-//! 抠出来，其余键（`metadata` / `allowed-tools` / `license` …）**宽容忽略**——
-//! 向前兼容，一个坏 skill 不该拖垮整个目录。
+//! Aligned with the Agent Skills open standard (`docs/skills.md` section 2): a skill is a directory,
+//! and the minimal form contains just one `SKILL.md`. This module only extracts the fields the
+//! Tier1 directory needs from the frontmatter; the other keys (`metadata` / `allowed-tools` / `license` ...) are
+//! **leniently ignored** -- forward compatible, so one bad skill cannot bring down the whole directory.
 //!
-//! frontmatter 的切分与 `memory/format.rs` 同源（手写 `key: value`，不引 YAML
-//! 依赖）；这里独立实现，避免为复用去动 memory 模块（`docs/skills.md` 十.2）。
+//! Frontmatter splitting shares its origin with `memory/format.rs` (hand-written `key: value`, no YAML
+//! dependency); it is implemented independently here to avoid touching the memory module for reuse (`docs/skills.md` 10.2).
 
 use std::path::PathBuf;
 
-/// 单条 `description` 的字符上限（对齐标准，防一条描述自己撑爆目录）。
+/// Character limit for a single `description` (aligned with the standard; keeps one description from blowing up the directory).
 const MAX_DESCRIPTION_CHARS: usize = 1024;
 
-/// 一个已解析的 skill（P0 只保留 Tier1 目录需要的字段 + 根目录）。
+/// A parsed skill (P0 keeps only the fields the Tier1 directory needs + the root directory).
 ///
-/// 正文 / `scripts` / `references` 不在 P0 预加载——激活时按需读（渐进式披露的
-/// Tier2/Tier3，见 `docs/skills.md` 2.2）。
+/// The body / `scripts` / `references` are not preloaded in P0 -- they are read on demand at activation time (progressive
+/// disclosure's Tier2/Tier3, see `docs/skills.md` 2.2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SkillMeta {
-    /// skill 名（= 父目录名，见 [`parse_skill`]）。
+    /// skill name (= parent directory name, see [`parse_skill`]).
     pub name: String,
-    /// 一句话描述：**做什么 + 何时用**（模型据此决定是否激活）。
+    /// One-line description: **what it does + when to use it** (the model uses this to decide whether to activate).
     pub description: String,
-    /// skill 目录（`SKILL.md` 所在目录）。
+    /// skill directory (the directory containing `SKILL.md`).
     pub root: PathBuf,
 }
 
-/// 解析失败的原因。
+/// Reason parsing failed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ParseError {
-    /// 缺 `---` 包裹的 frontmatter。
+    /// Missing `---`-wrapped frontmatter.
     MissingFrontmatter,
-    /// frontmatter 里没有非空的 `description`。
+    /// frontmatter has no non-empty `description`.
     MissingDescription,
 }
 
@@ -47,18 +47,18 @@ impl std::fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
-/// 解析一份 `SKILL.md`。
+/// Parse one `SKILL.md`.
 ///
-/// `dir_name` 是 skill 所在目录名——**skill 名以目录名为准**（标准要求 frontmatter
-/// `name` == 目录名；不一致时用目录名，避免模型看到一个和路径对不上的名字）。
-/// `root` 是 skill 目录。
+/// `dir_name` is the name of the directory the skill is in -- **the skill name follows the directory name** (the standard requires
+/// the frontmatter `name` == the directory name; when they differ, use the directory name, so the model never sees a name that does not match the path).
+/// `root` is the skill directory.
 pub fn parse_skill(text: &str, dir_name: &str, root: PathBuf) -> Result<SkillMeta, ParseError> {
     let front = split_frontmatter(text).ok_or(ParseError::MissingFrontmatter)?;
 
     let mut description: Option<String> = None;
     for line in front.lines() {
         let Some((key, value)) = line.split_once(':') else {
-            continue; // 忽略空行 / 无法识别的行（宽松解析）
+            continue; // ignore blank / unrecognized lines (lenient parsing)
         };
         if key.trim() == "description" {
             let value = unquote(value.trim());
@@ -78,9 +78,9 @@ pub fn parse_skill(text: &str, dir_name: &str, root: PathBuf) -> Result<SkillMet
     })
 }
 
-/// 取出 `---` 包裹的 frontmatter 段（不含首尾分隔线）；缺失或未闭合返回 `None`。
+/// Extract the `---`-wrapped frontmatter block (without the leading/trailing delimiters); returns `None` if missing or unterminated.
 fn split_frontmatter(text: &str) -> Option<&str> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text); // 容忍 BOM
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text); // tolerate BOM
     let rest = text
         .strip_prefix("---\n")
         .or_else(|| text.strip_prefix("---\r\n"))?;
@@ -95,13 +95,13 @@ fn split_frontmatter(text: &str) -> Option<&str> {
     None
 }
 
-/// 取 `SKILL.md` 的**正文**（剥掉 `---` 包裹的 frontmatter 段）。
+/// Get the **body** of `SKILL.md` (strip the `---`-wrapped frontmatter block).
 ///
-/// 激活（Tier2）只把正文交给模型——frontmatter 是元数据，模型已在 Tier1 目录里
-/// 见过 `name` / `description`，正文才是要执行的指令。无 frontmatter 或未闭合时
-/// 返回原文（与 [`parse_skill`] 的容错口径一致）。
+/// Activation (Tier2) hands only the body to the model -- the frontmatter is metadata, and the model has already
+/// seen `name` / `description` in the Tier1 directory; the body is the actual instruction to execute. When there is no
+/// frontmatter or it is unterminated, returns the original text (consistent with [`parse_skill`]'s lenient contract).
 pub fn body(text: &str) -> &str {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text); // 容忍 BOM
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text); // tolerate BOM
     let Some(rest) = text
         .strip_prefix("---\n")
         .or_else(|| text.strip_prefix("---\r\n"))
@@ -117,10 +117,10 @@ pub fn body(text: &str) -> &str {
         }
         offset += line.len();
     }
-    text // 未闭合：当没有 frontmatter
+    text // unterminated: treat as having no frontmatter
 }
 
-/// 去掉值两端成对的引号（`"..."` / `'...'`）。
+/// Remove paired quotes from both ends of a value (`"..."` / `'...'`).
 fn unquote(value: &str) -> String {
     let bytes = value.as_bytes();
     if bytes.len() >= 2 {
@@ -133,7 +133,7 @@ fn unquote(value: &str) -> String {
     value.to_string()
 }
 
-/// 按字符（非字节）截断到 `max` 个字符。
+/// Truncate to `max` characters (by char, not byte).
 fn clip_chars(text: String, max: usize) -> String {
     if text.chars().count() <= max {
         return text;
@@ -158,7 +158,7 @@ mod tests {
 
     #[test]
     fn name_follows_directory_not_frontmatter() {
-        // frontmatter 名与目录名不一致时以目录名为准。
+        // when the frontmatter name and the directory name differ, the directory name wins.
         let text = "---\nname: other\ndescription: does a thing\n---\nbody";
         let meta = parse_skill(text, "real-dir", PathBuf::from("/s/real-dir")).unwrap();
         assert_eq!(meta.name, "real-dir");

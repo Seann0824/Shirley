@@ -1,19 +1,23 @@
-//! 提示词模板渲染：把 `{{占位符}}` 替换成运行时值。
+//! Prompt template rendering: substitute `{{placeholders}}` with runtime values.
 //!
-//! 提示词正文维护在 `prompts/*.md`（经 `include_str!` 编译期内嵌），代码里只保留
-//! "用哪个模板、填哪些占位符"的接线。这样改文案不必改 Rust，动态内容（工作目录、
-//! 项目指南、检索结果……）通过占位符注入。
+//! Prompt bodies live in `prompts/*.md` (embedded at compile time via `include_str!`); the code
+//! keeps only the wiring of "which template, which placeholders". This way changing the wording
+//! doesn't require touching Rust, and dynamic content (working dir, project guide, search
+//! results, ...) is injected through placeholders.
 //!
-//! 设计要点：
-//! - **单遍扫描**：替换进去的值不再被二次扫描，避免用户内容里恰好出现 `{{...}}`
-//!   时被误当占位符（例如项目指南正文里写了 `{{working_dir}}`）。
-//! - **未知占位符原样保留**：模板里写了代码没提供的键时，`{{key}}` 原样输出，
-//!   便于肉眼发现漏接线，而不是静默吞掉。
-//! - 占位符名只允许 `[A-Za-z0-9_]`，`{{` 后紧跟非名字字符时不视为占位符。
+//! Design notes:
+//! - **Single pass**: substituted values are not scanned again, so user content that happens to
+//!   contain `{{...}}` is not mistaken for a placeholder (e.g. a project guide that literally
+//!   writes `{{working_dir}}`).
+//! - **Unknown placeholders are kept as-is**: when the template references a key the code does
+//!   not provide, `{{key}}` is emitted verbatim, so a missing wire-up is visible instead of being
+//!   silently swallowed.
+//! - Placeholder names allow only `[A-Za-z0-9_]`; a `{{` followed by a non-name char is not a
+//!   placeholder.
 
-/// 把 `template` 里的 `{{key}}` 替换为 `vars` 中对应的值。
+/// Replace `{{key}}` in `template` with the matching value from `vars`.
 ///
-/// 未命中的占位符原样保留；`vars` 中未被模板引用的键忽略。
+/// Unmatched placeholders are left as-is; keys in `vars` not referenced by the template are ignored.
 pub fn render(template: &str, vars: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(template.len());
     let bytes = template.as_bytes();
@@ -28,7 +32,7 @@ pub fn render(template: &str, vars: &[(&str, &str)]) -> String {
                 }
             }
         }
-        // 原样输出一个字符（按 UTF-8 边界推进，避免切开多字节字符）。
+        // Emit one character as-is (advance on UTF-8 boundaries to avoid splitting a multibyte char).
         let ch = template[i..].chars().next().expect("i is on a char boundary");
         out.push(ch);
         i += ch.len_utf8();
@@ -36,7 +40,7 @@ pub fn render(template: &str, vars: &[(&str, &str)]) -> String {
     out
 }
 
-/// 若 `start` 处是合法占位符 `{{name}}`，返回 `(name, 结束后的下标)`。
+/// If `start` is a valid placeholder `{{name}}`, return `(name, index just after it)`.
 fn placeholder_at(template: &str, start: usize) -> Option<(&str, usize)> {
     let rest = &template[start + 2..];
     let end = rest.find("}}")?;
@@ -65,7 +69,7 @@ mod tests {
 
     #[test]
     fn inserted_values_are_not_rescanned() {
-        // 注入的值里含 `{{...}}` 时不应被再次替换。
+        // Injected values containing `{{...}}` must not be substituted again.
         let out = render("v={{value}}", &[("value", "{{other}}"), ("other", "boom")]);
         assert_eq!(out, "v={{other}}");
     }
@@ -78,7 +82,7 @@ mod tests {
 
     #[test]
     fn handles_multibyte_text() {
-        let out = render("工作区：{{dir}}，结束", &[("dir", "/tmp/项目")]);
-        assert_eq!(out, "工作区：/tmp/项目，结束");
+        let out = render("café {{dir}} 🚀", &[("dir", "/tmp/naïve")]);
+        assert_eq!(out, "café /tmp/naïve 🚀");
     }
 }

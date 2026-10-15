@@ -4,12 +4,12 @@ mod tool;
 
 #[proc_macro_attribute]
 pub fn tool(
-    // 宏定义的参数
+    // The macro's parameters
     attr: TokenStream,
-    // 修饰的代码块
+    // The annotated code block
     item: TokenStream,
 ) -> TokenStream {
-    // 根据获得的原始代码，去生成新的代码块冰返回。
+    // Generate a new code block from the obtained original code and return it.
 
     tool::expand(attr, item)
 }

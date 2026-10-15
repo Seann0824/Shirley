@@ -1,16 +1,16 @@
-//! 应用侧的会话存储（`docs/session.md`）。
+//! Application-side session storage (`docs/session.md`).
 //!
-//! 会话持久化**完全属于应用层**：契约（[`SessionStore`] / [`SessionError`]）与
-//! 实现都在这里，SDK 不再持有任何会话概念。当前落盘选 **JSONL**——每行一条序列化
-//! 的 `Message`，追加即 `write`，读回即逐行 `serde_json::from_str`。选它的理由：
-//! 零依赖、可读、可手工调试，且天然是 append-only 的"日志"形状，与
-//! `docs/session.md` 一.决策 4 完全对齐。
+//! Session persistence **belongs entirely to the application layer**: the contract ([`SessionStore`] / [`SessionError`]) and
+//! the implementation both live here; the SDK no longer holds any session concept. The current on-disk format is **JSONL** -- one serialized
+//! `Message` per line: append is a `write`, read-back is line-by-line `serde_json::from_str`. Why it was chosen:
+//! zero dependencies, human-readable, hand-debuggable, and naturally append-only "log"-shaped, exactly aligned
+//! with `docs/session.md` section 1 decision 4.
 //!
-//! 落盘的是**原始 Message 全量日志**：不含 system（恢复时现生成）。
-//! `ContextSummary` 是日志里的一等消息，压缩时也走 `append`。
+//! What is persisted is the **full raw Message log**: no system (generated fresh on restore).
+//! `ContextSummary` is a first-class message in the log; compaction goes through `append` too.
 //!
-//! 落库时机由应用层驱动：`Session::apply_event` 收到 SDK 的 `MessageAdded` 事件即
-//! 调 [`SessionStore::append`]（SDK 只发事件、不落库）。
+//! Persistence timing is driven by the application layer: when `Session::apply_event` receives the SDK's `MessageAdded` event it
+//! calls [`SessionStore::append`] (the SDK only emits events, never persists).
 
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
@@ -19,56 +19,56 @@ use std::sync::{Arc, Mutex};
 
 use shirley_agent_sdk::Message;
 
-/// 会话日志的存储抽象。
+/// Storage abstraction for session logs.
 ///
-/// 三个方法对应三种操作，**恰好是会话写入的全部语义**：追加（正常轮次 + 压缩）、
-/// 读回（恢复）、截尾（rewind）。故意没有 `delete` / `update` / `search`——用不到。
+/// The three methods map to three operations, **exactly the full semantics of session writing**: append (normal turns + compaction),
+/// read-back (restore), truncate-tail (rewind). Deliberately no `delete` / `update` / `search` -- not needed.
 ///
-/// **签名是同步的**：`SessionManager` 的恢复 / 截尾发生在同步路径上，同步接口让
-/// 调用方不必变异步。存储后端若是异步驱动，由实现内部消化。契约同步，实现自由。
+/// **The signature is synchronous**: `SessionManager`'s restore / truncate happen on synchronous paths, and a synchronous interface spares
+/// callers from going async. If a storage backend is async-driven, the implementation absorbs it internally. Synchronous contract, free implementation.
 pub trait SessionStore: Send + Sync {
-    /// 追加一条消息到日志尾部。压缩产生的 `ContextSummary` 也走这里。
+    /// Append a message to the tail of the log. The `ContextSummary` produced by compaction also goes through here.
     fn append(&self, message: &Message) -> Result<(), SessionError>;
 
-    /// 读取全量日志（只读、顺序）。
+    /// Read the full log (read-only, in order).
     fn load(&self) -> Result<Vec<Message>, SessionError>;
 
-    /// 截断到前 `len` 条（rewind 用；只截尾，不产生中间空洞）。
+    /// Truncate to the first `len` entries (for rewind; tail-only, never producing interior holes).
     ///
-    /// `len` 不小于当前长度时不做任何事（幂等，避免越界）。
+    /// Does nothing when `len` is not smaller than the current length (idempotent, avoids out-of-bounds).
     fn truncate(&self, len: usize) -> Result<(), SessionError>;
 }
 
-/// 会话存储失败。
+/// Session storage failure.
 ///
-/// 展示格式统一为 `[前缀]: 详情`，与 SDK 各层错误（`AdapterError` / `ToolError` /
-/// `SandboxError` / `WorkspaceError`）一致；前缀留在变体旁。
+/// Display format is uniformly `[prefix]: details`, consistent with the SDK's layered errors (`AdapterError` / `ToolError` /
+/// `SandboxError` / `WorkspaceError`); the prefix stays next to the variant.
 ///
-/// 持久化失败当前一律**当作错误**（`docs/session.md` 二.2）：持久化失败还继续跑，
-/// 等于假装有存档，比直接报错更危险。
+/// Persistence failure is currently always **treated as an error** (`docs/session.md` section 2.2): continuing after a persistence failure
+/// amounts to pretending there is a saved state, which is more dangerous than erroring out.
 #[derive(Debug, thiserror::Error)]
 pub enum SessionError {
-    /// 底层存储 I/O 失败（写盘、读盘、序列化等）。
+    /// Underlying storage I/O failure (write, read, serialization, etc.).
     #[error("[session storage failure]: {0}")]
     Io(#[from] std::io::Error),
 
-    /// 存储后端本身报告的错误（例如 SQL 失败），带自由文本详情。
+    /// An error reported by the storage backend itself (e.g. a SQL failure), with free-text details.
     #[error("[session storage error]: {0}")]
     Backend(String),
 }
 
-/// JSONL 会话日志：每行一条 `Message`。
+/// JSONL session log: one `Message` per line.
 ///
-/// 内部持一把锁保护文件句柄与截断/追加的原子性——`SessionStore` 的方法收
-/// `&self`（同步签名，见 `docs/session.md` 二.1），可变状态只能藏在锁里。
+/// Internally holds a lock protecting the file handle and the atomicity of truncate/append -- `SessionStore`'s methods take
+/// `&self` (synchronous signature, see `docs/session.md` section 2.1), so mutable state can only hide inside the lock.
 pub struct JsonlSessionStore {
     path: PathBuf,
-    /// 追加用句柄；`truncate` 会重开。锁保证两个操作不交错。
+    /// Handle used for appending; `truncate` reopens it. The lock keeps the two operations from interleaving.
     file: Mutex<File>,
 }
 
 impl JsonlSessionStore {
-    /// 打开（不存在则创建）指定路径的 JSONL 会话日志。
+    /// Open (creating if absent) the JSONL session log at the given path.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SessionError> {
         let path = path.as_ref().to_path_buf();
         if let Some(parent) = path.parent() {
@@ -85,7 +85,7 @@ impl JsonlSessionStore {
         })
     }
 
-    /// 读取全量日志（逐行反序列化）。空行跳过。
+    /// Read the full log (line-by-line deserialization). Blank lines are skipped.
     fn read_all(&self) -> Result<Vec<Message>, SessionError> {
         let file = File::open(&self.path)?;
         let reader = BufReader::new(file);
@@ -96,29 +96,29 @@ impl JsonlSessionStore {
                 continue;
             }
             let message: Message = serde_json::from_str(&line)
-                .map_err(|e| SessionError::Backend(format!("会话日志第 {} 行解析失败: {e}", log.len() + 1)))?;
+                .map_err(|e| SessionError::Backend(format!("failed to parse session log line {}: {e}", log.len() + 1)))?;
             log.push(message);
         }
         Ok(log)
     }
 
-    /// 用给定日志整体重写文件（`truncate` 用）。先写临时文件再原子替换。
+    /// Rewrite the file wholesale with the given log (used by `truncate`). Writes a temp file then atomically replaces.
     ///
-    /// **调用方必须已持有 `self.file` 的锁**——这里不再自己加锁，否则会与
-    /// 调用方嵌套同一把非重入锁而死锁。函数负责替换文件并把新的追加句柄写回。
+    /// **The caller must already hold `self.file`'s lock** -- this does not lock again, otherwise it would
+    /// deadlock by nesting the same non-reentrant lock as the caller. The function replaces the file and writes the new append handle back.
     fn rewrite_locked(&self, guard: &mut File, log: &[Message]) -> Result<(), SessionError> {
         let tmp = self.path.with_extension("jsonl.tmp");
         {
             let mut file = File::create(&tmp)?;
             for message in log {
                 let line = serde_json::to_string(message)
-                    .map_err(|e| SessionError::Backend(format!("会话消息序列化失败: {e}")))?;
+                    .map_err(|e| SessionError::Backend(format!("failed to serialize session message: {e}")))?;
                 writeln!(file, "{line}")?;
             }
             file.flush()?;
         }
         std::fs::rename(&tmp, &self.path)?;
-        // 重开追加句柄，指向替换后的文件，并写回给调用方持有的 guard。
+        // Reopen the append handle, pointing at the replaced file, and write it back to the caller's guard.
         *guard = OpenOptions::new()
             .create(true)
             .append(true)
@@ -131,21 +131,21 @@ impl JsonlSessionStore {
 impl SessionStore for JsonlSessionStore {
     fn append(&self, message: &Message) -> Result<(), SessionError> {
         let line = serde_json::to_string(message)
-            .map_err(|e| SessionError::Backend(format!("会话消息序列化失败: {e}")))?;
-        let mut file = self.file.lock().expect("会话锁中毒");
+            .map_err(|e| SessionError::Backend(format!("failed to serialize session message: {e}")))?;
+        let mut file = self.file.lock().expect("session lock poisoned");
         writeln!(file, "{line}")?;
         file.flush()?;
         Ok(())
     }
 
     fn load(&self) -> Result<Vec<Message>, SessionError> {
-        // 与 append / truncate 互斥，避免读到写了一半的行。
-        let _guard = self.file.lock().expect("会话锁中毒");
+        // Mutually exclusive with append / truncate, avoiding reads of half-written lines.
+        let _guard = self.file.lock().expect("session lock poisoned");
         self.read_all()
     }
 
     fn truncate(&self, len: usize) -> Result<(), SessionError> {
-        let mut guard = self.file.lock().expect("会话锁中毒");
+        let mut guard = self.file.lock().expect("session lock poisoned");
         let mut log = self.read_all()?;
         if len < log.len() {
             log.truncate(len);
@@ -155,28 +155,28 @@ impl SessionStore for JsonlSessionStore {
     }
 }
 
-/// 惰性会话日志：**启动时不落盘**，首次 `append`（即首条消息）时才创建文件。
+/// Lazy session log: **does not touch disk at startup**; the file is created only on the first `append` (i.e. the first message).
 ///
-/// 动机：Codex 的 UX——打开应用时并不产生一个空会话文件，只有真正发消息
-/// （产生交互）才建会话。这样会话列表不会被一堆"点了没聊"的空文件塞满。
+/// Motivation: Codex's UX -- opening the app does not create an empty session file; only actually sending a message
+/// (producing an interaction) creates a session. This keeps the session list from being clogged with a pile of "opened but never chatted" empty files.
 ///
-/// 语义上它就是一个 [`SessionStore`]：`Session` 照常持有它，发送路径无需感知
-/// "延迟创建"这回事。区别只有两点：
-/// - 名字在**构造时**就确定（供 UI 页脚 / 当前会话标记用），但**文件不建**；
-/// - 首次 `append` 时才**惰性物化**：按已定的名字落盘 JSONL（并写标题 sidecar）。
+/// Semantically it is just a [`SessionStore`]: `Session` holds it as usual, and the send path need not be aware of
+/// "delayed creation" at all. There are only two differences:
+/// - the name is decided at **construction time** (for the UI footer / current-session marker), but **no file is created**;
+/// - it is **lazily materialized** only on the first `append`: writes the JSONL under the decided name (and the title sidecar).
 ///
-/// 物化之前，`load` / `truncate` 一律视为空日志（没有文件就没有内容）；
-/// 物化后永久持有内部 [`JsonlSessionStore`]，行为与直接打开一份会话完全一致。
+/// Before materialization, `load` / `truncate` are treated as an empty log (no file, no content);
+/// after materialization it permanently holds an internal [`JsonlSessionStore`], behaving exactly like a directly opened session.
 ///
-/// 标题若给出，在物化时落成 sidecar `<name>.title`（与
-/// [`FileSessionCatalog::create_named`] 同语义）。
+/// If a title is given, it is written as the sidecar `<name>.title` on materialization (same semantics as
+/// [`FileSessionCatalog::create_named`]).
 pub struct LazySessionStore {
     catalog: Arc<FileSessionCatalog>,
-    /// 启动时已确定的名字（`list` 在物化前扫不到它，因为没有文件）。
+    /// The name decided at startup (`list` cannot find it before materialization, since there is no file).
     name: String,
-    /// 物化后的底层存储（首次 `append` 时创建）。
+    /// The underlying store after materialization (created on the first `append`).
     inner: Mutex<Option<Arc<JsonlSessionStore>>>,
-    /// 可选标题（物化时落成 sidecar）。
+    /// Optional title (written as a sidecar on materialization).
     title: Option<String>,
 }
 
@@ -190,9 +190,9 @@ impl LazySessionStore {
         }
     }
 
-    /// 物化：按已定的名字落盘空日志、写标题 sidecar，返回底层存储。幂等。
+    /// Materialize: write the empty log under the decided name, write the title sidecar, return the underlying store. Idempotent.
     fn materialize(&self) -> Result<Arc<JsonlSessionStore>, SessionError> {
-        let mut inner = self.inner.lock().expect("会话锁中毒");
+        let mut inner = self.inner.lock().expect("session lock poisoned");
         if let Some(store) = inner.as_ref() {
             return Ok(store.clone());
         }
@@ -207,79 +207,79 @@ impl LazySessionStore {
 
 impl SessionStore for LazySessionStore {
     fn append(&self, message: &Message) -> Result<(), SessionError> {
-        // 首次 append 触发物化；此后直接委托。
+        // The first append triggers materialization; afterward it just delegates.
         self.materialize()?.append(message)
     }
 
     fn load(&self) -> Result<Vec<Message>, SessionError> {
-        // 物化前 = 空日志（没有文件就没有内容）。
-        match self.inner.lock().expect("会话锁中毒").as_ref() {
+        // Before materialization = empty log (no file, no content).
+        match self.inner.lock().expect("session lock poisoned").as_ref() {
             Some(store) => store.load(),
             None => Ok(Vec::new()),
         }
     }
 
     fn truncate(&self, len: usize) -> Result<(), SessionError> {
-        match self.inner.lock().expect("会话锁中毒").as_ref() {
+        match self.inner.lock().expect("session lock poisoned").as_ref() {
             Some(store) => store.truncate(len),
-            // 物化前没有日志，截尾是空操作（幂等，与契约一致）。
+            // No log before materialization, so truncation is a no-op (idempotent, consistent with the contract).
             None => Ok(()),
         }
     }
 }
 
-/// 一个可选会话（`/session` 切换用）。
+/// A selectable session (for `/session` switching).
 ///
-/// `name` 是唯一标识（文件 stem），`label` 给人看（自定义标题优先，否则回落
-/// `name`），`preview` 是该会话首条用户消息的摘要——列表里只显示时间戳的话
-/// 无法分辨，预览让用户认得出会话。
+/// `name` is the unique identity (the file stem); `label` is for humans (a custom title wins, otherwise it falls back to
+/// `name`); `preview` is a summary of the session's first user message -- if the list showed only timestamps
+/// they would be indistinguishable, and the preview lets the user recognize the session.
 ///
-/// `modified_ms` / `turns` 是给 UI 的元信息（Codex 的 resume picker 会展示
-/// 时间与轮数），不参与标识与查找。
+/// `modified_ms` / `turns` are metadata for the UI (Codex's resume picker shows
+/// time and turn count); they do not participate in identity or lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionEntry {
     pub name: String,
     pub label: String,
     pub preview: String,
-    /// 最近修改时间（Unix 毫秒；0 = 未知）。列表按它降序。
+    /// Last-modified time (Unix millis; 0 = unknown). The list sorts by it descending.
     pub modified_ms: u64,
-    /// 用户轮数（该会话里 `User` 消息条数）。
+    /// Number of user turns (count of `User` messages in the session).
     pub turns: usize,
 }
 
 impl SessionEntry {
-    /// 该会话是否有内容（决定 UI 是否显示预览）。
+    /// Whether the session has content (decides whether the UI shows a preview).
     pub fn is_empty(&self) -> bool {
         self.preview.is_empty()
     }
 }
 
-/// 会话目录（应用层）：列出 / 打开 / 新建 / 重命名 / 删除会话。
+/// Session catalog (application layer): list / open / create / rename / delete sessions.
 ///
-/// 与 `models::ModelCatalog` 对称——把"当前有哪些会话可选、怎么管理"收敛到接口
-/// 后面。当前实现是本地目录扫描（[`FileSessionCatalog`]），将来若要换成远端 /
-/// 数据库，指令与选择器 UI 都不用改。
+/// Symmetric with `models::ModelCatalog` -- it converges "which sessions are currently selectable and how they are managed" behind
+/// an interface. The current implementation scans a local directory ([`FileSessionCatalog`]); if this is later swapped for a remote /
+/// database backend, neither the commands nor the picker UI need to change.
 ///
-/// **TUI 与 desktop 共用同一个实现**：两边的会话列表 / 切换 / 重命名 / 删除都
-/// 落在这一层，因此天然共享同一份 `<root>/.shirley/sessions` 数据。
+/// **The TUI and desktop share the same implementation**: both sides' session list / switch / rename / delete
+/// land in this layer, so they naturally share the same `<root>/.shirley/sessions` data.
 pub trait SessionCatalog: Send + Sync {
-    /// 列出全部会话，**按最近修改时间降序**（最新的在前）。
+    /// List all sessions, **sorted by last-modified time descending** (newest first).
     fn list(&self) -> Result<Vec<SessionEntry>, SessionError>;
 
-    /// 打开指定会话的存储（不存在则创建空文件）。
+    /// Open the store for the named session (creating an empty file if absent).
     fn open(&self, name: &str) -> Result<Arc<dyn SessionStore>, SessionError>;
 
-    /// 新建一个空会话，返回它的条目与存储。
+    /// Create a new empty session; return its entry and store.
     fn create(&self) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError>;
 
-    /// 惰性新建会话：**此刻不落盘**，返回的存储首次 `append` 时才创建文件。
+    /// Lazily create a session: **no disk write yet**; the returned store creates the file only on the first `append`.
     ///
-    /// 用于「启动默认空会话」——没发起聊天就不该在会话列表里留一个空文件。
-    /// 返回的 [`SessionEntry`] 此时 `preview` / `turns` 皆空、`name` 为占位
-    /// （物化前的临时名，UI 不应据此查找会话）。
+    /// Used for "startup default empty session" -- a session with no chat should not leave an empty file in the list.
+    /// The returned [`SessionEntry`] has empty `preview` / `turns` and a placeholder `name`
+    /// (a temporary name before materialization; the UI must not look up sessions by it).
     ///
-    /// 默认实现退化为 [`SessionCatalog::create`]（立即落盘）——不支持惰性的
-    /// 后端无需改动，只是拿不到"延迟创建"的好处。
+    /// The default implementation degrades to [`SessionCatalog::create`] (immediate disk write) -- backends without lazy
+    /// support need no change, they just miss out on "delayed creation".
     fn create_lazy(
         &self,
         _title: Option<&str>,
@@ -287,10 +287,10 @@ pub trait SessionCatalog: Send + Sync {
         self.create()
     }
 
-    /// 新建会话并可带标题（`None` = 匿名，UI 回落到首条用户消息 / 名字）。
+    /// Create a session with an optional title (`None` = anonymous; the UI falls back to the first user message / name).
     ///
-    /// 默认实现忽略标题、退化为 [`SessionCatalog::create`]——不支持标题的后端
-    /// 无需改动。
+    /// The default implementation ignores the title and degrades to [`SessionCatalog::create`] -- backends without title
+    /// support need no change.
     fn create_named(
         &self,
         _title: Option<&str>,
@@ -298,33 +298,49 @@ pub trait SessionCatalog: Send + Sync {
         self.create()
     }
 
-    /// 重命名会话：**只改标题，不改会话标识 / 内容**（Codex 的 `/rename` 语义，
-    /// 不动 transcript）。
+    /// Rename a session: **changes only the title, not the session identity / content** (Codex's `/rename` semantics,
+    /// it does not touch the transcript).
     ///
-    /// 默认实现报错——不支持元数据的后端（如 [`EmptySessionCatalog`]）无需实现。
+    /// The default implementation errors -- backends without metadata support (e.g. [`EmptySessionCatalog`]) need not implement it.
     fn rename(&self, _name: &str, _title: &str) -> Result<(), SessionError> {
-        Err(SessionError::Backend("该会话目录不支持重命名".into()))
+        Err(SessionError::Backend("this session catalog does not support renaming".into()))
     }
 
-    /// 删除会话（连同其日志与标题）。默认实现报错。
+    /// Delete a session (along with its log and title). The default implementation errors.
     fn delete(&self, _name: &str) -> Result<(), SessionError> {
-        Err(SessionError::Backend("该会话目录不支持删除".into()))
+        Err(SessionError::Backend("this session catalog does not support deletion".into()))
+    }
+
+    /// The directory holding the session logs (for cross-directory moves). The default returns `None` -- backends without
+    /// directory semantics (e.g. [`EmptySessionCatalog`]) need not implement it.
+    fn storage_dir(&self) -> Option<PathBuf> {
+        None
+    }
+
+    /// Move a session (along with its title) from the current directory to `dest_dir`.
+    ///
+    /// Used for "move a session to another project" -- each project has its own
+    /// `<root>/.shirley/sessions` directory, so a move is copying `<name>.jsonl` and
+    /// `<name>.title` into the target directory. If the target already has a same-named session it **errors**
+    /// (no silent overwrite, to avoid data loss). The default implementation errors.
+    fn move_to(&self, _name: &str, _dest_dir: &Path) -> Result<(), SessionError> {
+        Err(SessionError::Backend("this session catalog does not support moving".into()))
     }
 }
 
-/// 基于本地目录的会话目录：`<root>/.shirley/sessions/<name>.jsonl`。
+/// A local-directory-based session catalog: `<root>/.shirley/sessions/<name>.jsonl`.
 ///
-/// 每份会话就是一份独立的 JSONL 日志（沿用 [`JsonlSessionStore`]），
-/// 目录扫描即"列出会话"。名字默认取时间戳，天然有序且无需额外索引。
+/// Each session is an independent JSONL log (reusing [`JsonlSessionStore`]),
+/// and scanning the directory is "listing sessions". The name defaults to a timestamp, naturally ordered and needing no extra index.
 ///
-/// 标题另存为 sidecar `<name>.title`（纯文本）：日志只存 `Message`
-/// （`docs/session.md` 一.决策 1），把标题塞进消息流会破坏这条不变量。
+/// The title is stored separately as the sidecar `<name>.title` (plain text): the log stores only `Message`
+/// (`docs/session.md` section 1 decision 1); stuffing the title into the message stream would break this invariant.
 pub struct FileSessionCatalog {
     dir: PathBuf,
 }
 
 impl FileSessionCatalog {
-    /// 工作区根目录下的会话目录：`<root>/.shirley/sessions`。
+    /// The session directory under the workspace root: `<root>/.shirley/sessions`.
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
             dir: root.as_ref().join(".shirley").join("sessions"),
@@ -335,19 +351,19 @@ impl FileSessionCatalog {
         self.dir.join(format!("{name}.jsonl"))
     }
 
-    /// 标题 sidecar 路径：`<name>.title`（纯文本）。
+    /// Title sidecar path: `<name>.title` (plain text).
     fn title_path_for(&self, name: &str) -> PathBuf {
         self.dir.join(format!("{name}.title"))
     }
 
-    /// 读取会话标题（未命名返回 `None`）。
+    /// Read the session title (returns `None` when unnamed).
     fn read_title(&self, name: &str) -> Option<String> {
         let text = std::fs::read_to_string(self.title_path_for(name)).ok()?;
         let trimmed = text.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_owned())
     }
 
-    /// 写入会话标题：空串视为"清空标题"（删除 sidecar），非空则落盘。
+    /// Write the session title: an empty string means "clear the title" (delete the sidecar); non-empty is written.
     fn write_title(&self, name: &str, title: &str) -> Result<(), SessionError> {
         std::fs::create_dir_all(&self.dir)?;
         let title = title.trim();
@@ -359,13 +375,13 @@ impl FileSessionCatalog {
         Ok(())
     }
 
-    /// 打开指定名字的会话；文件不存在时 `JsonlSessionStore::open` 会创建它。
+    /// Open the session with the given name; `JsonlSessionStore::open` creates the file if it is absent.
     fn open_named(&self, name: &str) -> Result<Arc<dyn SessionStore>, SessionError> {
         let store = JsonlSessionStore::open(self.path_for(name))?;
         Ok(Arc::new(store))
     }
 
-    /// 生成一个不冲突的新会话名（时间戳，必要时追加序号）。
+    /// Generate a non-colliding new session name (timestamp, with a suffix appended if needed).
     fn fresh_name(&self) -> String {
         let base = chrono::Local::now().format("%Y%m%d-%H%M%S").to_string();
         if !self.path_for(&base).exists() {
@@ -380,10 +396,10 @@ impl FileSessionCatalog {
         base
     }
 
-    /// 迁移旧版单文件日志：`<root>/.shirley/session.jsonl` 若存在且当前
-    /// 尚无任何会话，则把它收编成第一份会话。只在启动时调用一次。
+    /// Migrate the old single-file log: if `<root>/.shirley/session.jsonl` exists and there is currently
+    /// no session yet, adopt it as the first session. Called only once at startup.
     ///
-    /// 这样升级到多会话布局不会丢掉用户已有的对话（旧版只有一份日志）。
+    /// This way upgrading to the multi-session layout does not lose the user's existing conversation (the old version had only one log).
     pub fn adopt_legacy(&self) -> Result<(), SessionError> {
         let legacy = self.dir.parent().map(|p| p.join("session.jsonl"));
         let Some(legacy) = legacy else {
@@ -392,7 +408,7 @@ impl FileSessionCatalog {
         if !legacy.exists() {
             return Ok(());
         }
-        // 已经有会话了就不再迁移，避免重复。
+        // If there are already sessions, do not migrate again, to avoid duplicates.
         if !self.list()?.is_empty() {
             return Ok(());
         }
@@ -407,7 +423,7 @@ impl SessionCatalog for FileSessionCatalog {
         let mut entries: Vec<(u64, SessionEntry)> = Vec::new();
         let read = match std::fs::read_dir(&self.dir) {
             Ok(read) => read,
-            // 目录还不存在 = 还没有任何会话，不是错误。
+            // The directory does not exist yet = no sessions yet, not an error.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
             Err(e) => return Err(e.into()),
         };
@@ -439,7 +455,7 @@ impl SessionCatalog for FileSessionCatalog {
                 },
             ));
         }
-        // 最近修改的排前面。
+        // Most recently modified first.
         entries.sort_by(|a, b| b.0.cmp(&a.0));
         Ok(entries.into_iter().map(|(_, e)| e).collect())
     }
@@ -456,7 +472,7 @@ impl SessionCatalog for FileSessionCatalog {
         &self,
         title: Option<&str>,
     ) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError> {
-        // 名字此刻就定（供 UI 显示），文件留到首次 append 才建。
+        // The name is decided now (for the UI to display); the file waits until the first append.
         let catalog = Arc::new(FileSessionCatalog {
             dir: self.dir.clone(),
         });
@@ -497,7 +513,7 @@ impl SessionCatalog for FileSessionCatalog {
 
     fn rename(&self, name: &str, title: &str) -> Result<(), SessionError> {
         if !self.path_for(name).exists() {
-            return Err(SessionError::Backend(format!("会话不存在：{name}")));
+            return Err(SessionError::Backend(format!("session does not exist: {name}")));
         }
         self.write_title(name, title)
     }
@@ -505,16 +521,39 @@ impl SessionCatalog for FileSessionCatalog {
     fn delete(&self, name: &str) -> Result<(), SessionError> {
         let log = self.path_for(name);
         if !log.exists() {
-            return Err(SessionError::Backend(format!("会话不存在：{name}")));
+            return Err(SessionError::Backend(format!("session does not exist: {name}")));
         }
         std::fs::remove_file(&log)?;
-        // 标题 sidecar 附属于日志：日志没了它也就没意义，一并删除（best-effort）。
+        // The title sidecar is subordinate to the log: without the log it is meaningless, so delete it too (best-effort).
         let _ = std::fs::remove_file(self.title_path_for(name));
+        Ok(())
+    }
+
+    fn storage_dir(&self) -> Option<PathBuf> {
+        Some(self.dir.clone())
+    }
+
+    fn move_to(&self, name: &str, dest_dir: &Path) -> Result<(), SessionError> {
+        let log = self.path_for(name);
+        if !log.exists() {
+            return Err(SessionError::Backend(format!("session does not exist: {name}")));
+        }
+        let dest_log = dest_dir.join(format!("{name}.jsonl"));
+        if dest_log.exists() {
+            return Err(SessionError::Backend(format!("the target project already has a session with this name: {name}")));
+        }
+        std::fs::create_dir_all(dest_dir)?;
+        // Move the log first (source of truth), then the title sidecar (subordinate; missing is not an error).
+        std::fs::rename(&log, &dest_log)?;
+        let title = self.title_path_for(name);
+        if title.exists() {
+            let _ = std::fs::rename(&title, dest_dir.join(format!("{name}.title")));
+        }
         Ok(())
     }
 }
 
-/// 读取会话的预览（首条用户消息，截断 40 字符）与用户轮数。读不到返回 `("", 0)`。
+/// Read a session's preview (first user message, truncated to 40 chars) and user turn count. Returns `("", 0)` on failure.
 fn summary_of(path: &Path) -> (String, usize) {
     let Ok(file) = File::open(path) else {
         return (String::new(), 0);
@@ -537,7 +576,7 @@ fn summary_of(path: &Path) -> (String, usize) {
     (preview, turns)
 }
 
-/// 按字符数截断（中文按字，避免按字节切碎 UTF-8）。
+/// Truncate by character count (CJK counted per char, avoiding splitting UTF-8 by bytes).
 fn truncate_chars(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         return text.to_owned();
@@ -547,11 +586,11 @@ fn truncate_chars(text: &str, max: usize) -> String {
     out
 }
 
-/// 取会话里的**首条用户消息**正文（供自动标题当输入）。
+/// Take the body of the **first user message** in a session (as input for auto-titling).
 ///
-/// 遍历顺序即消息顺序；`ContextSummary` / assistant / tool 消息跳过。没有用户
-/// 消息时返回 `None`。正文按字符截断（[`AUTO_TITLE_INPUT_CHARS`]），避免把整段
-/// 长输入喂给标题模型。
+/// Iteration order is message order; `ContextSummary` / assistant / tool messages are skipped. When there is no user
+/// message it returns `None`. The body is truncated by character ([`AUTO_TITLE_INPUT_CHARS`]), to avoid feeding the whole
+/// long input to the titling model.
 pub fn first_user_message(messages: &[Message]) -> Option<String> {
     messages.iter().find_map(|message| match message {
         Message::User { content } => Some(truncate_chars(content, AUTO_TITLE_INPUT_CHARS)),
@@ -559,18 +598,18 @@ pub fn first_user_message(messages: &[Message]) -> Option<String> {
     })
 }
 
-/// 自动标题的一次性补全提示词：让模型把首条用户消息概括成短标题。
+/// The one-shot completion prompt for auto-titling: have the model summarize the first user message into a short title.
 ///
-/// 只输出标题本身——清洗交给 [`sanitize_title`]（模型偶尔会带引号 / 前缀）。
+/// Output only the title itself -- cleaning is left to [`sanitize_title`] (the model occasionally adds quotes / prefixes).
 pub fn title_prompt(first_user_message: &str) -> String {
     format!(
-        "请阅读用户的第一条消息，用不超过 20 个字符概括这个会话的主题，作为会话标题。\
-只输出标题本身：不要引号、不要标点、不要解释、不要换行。\n\n用户的第一条消息：\n{first_user_message}"
+        "Read the user's first message and summarize the topic of this session in no more than 20 characters, as the session title.\
+Output only the title itself: no quotes, no punctuation, no explanation, no newlines.\n\nThe user's first message:\n{first_user_message}"
     )
 }
 
-/// 清洗模型返回的标题：取首个非空行、去掉包裹的引号 / 反引号与首尾空白、
-/// 折叠内部空白、截断到 [`AUTO_TITLE_MAX_CHARS`]。清洗后为空返回 `None`。
+/// Clean the title returned by the model: take the first non-empty line, strip wrapping quotes / backticks and surrounding whitespace,
+/// collapse internal whitespace, truncate to [`AUTO_TITLE_MAX_CHARS`]. Returns `None` if empty after cleaning.
 pub fn sanitize_title(raw: &str) -> Option<String> {
     let line = raw
         .lines()
@@ -586,15 +625,15 @@ pub fn sanitize_title(raw: &str) -> Option<String> {
     Some(truncate_chars(&collapsed, AUTO_TITLE_MAX_CHARS))
 }
 
-/// 自动标题的输入截断（字符数）。
+/// Auto-title input truncation (character count).
 const AUTO_TITLE_INPUT_CHARS: usize = 500;
-/// 自动标题的输出截断（字符数）——与 `summary_of` 的预览长度同量级。
+/// Auto-title output truncation (character count) -- same order of magnitude as `summary_of`'s preview length.
 const AUTO_TITLE_MAX_CHARS: usize = 40;
 
-/// 空会话目录：`App::new` 的默认值，供不关心会话切换的测试与默认构造使用。
-/// 空会话目录：`App::new` 的默认值，供不关心会话切换的测试与默认构造使用。
+/// Empty session catalog: the default for `App::new`, for tests and default construction that do not care about session switching.
+/// Empty session catalog: the default for `App::new`, for tests and default construction that do not care about session switching.
 ///
-/// 列出为空、打开 / 新建都报错——不落盘、也不产生副作用。
+/// Lists as empty; open / create both error -- no disk writes, no side effects.
 #[allow(dead_code)]
 pub struct EmptySessionCatalog;
 
@@ -604,11 +643,11 @@ impl SessionCatalog for EmptySessionCatalog {
     }
 
     fn open(&self, _name: &str) -> Result<Arc<dyn SessionStore>, SessionError> {
-        Err(SessionError::Backend("空会话目录不支持打开会话".into()))
+        Err(SessionError::Backend("the empty session catalog does not support opening sessions".into()))
     }
 
     fn create(&self) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError> {
-        Err(SessionError::Backend("空会话目录不支持新建会话".into()))
+        Err(SessionError::Backend("the empty session catalog does not support creating sessions".into()))
     }
 }
 
@@ -635,7 +674,7 @@ mod tests {
             store.append(&user("a")).unwrap();
             store.append(&user("b")).unwrap();
         }
-        // 新句柄读回——模拟进程重启。
+        // Read back via a new handle -- simulating a process restart.
         let store = JsonlSessionStore::open(&path).unwrap();
         let log = store.load().unwrap();
         assert_eq!(log.len(), 2);
@@ -654,7 +693,7 @@ mod tests {
             .unwrap();
         match &store.load().unwrap()[0] {
             Message::ContextSummary { content } => assert!(content.contains("current_goal")),
-            other => panic!("应为 ContextSummary，实际 {other:?}"),
+            other => panic!("expected ContextSummary, got {other:?}"),
         }
         let _ = std::fs::remove_file(&path);
     }
@@ -668,7 +707,7 @@ mod tests {
             store.append(&user(c)).unwrap();
         }
         store.truncate(2).unwrap();
-        // 重开句柄确认落盘。
+        // Reopen the handle to confirm it persisted.
         let reopened = JsonlSessionStore::open(&path).unwrap();
         assert_eq!(reopened.load().unwrap().len(), 2);
         let _ = std::fs::remove_file(&path);
@@ -694,7 +733,7 @@ mod tests {
             store.append(&user(c)).unwrap();
         }
         store.truncate(1).unwrap();
-        // 截断后仍能继续追加（句柄已重开）。
+        // Appending still works after truncation (the handle was reopened).
         store.append(&user("d")).unwrap();
         let log = store.load().unwrap();
         assert_eq!(log.len(), 2);
@@ -719,11 +758,11 @@ mod tests {
         let catalog = FileSessionCatalog::new(&dir);
         assert!(catalog.list().unwrap().is_empty());
         let (entry, store) = catalog.create().unwrap();
-        store.append(&user("你好")).unwrap();
+        store.append(&user("hello")).unwrap();
         let listed = catalog.list().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, entry.name);
-        assert_eq!(listed[0].preview, "你好");
+        assert_eq!(listed[0].preview, "hello");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -735,7 +774,7 @@ mod tests {
         sa.append(&user("a-msg")).unwrap();
         let (_b, sb) = catalog.create().unwrap();
         sb.append(&user("b-msg")).unwrap();
-        // 打开 a：只看到 a 的内容，b 的内容不串。
+        // Open a: only a's content is visible, b's content does not leak.
         let reopened = catalog.open(&a.name).unwrap();
         let log = reopened.load().unwrap();
         assert_eq!(log.len(), 1);
@@ -751,7 +790,7 @@ mod tests {
         let long = "字".repeat(80);
         store.append(&user(&long)).unwrap();
         let preview = &catalog.list().unwrap()[0].preview;
-        // 40 个字符 + 省略号。
+        // 40 characters + an ellipsis.
         assert_eq!(preview.chars().count(), 41);
         assert!(preview.ends_with('…'));
         let _ = std::fs::remove_dir_all(&dir);
@@ -765,17 +804,17 @@ mod tests {
         let legacy = shirley.join("session.jsonl");
         std::fs::write(
             &legacy,
-            format!("{}\n", serde_json::to_string(&user("旧对话")).unwrap()),
+            format!("{}\n", serde_json::to_string(&user("old conversation")).unwrap()),
         )
         .unwrap();
         let catalog = FileSessionCatalog::new(&dir);
         catalog.adopt_legacy().unwrap();
-        // 旧文件被搬进 sessions 目录，仍能读回。
+        // The old file is moved into the sessions directory and can still be read back.
         assert!(!legacy.exists());
         let listed = catalog.list().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, "legacy");
-        assert_eq!(listed[0].preview, "旧对话");
+        assert_eq!(listed[0].preview, "old conversation");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -783,22 +822,22 @@ mod tests {
     fn catalog_create_named_sets_title_and_counts_turns() {
         let dir = tmp_dir("named");
         let catalog = FileSessionCatalog::new(&dir);
-        let (entry, store) = catalog.create_named(Some("迁移任务")).unwrap();
-        assert_eq!(entry.label, "迁移任务");
-        store.append(&user("第一轮")).unwrap();
+        let (entry, store) = catalog.create_named(Some("migration task")).unwrap();
+        assert_eq!(entry.label, "migration task");
+        store.append(&user("first turn")).unwrap();
         store.append(&Message::Assistant {
-            content: Some("回复".into()),
+            content: Some("reply".into()),
             reasoning_content: None,
             tool_calls: Vec::new(),
         })
         .unwrap();
-        store.append(&user("第二轮")).unwrap();
+        store.append(&user("second turn")).unwrap();
         let listed = catalog.list().unwrap();
         assert_eq!(listed.len(), 1);
-        // 标题持久化在 sidecar，name 仍是时间戳（不改标识）。
-        assert_eq!(listed[0].label, "迁移任务");
+        // The title is persisted in the sidecar; the name is still a timestamp (identity unchanged).
+        assert_eq!(listed[0].label, "migration task");
         assert_eq!(listed[0].name, entry.name);
-        assert_eq!(listed[0].preview, "第一轮");
+        assert_eq!(listed[0].preview, "first turn");
         assert_eq!(listed[0].turns, 2);
         assert!(listed[0].modified_ms > 0);
         let _ = std::fs::remove_dir_all(&dir);
@@ -809,14 +848,14 @@ mod tests {
         let dir = tmp_dir("rename");
         let catalog = FileSessionCatalog::new(&dir);
         let (entry, store) = catalog.create().unwrap();
-        store.append(&user("内容")).unwrap();
-        catalog.rename(&entry.name, "新名字").unwrap();
+        store.append(&user("content")).unwrap();
+        catalog.rename(&entry.name, "new name").unwrap();
         let listed = catalog.list().unwrap();
-        assert_eq!(listed[0].label, "新名字");
-        // 标识与内容不变（rename 不动 transcript）。
+        assert_eq!(listed[0].label, "new name");
+        // Identity and content unchanged (rename does not touch the transcript).
         assert_eq!(listed[0].name, entry.name);
-        assert_eq!(listed[0].preview, "内容");
-        // 重开仍读到同样的日志。
+        assert_eq!(listed[0].preview, "content");
+        // Reopening still reads the same log.
         assert_eq!(catalog.open(&entry.name).unwrap().load().unwrap().len(), 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -825,12 +864,12 @@ mod tests {
     fn catalog_delete_removes_log_and_title() {
         let dir = tmp_dir("delete");
         let catalog = FileSessionCatalog::new(&dir);
-        let (entry, store) = catalog.create_named(Some("待删")).unwrap();
+        let (entry, store) = catalog.create_named(Some("to delete")).unwrap();
         store.append(&user("x")).unwrap();
         assert_eq!(catalog.list().unwrap().len(), 1);
         catalog.delete(&entry.name).unwrap();
         assert!(catalog.list().unwrap().is_empty());
-        // 再删报错（已不存在）。
+        // Deleting again errors (already gone).
         assert!(catalog.delete(&entry.name).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -840,20 +879,20 @@ mod tests {
         let dir = tmp_dir("lazy");
         let catalog = FileSessionCatalog::new(&dir);
         let (entry, store) = catalog.create_lazy(None).unwrap();
-        // 构造后：名字已定，但目录里没有任何文件（不落盘）。
+        // After construction: the name is set, but there is no file in the directory (nothing written to disk).
         assert!(!entry.name.is_empty());
         assert!(catalog.list().unwrap().is_empty());
         assert!(!catalog.path_for(&entry.name).exists());
-        // 物化前 load 视为空日志。
+        // Before materialization, load is treated as an empty log.
         assert!(store.load().unwrap().is_empty());
 
-        // 首次 append 才真正建文件。
-        store.append(&user("第一条")).unwrap();
+        // Only the first append actually creates the file.
+        store.append(&user("first entry")).unwrap();
         assert!(catalog.path_for(&entry.name).exists());
         let listed = catalog.list().unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].name, entry.name);
-        assert_eq!(listed[0].preview, "第一条");
+        assert_eq!(listed[0].preview, "first entry");
         assert_eq!(listed[0].turns, 1);
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -862,14 +901,14 @@ mod tests {
     fn create_lazy_with_title_writes_sidecar_on_materialize() {
         let dir = tmp_dir("lazy_title");
         let catalog = FileSessionCatalog::new(&dir);
-        let (entry, store) = catalog.create_lazy(Some("迁移任务")).unwrap();
-        assert_eq!(entry.label, "迁移任务");
-        // 物化前标题 sidecar 也不存在。
+        let (entry, store) = catalog.create_lazy(Some("migration task")).unwrap();
+        assert_eq!(entry.label, "migration task");
+        // Before materialization the title sidecar does not exist either.
         assert!(!catalog.title_path_for(&entry.name).exists());
-        store.append(&user("干活")).unwrap();
+        store.append(&user("get to work")).unwrap();
         let listed = catalog.list().unwrap();
-        assert_eq!(listed[0].label, "迁移任务");
-        assert_eq!(listed[0].preview, "干活");
+        assert_eq!(listed[0].label, "migration task");
+        assert_eq!(listed[0].preview, "get to work");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -881,7 +920,7 @@ mod tests {
         for c in ["a", "b", "c"] {
             store.append(&user(c)).unwrap();
         }
-        // 物化后行为与普通会话一致：截尾 + 继续追加。
+        // After materialization the behavior matches a normal session: truncate-tail + keep appending.
         store.truncate(2).unwrap();
         store.append(&user("d")).unwrap();
         let reopened = catalog.open(&entry.name).unwrap();
@@ -905,24 +944,24 @@ mod tests {
                 tool_calls: Vec::new(),
             },
             Message::User {
-                content: "修复登录页的样式问题".into(),
+                content: "fix the login page styling".into(),
             },
             Message::User {
-                content: "第二条".into(),
+                content: "second message".into(),
             },
         ];
         assert_eq!(
             first_user_message(&messages).as_deref(),
-            Some("修复登录页的样式问题")
+            Some("fix the login page styling")
         );
-        // 无用户消息 → None。
+        // No user message -> None.
         assert!(first_user_message(&[Message::Assistant {
             content: Some("x".into()),
             reasoning_content: None,
             tool_calls: Vec::new(),
         }])
         .is_none());
-        // 超长输入按字符截断并带省略号。
+        // Over-long input is truncated by character with an ellipsis.
         let long = "字".repeat(AUTO_TITLE_INPUT_CHARS + 50);
         let got = first_user_message(&[Message::User { content: long }]).unwrap();
         assert!(got.ends_with('…'));
@@ -931,16 +970,16 @@ mod tests {
 
     #[test]
     fn sanitize_title_strips_quotes_and_whitespace() {
-        assert_eq!(sanitize_title("  “修复登录页样式”  ").as_deref(), Some("修复登录页样式"));
+        assert_eq!(sanitize_title("  “fix login page styles”  ").as_deref(), Some("fix login page styles"));
         assert_eq!(sanitize_title("`fix login`").as_deref(), Some("fix login"));
-        // 取首个非空行。
-        assert_eq!(sanitize_title("\n\n标题一行\n第二行").as_deref(), Some("标题一行"));
-        // 折叠内部空白。
+        // Take the first non-empty line.
+        assert_eq!(sanitize_title("\n\nfirst title line\nsecond line").as_deref(), Some("first title line"));
+        // Collapse internal whitespace.
         assert_eq!(sanitize_title("a   b\tc").as_deref(), Some("a b c"));
-        // 清洗后为空 → None。
+        // Empty after cleaning -> None.
         assert_eq!(sanitize_title("   \n  \n"), None);
         assert_eq!(sanitize_title("\"\""), None);
-        // 超长截断。
+        // Over-long truncation.
         let long = "字".repeat(AUTO_TITLE_MAX_CHARS + 10);
         let got = sanitize_title(&long).unwrap();
         assert!(got.ends_with('…'));

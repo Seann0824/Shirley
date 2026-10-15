@@ -1,84 +1,84 @@
-**Shirley 技术方案 · 错误处理统一化（执行计划）**
+**Shirley technical design · Error-handling unification (execution plan)**
 
-本文档记录"统一集中处理 Agent SDK 错误"这项工作的已完成部分与后续任务清单。
-它承接 `runtime-hardening.md` 第二节（结构化错误）与 `README.md` 的"失败要可分类"原则，
-把设计意图落成可核对的状态。
-
----
-
-**一、为什么要做**
-
-`docs/README.md` 里写的原则是"失败要可分类"，但当前代码里没有任何一处真的做到了：
-
-- `AdapterError` 只有 `RequestError(String)` / `ResponseError(String)` 两个变体，HTTP 状态码在 `format!` 里被拼成字符串后就消失了，429 和 400 长得一模一样。
-- `AgentError` 手写 `Display`，其中 Adapter 分支用 `{error:?}`，代码里自己标了 `todo: 这里应该格式化一下错误`。
-- `ToolError` 没有实现 `std::error::Error`，无法参与 `?` 传播与错误链。
-- `WorkspaceError` 既没有 `Display` 也没有 `Error`，还从 `futures::io` 引入了其实等价于 `std::io` 的类型。
-- `adapter::codec` 与 `invoke` 的流式分支用 `todo!()` 表达"协议未实现"，切协议会让宿主进程 panic。
-
-结论：**重试、降级、取消这三件事都依赖"这个错误是哪一类"，而当前没有任何一个错误类型携带这个信息。**
-所以结构化错误必须排在功能扩张之前。
+This document records the completed parts and the follow-up task list for the work of "uniformly and centrally handling Agent SDK errors".
+It follows section 2 of `runtime-hardening.md` (structured errors) and the "failures must be classifiable" principle in `README.md`,
+turning the design intent into a checkable state.
 
 ---
 
-**二、设计结论（与 sandbox 的关系）**
+**1. Why do this**
 
-最初的假设是"照 sandbox 的错误那样处理"。核对后确认：sandbox 的**模式**可以借鉴，但**不能照抄**。
+The principle written in `docs/README.md` is "failures must be classifiable", but currently no place in the code actually achieves it:
 
-sandbox 是叶子模块，只面对 `std`，所以它可以把自己的错误定义在自己模块里、扁平、简单。
-而 Agent SDK 是分层的，错误需要自下而上汇聚。照抄的结果会是一个巨大的扁平 enum，反而更难维护。
+- `AdapterError` only has two variants, `RequestError(String)` / `ResponseError(String)`; the HTTP status code is concatenated into a string in `format!` and then disappears, so a 429 and a 400 look identical.
+- `AgentError` hand-writes `Display`, where the Adapter branch uses `{error:?}`, and the code itself notes `todo: this should format the error`.
+- `ToolError` does not implement `std::error::Error`, so it cannot participate in `?` propagation and error chains.
+- `WorkspaceError` has neither `Display` nor `Error`, and even imports from `futures::io` a type that is actually equivalent to `std::io`.
+- The streaming branch of `adapter::codec` and `invoke` uses `todo!()` to express "protocol not implemented", so switching protocols panics the host process.
 
-因此从 sandbox 抽出的是四条契约，而非它的代码：
-
-1. 错误定义在**拥有它的模块里**，不集中到一个 `errors.rs`。
-2. 扁平 enum，变体带**结构化数据**，不是全 String。
-3. 实现 `Display` + `std::error::Error` + `From`，让 `?` 能自动转换。
-4. **错误通道与结果通道分开**：命令跑挂了走 `SandboxOutput.exit_code`，沙盒自己坏了才走 `Err`。
-
-最终落地形状是"分层定义 + 统一契约 + 顶层收敛"。
+Conclusion: **the three things -- retry, degradation, and cancellation -- all depend on "which class this error belongs to", and currently no error type carries that information.**
+So structured errors must come before feature expansion.
 
 ---
 
-**三、第一步已完成：错误契约与结构化错误**
+**2. Design conclusion (relationship with sandbox)**
 
-**3.1 交付物**
+The initial assumption was "handle it like sandbox's errors". After checking, it was confirmed that sandbox's **pattern** can be borrowed, but **not copied verbatim**.
 
-新增 `crates/shirley-agent-sdk/src/error.rs`：
+Sandbox is a leaf module, facing only `std`, so it can define its own errors in its own module, flat and simple.
+But the Agent SDK is layered, and errors need to converge bottom-up. Copying would result in a giant flat enum, which is actually harder to maintain.
 
-- `ErrorKind`：7 个稳定分类，用于日志 / 指标 / 审计，不随文案变化。
+So what we extract from sandbox is four contracts, not its code:
+
+1. Errors are defined **in the module that owns them**, not centralized into an `errors.rs`.
+2. A flat enum, variants carry **structured data**, not all String.
+3. Implement `Display` + `std::error::Error` + `From`, so `?` can convert automatically.
+4. **The error channel and the result channel are separate**: a command that fails goes through `SandboxOutput.exit_code`; only the sandbox itself breaking goes through `Err`.
+
+The final landing shape is "layered definition + unified contract + top-level convergence".
+
+---
+
+**3. Step one complete: error contract and structured errors**
+
+**3.1 Deliverables**
+
+Added `crates/shirley-agent-sdk/src/error.rs`:
+
+- `ErrorKind`: 7 stable classifications, used for logs / metrics / auditing, not changing with the wording.
   - `Transport` / `RateLimited` / `ServerError` / `BadRequest` / `Unsupported` / `ToolFailure` / `Internal`
-- `ErrorKind::is_retryable()`：分类到可重试性的唯一映射。
-  - 可重试：`Transport`、`RateLimited`、`ServerError`
-  - 不可重试：`BadRequest`、`Unsupported`、`ToolFailure`、`Internal`
-- `ErrorKind` 的 `Display`：给每个分类一句稳定中文文案。
-- `SdkError` trait：`kind()` 必须实现，`is_retryable()` 默认由 `kind()` 推导，具体类型可覆盖。
+- `ErrorKind::is_retryable()`: the single mapping from classification to retryability.
+  - retryable: `Transport`, `RateLimited`, `ServerError`
+  - not retryable: `BadRequest`, `Unsupported`, `ToolFailure`, `Internal`
+- `ErrorKind`'s `Display`: one stable sentence for each classification.
+- `SdkError` trait: `kind()` must be implemented, `is_retryable()` is derived from `kind()` by default, and a concrete type may override it.
 
-新增依赖：`crates/shirley-agent-sdk/Cargo.toml` 显式加入 `thiserror = "2.0.21"`。
-（该版本此前已被其他 crate 间接引入 `Cargo.lock`，但 SDK 自己没声明。）
+New dependency: `crates/shirley-agent-sdk/Cargo.toml` explicitly adds `thiserror = "2.0.21"`.
+(This version had already been pulled into `Cargo.lock` indirectly by other crates, but the SDK itself had not declared it.)
 
-**3.2 各层改造**
+**3.2 Changes per layer**
 
-| 类型 | 文件 | 变化 |
+| Type | File | Change |
 | --- | --- | --- |
-| `AdapterError` | `adapter/mod.rs` | 重写为 `Transport(#[source] reqwest::Error)` / `Http{status, body}` / `Decode` / `Encode` / `UnsupportedProtocol`；`thiserror` 派生；实现 `SdkError` |
-| `AgentError` | `runtime/mod.rs` | 变体改名并 `#[from]` 收敛 Tool / Adapter / Sandbox / Workspace；删除手写 `Display`；实现 `SdkError` |
-| `ToolError` | `tool/mod.rs` | 补上缺失的 `std::error::Error`；实现 `SdkError`；构造点改名 |
-| `SandboxError` | `sandbox/backend/mod.rs` | 实现 `SdkError`（`BackendUnavailable` / `Unsupported` → `Unsupported`） |
-| `WorkspaceError` | `workspace/mod.rs` | 改为 `thiserror` 派生，补 `Display` / `Error`；`futures::io` 换回 `std::io`；实现 `SdkError` |
+| `AdapterError` | `adapter/mod.rs` | rewritten as `Transport(#[source] reqwest::Error)` / `Http{status, body}` / `Decode` / `Encode` / `UnsupportedProtocol`; `thiserror` derived; implements `SdkError` |
+| `AgentError` | `runtime/mod.rs` | variants renamed and `#[from]` converges Tool / Adapter / Sandbox / Workspace; hand-written `Display` removed; implements `SdkError` |
+| `ToolError` | `tool/mod.rs` | adds the missing `std::error::Error`; implements `SdkError`; construction sites renamed |
+| `SandboxError` | `sandbox/backend/mod.rs` | implements `SdkError` (`BackendUnavailable` / `Unsupported` -> `Unsupported`) |
+| `WorkspaceError` | `workspace/mod.rs` | changed to a `thiserror` derive, adds `Display` / `Error`; `futures::io` switched back to `std::io`; implements `SdkError` |
 
-**3.3 顺带清掉的三个 panic 点**
+**3.3 Three panic points cleared along the way**
 
-这三个都在 `adapter` 层，原本用 `todo!()` 表达"未实现"：
+These three are all in the `adapter` layer, originally using `todo!()` to express "not implemented":
 
-1. `codec` 的 `_ => todo!()` → `Err(AdapterError::UnsupportedProtocol { protocol })`
-2. `invoke` 流式分支的 `_ => todo!()` → 同上
-3. `chat_completions` SSE 解析中 `id:` 行的 `todo!()` → 忽略该行，注释写明等实现断线重连时再消费 `last_event_id`
+1. `codec`'s `_ => todo!()` -> `Err(AdapterError::UnsupportedProtocol { protocol })`
+2. `invoke`'s streaming branch `_ => todo!()` -> same as above
+3. `todo!()` on the `id:` line in `chat_completions` SSE parsing -> ignore the line, with a comment noting that `last_event_id` will be consumed when disconnect-reconnect is implemented
 
-依据是 `runtime-hardening.md` 第七节：**SDK 里任何未实现路径都必须返回 `Err`，绝不在 SDK 里 panic。**
+The basis is section 7 of `runtime-hardening.md`: **any unimplemented path in the SDK must return `Err`, and must never panic in the SDK.**
 
-**3.4 一个容易被忽略的关键修复：HTTP 状态码不再丢失**
+**3.4 An easily overlooked key fix: the HTTP status code is no longer lost**
 
-改造前：
+Before the change:
 
 ```rust
 if !status.is_success() {
@@ -86,142 +86,142 @@ if !status.is_success() {
 }
 ```
 
-状态码被格式化进字符串后，调用方拿到的只是一句话，无法区分 429（该退避重试）和 400（重试无意义）。
+After the status code is formatted into a string, the caller gets only a sentence and cannot distinguish 429 (should back off and retry) from 400 (retrying is meaningless).
 
-改造后抽出 `ensure_success(response)` 统一处理，保留 `status: u16` 与 `body: String` 两个字段。
-之所以抽成独立函数，是因为 `reqwest::Response` 只能被消费一次，"先检查状态、后读 body"必须在同一处完成，
-而流式与非流式两条分支都需要这段逻辑。
+After the change, `ensure_success(response)` is extracted for unified handling, keeping the two fields `status: u16` and `body: String`.
+The reason to extract it into a separate function is that `reqwest::Response` can only be consumed once, and "check the status first, then read the body" must be done in the same place,
+and both the streaming and non-streaming branches need this logic.
 
-**3.5 公开导出**
+**3.5 Public exports**
 
-`lib.rs` 增加了 `pub mod error`、`pub mod workspace`，以及 `AdapterError`、`ErrorKind`、`SdkError` 的 re-export。
+`lib.rs` added `pub mod error`, `pub mod workspace`, and re-exports of `AdapterError`, `ErrorKind`, `SdkError`.
 
-其中 `AdapterError` 与 `workspace` 的导出是 Rust 私有类型泄漏规则逼出来的：
-`AgentError::Adapter` 是公开变体，它包裹的类型如果不公开，下游就无法匹配。
-若后续希望收窄公共 API，可以考虑给 `AgentError` 提供不透明访问器来替代直接暴露变体。
+The exports of `AdapterError` and `workspace` were forced out by Rust's private-type-leak rules:
+`AgentError::Adapter` is a public variant, and if the type it wraps is not public, downstream cannot match on it.
+If the public API is to be narrowed later, consider giving `AgentError` opaque accessors instead of exposing the variants directly.
 
-**3.6 展示文案格式统一**
+**3.6 Display format unified**
 
-四层错误原本用了两套 convention：`ToolError` / `SandboxError` 手写 `Display`、带 `[前缀]:`；
-`AdapterError` / `WorkspaceError` 走 thiserror、裸文案。现统一为**一套机制 + 一套格式**：
+The four error layers originally used two conventions: `ToolError` / `SandboxError` hand-wrote `Display` with `[prefix]:`;
+`AdapterError` / `WorkspaceError` went through thiserror with bare wording. Now unified to **one mechanism + one format**:
 
-- 机制：全部走 thiserror 派生，删掉两段手写 `Display` match（`SandboxError` 的手写 `From<io::Error>` 也由 `#[from]` 取代）。
-- 格式：全部为 `[前缀]: 详情`，`AdapterError` / `WorkspaceError` 补上方括号。
+- Mechanism: all go through the thiserror derive, and the two hand-written `Display` matches are deleted (`SandboxError`'s hand-written `From<io::Error>` is also replaced by `#[from]`).
+- Format: all are `[prefix]: detail`, with square brackets added to `AdapterError` / `WorkspaceError`.
 
-前缀**留在各变体旁，不从 `ErrorKind` 推导**。原因是映射是多对一的：
-`ToolError::NotFoundError` 与 `ArgumentsError` 同属 `BadRequest`，
-`SandboxError::BackendUnavailable` 与 `Unsupported` 同属 `Unsupported`。
-若把前缀挂到 `ErrorKind`，这些变体会渲染成同一句话，模型就分不清
-"工具不存在"（换工具）与"参数写错了"（改参数）——后者它自己能修。
-`ErrorKind` 是粗粒度的重试决策轴，前缀是细粒度的人类标签，两者正交。
+The prefix **stays next to each variant, and is not derived from `ErrorKind`**. The reason is that the mapping is many-to-one:
+`ToolError::NotFoundError` and `ArgumentsError` both belong to `BadRequest`,
+and `SandboxError::BackendUnavailable` and `Unsupported` both belong to `Unsupported`.
+If the prefix were attached to `ErrorKind`, these variants would render as the same sentence, and the model could not distinguish
+"the tool does not exist" (switch tools) from "the arguments are wrong" (change the arguments) -- the latter it can fix itself.
+`ErrorKind` is a coarse-grained retry-decision axis, and the prefix is a fine-grained human label; the two are orthogonal.
 
-**3.7 测试**
+**3.7 Tests**
 
-新增 `crates/shirley-agent-sdk/tests/error_contract.rs`，6 个用例，锁的是**分类语义而非文案**：
+Added `crates/shirley-agent-sdk/tests/error_contract.rs`, 6 cases, locking **classification semantics rather than wording**:
 
-- `http_status_maps_to_kind`：429→`RateLimited`、5xx→`ServerError`、4xx→`BadRequest`
-- `unsupported_protocol_is_error_not_panic`：未实现协议返回 `Err`
-- `decode_and_encode_are_not_retryable`：解析 / 编码失败不可重试
-- `retryable_kinds_are_stable`：7 个分类的可重试性行为
-- `every_kind_has_display_text`：每个分类都有展示文案
-- `error_source_chain_is_preserved`：`Http` 的展示文案包含状态码与错误体
+- `http_status_maps_to_kind`: 429 -> `RateLimited`, 5xx -> `ServerError`, 4xx -> `BadRequest`
+- `unsupported_protocol_is_error_not_panic`: an unimplemented protocol returns `Err`
+- `decode_and_encode_are_not_retryable`: parse / encode failures are not retryable
+- `retryable_kinds_are_stable`: the retryability behavior of the 7 classifications
+- `every_kind_has_display_text`: every classification has display text
+- `error_source_chain_is_preserved`: the display text of `Http` contains the status code and the error body
 
-**3.8 验收结果**
+**3.8 Acceptance results**
 
-- `cargo check --workspace` 通过，无新增 warning（SDK 侧 11 条，全部是既有的 dead_code）。
-- `cargo test -p shirley-agent-sdk`：`error_contract` 6/6、`sandbox_smoke` 6/6、doc test 1/1。
-- 四层错误（`Tool` / `Adapter` / `Sandbox` / `Workspace`）共 11 个变体的 `Display` 输出已逐一核对，全部为 `[前缀]: 详情` 格式。
-- `cargo test --workspace` 有 1 个失败：`tools::bash::tests::reports_sandbox_degradation`。
-  **该失败在改动前即存在**（已用 `git stash` 在干净代码上复现），原因是 `src/tools/bash.rs` 的 `render()`
-  中降级提示被注释掉了，而测试仍在断言它。与本次改动无关，未处理。
+- `cargo check --workspace` passes, with no new warnings (11 on the SDK side, all pre-existing dead_code).
+- `cargo test -p shirley-agent-sdk`: `error_contract` 6/6, `sandbox_smoke` 6/6, doc test 1/1.
+- The `Display` output of the 11 variants across the four error layers (`Tool` / `Adapter` / `Sandbox` / `Workspace`) was checked one by one, all in the `[prefix]: detail` format.
+- `cargo test --workspace` has 1 failure: `tools::bash::tests::reports_sandbox_degradation`.
+  **This failure existed before the change** (reproduced on clean code with `git stash`); the cause is that the degradation hint in `render()`
+  of `src/tools/bash.rs` is commented out while the test still asserts it. Unrelated to this change, not handled.
 
-**3.9 明确未做**
+**3.9 Explicitly not done**
 
-- `Tool` trait 的签名没有改（见后续任务 T2），宏里仍然是 `map_err(AgentError::Tool)?` 硬转。
-- 重试、退避、超时接线没有做（只提供了 `is_retryable` 这个决策依据）。
-- 错误通道与结果通道仍然混在一起（见 T4）。
-
----
-
-**四、后续任务**
-
-按依赖顺序排列。T1 是其余任务的前置——重试、降级、取消全都要问 `is_retryable`。
-
-**T1 · 接线 `request_timeout` 与 `reqwest::Client` 复用**（P0，独立）
-
-- 现状：`runtime/mod.rs` 的 `run_stream` 每次调用 `reqwest::Client::new()`，连接池不复用；`ModelConfig.request_timeout` 已定义但从未使用。
-- 做法：`Agent` 持有一个 `reqwest::Client`，在 builder 阶段用 `request_timeout` 配置；`invoke` 改为接收 `&Client`。
-- 验收：慢接口能触发超时；连续多轮 `run` 复用同一连接池。
-
-**T2 · `Tool` trait 签名归位**（P0，破坏面最大，放最后做）
-
-- 现状：`ToolFuture = Future<Output = Result<Value, AgentError>>`，但工具作者写的是 `Result<String, ToolError>`，宏里 `map_err(::shirley_agent_sdk::AgentError::ToolError)?` 硬转。结果是工具作者被迫感知 `AgentError`——而它是 SDK 边界类型，不是工具该看到的东西。
-- 做法：`ToolFuture` 改为 `Result<serde_json::Value, ToolError>`；宏里删掉 `map_err`；由 runtime 在调用点用 `?` 收敛到 `AgentError`。这与 sandbox 一致——`ProcessBackend::execute` 只返回 `SandboxError`。
-- 影响面：`crates/shirley-agent-sdk-macros/src/tool.rs`、`crates/shirley-agent-sdk/src/tool/mod.rs`、`src/tools/bash.rs`。
-- 验收：工具函数签名只需 `Result<_, ToolError>`；现有 6 个 bash 测试全过。
-
-**T3 · 重试与指数退避**（P0，依赖 T1）
-
-- 现状：429 / 5xx / 超时全部直接冒泡，一次网络抖动废掉整轮长任务。
-- 做法：在 `invoke` 外层包一层重试，用 `SdkError::is_retryable()` 判断；`RateLimited` 优先解析 `Retry-After` 响应头；退避带抖动。
-- 建议补充：给 `AdapterError` 加 `retry_after()` 方法（`runtime-hardening.md` 已列出接口）。
-- 验收：注入 429 / 500，自动退避重试后继续；注入 400，立即失败不重试。
-
-**T4 · 错误通道与结果通道分离**（P0）
-
-- 现状：`runtime/mod.rs` 里工具失败是 `Err(error) => error.to_string()` 直接喂给模型，外部消费者完全看不到；旁边代码里有 `TODO: 感觉这里不太合理`。
-- 做法：双通道。`ToolError` 已 `derive(Serialize)`，内容进 `Message::Tool` 让模型自我纠正；同时新增 `AgentEvent::ToolFailed { call_id, error }` 给 UI 与审计。
-- 依据：`security.md` 6.1——模型需要看到失败细节才能自我纠正；但审计需要结构化字段，不能只有一句话。
-- 验收：模型侧能看到 stderr 与退出码；UI 侧能拿到结构化错误分类。
-
-**T5 · `max_steps` 与终止语义**（P0）
-
-- 现状：`StopReason::MaxStepsReached` / `Cancelled` 已定义但代码里没有任何地方产生它们；主循环唯一出口是"本轮没有 tool_calls"。
-- 做法：builder 加 `max_steps`（默认 32），主循环带计数；到达上限时以 `MaxStepsReached` 结束并返回已有消息。
-- 验收：构造持续返回 tool_calls 的假响应，Agent 在 `max_steps` 后正常结束而非无限循环。
-
-**T6 · 压缩失败降级**（P1）
-
-- 现状：`compress_context` 失败即中断整个 stream；且压缩后若摘要本身仍超阈值会立刻再次触发压缩（抖动）。
-- 做法：压缩失败时保留原消息继续任务，通过事件上报；压缩后判断摘要是否仍接近阈值，是则不重复压缩。
-- 验收：压缩指令导致模型返回空内容时，任务继续而非中断。
-
-**T7 · 审计与日志接入 `ErrorKind`**（P1）
-
-- 现状：`security.md` 6.3 要求的审计日志 `~/.shirley/audit.log` 尚未落地。
-- 做法：审计记录 `(timestamp, tool, arguments, decision, ErrorKind, exit_code)`；日志用 `ErrorKind` 而非 `to_string()` 作为分类维度。
-- 依赖：T4 提供结构化错误事件。
-- 验收：日志可按 `ErrorKind` 聚合统计；被拦截的调用有记录。
-
-**T8 · 测试补强**（P1，可与上述并行）
-
-- `testing.md` 要求的 Usage 单测（`Option` 语义、`Add` 的"保留已知一侧"行为）尚未编写，而 `message` 是被多处复用的地基，改动风险最高。
-- 缓存命中率基准：用简单 case 跑真实 API，验证 prefix 稳定性，设定阈值。
-- 验收：`message::Usage` 有覆盖 `None` 与 `Some(0)` 差异的单测。
+- The `Tool` trait signature was not changed (see follow-up task T2); the macro still does the hard `map_err(AgentError::Tool)?` conversion.
+- Retry, backoff, and timeout wiring were not done (only the `is_retryable` decision basis was provided).
+- The error channel and the result channel are still mixed together (see T4).
 
 ---
 
-**五、依赖关系**
+**4. Follow-up tasks**
+
+Arranged in dependency order. T1 is a prerequisite for the rest -- retry, degradation, and cancellation all need to ask `is_retryable`.
+
+**T1 · Wire up `request_timeout` and `reqwest::Client` reuse** (P0, independent)
+
+- Status quo: `run_stream` in `runtime/mod.rs` calls `reqwest::Client::new()` every time, so the connection pool is not reused; `ModelConfig.request_timeout` is defined but never used.
+- Approach: the `Agent` holds a `reqwest::Client`, configured with `request_timeout` at the builder stage; `invoke` is changed to accept `&Client`.
+- Acceptance: a slow endpoint can trigger a timeout; multiple consecutive `run` calls reuse the same connection pool.
+
+**T2 · Relocating the `Tool` trait signature** (P0, largest blast radius, do last)
+
+- Status quo: `ToolFuture = Future<Output = Result<Value, AgentError>>`, but tool authors write `Result<String, ToolError>`, and the macro hard-converts with `map_err(::shirley_agent_sdk::AgentError::ToolError)?`. The result is that tool authors are forced to be aware of `AgentError` -- which is an SDK boundary type, not something a tool should see.
+- Approach: change `ToolFuture` to `Result<serde_json::Value, ToolError>`; delete the `map_err` in the macro; the runtime converges to `AgentError` with `?` at the call site. This is consistent with sandbox -- `ProcessBackend::execute` only returns `SandboxError`.
+- Blast radius: `crates/shirley-agent-sdk-macros/src/tool.rs`, `crates/shirley-agent-sdk/src/tool/mod.rs`, `src/tools/bash.rs`.
+- Acceptance: the tool function signature only needs `Result<_, ToolError>`; the existing 6 bash tests all pass.
+
+**T3 · Retry and exponential backoff** (P0, depends on T1)
+
+- Status quo: 429 / 5xx / timeouts all bubble up directly, and a single network blip ruins a whole long task.
+- Approach: wrap a retry layer outside `invoke`, using `SdkError::is_retryable()` to decide; `RateLimited` parses the `Retry-After` response header first; backoff includes jitter.
+- Suggested addition: add a `retry_after()` method to `AdapterError` (`runtime-hardening.md` already lists the interface).
+- Acceptance: inject 429 / 500, and after automatic backoff-retry it continues; inject 400, and it fails immediately without retry.
+
+**T4 · Separate the error channel from the result channel** (P0)
+
+- Status quo: in `runtime/mod.rs`, a tool failure is fed to the model directly via `Err(error) => error.to_string()`, and external consumers cannot see it at all; nearby code has `TODO: this feels a bit off`.
+- Approach: dual-channel. `ToolError` is already `derive(Serialize)`, so the content goes into `Message::Tool` to let the model self-correct; at the same time add `AgentEvent::ToolFailed { call_id, error }` for the UI and auditing.
+- Basis: `security.md` 6.1 -- the model needs to see failure details to self-correct; but auditing needs structured fields, not just a sentence.
+- Acceptance: the model side can see stderr and the exit code; the UI side can get the structured error classification.
+
+**T5 · `max_steps` and termination semantics** (P0)
+
+- Status quo: `StopReason::MaxStepsReached` / `Cancelled` are defined but nothing in the code produces them; the main loop's only exit is "this round has no tool_calls".
+- Approach: add `max_steps` to the builder (default 32), the main loop carries a counter; on reaching the limit, end with `MaxStepsReached` and return the existing messages.
+- Acceptance: construct a fake response that keeps returning tool_calls, and the Agent ends normally after `max_steps` rather than looping infinitely.
+
+**T6 · Compaction failure degradation** (P1)
+
+- Status quo: a `compress_context` failure aborts the whole stream; and after compaction, if the summary itself is still over the threshold, it immediately triggers compaction again (thrashing).
+- Approach: on compaction failure, keep the original messages and continue the task, reporting via an event; after compaction, determine whether the summary is still near the threshold, and if so do not re-compact.
+- Acceptance: when the compaction instruction causes the model to return empty content, the task continues rather than aborting.
+
+**T7 · Wire auditing and logging into `ErrorKind`** (P1)
+
+- Status quo: the audit log `~/.shirley/audit.log` required by `security.md` 6.3 has not landed.
+- Approach: the audit records `(timestamp, tool, arguments, decision, ErrorKind, exit_code)`; the log uses `ErrorKind` rather than `to_string()` as the classification dimension.
+- Dependency: T4 provides the structured error event.
+- Acceptance: the log can be aggregated and counted by `ErrorKind`; blocked calls are recorded.
+
+**T8 · Test reinforcement** (P1, can run in parallel with the above)
+
+- The Usage unit tests required by `testing.md` (the `Option` semantics, the "keep the known side" behavior of `Add`) have not been written, and `message` is the foundation reused in many places, with the highest change risk.
+- Cache hit-rate benchmark: run a simple case against the real API, verify prefix stability, and set a threshold.
+- Acceptance: `message::Usage` has unit tests covering the difference between `None` and `Some(0)`.
+
+---
+
+**5. Dependency relationships**
 
 ```mermaid
 graph LR
-    T1["T1 · client/timeout"] --> T3["T3 · 重试退避"]
-    T2["T2 · Tool 签名"] --> D2["独立<br/>但会动宏与 src/tools"]
-    T4["T4 · 双通道"] --> T7["T7 · 审计"]
-    T5["T5 · max_steps"] --> D5["独立"]
-    T6["T6 · 压缩降级"] --> D6["独立"]
-    T8["T8 · 测试"] -.-> P["全程并行，不阻塞"]
+    T1["T1 · client/timeout"] --> T3["T3 · retry backoff"]
+    T2["T2 · Tool signature"] --> D2["independent<br/>but touches the macro and src/tools"]
+    T4["T4 · dual channel"] --> T7["T7 · auditing"]
+    T5["T5 · max_steps"] --> D5["independent"]
+    T6["T6 · compaction degradation"] --> D6["independent"]
+    T8["T8 · tests"] -.-> P["parallel throughout, not blocking"]
 ```
 
-关键判断与 `roadmap.md` 一致：**结构化错误是很多事的前置**。
-本步骤（第三节）已经交付了这个前置，后续 T1–T6 都可以直接消费 `is_retryable` 与 `ErrorKind`，
-不必再各自发明判断逻辑。
+The key judgment is consistent with `roadmap.md`: **structured errors are a prerequisite for many things**.
+This step (section 3) has delivered that prerequisite, and the subsequent T1-T6 can all directly consume `is_retryable` and `ErrorKind`,
+without each inventing its own decision logic.
 
 ---
 
-**六、风险与注意**
+**6. Risks and cautions**
 
-1. **`Tool` trait 签名改动（T2）破坏面最大**，会同时触及宏、SDK 与 `src/tools/`。建议单独一次提交，且在此之前不要并行改工具实现。
-2. **`ErrorKind` 是稳定契约**。文案可以改，分类不能随意增删或改语义——上层的重试决策挂在它上面。新增分类时应同步更新 `is_retryable` 与 `error_contract.rs`。
-3. **`AgentError` 目前直接暴露了包裹类型**（见 3.5）。若后续要收窄公共 API，应在一个版本内完成，避免下游已经 `match` 之后再加破坏性改动。
-4. **`futures::io` 与 `std::io`**：`workspace` 原先用的是 `futures::io::Error`，它其实是 `std::io::Error` 的 re-export，属于误导性 import，已改回 `std::io`。类似写法值得全仓扫一遍。
+1. **The `Tool` trait signature change (T2) has the largest blast radius**, touching the macro, the SDK, and `src/tools/` at the same time. It is suggested to do it in a separate commit, and not to change tool implementations in parallel before then.
+2. **`ErrorKind` is a stable contract**. The wording can change, but the classifications must not be casually added, removed, or have their semantics changed -- the upper layer's retry decisions hang on it. When adding a classification, update `is_retryable` and `error_contract.rs` in sync.
+3. **`AgentError` currently exposes the wrapped types directly** (see 3.5). If the public API is to be narrowed later, it should be done within one version, to avoid a breaking change after downstream already `match`es on it.
+4. **`futures::io` and `std::io`**: `workspace` originally used `futures::io::Error`, which is actually a re-export of `std::io::Error`, a misleading import, now changed back to `std::io`. Similar patterns are worth scanning across the whole repository.

@@ -1,40 +1,40 @@
-//! 记忆条目的 schema：frontmatter 的解析与序列化（`docs/memory.md` §3.2）。
+//! Memory entry schema: parsing and serializing frontmatter (`docs/memory.md` 3.2).
 //!
-//! 一条记忆 = 一段 Markdown 文件，开头是 `---` 包裹的 frontmatter，其后是正文。
+//! One memory = a Markdown file that starts with frontmatter wrapped in `---`, followed by the body.
 //!
-//! 这里**不引入 YAML 依赖**：只支持我们约定的极小子集——`key: value` 标量行，
-//! 以及 `source:` 下的缩进列表（`  - session: <ref>`）。契约窄，解析就简单可测；
-//! 将来真要复杂结构再换 YAML 也不迟（别为想象的需求上依赖）。
+//! This **does not pull in a YAML dependency**: it only supports the minimal subset we agreed on -- `key: value` scalar lines,
+//! plus an indented list under `source:` (`  - session: <ref>`). A narrow contract keeps parsing simple and testable;
+//! if complex structures are truly needed later, switching to YAML is not too late (do not add dependencies for imagined needs).
 
 use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-/// 记忆模块错误。
+/// Memory module error.
 #[derive(Debug, thiserror::Error)]
 pub enum MemoryError {
-    /// 文件内容不合法（缺 frontmatter、缺必填字段、字段类型不对）。
+    /// File content is invalid (missing frontmatter, missing required field, wrong field type).
     #[error("invalid memory entry: {0}")]
     Parse(String),
-    /// 底层 IO 失败。
+    /// Underlying IO failure.
     #[error("memory io error: {0}")]
     Io(#[from] std::io::Error),
 }
 
-/// 条目类型（`docs/memory.md` §3.2）。
+/// Entry type (`docs/memory.md` 3.2).
 ///
-/// 对齐第 3 章认知科学三类长期记忆：`Event` 是情景，`Preference` / `Fact` 偏语义，
-/// `Procedure` 是程序。
+/// Aligns with the three cognitive-science long-term memory categories from chapter 3: `Event` is episodic, `Preference` / `Fact` are more semantic,
+/// and `Procedure` is procedural.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryType {
-    /// 偏好 / 习惯（"以后都这样"）。
+    /// Preference / habit ("do it this way from now on").
     Preference,
-    /// 事实（"张三是同事"、"项目用 Postgres"）。
+    /// Fact ("Zhang San is a colleague", "the project uses Postgres").
     Fact,
-    /// 事件（带时间戳的具体经历）。
+    /// Event (a specific experience with a timestamp).
     Event,
-    /// 程序记忆（"先 X 再 Y"的行为流程）。
+    /// Procedural memory (a "first X then Y" behavior flow).
     Procedure,
 }
 
@@ -59,15 +59,15 @@ impl EntryType {
     }
 }
 
-/// 条目状态：版本化的关键——取代旧条目不删旧条目（`docs/memory.md` 决策 4）。
+/// Entry status: the key to versioning -- superseding an old entry does not delete it (`docs/memory.md` decision 4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntryStatus {
-    /// 当前生效。
+    /// Currently in effect.
     Active,
-    /// 已被更新的条目取代（旧条目保留，仅改状态）。
+    /// Superseded by an updated entry (the old entry is kept, only its status changes).
     Superseded,
-    /// 证据不足、待确认（`confidence: low` 时常伴生）。
+    /// Insufficient evidence, pending confirmation (often accompanies `confidence: low`).
     Unconfirmed,
 }
 
@@ -90,7 +90,7 @@ impl EntryStatus {
     }
 }
 
-/// 置信度：证据不足时降级标注（`docs/memory.md` §3.2）。
+/// Confidence: a downgrade label when evidence is insufficient (`docs/memory.md` 3.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Confidence {
@@ -118,21 +118,21 @@ impl Confidence {
     }
 }
 
-/// 记忆归属域——与 [`EntryType`]（语义类型）**正交**的一条轴。
+/// Memory owning domain -- an axis **orthogonal** to [`EntryType`] (semantic type).
 ///
-/// 语义类型回答"这是什么"（情景/语义/程序），归属域回答"属于谁"（个人/项目）。
-/// 归属域由**存储根**承载：`Personal` 落全局根（跨项目、随用户走），
-/// `Project` 落工作区根（随仓库走、每个 workspace 天然隔离）。
+/// The semantic type answers "what is this" (episodic/semantic/procedural); the owning domain answers "whose is it" (personal/project).
+/// The owning domain is carried by the **storage root**: `Personal` lands in the global root (cross-project, travels with the user),
+/// `Project` lands in the workspace root (travels with the repo, each workspace naturally isolated).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Domain {
-    /// 个人记忆：用户画像 / 偏好 / 跨项目事实 → 全局根。
+    /// Personal memory: user profile / preferences / cross-project facts -> global root.
     ///
-    /// 默认值（`#[default]`）：向后兼容——旧条目无 `domain` 字段 → 视为个人记忆
-    /// （保守，落全局根）。
+    /// Default value (`#[default]`): backward compatible -- old entries without a `domain` field are treated as personal memory
+    /// (conservative, landing in the global root).
     #[default]
     Personal,
-    /// 项目记忆：特定工作区的事实 / 流程 → 工作区根（每 workspace 隔离）。
+    /// Project memory: facts / flows specific to a workspace -> workspace root (each workspace isolated).
     Project,
 }
 
@@ -153,41 +153,41 @@ impl Domain {
     }
 }
 
-/// 一条记忆条目。
+/// One memory entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Entry {
-    /// 稳定标识（如 `pref-rust-error-style`）。文件名与 `index.md` 均引用它。
+    /// Stable identifier (e.g. `pref-rust-error-style`). Both the file name and `index.md` reference it.
     pub id: String,
-    /// 分类。
+    /// Category.
     pub entry_type: EntryType,
-    /// 归属域：个人（全局根）/ 项目（工作区根）。决定条目落哪个存储根。
+    /// Owning domain: personal (global root) / project (workspace root). Determines which storage root the entry lands in.
     pub domain: Domain,
-    /// 主题（供检索 / 归并）。
+    /// Subject (for retrieval / merging).
     pub subject: String,
-    /// 写入时间（`YYYY-MM-DD`）。
+    /// Write time (`YYYY-MM-DD`).
     pub created_at: String,
-    /// 生效时间（`YYYY-MM-DD`）。时间线的关键：与 `created_at` 可不同。
+    /// Effective time (`YYYY-MM-DD`). The key to the timeline: may differ from `created_at`.
     pub valid_from: Option<String>,
-    /// 取代了哪条旧条目（旧条目不删，改 `status: superseded`）。
+    /// Which old entry this supersedes (the old entry is not deleted; change `status: superseded`).
     pub supersedes: Option<String>,
-    /// 版本化状态。
+    /// Versioned status.
     pub status: EntryStatus,
-    /// 置信度。
+    /// Confidence.
     pub confidence: Confidence,
-    /// **适用场景**（qualification）：冲突双方可在不同条件下并存，不二选一。
+    /// **Applicable scope** (qualification): the two sides of a conflict can coexist under different conditions, not an either/or.
     pub scope: Option<String>,
-    /// 历史有用度（V2 排序用，V1 只存）。
+    /// Historical usefulness (used by V2 ordering, only stored in V1).
     pub utility: Option<f64>,
-    /// 被检索命中次数（V2 重要性评分，V1 只存）。
+    /// Number of times retrieved (V2 importance scoring, only stored in V1).
     pub usage_count: Option<u64>,
-    /// 证据引用，可回溯到原始会话（`sessions/*.jsonl#turn:N`）。
+    /// Evidence references, traceable back to the original session (`sessions/*.jsonl#turn:N`).
     pub source: Vec<String>,
-    /// 正文（Markdown）。
+    /// Body (Markdown).
     pub body: String,
 }
 
 impl Entry {
-    /// 解析一段完整条目文本（frontmatter + 正文）。
+    /// Parse a full entry text (frontmatter + body).
     pub fn parse(text: &str) -> Result<Self, MemoryError> {
         let (front, body) = split_frontmatter(text)?;
         let mut id = None;
@@ -206,7 +206,7 @@ impl Entry {
 
         let mut in_source = false;
         for line in front.lines() {
-            // `source:` 下的列表项：`  - session: <ref>`（也容忍 `  - <ref>`）。
+            // List items under `source:`: `  - session: <ref>` (also tolerates `  - <ref>`).
             if in_source {
                 let trimmed = line.trim_start();
                 if let Some(item) = trimmed.strip_prefix("- ") {
@@ -214,14 +214,14 @@ impl Entry {
                     continue;
                 }
                 if !trimmed.is_empty() && !line.starts_with(char::is_whitespace) {
-                    in_source = false; // 回到标量键
+                    in_source = false; // back to a scalar key
                 } else {
                     continue;
                 }
             }
 
             let Some((key, value)) = line.split_once(':') else {
-                continue; // 忽略空行 / 无法识别的行（宽松解析）
+                continue; // ignore blank / unrecognized lines (lenient parsing)
             };
             let key = key.trim();
             let value = value.trim();
@@ -240,13 +240,13 @@ impl Entry {
                 "usage_count" => usage_count = Some(parse_u64(key, value)?),
                 "source" => {
                     in_source = true;
-                    // `source: []` 是"无证据"的空列表写法；行内单值
-                    // `source: sessions/x.jsonl#turn:3` 也容忍。
+                    // `source: []` is the "no evidence" empty-list form; an inline single value
+                    // `source: sessions/x.jsonl#turn:3` is also tolerated.
                     if !value.is_empty() && value != "[]" {
                         source.push(normalize_source(value));
                     }
                 }
-                _ => {} // 未知键忽略，向前兼容
+                _ => {} // unknown keys ignored, forward compatible
             }
         }
 
@@ -268,7 +268,7 @@ impl Entry {
         })
     }
 
-    /// 序列化回条目文本（frontmatter + 空行 + 正文）。
+    /// Serialize back to entry text (frontmatter + blank line + body).
     pub fn render(&self) -> String {
         let mut out = String::from("---\n");
         out.push_str(&format!("id: {}\n", self.id));
@@ -308,21 +308,21 @@ impl Entry {
     }
 }
 
-/// 一行索引（`index.md` 用）：从条目投影出的检索所需最小信息。
+/// One index line (used by `index.md`): the minimal retrieval info projected from an entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexLine {
     pub id: String,
     pub entry_type: EntryType,
-    /// 相对记忆根的路径（如 `preferences/rust-error-style.md`）。
+    /// Path relative to the memory root (e.g. `preferences/rust-error-style.md`).
     pub path: String,
-    /// 一句话摘要（取正文首行，见 [`Entry::summary`]）。
+    /// One-line summary (first line of the body, see [`Entry::summary`]).
     pub summary: String,
-    /// 时间线展示用（`valid_from` 优先，回退 `created_at`）。
+    /// For timeline display (`valid_from` preferred, falling back to `created_at`).
     pub date: String,
 }
 
 impl Entry {
-    /// 正文首行作为摘要（供 `index.md` 与相关注入展示）。
+    /// First line of the body as the summary (for `index.md` and related injection display).
     pub fn summary(&self) -> String {
         self.body
             .lines()
@@ -331,19 +331,19 @@ impl Entry {
             .unwrap_or_default()
     }
 
-    /// 时间线展示日期：`valid_from` 优先，回退 `created_at`。
+    /// Timeline display date: `valid_from` preferred, falling back to `created_at`.
     pub fn timeline_date(&self) -> &str {
         self.valid_from.as_deref().unwrap_or(&self.created_at)
     }
 }
 
 fn split_frontmatter(text: &str) -> Result<(&str, &str), MemoryError> {
-    let text = text.strip_prefix('\u{feff}').unwrap_or(text); // 容忍 BOM
+    let text = text.strip_prefix('\u{feff}').unwrap_or(text); // tolerate BOM
     let rest = text
         .strip_prefix("---\n")
         .or_else(|| text.strip_prefix("---\r\n"))
         .ok_or_else(|| MemoryError::Parse("missing opening `---`".into()))?;
-    // 找闭合的 `---` 行。
+    // find the closing `---` line.
     let mut offset = 0;
     for line in rest.split_inclusive('\n') {
         let bare = line.trim_end_matches(['\n', '\r']);
@@ -397,7 +397,7 @@ valid_from: 2026-05-10
 supersedes: pref-rust-error-style-v1
 status: active
 confidence: high
-scope: rust / 领域错误处理
+scope: rust / domain-error-handling
 utility: 0.8
 usage_count: 3
 source:
@@ -405,7 +405,7 @@ source:
   - session: 2026-05-11-def.jsonl#turn:2
 ---
 
-用户偏好用 thiserror 而非 anyhow 定义领域错误。
+The user prefers thiserror over anyhow for defining domain errors.
 ";
 
     #[test]
@@ -419,7 +419,7 @@ source:
         assert_eq!(entry.supersedes.as_deref(), Some("pref-rust-error-style-v1"));
         assert_eq!(entry.status, EntryStatus::Active);
         assert_eq!(entry.confidence, Confidence::High);
-        assert_eq!(entry.scope.as_deref(), Some("rust / 领域错误处理"));
+        assert_eq!(entry.scope.as_deref(), Some("rust / domain-error-handling"));
         assert_eq!(entry.utility, Some(0.8));
         assert_eq!(entry.usage_count, Some(3));
         assert_eq!(
@@ -429,7 +429,7 @@ source:
                 "2026-05-11-def.jsonl#turn:2".to_string(),
             ]
         );
-        assert_eq!(entry.body, "用户偏好用 thiserror 而非 anyhow 定义领域错误。");
+        assert_eq!(entry.body, "The user prefers thiserror over anyhow for defining domain errors.");
     }
 
     #[test]
@@ -441,9 +441,9 @@ source:
 
     #[test]
     fn scope_with_colon_survives() {
-        // scope 值里含 `:` 也不能被当作键值分隔（只切第一个 `:`）。
+        // a `:` in the scope value must not be treated as a key-value separator (only the first `:` is split).
         let entry = Entry::parse(SAMPLE).unwrap();
-        assert_eq!(entry.scope.as_deref(), Some("rust / 领域错误处理"));
+        assert_eq!(entry.scope.as_deref(), Some("rust / domain-error-handling"));
     }
 
     #[test]
@@ -456,7 +456,7 @@ subject: db
 created_at: 2026-05-12
 ---
 
-项目用 Postgres。
+The project uses Postgres.
 ";
         let entry = Entry::parse(text).unwrap();
         assert_eq!(entry.status, EntryStatus::Active);
@@ -506,6 +506,6 @@ created_at: 2026-05-12
     #[test]
     fn summary_takes_first_nonempty_line() {
         let entry = Entry::parse(SAMPLE).unwrap();
-        assert_eq!(entry.summary(), "用户偏好用 thiserror 而非 anyhow 定义领域错误。");
+        assert_eq!(entry.summary(), "The user prefers thiserror over anyhow for defining domain errors.");
     }
 }

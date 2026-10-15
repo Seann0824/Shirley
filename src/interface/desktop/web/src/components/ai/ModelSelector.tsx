@@ -6,10 +6,11 @@ import { cn } from "@/ui/utils";
 import type { ModelEntry } from "@/lib/bridge";
 
 /**
- * 模型切换选择器：贴在发送按钮旁边。
+ * Model switcher: sits next to the send button.
  *
- * 只是「模型目录 + 热切换」的薄 UI——目录与切换都由 Rust 侧
- * (`ModelCatalog` / `Agent::set_model`) 提供，前端不持有模型状态。
+ * Just a thin UI over "model catalog + hot switch" — both the catalog and the switch are
+ * provided by the Rust side (`ModelCatalog` / `Agent::set_model`); the frontend holds no
+ * model state.
  */
 export function ModelSelector({
   project,
@@ -28,7 +29,7 @@ export function ModelSelector({
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
 
-  // 点击组件外部 / Esc 关闭。
+  // Close on click outside the component / Esc.
   useEffect(() => {
     if (!open) return;
     const onPointerDown = (event: PointerEvent) => {
@@ -70,31 +71,34 @@ export function ModelSelector({
         size="sm"
         aria-haspopup="listbox"
         aria-expanded={open}
-        aria-label="切换模型"
+        aria-label="Switch model"
         className="max-w-[12rem] gap-1 px-2 text-muted"
         onClick={() => void toggle()}
       >
-        <span className="truncate">{current || "未选择模型"}</span>
+        <span className="truncate">{current || "No model selected"}</span>
         <ChevronDown className="size-3.5 shrink-0" />
       </Button>
       {open && (
         <ScrollArea
           role="listbox"
-          aria-label="可选模型"
+          aria-label="Available models"
           className="absolute bottom-[calc(100%+0.5rem)] right-0 z-20 w-64 rounded-card border border-line bg-surface shadow-lg"
-          // 高度上限必须加在 **viewport** 上：Radix 的 viewport 是 `h-full`，
-          // 若上限加在 Root（auto 高度）上，viewport 会随内容长高、永不溢出，
-          // 滚动条也就不会出现（模型展示不全）。与 `FileMentionPopover` 保持一致。
+          // The max height must be set on the **viewport**: Radix's viewport is `h-full`,
+          // so if the cap were on the Root (auto height), the viewport would grow with the
+          // content, never overflow, and the scrollbar would never appear (models cut off).
+          // Kept consistent with `FileMentionPopover`.
           viewportClassName="max-h-72 overscroll-contain"
-          // Radix ScrollArea 的 Root 会注入内联 `position: relative`，内联样式优先级高于
-          // `absolute` 类——不覆盖就会退回标准流、把输入框撑开。这里显式改回绝对定位。
+          // Radix ScrollArea's Root injects an inline `position: relative`, and inline
+          // styles outrank the `absolute` class — without overriding it, the element falls
+          // back into normal flow and stretches the input box. Explicitly restore absolute
+          // positioning here.
           style={{ position: "absolute" }}
         >
           <div className="p-1">
-            {loading && <p className="px-3 py-2 text-caption text-muted">加载中…</p>}
-            {!loading && error && <p className="px-3 py-2 text-caption text-danger-ink">模型列表加载失败：{error}</p>}
+            {loading && <p className="px-3 py-2 text-caption text-muted">Loading...</p>}
+            {!loading && error && <p className="px-3 py-2 text-caption text-danger-ink">Failed to load model list: {error}</p>}
             {!loading && !error && entries.length === 0 && (
-              <p className="px-3 py-2 text-caption text-muted">没有可用的模型。</p>
+              <p className="px-3 py-2 text-caption text-muted">No models available.</p>
             )}
             {!loading &&
               entries.map((entry) => {

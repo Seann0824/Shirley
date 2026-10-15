@@ -1,281 +1,297 @@
-**Shirley 技术方案 · 技能（skills）**
+**Shirley technical design · Skills**
 
-这份文档给"让 Shirley 支持 skills 能力、拥抱 skill 生态"落地一个方案。它是
-`todo.md` / `memory.md` 的**同族延伸**：todo 解决"压缩后忘了做到哪"，memory 解决
-"新会话忘了用户是谁"，而 skills 解决**"模型不知道某类任务该怎么做"**——把操作
-流程、脚本、模板打包成可插拔的能力包，模型在需要时按需加载。
+This document lands a plan for "letting Shirley support skills and embrace the skill ecosystem". It is
+a **sibling extension** of `todo.md` / `memory.md`: todo solves "forgot where it got to after
+compaction", memory solves "forgot who the user is in a new session", and skills solves **"the model
+does not know how to do a certain class of task"** -- packaging procedures, scripts, and templates
+into a pluggable capability pack that the model loads on demand when needed.
 
-方案的外部依据是 **Agent Skills 开放标准**（`agentskills.io`，源头是
-`anthropics/skills` 的 `spec/agent-skills-spec.md`），以及 Anthropic 官方的
-《Equipping agents for the real world with Agent Skills》与客户端实现指南。
-反面参照是 Claude Code 的私有扩展字段——只吸收它直观、跨客户端通用的部分。
+The external basis of the plan is the **Agent Skills open standard** (`agentskills.io`, whose source is
+`anthropics/skills`'s `spec/agent-skills-spec.md`), plus Anthropic's official "Equipping agents for
+the real world with Agent Skills" and the client implementation guide. The counter-example is Claude
+Code's private extension fields -- only absorb the intuitive, cross-client-common parts.
 
-**范围声明**：方案遵循既有范式（todo / memory）：**应用层持有状态 +
-`ContextProvider` 注入 + 配套工具，SDK 零改动**。
+**Scope statement**: the plan follows the existing paradigm (todo / memory): **the application layer
+holds state + `ContextProvider` injection + companion tools, with zero SDK changes**.
 
-> **实现状态**：**P0+P1+P2(slash) 已落地**（`src/skills/`：`parse` / `discovery` /
-> `catalog` / `provider` / `runtime` / `tool`）。P0 经 `bootstrap::build_agent` 注入
-> Tier1 目录；P1 新增 `activate_skill`（`name` 限枚举）+ `SkillRuntime`（已激活集合，
-> 与 provider 共享同一 `Arc`）+ 每轮末尾**追加**注入已激活正文（跨压缩存活）+
-> `read_skill_file`（Tier3 资源按需读）。P2(slash) 新增 `/<skill-name>` 命令入口
-> （`CommandOutcome::ActivateSkill`，harness 直接激活、跳过模型判断；只动应用层命令层，
-> 复用 `SkillRuntime`）。**KV 缓存约束**：注入恒为追加式（目录是稳定前缀、已激活块
-> 按激活顺序拼接，旧内容逐字节不变）。P2 其余项（去重激活提示 / 正文上限调优）及以后
-> **未落地**。分期与验收见第八、九节。
+> **Implementation status**: **P0+P1+P2(slash) are landed** (`src/skills/`: `parse` / `discovery` /
+> `catalog` / `provider` / `runtime` / `tool`). P0 injects the Tier1 catalog via
+> `bootstrap::build_agent`; P1 adds `activate_skill` (`name` limited to an enum) + `SkillRuntime`
+> (the activated set, sharing the same `Arc` with the provider) + **appending** the activated body at
+> the end of each round (survives compaction) + `read_skill_file` (Tier3 resources read on demand).
+> P2(slash) adds a `/<skill-name>` command entry (`CommandOutcome::ActivateSkill`, with the harness
+> activating directly and skipping the model's judgment; only touching the application-layer command
+> layer, reusing `SkillRuntime`). **KV cache constraint**: injection is always append-style (the
+> catalog is a stable prefix, activated blocks are concatenated in activation order, and old content
+> is byte-for-byte unchanged). The rest of P2 (dedup activation hints / body cap tuning) and beyond
+> are **not landed**. For the phases and acceptance criteria see sections 8 and 9.
 
 ---
 
-**一、要解决什么**
+**1. What to solve**
 
-Shirley 现在有三种"记忆/状态"能力，缺的是第四种——"**怎么做事**"：
+Shirley now has three kinds of "memory / state" capabilities, and the missing fourth is "**how to do
+things**":
 
-| 能力 | 解决的问题 | 形态 | 归属 |
+| Capability | Problem solved | Form | Ownership |
 | --- | --- | --- | --- |
-| 压缩（compaction） | 一轮对话装不下 | 摘要重建 | SDK runtime |
-| 任务账本（todo） | 压缩后忘了做到哪 | 每轮末尾注入的 system | 应用层 `src/todo.rs` |
-| 记忆（memory） | 新会话忘了用户是谁 | 每轮末尾注入的 system + `recall` 工具 | 应用层 `src/memory/` |
-| **技能（skills）** | **模型不知道某类任务该怎么做** | **目录常驻 + 按需激活的指令/资源包** | **应用层 `src/skills/`（本文）** |
+| Compaction | A round does not fit | Summary rebuild | SDK runtime |
+| Task ledger (todo) | Forgot where it got to after compaction | A system injected at the end of each round | Application layer `src/todo.rs` |
+| Memory | Forgot who the user is in a new session | A system injected at the end of each round + the `recall` tool | Application layer `src/memory/` |
+| **Skills** | **The model does not know how to do a certain class of task** | **An always-resident catalog + on-demand-activated instruction / resource pack** | **Application layer `src/skills/` (this document)** |
 
-一个 skill 就是**一个目录**，最小形态只含一个 `SKILL.md`（YAML frontmatter +
-Markdown 正文）。它能携带：操作步骤、领域知识、可执行脚本（`scripts/`）、按需
-文档（`references/`）、模板资源（`assets/`）。
+A skill is **a directory**, whose minimal form contains only a `SKILL.md` (YAML frontmatter +
+Markdown body). It can carry: procedures, domain knowledge, executable scripts (`scripts/`), on-demand
+documents (`references/`), and template resources (`assets/`).
 
-**为什么值得做**：生态已经起来了。Anthropic 在 2025-10 发布 Agent Skills 开放
-标准，Claude Code / Claude.ai / API 三端都支持，社区开始沉淀现成 skill 仓库
-（`anthropics/skills` 里的 `skills/` 目录、以及各类第三方 `.claude/skills/`）。
-拥抱标准意味着 Shirley **不用自己发明能力包格式**，直接吃生态里已有的 skill；
-同时给自己的用户一个"把项目里反复用的流程写成一个 skill"的扩展点。
+**Why it is worth doing**: the ecosystem has already taken off. Anthropic released the Agent Skills
+open standard in 2025-10, and Claude Code / Claude.ai / API all support it; the community has begun to
+accumulate ready-made skill repositories (the `skills/` directory in `anthropics/skills`, and various
+third-party `.claude/skills/`). Embracing the standard means Shirley **does not have to invent its own
+capability-pack format** and can directly consume existing skills in the ecosystem; at the same time
+it gives its own users an extension point to "write a repeatedly-used project procedure as a skill".
 
-Shirley 现状里没有对应概念：系统提示词（`src/prompt.rs`）静态内联 `Agent.md`，
-工具集固定（`bash` / `read_file` / `web_search`）。**没有一个"可插拔能力包"的
-接缝**——这正是本文要补的。
+The current Shirley has no corresponding concept: the system prompt (`src/prompt.rs`) statically
+inlines `Agent.md`, and the toolset is fixed (`bash` / `read_file` / `web_search`). **There is no seam
+for a "pluggable capability pack"** -- this is exactly what this document adds.
 
 ---
 
-**二、外部生态调研（Agent Skills 开放标准）**
+**2. External ecosystem research (the Agent Skills open standard)**
 
-**2.1 skill 的磁盘形态**
+**2.1 The on-disk form of a skill**
 
-一个 skill 是一个目录，最小只需 `SKILL.md`：
+A skill is a directory; the minimum is just `SKILL.md`:
 
 ```
 my-skill/
-├── SKILL.md          # 必需：YAML frontmatter + Markdown 正文
-├── scripts/          # 可选：可执行代码（模型按需调用，标准不自动执行）
-├── references/       # 可选：按需加载的参考文档
-└── assets/           # 可选：模板 / 资源文件
+├── SKILL.md          # required: YAML frontmatter + Markdown body
+├── scripts/          # optional: executable code (called on demand by the model; the standard does not auto-execute)
+├── references/       # optional: reference documents loaded on demand
+└── assets/           # optional: templates / resource files
 ```
 
-`SKILL.md` 的 frontmatter 字段（标准）：
+`SKILL.md`'s frontmatter fields (the standard):
 
-| 字段 | 必填 | 约束 | 说明 |
+| Field | Required | Constraint | Description |
 | --- | --- | --- | --- |
-| `name` | ✅ | ≤64，`[a-z0-9-]`，**须等于父目录名** | 唯一标识 |
-| `description` | ✅ | ≤1024 | 必须同时写清"**做什么**"和"**何时用**"——它是模型决定要不要激活的唯一依据 |
-| `license` | ❌ | — | 许可证 |
-| `compatibility` | ❌ | ≤500 | 运行环境要求（如"需要 python3"） |
-| `metadata` | ❌ | map | 自定义键值 |
-| `allowed-tools` | ❌ | 空格分隔 | **实验性**；标准只要求"声明"，不要求客户端强制 |
+| `name` | ✅ | ≤64, `[a-z0-9-]`, **must equal the parent directory name** | unique identifier |
+| `description` | ✅ | ≤1024 | must state both "**what it does**" and "**when to use it**" -- it is the sole basis on which the model decides whether to activate |
+| `license` | ❌ | -- | license |
+| `compatibility` | ❌ | ≤500 | runtime requirements (e.g. "requires python3") |
+| `metadata` | ❌ | map | custom key-values |
+| `allowed-tools` | ❌ | space-separated | **experimental**; the standard only requires "declaration", not client enforcement |
 
-Claude Code 还加了一批**私有**字段（`disable-model-invocation` /
-`user-invocable` / `disallowed-tools` / `model` / `effort` / `context:fork` /
-`agent` / `hooks` / `paths` / `argument-hint` / `arguments` / `when_to_use`）。
-**这些不进标准**，Shirley 第一期不实现（见第九节）。
+Claude Code also adds a batch of **private** fields (`disable-model-invocation` / `user-invocable` /
+`disallowed-tools` / `model` / `effort` / `context:fork` / `agent` / `hooks` / `paths` /
+`argument-hint` / `arguments` / `when_to_use`). **These do not go into the standard**, and Shirley
+does not implement them in phase one (see section 9).
 
-**2.2 渐进式披露（progressive disclosure）—— 核心机制**
+**2.2 Progressive disclosure -- the core mechanism**
 
-skill 不一次性全塞进上下文，而是分三层按需加载：
+A skill is not stuffed entirely into the context at once, but loaded on demand in three tiers:
 
 ```mermaid
 flowchart LR
-    T1["Tier 1 · 目录<br/>name + description<br/>~50–100 token/skill<br/>会话启动加载"]
-    T2["Tier 2 · 指令<br/>完整 SKILL.md 正文<br/>激活时加载<br/>建议 < 5000 token"]
-    T3["Tier 3 · 资源<br/>scripts / references / assets<br/>用到才读"]
-    T1 -->|"模型判断相关 → 激活"| T2
-    T2 -->|"正文里引用相对路径"| T3
+    T1["Tier 1 · catalog<br/>name + description<br/>~50-100 token/skill<br/>loaded at session start"]
+    T2["Tier 2 · instructions<br/>the full SKILL.md body<br/>loaded on activation<br/>suggested < 5000 token"]
+    T3["Tier 3 · resources<br/>scripts / references / assets<br/>read only when used"]
+    T1 -->|"model judges relevant -> activate"| T2
+    T2 -->|"body references relative paths"| T3
 ```
 
-- **Tier 1**：只把每个 skill 的 `name` + `description` 列出来，代价极小。
-- **Tier 2**：模型决定相关后，才读完整 `SKILL.md` 正文（剥掉 frontmatter）。
-- **Tier 3**：正文里引用的脚本/文档/模板，模型真正需要时再读。
+- **Tier 1**: only list each skill's `name` + `description`, at a very small cost.
+- **Tier 2**: only after the model decides it is relevant does it read the full `SKILL.md` body
+  (stripping the frontmatter).
+- **Tier 3**: the scripts / documents / templates referenced in the body, read only when the model
+  really needs them.
 
-这个机制是"**上下文预算友好**"的关键：装 100 个 skill 也只在上下文里放 100 行
-目录，只有被激活的才付正文的钱。
+This mechanism is the key to being "**context-budget friendly**": even with 100 skills installed, only
+100 lines of catalog go into the context, and only the activated ones pay for the body.
 
-**2.3 发现位置（跨客户端约定）**
+**2.3 Discovery locations (cross-client convention)**
 
-| 层级 | 路径 | 优先级 |
+| Level | Path | Priority |
 | --- | --- | --- |
-| 项目级 | `<project>/.agents/skills/` | 高（覆盖用户级） |
-| 项目级（兼容） | `<project>/.claude/skills/` | 高 |
-| 用户级 | `~/.agents/skills/` | 低 |
-| 用户级（兼容） | `~/.claude/skills/` | 低 |
-| 客户端原生 | `<project>/.<client>/skills/` | 实现自定义 |
+| Project level | `<project>/.agents/skills/` | high (overrides user level) |
+| Project level (compat) | `<project>/.claude/skills/` | high |
+| User level | `~/.agents/skills/` | low |
+| User level (compat) | `~/.claude/skills/` | low |
+| Client-native | `<project>/.<client>/skills/` | implementation-defined |
 
-重名规则：**项目级覆盖用户级**。同一层级内重名视为冲突，实现需处理（Shirley
-采用"先扫到的赢 + 记录冲突"的保守策略，见 5.2）。
+Name-collision rule: **project level overrides user level**. A collision within the same level is
+treated as a conflict and must be handled by the implementation (Shirley adopts the conservative
+strategy of "first scanned wins + record the conflict", see 5.2).
 
-**2.4 激活的两种实现**
+**2.4 Two implementations of activation**
 
-1. **文件读取激活**：目录里给出每个 skill 的 `location`，模型用通用 `read`
-   工具读 `SKILL.md`。
-2. **专用工具激活**：暴露 `activate_skill(name)`，由 harness 读文件、剥
-   frontmatter、把正文包进 `<skill_content>` 标签、列出 `resources`，并把
-   `name` 限制成**枚举**（防模型编造不存在的 skill）。
+1. **File-read activation**: the catalog gives each skill's `location`, and the model uses the generic
+   `read` tool to read `SKILL.md`.
+2. **Dedicated-tool activation**: expose `activate_skill(name)`, and the harness reads the file,
+   strips the frontmatter, wraps the body in a `<skill_content>` tag, lists `resources`, and limits
+   `name` to an **enum** (to prevent the model from fabricating a nonexistent skill).
 
-官方客户端指南还提到第三条路：把 skill 绑成 **slash 命令**（`/skill-name`），
-由 harness 直接注入——这条属交互层，见第九节。
+The official client guide also mentions a third route: binding a skill as a **slash command**
+(`/skill-name`), injected directly by the harness -- this belongs to the interaction layer, see
+section 9.
 
-**2.5 客户端实现指南（5 步）**
+**2.5 Client implementation guide (5 steps)**
 
-1. **Discover**：扫目录、处理重名、做信任校验。
-2. **Parse**：容错解析 frontmatter；`description` 缺失就**跳过**该 skill。
-3. **Disclose**：把 Tier1 目录放进系统提示词段，或放进工具 description。
-4. **Activate**：见 2.4。
-5. **Manage over time**：**防止压缩把已激活的 skill 内容剪掉**；去重激活（同一
-   skill 不重复注入）；可选起 subagent 隔离。
+1. **Discover**: scan directories, handle name collisions, do trust validation.
+2. **Parse**: fault-tolerantly parse the frontmatter; if `description` is missing, **skip** that
+   skill.
+3. **Disclose**: put the Tier1 catalog into a system-prompt segment, or into a tool description.
+4. **Activate**: see 2.4.
+5. **Manage over time**: **prevent compaction from cutting away activated skill content**; dedup
+   activation (do not re-inject the same skill); optionally start a subagent for isolation.
 
-> 第 5 步是**最容易踩坑**的地方：skill 正文一旦作为普通对话消息注入，上下文
-> 压缩会把它静默丢掉，模型随后就"忘了怎么做"。Shirley 的 `ContextProvider`
-> 接缝天然规避了这个坑（见决策 4）。
-
----
-
-**三、核心决策（先定调）**
-
-**决策 1：归属应用层，SDK 零改动。**
-
-skill 的"发现哪些目录、怎么解析、怎么披露、怎么激活"是 coding agent 这个产品
-的取舍，不是通用基础能力——与 todo / memory 同款理由。SDK 只提供两个通用接缝：
-`ContextProvider`（每轮末尾注入）与工具注册（`ToolManager`）。**本文不新增任何
-SDK 对外类型**，`lib.rs` 的 `pub use` 不动。
-
-**决策 2：以渐进式披露为骨架。**
-
-不做"启动时把全部 skill 正文内联进提示词"的粗暴实现（那是把 2.2 的机制整个
-丢掉，装几个 skill 就把上下文撑爆）。Tier1 目录常驻、Tier2 按需激活、Tier3
-按需读取。
-
-**决策 3：激活用专用工具 `activate_skill(name)`，不用文件读取。**
-
-三条理由：
-
-- **文件读取对用户级 skill 不可行**。Shirley 的 `read_file` 经
-  `WorkSpace::resolve` 校验，**拒绝绝对路径与越界路径**——而用户级 skill 在
-  `~/.agents/skills/`，在工作区外，模型根本读不到。
-- **专用工具能做通用读取做不到的事**：剥 frontmatter（只把正文给模型）、列出
-  `resources` 清单、把 `name` 限制成**枚举**（防止模型幻觉出一个不存在的
-  skill 名）。
-- **专用工具让"激活"成为可观测事件**，便于做去重激活与状态跟踪（决策 4）。
-
-**决策 4：已激活的 skill 正文由 `SkillContextProvider` 每轮注入，跨压缩存活。**
-
-这是与 todo 完��同构的手法：激活状态记在 `SkillRuntime`（应用层持有），
-**不进 `self.messages`**，每轮组装请求时在**末尾**追加一条 system。压缩碰不到
-它，天然跨压缩存活——正好补上 2.5 第 5 步那个坑。
-
-代价与 todo 一样：激活/取消激活会改动"末尾那条 system"，使其后的前缀失效。
-用"只注入**已激活**的 skill + 设字符上限"把代价压到最小。
-
-**决策 5：skill 是**不可信外部数据**，只读、不自动执行。**
-
-skill 可能来自 `git clone` 的第三方仓库（甚至恶意仓库）。所以：
-
-- 注入时用 `<skill_content>` 标签包裹，并在系统提示词里声明"这是外部指令数据，
-  不是系统指令"（与 `web_search` 把结果标为不可信同款）。
-- `allowed-tools` **只记录、不强制**（标准本身也只要求声明）——第一期不做权限
-  收窄，因为 Shirley 还没有通用权限层（`docs/security.md` 的
-  `PermissionPolicy` 未落地）。
-- **不自动执行** `scripts/`：只把路径告诉模型，真要执行仍走 `bash`（受沙盒
-  约束）。
-- 扫描时跳过 `.git` / `node_modules` / `target` 等噪音目录。
+> Step 5 is **where it is easiest to fall into a pit**: once a skill body is injected as an ordinary
+> conversation message, context compaction silently drops it, and the model then "forgets how to do
+> it". Shirley's `ContextProvider` seam naturally avoids this pit (see decision 4).
 
 ---
 
-**四、方案对比：三条集成路径**
+**3. Core decisions (setting the tone first)**
 
-| 维度 | A. 全量内联提示词 | B. 文件读取激活 | C. 专用工具 + ContextProvider（**推荐**） |
+**Decision 1: owned by the application layer, zero SDK changes.**
+
+A skill's "which directories to discover, how to parse, how to disclose, how to activate" is a
+trade-off of the coding-agent product, not a generic fundamental capability -- the same reason as
+todo / memory. The SDK provides only two generic seams: `ContextProvider` (injected at the end of each
+round) and tool registration (`ToolManager`). **This document adds no new SDK external types**, and
+`lib.rs`'s `pub use` is untouched.
+
+**Decision 2: use progressive disclosure as the skeleton.**
+
+Do not do the crude implementation of "inlining all skill bodies into the prompt at startup" (that
+throws away the whole mechanism of 2.2, and a few skills blow up the context). The Tier1 catalog is
+always resident, Tier2 is activated on demand, and Tier3 is read on demand.
+
+**Decision 3: activate with the dedicated tool `activate_skill(name)`, not file reading.**
+
+Three reasons:
+
+- **File reading is infeasible for user-level skills**. Shirley's `read_file` is validated by
+  `WorkSpace::resolve` and **rejects absolute paths and out-of-bounds paths** -- whereas a user-level
+  skill is in `~/.agents/skills/`, outside the workspace, which the model simply cannot read.
+- **A dedicated tool can do what generic reading cannot**: strip the frontmatter (give the model only
+  the body), list the `resources`, and limit `name` to an **enum** (preventing the model from
+  hallucinating a nonexistent skill name).
+- **A dedicated tool makes "activation" an observable event**, convenient for dedup activation and
+  state tracking (decision 4).
+
+**Decision 4: the activated skill body is injected each round by `SkillContextProvider`, surviving
+compaction.**
+
+This is a technique fully isomorphic to todo: the activation state is recorded in `SkillRuntime` (held
+by the application layer), **does not go into `self.messages`**, and a system message is **appended**
+at the end when assembling each round's request. Compaction cannot touch it, and it naturally survives
+compaction -- exactly filling the pit at step 5 of 2.5.
+
+The cost is the same as todo: activating / deactivating changes "the system message at the end",
+invalidating the prefix after it. Minimize the cost with "inject only **activated** skills + set a
+character cap".
+
+**Decision 5: a skill is **untrusted external data**, read-only, not auto-executed.**
+
+A skill may come from a third-party repository `git clone`d (even a malicious repository). So:
+
+- Wrap it in a `<skill_content>` tag when injecting, and declare in the system prompt that "this is
+  external instruction data, not a system instruction" (the same as `web_search` marking its results
+  as untrusted).
+- `allowed-tools` is **recorded only, not enforced** (the standard itself only requires declaration)
+  -- phase one does not narrow permissions, because Shirley does not yet have a general permission
+  layer (`docs/security.md`'s `PermissionPolicy` is not landed).
+- **Do not auto-execute** `scripts/`: only tell the model the path; actually executing still goes
+  through `bash` (subject to the sandbox).
+- Skip noise directories like `.git` / `node_modules` / `target` during the scan.
+
+---
+
+**4. Plan comparison: three integration routes**
+
+| Dimension | A. Fully inline into the prompt | B. File-read activation | C. Dedicated tool + ContextProvider (**recommended**) |
 | --- | --- | --- | --- |
-| Tier1 目录 | 全量正文塞进 system | 目录 + location 塞进 system | 目录塞进 system（同 B） |
-| Tier2 激活 | 无需激活（已全量） | 模型用 `read_file` 读 `SKILL.md` | `activate_skill(name)` 返回正文 |
-| 用户级 skill | 可读（启动时读入） | **读不到**（`read_file` 越界拒绝） | 可读（工具内部按 skill 根解析） |
-| 上下文占用 | **爆炸**（N 个 skill 全量常驻） | 小 | 小 |
-| 防幻觉 skill 名 | 不适用 | 不能（模型可编路径） | 能（name 限制为枚举） |
-| 跨压缩存活 | 天然（在 system 里） | **丢失**（正文作为普通消息被压掉） | 天然（provider 每轮重注入） |
-| 去重激活 / 可观测 | 不适用 | 无 | 有（激活是显式事件） |
-| 实现复杂度 | 低 | 中 | 中 |
-| 结论 | ❌ 违反渐进式披露 | ⚠️ 用户级 skill 失效 + 压缩丢内容 | ✅ 采纳 |
+| Tier1 catalog | full body stuffed into system | catalog + location stuffed into system | catalog stuffed into system (same as B) |
+| Tier2 activation | no activation needed (already full) | the model reads `SKILL.md` with `read_file` | `activate_skill(name)` returns the body |
+| User-level skill | readable (read in at startup) | **unreadable** (`read_file` rejects out-of-bounds) | readable (the tool resolves against the skill root internally) |
+| Context usage | **explodes** (N skills all resident in full) | small | small |
+| Anti-hallucination of skill names | N/A | cannot (the model can fabricate a path) | can (name limited to an enum) |
+| Survives compaction | naturally (in system) | **lost** (the body is compacted away as an ordinary message) | naturally (the provider re-injects each round) |
+| Dedup activation / observability | N/A | none | yes (activation is an explicit event) |
+| Implementation complexity | low | medium | medium |
+| Conclusion | ❌ violates progressive disclosure | ⚠️ user-level skills fail + compaction loses content | ✅ adopt |
 
-**结论**：走 C。它同时满足"拥抱标准格式"（磁盘布局完全按标准）与"适配 Shirley
-自身约束"（工作区越界 + 压缩语义）。
+**Conclusion**: go with C. It satisfies both "embrace the standard format" (the on-disk layout follows
+the standard exactly) and "adapt to Shirley's own constraints" (workspace out-of-bounds + compaction
+semantics).
 
 ---
 
-**五、落地设计**
+**5. Landing design**
 
-**5.1 目录布局与模块**
+**5.1 Directory layout and modules**
 
-新增应用层模块 `src/skills/`，与 `src/todo.rs` / `src/memory/` 平级：
+Add an application-layer module `src/skills/`, at the same level as `src/todo.rs` / `src/memory/`:
 
 ```
 src/skills/
-├── mod.rs         # 门面：重导出 SkillCatalog / SkillRuntime / SkillContextProvider / 工具
-├── discovery.rs   # 扫描发现位置、重名与冲突处理、噪音目录过滤
-├── parse.rs       # SKILL.md frontmatter 容错解析（复用 memory 的 frontmatter 切分）
-├── catalog.rs     # SkillCatalog：name → SkillMeta 映射 + 渲染 Tier1 目录
-├── runtime.rs     # SkillRuntime：已激活集合（Arc<Mutex<...>>），provider / 工具共享
-├── provider.rs    # SkillContextProvider：每轮注入「目录 + 已激活正文」
-└── tool.rs        # activate_skill / read_skill_file 两个手写 Tool
+├── mod.rs         # facade: re-export SkillCatalog / SkillRuntime / SkillContextProvider / tools
+├── discovery.rs   # scan discovery locations, name collisions and conflict handling, noise-directory filtering
+├── parse.rs       # fault-tolerant parsing of SKILL.md frontmatter (reusing memory's frontmatter split)
+├── catalog.rs     # SkillCatalog: name -> SkillMeta map + render the Tier1 catalog
+├── runtime.rs     # SkillRuntime: the activated set (Arc<Mutex<...>>), shared by provider / tools
+├── provider.rs    # SkillContextProvider: inject "catalog + activated bodies" each round
+└── tool.rs        # two hand-written Tools: activate_skill / read_skill_file
 ```
 
-**5.2 发现与解析**
+**5.2 Discovery and parsing**
 
-- **发现顺序**：项目级（`.agents/skills/` → `.claude/skills/`）→ 用户级
-  （`~/.agents/skills/` → `~/.claude/skills/`）。**先扫到的赢**（项目级天然先于
-  用户级，实现项目覆盖用户）。
-- **解析容错**：frontmatter 缺失 / `name` 或 `description` 缺失 → **跳过该
-  skill 并记一条 warn**（对齐官方指南第 2 步，绝不因为一个坏 skill 拖垮整个
-  目录）。
-- **校验**：`name` 与父目录名不一致 → 以**目录名**为准（避免模型看到一个和
-  路径对不上的名字）。
-- **复用**：`memory/format.rs` 里已有 `split_frontmatter(text) -> (&str, &str)`
-  的容错实现。把它**提升为共享工具函数**（如 `src/skills/parse.rs` 直接调用、
-  或抽到 `src/util/`），避免引入新的 YAML 依赖（仓库当前没有 `serde_yaml`，
-  frontmatter 是手写的 key:value 解析，够用）。
+- **Discovery order**: project level (`.agents/skills/` -> `.claude/skills/`) -> user level
+  (`~/.agents/skills/` -> `~/.claude/skills/`). **First scanned wins** (project level naturally comes
+  before user level, implementing project overriding user).
+- **Parsing fault tolerance**: missing frontmatter / missing `name` or `description` -> **skip that
+  skill and log a warn** (aligned with step 2 of the official guide; never let one bad skill drag down
+  the whole directory).
+- **Validation**: if `name` does not match the parent directory name -> use the **directory name**
+  (to avoid the model seeing a name that does not line up with the path).
+- **Reuse**: `memory/format.rs` already has a fault-tolerant `split_frontmatter(text) -> (&str, &str)`
+  implementation. **Promote it to a shared utility function** (e.g. `src/skills/parse.rs` calls it
+  directly, or extract it to `src/util/`), avoiding a new YAML dependency (the repository currently
+  has no `serde_yaml`; the frontmatter is a hand-written key:value parse, which suffices).
 
-**5.3 运行时与数据流**
+**5.3 Runtime and data flow**
 
 ```mermaid
 flowchart TD
-    Boot["build_agent<br/>（每个 Agent 一份 SkillRuntime）"]
-    Disc["discovery：扫 skill 目录"]
+    Boot["build_agent<br/>(one SkillRuntime per Agent)"]
+    Disc["discovery: scan skill directories"]
     Cat["SkillCatalog<br/>name + description + root + resources"]
     Prov["SkillContextProvider"]
     Act["activate_skill(name)"]
     Read["read_skill_file(skill, path)"]
 
     Boot --> Disc --> Cat
-    Cat -->|"Tier1 目录"| Prov
-    Cat -->|"name 枚举"| Act
-    Act -->|"读 SKILL.md 正文"| Cat
-    Act -->|"写入已激活集合"| Prov
-    Prov -->|"每轮末尾 system：目录 + 已激活正文"| Agent["Agent::run_stream"]
-    Read -->|"按 skill 根解析 + 行/字节上限"| Cat
+    Cat -->|"Tier1 catalog"| Prov
+    Cat -->|"name enum"| Act
+    Act -->|"read SKILL.md body"| Cat
+    Act -->|"write the activated set"| Prov
+    Prov -->|"system at the end of each round: catalog + activated bodies"| Agent["Agent::run_stream"]
+    Read -->|"resolve against skill root + line/byte caps"| Cat
 ```
 
-- **`SkillCatalog`**：启动时扫描一次，持 `Vec<SkillMeta>`（`name` /
-  `description` / `root` / `resources`）。目录在会话期间**不变**。
-- **`SkillRuntime`**：`Arc<Mutex<HashSet<String>>>`（已激活的 skill 名）。
-  `provider` 与 `activate_skill` 工具共享同一 `Arc`，与 todo 的 `TodoStore`
-  同构。
-- **`SkillContextProvider`**：渲染两段——
-  1. **Tier1 目录**（`<available_skills>`：每行 `name: description`）；
-  2. **已激活正文**（`<active_skill name="...">正文</active_skill>`）。
-  空目录且无激活 → 返回 `None`（不注入）。
+- **`SkillCatalog`**: scanned once at startup, holding `Vec<SkillMeta>` (`name` / `description` /
+  `root` / `resources`). The catalog is **unchanged** during a session.
+- **`SkillRuntime`**: `Arc<Mutex<HashSet<String>>>` (the activated skill names). The `provider` and
+  the `activate_skill` tool share the same `Arc`, isomorphic to todo's `TodoStore`.
+- **`SkillContextProvider`**: renders two segments --
+  1. **Tier1 catalog** (`<available_skills>`: one line `name: description` each);
+  2. **activated bodies** (`<active_skill name="...">body</active_skill>`).
+  Empty catalog and no activation -> return `None` (do not inject).
 
-**5.4 接缝接线（`src/bootstrap.rs`）**
+**5.4 Seam wiring (`src/bootstrap.rs`)**
 
-`build_agent` 里新增第三个 provider，加入既有的 `CompositeContextProvider`：
+Add a third provider in `build_agent`, into the existing `CompositeContextProvider`:
 
 ```rust
 let skill_runtime = Arc::new(SkillRuntime::new(skill_catalog.clone()));
@@ -284,134 +300,149 @@ let provider = CompositeContextProvider::new(vec![
     Arc::new(MemoryContextProvider::new(memory.clone())) as Arc<dyn ContextProvider>,
     Arc::new(SkillContextProvider::new(skill_catalog, skill_runtime.clone())) as Arc<dyn ContextProvider>,
 ]);
-// 注册 activate_skill / read_skill_file（共享同一 skill_runtime）
+// register activate_skill / read_skill_file (sharing the same skill_runtime)
 let _ = tool_manager.register(ActivateSkillTool::new(skill_runtime.clone()));
 let _ = tool_manager.register(ReadSkillFileTool::new(skill_catalog));
 ```
 
-**关键点**：`SkillCatalog` 可在 `AgentFactory::assemble` 时扫一次并 `clone` 给每个
-`Agent`（目录只读、跨会话共享无碍）；`SkillRuntime` **每会话新建**（激活状态
-随会话隔离），与 todo / memory 的运行时分发完全一致。
+**Key point**: `SkillCatalog` can be scanned once at `AgentFactory::assemble` and `clone`d to each
+`Agent` (the catalog is read-only, harmless to share across sessions); `SkillRuntime` is **created
+fresh per session** (the activation state is isolated per session), fully consistent with todo /
+memory's runtime distribution.
 
-**5.5 Tier3：`read_skill_file(skill, path)`**
+**5.5 Tier3: `read_skill_file(skill, path)`**
 
-用户级 skill 在工作区外，`read_file` 够不到。所以给一个**受 skill 根约束**的
-读取工具：
+User-level skills are outside the workspace, and `read_file` cannot reach them. So give a read tool
+**constrained by the skill root**:
 
-- 入参 `skill`（枚举）+ `path`（相对 skill 根，拒绝 `..` / 绝对路径）。
-- 复用 `read_file` 的行数上限（默认 200 / 上限 2000）、字节上限（64KB）、
-  二进制探测、密钥过滤——**同一套边界**，只是把根从 `WorkSpace` 换成
-  `skill.root`。
-- 实现上把 `read_file` 的读取内核抽成 `read_text_range(root, path, ...)`，
-  两处共用，避免边界漂移（对齐 `docs/security.md` "边界只有一处"）。
+- Input `skill` (enum) + `path` (relative to the skill root, rejecting `..` / absolute paths).
+- Reuse `read_file`'s line cap (default 200 / cap 2000), byte cap (64KB), binary detection, and secret
+  filtering -- **the same set of boundaries**, only changing the root from `WorkSpace` to `skill.root`.
+- In implementation, extract `read_file`'s read kernel into `read_text_range(root, path, ...)`, shared
+  by both, to avoid boundary drift (aligned with `docs/security.md` "the boundary exists in only one
+  place").
 
-**5.6 与 slash 命令的关系（P2，已落地）**
+**5.6 Relationship to slash commands (P2, landed)**
 
-除模型经 `activate_skill` 激活外，用户还可敲 **`/<skill-name>`** 由 harness
-**直接激活**——确定性入口，跳过模型的判断。
+Besides the model activating via `activate_skill`, the user can also type **`/<skill-name>`** for the
+harness to **activate directly** -- a deterministic entry that skips the model's judgment.
 
-- **解析**：`CommandManager::resolve` / `fuzzy_match` 增 `skills: &[String]` 参数；
-  候选名 = 内置指令 + 当前会话可见的 skill 名。**内置指令优先**（`/model` 等不被
-  同名 skill 抢走），skill 名只在内置未命中时匹配。skill 名作为**数据**传入，
-  `CommandManager` 保持无状态、不缓存（避免 stale）。
-- **拿到 `SkillRuntime`**：仿 `memory` 模式——`BuiltAgent` 多带 `skills: Arc<SkillRuntime>`，
-  `Session` 持 `pub skills: Option<Arc<SkillRuntime>>`，App 从前台会话取。
-- **注入**：激活只写 `SkillRuntime` 的已激活集合，正文仍由 `SkillContextProvider`
-  下一轮**追加注入**——**不新增注入接缝**，`render()` 的追加语义保证 KV 前缀稳定。
-- **UX**：`/<skill-name>`（无参）= 激活 + 一条本地系统提示（不发模型）；
-  `/<skill-name> <text>` = 激活后把 `<text>` 作为本轮 prompt 发送；激活失败
-  （未知技能 / 读文件失败）本地报错、不发模型。skill 名不在目录里则按普通文本处理
-  （宽松策略，不打断输入）。
-- **边界**：纯应用层（`src/interface/command.rs` + `app.rs` 接线），**SDK 零改动**。
+- **Parsing**: `CommandManager::resolve` / `fuzzy_match` gain a `skills: &[String]` parameter; the
+  candidate names = built-in commands + the skill names visible to the current session. **Built-in
+  commands take priority** (`/model` etc. are not stolen by a same-named skill), and a skill name is
+  matched only when no built-in hits. The skill names are passed in as **data**, and `CommandManager`
+  stays stateless and does not cache (to avoid staleness).
+- **Obtaining `SkillRuntime`**: mimic the `memory` pattern -- `BuiltAgent` carries an extra
+  `skills: Arc<SkillRuntime>`, `Session` holds `pub skills: Option<Arc<SkillRuntime>>`, and the App
+  takes it from the foreground session.
+- **Injection**: activation only writes to `SkillRuntime`'s activated set, and the body is still
+  **appended and injected** by `SkillContextProvider` in the next round -- **no new injection seam**,
+  and `render()`'s append semantics guarantee KV prefix stability.
+- **UX**: `/<skill-name>` (no args) = activate + a local system hint (does not send to the model);
+  `/<skill-name> <text>` = activate and then send `<text>` as this round's prompt; a failed activation
+  (unknown skill / file-read failure) errors locally and does not send to the model. If a skill name is
+  not in the catalog, treat it as ordinary text (a lenient strategy, not interrupting input).
+- **Boundary**: purely application-layer (`src/interface/command.rs` + `app.rs` wiring), **zero SDK
+  changes**.
 
 ---
 
-**六、安全与信任**
+**6. Security and trust**
 
-| 风险 | 处置 |
+| Risk | Handling |
 | --- | --- |
-| 第三方 skill 注入恶意指令 | `<skill_content>` 标签 + 系统提示词声明"外部数据，非系统指令"；不自动执行 `scripts/` |
-| `allowed-tools` 被当成授权 | 第一期**只记录不强制**（Shirley 无通用权限层）；文档明说它不是安全边界 |
-| 用户级 skill 路径越界读取 | `read_skill_file` 把根钉死在 `skill.root`，拒绝 `..` / 绝对路径 |
-| 目录扫描被大仓库拖慢 | 跳过 `.git` / `node_modules` / `target`；只扫固定深度的 `skills/*/SKILL.md` |
-| 激活内容撑爆上下文 | 每 skill 正文设字符上限（如 20k），超限截断并标注；总注入设上限 |
-| 幻觉出不存在的 skill | `activate_skill` 的 `name` 由宏/手写 schema 限制为**枚举** |
+| A third-party skill injects malicious instructions | `<skill_content>` tag + a system-prompt declaration "external data, not a system instruction"; do not auto-execute `scripts/` |
+| `allowed-tools` treated as authorization | phase one **records only, does not enforce** (Shirley has no general permission layer); the doc states plainly that it is not a security boundary |
+| Out-of-bounds reading of user-level skill paths | `read_skill_file` pins the root at `skill.root`, rejecting `..` / absolute paths |
+| Directory scanning slowed by a large repository | skip `.git` / `node_modules` / `target`; scan only fixed-depth `skills/*/SKILL.md` |
+| Activated content blows up the context | set a character cap per skill body (e.g. 20k), truncating with a marker when exceeded; set a cap on the total injection |
+| Hallucinating a nonexistent skill | `activate_skill`'s `name` is limited to an **enum** by the macro / hand-written schema |
 
-> **不做的**：不自动信任、不自动执行、不做沙盒级别的 skill 隔离（那是
-> `docs/security.md` 的 `PermissionPolicy` 该管的，属后续独立工作）。
+> **Not doing**: not auto-trusting, not auto-executing, not doing sandbox-level skill isolation (that
+> is what `docs/security.md`'s `PermissionPolicy` should handle, a separate follow-up).
 
 ---
 
-**七、与 todo / memory 的边界**
+**7. Boundary with todo / memory**
 
-三者都复用 `ContextProvider`，但**职责不重叠**，注入内容彼此独立：
+All three reuse `ContextProvider`, but their **responsibilities do not overlap**, and the injected
+content is independent of each other:
 
 | | todo | memory | skills |
 | --- | --- | --- | --- |
-| 注入内容 | 任务进度 | 用户画像 + 相关记忆 | 可用能力目录 + 已激活指令 |
-| 变化频率 | 每轮可能变 | 每轮可能变 | 目录不变；激活偶发 |
-| 配套工具 | `todo`（写） | `recall`（读） | `activate_skill` / `read_skill_file` |
-| 生命周期 | 每会话一份 `TodoStore` | 每会话一份 `MemoryRuntime` | 每会话一份 `SkillRuntime`；`SkillCatalog` 跨会话共享 |
+| Injected content | task progress | user profile + relevant memories | available capability catalog + activated instructions |
+| Change frequency | may change each round | may change each round | catalog unchanged; activation occasional |
+| Companion tool | `todo` (write) | `recall` (read) | `activate_skill` / `read_skill_file` |
+| Lifecycle | one `TodoStore` per session | one `MemoryRuntime` per session | one `SkillRuntime` per session; `SkillCatalog` shared across sessions |
 
-拼接顺序（`CompositeContextProvider`）建议 **todo → memory → skills**：把"进度 /
-画像"这类每轮最需要在前的内容放前，把"能力目录"这类偏静态的放后。顺序只影响
-拼接文本，不影响正确性。
-
----
-
-**八、验收口径**
-
-方案落地后，至少覆盖：
-
-1. **标准兼容**：能直接消费一个符合 Agent Skills 标准的 skill 目录（含
-   `scripts/` / `references/`），无需改造。
-2. **发现**：项目级 + 用户级都被扫到；项目级重名覆盖用户级。
-3. **容错**：坏 frontmatter / 缺 `description` 的 skill 被跳过，不影响其余。
-4. **披露**：未激活时，上下文里只有 Tier1 目录（每 skill 一行），无正文。
-5. **激活**：`activate_skill` 返回剥掉 frontmatter 的正文 + `resources` 清单；
-   非枚举的 `name` 被拒。
-6. **跨压缩存活**：激活后再触发一次压缩，模型下一轮仍能看到该 skill 正文。
-7. **越界**：`read_skill_file` 拒绝 `..` / 绝对路径；用户级 skill 可读。
-8. **不自动执行**：`scripts/` 里的脚本在未显式 `bash` 调用前不会被执行。
-9. **SDK 零改动**：`crates/shirley-agent-sdk/src/lib.rs` 的 `pub use` 无新增。
+The concatenation order (`CompositeContextProvider`) is suggested as **todo -> memory -> skills**: put
+the content that most needs to be in front each round ("progress / profile") first, and the more static
+"capability catalog" later. The order only affects the concatenated text, not correctness.
 
 ---
 
-**九、分期**
+**8. Acceptance criteria**
 
-| 期 | 内容 | 依赖 |
+After the plan lands, at least cover:
+
+1. **Standard compatibility**: can directly consume a skill directory conforming to the Agent Skills
+   standard (including `scripts/` / `references/`), with no rework.
+2. **Discovery**: both project level + user level are scanned; a project-level name collision overrides
+   the user level.
+3. **Fault tolerance**: a skill with bad frontmatter / missing `description` is skipped without
+   affecting the rest.
+4. **Disclosure**: when not activated, the context contains only the Tier1 catalog (one line per
+   skill), with no body.
+5. **Activation**: `activate_skill` returns the body with the frontmatter stripped + the `resources`
+   list; a non-enum `name` is rejected.
+6. **Survives compaction**: trigger another compaction after activation, and the model can still see
+   that skill's body in the next round.
+7. **Out-of-bounds**: `read_skill_file` rejects `..` / absolute paths; user-level skills are readable.
+8. **Not auto-executed**: scripts under `scripts/` are not executed until explicitly called via `bash`.
+9. **Zero SDK changes**: `crates/shirley-agent-sdk/src/lib.rs`'s `pub use` has no additions.
+
+---
+
+**9. Phases**
+
+| Phase | Content | Dependency |
 | --- | --- | --- |
-| **P0** ✅ | `discovery` + `parse` + `catalog`（扫目录、解析、容错）+ `SkillContextProvider` 只注入 Tier1 目录 | 无 |
-| **P1** ✅ | `activate_skill` + `SkillRuntime` + 每轮**追加**注入已激活正文（跨压缩存活）+ `read_skill_file`（Tier3） | P0 |
-| **P2** ◐ | `/skill-name` slash 命令直接激活 ✅（`CommandOutcome::ActivateSkill` + 命令层 `skills` 参数）；去重激活提示、每 skill 正文上限调优（未落地） | P1 |
-| **P3（可选）** | 兼容 Claude Code 私有字段中的**只读**子集（`when_to_use` 等）；subagent 隔离 | P2 |
-| **不做** | 自动执行 `scripts/`；`allowed-tools` 强制；skill 市场 / 安装器；跨工作区 skill 同步 | — |
+| **P0** ✅ | `discovery` + `parse` + `catalog` (scan directories, parse, fault tolerance) + `SkillContextProvider` injecting only the Tier1 catalog | none |
+| **P1** ✅ | `activate_skill` + `SkillRuntime` + **appending** the activated bodies each round (survives compaction) + `read_skill_file` (Tier3) | P0 |
+| **P2** ◐ | the `/skill-name` slash command activating directly ✅ (`CommandOutcome::ActivateSkill` + the command layer's `skills` parameter); dedup activation hints and per-skill body cap tuning (not landed) | P1 |
+| **P3 (optional)** | compatible with the **read-only** subset of Claude Code's private fields (`when_to_use` etc.); subagent isolation | P2 |
+| **Not doing** | auto-executing `scripts/`; enforcing `allowed-tools`; a skill marketplace / installer; cross-workspace skill sync | -- |
 
 ---
 
-**十、已知缺口 / 待决策**
+**10. Known gaps / open decisions**
 
-1. **激活内容的 token 成本**：每轮重注入全文（决策 4）会持续占上下文。缓解是
-   "只注入已激活 + 设上限"，但"何时自动取消激活"没有好判据（模型不会主动说
-   '我不用了'）。备选：激活后只注入一次全文进 `self.messages`，provider 仅每轮
-   注入一行"已激活 X"的短提示——**但这会让全文可被压缩掉**，与决策 4 冲突。
-   倾向保持决策 4，把成本交给上限控制。
-2. **frontmatter 解析复用**：`memory/format.rs::split_frontmatter` 目前是私有的，
-   提升为共享函数会动 memory 模块——需确认不破坏其测试。
-3. **`description` 的"何时用"质量**：模型能否正确激活高度依赖 `description`
-   写得好不好。是否要在目录注入里加一句引导语（"当任务与某 skill 描述匹配时，
-   先 `activate_skill`"）——倾向加，待验证。
-4. **多工作区（desktop）下的 skill 根**：每个项目一份 `AgentFactory`，skill
-   目录应按项目根解析；用户级 `~/.agents/skills/` 全局共享。需在 `ProjectRuntime`
-   落地时确认。
-5. **信任模型**：是否要"首次使用某 skill 需用户确认"的 UX（防供应链攻击）——
-   第一期不做，记为缺口。
+1. **The token cost of activated content**: re-injecting the full text each round (decision 4)
+   continuously occupies the context. The mitigation is "inject only activated + set a cap", but there
+   is no good criterion for "when to auto-deactivate" (the model will not proactively say 'I am done
+   with it'). Alternative: after activation, inject the full text into `self.messages` only once, and
+   the provider injects only a one-line short hint "activated X" each round -- **but this makes the
+   full text compactable**, conflicting with decision 4. Leaning toward keeping decision 4 and leaving
+   the cost to cap control.
+2. **Reusing frontmatter parsing**: `memory/format.rs::split_frontmatter` is currently private;
+   promoting it to a shared function touches the memory module -- need to confirm it does not break
+   its tests.
+3. **The quality of `description`'s "when to use"**: whether the model can activate correctly depends
+   heavily on how well `description` is written. Whether to add a guiding sentence in the catalog
+   injection ("when a task matches a skill's description, `activate_skill` first") -- leaning toward
+   adding it, pending verification.
+4. **The skill root under multiple workspaces (desktop)**: one `AgentFactory` per project, and the
+   skill directories should be resolved against the project root; the user-level `~/.agents/skills/`
+   is globally shared. Need to confirm when `ProjectRuntime` lands.
+5. **Trust model**: whether to have the UX of "the first use of a skill requires user confirmation"
+   (against supply-chain attacks) -- not done in phase one, recorded as a gap.
 
 ---
 
-**附：与既有文档的关系**
+**Appendix: relationship to existing documents**
 
-- 复用接缝：`runtime/context.rs` 的 `ContextProvider`（`docs/todo.md` 已阐明）。
-- 同族能力：`docs/todo.md`（进度）、`docs/memory.md`（用户）。
-- 边界归属：`docs/security.md`（权限层，skill 的 `allowed-tools` 未来挂靠点）。
-- 上游标准：Agent Skills 开放标准（`agentskills.io`）+ `anthropics/skills`。
+- Reused seam: `runtime/context.rs`'s `ContextProvider` (already explained in `docs/todo.md`).
+- Sibling capabilities: `docs/todo.md` (progress), `docs/memory.md` (user).
+- Boundary ownership: `docs/security.md` (the permission layer, the future attachment point for a
+  skill's `allowed-tools`).
+- Upstream standard: the Agent Skills open standard (`agentskills.io`) + `anthropics/skills`.

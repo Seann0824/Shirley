@@ -1,40 +1,40 @@
-**Shirley 技术方案 · 进程沙盒（P0）**
+**Shirley technical design · Process sandbox (P0)**
 
-本文沉淀 `crates/shirley-agent-sdk/src/sandbox/` 当前的设计。它是 `security.md` 第六节"运行时约束"里"OS 级沙箱"那一步的落地，回答一个问题：**当 Agent 要执行外部命令时，怎么保证它跑在一个"假世界"里，闹不到真世界。**
+This document distills the current design of `crates/shirley-agent-sdk/src/sandbox/`. It is the landing of the "OS-level sandbox" step in section 6 ("Runtime constraints") of `security.md`, answering one question: **when the Agent wants to execute an external command, how do we guarantee it runs in a "fake world" and cannot disturb the real world.**
 
-**一、为什么单独立一层**
+**1. Why a separate layer**
 
-`security.md` 已经把边界定在"工作区根目录"这一层，但那只解决了"文件读写越界"。`bash` 这类工具真正的问题更深：它把任意命令交给 shell，而命令的语义**无法在字符串层面静态判断**（`/bin/rm`、`base64 | bash`、`r''m` 都是绕过）。结论是：**不要在命令字符串上做模式匹配，要在"能碰什么"这一层做物理隔离。**
+`security.md` already set the boundary at the "workspace root" layer, but that only solved "file read/write escaping the boundary". The real problem with a tool like `bash` is deeper: it hands arbitrary commands to a shell, and the semantics of a command **cannot be statically judged at the string level** (`/bin/rm`, `base64 | bash`, `r''m` are all bypasses). The conclusion is: **do not do pattern matching on the command string; do physical isolation at the "what can be touched" layer.**
 
-沙盒层因此与权限层（`PermissionPolicy`）分工明确：
+The sandbox layer therefore has a clear division of labor with the permission layer (`PermissionPolicy`):
 
-| 层 | 回答的问题 | 时机 |
+| Layer | Question it answers | Timing |
 | --- | --- | --- |
-| 权限层 policy | "该不该执行这条命令" | 执行前，静态决策 |
-| 沙盒层 sandbox | "执行了也碰不到真世界" | 执行时，物理约束 |
+| permission layer policy | "should this command be executed" | before execution, a static decision |
+| sandbox layer sandbox | "even if executed, it cannot touch the real world" | during execution, a physical constraint |
 
-正确顺序是 `policy.check() -> Allow/Deny/Ask`，放行后再交给 `Sandbox::run`。**沙盒不替 policy 做决策，policy 也不假设沙盒一定存在。**
+The correct order is `policy.check() -> Allow/Deny/Ask`, and only after being allowed is it handed to `Sandbox::run`. **The sandbox does not make decisions for the policy, and the policy does not assume the sandbox necessarily exists.**
 
-**二、五条设计原则**
+**2. Five design principles**
 
-1. **边界在"能碰什么"，不在命令字符串。** `SandboxSpec` 用 `program + args` 分离传递，不做 `bash -c "..."`。语义藏在字符串里就无法静态判断，这是 `bash.rs` 现状的根因。
-2. **默认拒绝。** 网络默认断（`NetworkPolicy::Disabled`），环境变量默认不继承（`env_clear` 后再注入），写路径默认空。要放开必须显式声明。
-3. **可替换后端。** 隔离机制由 `SandboxBackend` trait 提供。本地开发用 `ProcessBackend`，生产换 `bwrap` / `sandbox-exec` / microVM。换后端时门面与上层调用一行不改。
-4. **超时不可逃避。** 超时由门面 `Sandbox::run` 在最外层用 `tokio::time::timeout` 施加，配合后端的 `kill_on_drop`。后端即使想赖着不停也会被 drop + kill，不依赖进程自觉退出。
-5. **降级透明。** 后端做不到的约束必须写进 `SandboxOutput::degraded`，上层可据此拒绝结果，而不是被"看起来跑了"骗过去。
+1. **The boundary is in "what can be touched", not in the command string.** `SandboxSpec` passes `program + args` separately, and does not do `bash -c "..."`. Semantics hidden in a string cannot be statically judged -- this is the root cause of `bash.rs`'s status quo.
+2. **Deny by default.** Network is off by default (`NetworkPolicy::Disabled`), environment variables are not inherited by default (`env_clear` then inject), and write paths are empty by default. Opening anything up must be declared explicitly.
+3. **Replaceable backend.** The isolation mechanism is provided by the `SandboxBackend` trait. Local development uses `ProcessBackend`, production switches to `bwrap` / `sandbox-exec` / a microVM. When switching backends, the facade and upper-layer call sites do not change a single line.
+4. **The timeout cannot be evaded.** The timeout is applied by the facade `Sandbox::run` at the outermost layer with `tokio::time::timeout`, together with the backend's `kill_on_drop`. Even if the backend wants to stall and not stop, it will be dropped + killed, not relying on the process to voluntarily exit.
+5. **Degradation is transparent.** Constraints the backend cannot enforce must be written into `SandboxOutput::degraded`, so the upper layer can reject the result based on it, rather than being fooled by "it looks like it ran".
 
-**三、分层结构**
+**3. Layered structure**
 
 ```mermaid
 graph TD
-    APP["调用方<br/>（未来接入 bash 工具）"] --> FACADE
+    APP["caller<br/>(will wire in the bash tool in the future)"] --> FACADE
 
     subgraph SANDBOX["sandbox/"]
-        FACADE["mod.rs · Sandbox&lt;B&gt;<br/>门面：统一施加超时、组装结果"]
-        SPEC["spec.rs · SandboxSpec<br/>平台无关的执行意图"]
-        OUT["output.rs · SandboxOutput<br/>结果 + degraded 诚实度"]
+        FACADE["mod.rs · Sandbox&lt;B&gt;<br/>facade: uniformly apply the timeout, assemble the result"]
+        SPEC["spec.rs · SandboxSpec<br/>platform-agnostic execution intent"]
+        OUT["output.rs · SandboxOutput<br/>result + degraded honesty"]
         BE["backend/mod.rs<br/>SandboxBackend trait + Capabilities"]
-        PB["backend/process.rs<br/>ProcessBackend（无隔离，基线）"]
+        PB["backend/process.rs<br/>ProcessBackend (no isolation, baseline)"]
     end
 
     FACADE --> BE
@@ -45,150 +45,150 @@ graph TD
     PB -.-> OUT
 ```
 
-职责边界：
+Responsibility boundaries:
 
-- **`spec.rs`** 只描述意图，与平台无关。"我想跑什么、允许它碰什么"。
-- **`backend/`** 把意图落地为真实执行。**只负责执行与隔离**，不做权限决策，不负责超时（超时归门面）。
-- **`output.rs`** 统一结果。保留 `stderr` / `exit_code`（模型要看到失败细节才能自我纠正，见 `security.md` 6.1），以及 `degraded`（审计要知道当时隔离是否真的生效）。
-- **`mod.rs`** 门面。施加超时、组装结果，其余全部透传。
+- **`spec.rs`** only describes intent, platform-agnostic. "What I want to run, and what I allow it to touch."
+- **`backend/`** lands the intent as real execution. **Only responsible for execution and isolation**, it does not make permission decisions, and is not responsible for the timeout (the timeout belongs to the facade).
+- **`output.rs`** unifies the result. It keeps `stderr` / `exit_code` (the model needs to see failure details to self-correct, see `security.md` 6.1), as well as `degraded` (auditing needs to know whether isolation was actually in effect at the time).
+- **`mod.rs`** the facade. Applies the timeout, assembles the result, and passes everything else through.
 
-**四、一次执行的完整数据流**
+**4. The complete data flow of one execution**
 
 ```mermaid
 flowchart LR
-    S["SandboxSpec<br/>program+args / 网络 / 写路径 / 超时"] --> RUN["Sandbox::run"]
-    RUN --> CLAMP["计算 effective timeout<br/>min(spec.timeout, hard_timeout)"]
-    CLAMP --> WRAP["tokio::time::timeout<br/>包住 backend.execute"]
+    S["SandboxSpec<br/>program+args / network / write paths / timeout"] --> RUN["Sandbox::run"]
+    RUN --> CLAMP["compute effective timeout<br/>min(spec.timeout, hard_timeout)"]
+    CLAMP --> WRAP["tokio::time::timeout<br/>wrapping backend.execute"]
     WRAP --> BE["SandboxBackend::execute"]
-    BE --> PROC["起进程 / 施加隔离"]
+    BE --> PROC["spawn process / apply isolation"]
     PROC --> OUT["SandboxOutput<br/>stdout / stderr / exit_code<br/>isolation / degraded"]
-    WRAP -.->|超时| TO["手工拼 SandboxOutput<br/>timed_out=true, degraded=[]"]
-    OUT --> CALLER["调用方<br/>用 is_fully_isolated() 决定是否接受"]
+    WRAP -.->|timeout| TO["manually assemble SandboxOutput<br/>timed_out=true, degraded=[]"]
+    OUT --> CALLER["caller<br/>uses is_fully_isolated() to decide whether to accept"]
     TO --> CALLER
 ```
 
-**五、`degraded` 是什么，谁给出来的**
+**5. What `degraded` is, and who produces it**
 
-`degraded` 是**后端自愿上报的"认怂声明"**：它一边执行，一边对照 `spec` 里要求的约束，逐条检查自己做到了没有，做不到的 push 进列表。
+`degraded` is the backend's **voluntary "I admit I can't" declaration**: while executing, it checks itself item by item against the constraints required in the `spec`, and pushes the ones it cannot satisfy into the list.
 
-它**不是**事后监控记录，而是**事前就知道自己几斤几两**。`ProcessBackend` 从出生起就知道"我不会隔离"，所以不需要监控任何东西，它直接声明"我啥也拦不住"。它每次执行都会填：
+It is **not** a post-hoc monitoring record, but **knowing its own limits up front**. `ProcessBackend` knows from birth that "I do not isolate", so it does not need to monitor anything; it simply declares "I cannot block anything". Every execution it fills in:
 
 ```
-无文件系统隔离：进程可访问宿主整个文件系统
-无资源限制：未施加内存/进程数上限
-无网络隔离：NetworkPolicy::Disabled 未被强制
+no filesystem isolation: the process can access the host's entire filesystem
+no resource limits: no memory/process-count cap applied
+no network isolation: NetworkPolicy::Disabled is not enforced
 ```
 
-三方分工：
+Three-party division of labor:
 
-| 角色 | 对 degraded 做什么 | 位置 |
+| Role | What it does with degraded | Location |
 | --- | --- | --- |
-| 后端实现 | **写**——对照 spec 逐条上报做不到的约束 | `backend/process.rs`（未来 bwrap/sandbox-exec 同此） |
-| 门面 `Sandbox` | **基本不碰**——仅超时路径给空 `Vec`（超时不算隔离降级） | `mod.rs` |
-| 调用方 | **读**——`is_fully_isolated()` / 遍历，决定接不接受结果 | 上层业务 |
+| backend implementation | **write** -- report the constraints it cannot satisfy item by item against the spec | `backend/process.rs` (future bwrap/sandbox-exec the same) |
+| facade `Sandbox` | **basically does not touch it** -- only the timeout path gives an empty `Vec` (a timeout does not count as isolation degradation) | `mod.rs` |
+| caller | **read** -- `is_fully_isolated()` / iterate, deciding whether to accept the result | upper-layer business |
 
-**关键限制**：`degraded` 目前是后端**自报**的，理论上可以被偷懒的实现骗过。生产化时应加一层**外部验证**——后端启动时跑自检探针（试着往工作区外写、试着连外网），用实际行为校验它声明的能力，而不是只听它说。
+**Key limitation**: `degraded` is currently **self-reported** by the backend, and in theory a lazy implementation could lie. In production, an **external verification** layer should be added -- at backend startup, run self-check probes (try writing outside the workspace, try connecting to the internet) to validate the capabilities it declares with actual behavior, rather than just believing what it says.
 
-**六、后端选型路线**
+**6. Backend selection roadmap**
 
-`ProcessBackend` 只是把链路跑通，**绝不可用于不可信输入**。按平台接真实隔离：
+`ProcessBackend` only gets the pipeline working; it **must never be used for untrusted input**. Connect real isolation per platform:
 
-| 平台 / 场景 | 后端 | 隔离强度 |
+| Platform / scenario | Backend | Isolation strength |
 | --- | --- | --- |
-| 本地开发 / 测试 | `ProcessBackend` | 无（degraded 全填） |
-| macOS | `sandbox-exec`（SBPL profile：`(deny default)` + 放行 read/write/network） | 中 |
-| Linux | `bwrap`（`--ro-bind` / `--tmpfs` / `--unshare-net` / `--die-with-parent`） | 中 |
-| Linux 高保证 | `gVisor`（runsc） | 高（用户态内核） |
-| 多租户 / 极致隔离 | `Firecracker` microVM（独立内核） | 最高 |
+| local development / testing | `ProcessBackend` | none (degraded all filled in) |
+| macOS | `sandbox-exec` (SBPL profile: `(deny default)` + allow read/write/network) | medium |
+| Linux | `bwrap` (`--ro-bind` / `--tmpfs` / `--unshare-net` / `--die-with-parent`) | medium |
+| Linux high-assurance | `gVisor` (runsc) | high (user-space kernel) |
+| multi-tenant / extreme isolation | `Firecracker` microVM (separate kernel) | highest |
 
-新增后端只需实现 `SandboxBackend` 一个 trait，门面与上层调用无需改动。这正是把它做成 trait 的意义：**先把链路和契约固定，隔离强度作为可插拔的实现。**
+Adding a backend only requires implementing the single `SandboxBackend` trait, and the facade and upper-layer call sites need no changes. This is exactly the point of making it a trait: **first fix the pipeline and the contract; isolation strength is a pluggable implementation.**
 
-**七、能力矩阵**
+**7. Capability matrix**
 
-`Capabilities` 是后端**静态声明**它能做什么；`degraded` 是**本次执行**实际降级了什么。上层两者都要看：
+`Capabilities` is what the backend **statically declares** it can do; `degraded` is what was **actually degraded in this execution**. The upper layer must look at both:
 
-| 后端 | filesystem | network | resource | 运行时 degraded |
+| Backend | filesystem | network | resource | runtime degraded |
 | --- | --- | --- | --- | --- |
-| `ProcessBackend` | ✗ | ✗ | ✗ | 每次全填 |
-| `bwrap` 正常 | ✓ | ✓ | 部分 | 空 |
-| `bwrap` 未装成 | ✓ | ✓ | 部分 | "本次隔离未起来"（临时认怂） |
+| `ProcessBackend` | ✗ | ✗ | ✗ | all filled in every time |
+| `bwrap` normal | ✓ | ✓ | partial | empty |
+| `bwrap` failed to set up | ✓ | ✓ | partial | "isolation did not come up this time" (temporary admission) |
 
-**八、验收**
+**8. Acceptance**
 
-1. `SandboxSpec` 用 `program + args`，不经过 shell，`/bin/rm`、`r''m` 这类绕过在结构上不成立。
-2. 环境变量默认不继承：宿主设 `SANDBOX_LEAK_TEST`，沙盒内读不到；显式注入的才可见。
-3. 超时由门面强制：`sleep 5` + 200ms 超时必须返回 `timed_out=true`，且进程被清理。
-4. `ProcessBackend` 每次执行 `is_fully_isolated() == false`，`degraded` 非空。
-5. 命令失败时模型能拿到 `stderr` 与 `exit_code`（承接 `security.md` 6.1）。
-6. 接真实后端后，尝试写工作区外必须失败，`degraded` 为空。
+1. `SandboxSpec` uses `program + args`, does not go through a shell, so bypasses like `/bin/rm` and `r''m` are structurally impossible.
+2. Environment variables are not inherited by default: the host sets `SANDBOX_LEAK_TEST`, and it cannot be read inside the sandbox; only explicitly injected ones are visible.
+3. The timeout is enforced by the facade: `sleep 5` + a 200ms timeout must return `timed_out=true`, and the process is cleaned up.
+4. `ProcessBackend` returns `is_fully_isolated() == false` on every execution, with a non-empty `degraded`.
+5. On command failure the model can get `stderr` and `exit_code` (following `security.md` 6.1).
+6. After connecting a real backend, trying to write outside the workspace must fail, and `degraded` is empty.
 
-当前已覆盖 1–5（见 `crates/shirley-agent-sdk/tests/sandbox_smoke.rs`，6 个用例）。第 6 项待接 `sandbox-exec` / `bwrap` 后端后补齐。
+Currently 1-5 are covered (see `crates/shirley-agent-sdk/tests/sandbox_smoke.rs`, 6 cases). Item 6 awaits the `sandbox-exec` / `bwrap` backends.
 
-**九、设计缺口：谁决定工具是否沙盒化**
+**9. Design gap: who decides whether a tool is sandboxed**
 
-当前实现里，**是否走沙盒是工具作者自己决定的**。看 `src/tools/bash.rs`：
+In the current implementation, **whether to go through the sandbox is decided by the tool author themselves**. Look at `src/tools/bash.rs`:
 
 ```rust
 let sandbox = Sandbox::new(ProcessBackend::default());
 let output = sandbox.run(&spec).await?;
 ```
 
-是 `bash` 工具**自己选择**调用 `Sandbox::run`。任何工具都可以**不选**——直接 `tokio::process::Command::new(...)` 起进程，绕过沙盒，SDK 不会拦它。
+It is the `bash` tool **choosing for itself** to call `Sandbox::run`. Any tool can **choose not to** -- directly spawning a process with `tokio::process::Command::new(...)`, bypassing the sandbox, and the SDK will not stop it.
 
-**三种可能的归属**
+**Three possible ownership models**
 
-| 方案 | 谁决定 | 评价 |
+| Option | Who decides | Assessment |
 | --- | --- | --- |
-| A（现状） | 工具作者，在工具代码里 | 灵活，但默认不安全、策略分散、后端硬编码 |
-| B | SDK 统一规定：所有工具默认走沙盒 | 安全，但不够灵活（有些工具本不该被沙盒） |
-| C | 装配方（`main.rs`）在注册工具时声明 | 集中、可配置、默认安全 |
+| A (status quo) | the tool author, in the tool code | flexible, but insecure by default, scattered policy, hard-coded backend |
+| B | the SDK uniformly mandates: all tools go through the sandbox by default | safe, but not flexible enough (some tools should not be sandboxed) |
+| C | the assembler (`main.rs`) declares it when registering the tool | centralized, configurable, secure by default |
 
-**正确方向是 C，其次 B，最不该是 A。**
+**The right direction is C, then B, and A is the worst.**
 
-**为什么 A 最差**
+**Why A is the worst**
 
-1. **默认不安全。** 工具作者忘了用沙盒、或图省事直接 `Command::new`，就是裸跑。安全取决于"每个作者都记得"，这是最脆弱的设计——默认放行，靠自觉拒绝。
-2. **策略散落。** 工作区、超时、网络、后端，现在都写在 `bash.rs` 里。写第二个外部执行工具时又要重新决定一遍，且无法集中审计。
-3. **后端换不了。** `bash.rs` 硬编码了 `ProcessBackend::default()`，换后端得逐个工具改。
-4. **与原则冲突。** `security.md` 原则三说"权限策略是 SDK 能力，不是应用层硬编码"。现在隔离策略是**工具层硬编码**，比应用层还下沉一层。
+1. **Insecure by default.** If the tool author forgets to use the sandbox, or takes a shortcut and directly uses `Command::new`, it runs bare. Security depends on "every author remembering", which is the most fragile design -- allow by default, deny by self-discipline.
+2. **Scattered policy.** Workspace, timeout, network, backend are all written in `bash.rs` now. Writing a second external-execution tool means deciding it all over again, and it cannot be centrally audited.
+3. **The backend cannot be swapped.** `bash.rs` hard-codes `ProcessBackend::default()`, so swapping the backend means changing each tool.
+4. **Conflicts with the principles.** Principle 3 of `security.md` says "the permission policy is an SDK capability, not application-layer hard-coding". Now the isolation policy is **hard-coded at the tool layer**, one layer lower than the application layer.
 
-**应该长什么样（方向，非当前改动）**
+**What it should look like (direction, not the current change)**
 
-工具只声明"执行需求"，SDK 统一施加，后端由装配方注入：
+Tools only declare "execution requirements", the SDK uniformly applies them, and the backend is injected by the assembler:
 
 ```rust
-// 工具只描述"我要跑外部命令"，不决定隔离方式
+// a tool only describes "I want to run an external command", it does not decide the isolation method
 trait Tool {
     fn definition(&self) -> &ToolDefinition;
     fn invoke(&self, input: Value) -> ToolFuture;
-    // 新增：声明执行需求，默认 = 必须沙盒 + 最严约束
+    // new: declare execution requirements, default = must sandbox + strictest constraints
     fn execution_policy(&self) -> ExecutionPolicy;
 }
 
-// 装配方在 main.rs 决定后端与默认策略
+// the assembler decides the backend and default policy in main.rs
 let agent = Agent::builder()
-    .sandbox_backend(ProcessBackend::default())  // 或 sandbox-exec / bwrap
-    .tool(bash::tool())        // 声明需要沙盒
-    .tool(read::tool())        // 声明需要文件系统约束
-    .tool(http_fetch::tool())  // 显式声明允许出网
+    .sandbox_backend(ProcessBackend::default())  // or sandbox-exec / bwrap
+    .tool(bash::tool())        // declares it needs a sandbox
+    .tool(read::tool())        // declares it needs filesystem constraints
+    .tool(http_fetch::tool())  // explicitly declares outbound network is allowed
     .build()?;
 ```
 
-要点：默认沙盒化（不声明就用最严默认）；工具声明"需要什么"，SDK 决定"怎么满足"；后端由装配方注入，不硬编码；策略集中可审计。
+Key points: sandbox by default (using the strictest default if nothing is declared); tools declare "what they need", the SDK decides "how to satisfy it"; the backend is injected by the assembler, not hard-coded; the policy is centralized and auditable.
 
-**技术卡点**
+**Technical blocker**
 
-落地"装配方注入后端"卡在 object-safety：`SandboxBackend::execute` 返回 `impl Future`，trait **不是 object-safe**，无法 `Box<dyn SandboxBackend>` 动态注入（见 `bash.rs` 内 TODO）。需先把 `execute` 改成返回 `BoxFuture<'_>`（`Pin<Box<dyn Future + Send>>`），牺牲少量性能换 object-safety。
+Landing "the assembler injects the backend" is blocked on object-safety: `SandboxBackend::execute` returns `impl Future`, the trait **is not object-safe**, and `Box<dyn SandboxBackend>` cannot be dynamically injected (see the TODO in `bash.rs`). It is necessary to first change `execute` to return `BoxFuture<'_>` (`Pin<Box<dyn Future + Send>>`), trading a little performance for object-safety.
 
-**时机建议**
+**Timing suggestion**
 
-现在只有 `bash` 一个工具、`ProcessBackend` 一个后端，A 方案的坏处尚未暴露，**不急于改架构**。等出现第二个、第三个需要外部执行的工具时再做"声明 + 注入"，边际收益最大。届时应同时补上 `ExecutionPolicy` 与 object-safe 的 `SandboxBackend`。
+Right now there is only one tool, `bash`, and one backend, `ProcessBackend`; the downsides of option A have not yet surfaced, so **there is no rush to change the architecture**. Do the "declare + inject" when a second and third tool needing external execution appear, where the marginal benefit is greatest. At that time, `ExecutionPolicy` and an object-safe `SandboxBackend` should be added together.
 
-**十、尚未完成（明确划界）**
+**10. Not yet done (explicitly bounded)**
 
-- **真实隔离后端**：`sandbox-exec` / `bwrap` / microVM 均未接。当前只有 `ProcessBackend`。
-- ~~**`Sandbox` 未接入 `bash` 工具**~~：已接入。`src/tools/bash.rs` 走 `Sandbox::run`，保留 `bash -c`（不破坏管道/重定向），超时交给门面，结果含 stderr/exit_code/降级提示。黑名单降级为"临时静态兜底"。
-- **`degraded` 的外部验证**：目前只信后端自报，无自检探针。
-- **出网代理**：`NetworkPolicy::Proxy` 只是一个声明，代理本身（域名白名单 + 审计 + 内容检查）未实现。这是防数据外泄的关键层，也是事故高发区。
-- **执行策略归属未上收**：当前是否走沙盒由工具作者自行决定，见第九节。等第二个外部执行工具出现时一并解决。
-- **审计落盘**：`SandboxOutput` 已 `Serialize`，但尚未写入 `~/.shirley/audit.log`（见 `security.md` 6.3）。
+- **Real isolation backends**: `sandbox-exec` / `bwrap` / microVM are all unconnected. Currently only `ProcessBackend`.
+- ~~**`Sandbox` is not wired into the `bash` tool**~~: it is wired in. `src/tools/bash.rs` goes through `Sandbox::run`, keeping `bash -c` (without breaking pipes/redirection), the timeout is handed to the facade, and the result includes stderr/exit_code/a degradation hint. The blacklist is downgraded to a "temporary static fallback".
+- **External verification of `degraded`**: currently only the backend's self-report is trusted, with no self-check probes.
+- **Outbound proxy**: `NetworkPolicy::Proxy` is only a declaration; the proxy itself (domain allowlist + auditing + content inspection) is not implemented. This is the key layer against data exfiltration, and also a high-incident area.
+- **Execution policy ownership not centralized**: currently whether to go through the sandbox is decided by the tool author; see section 9. Solve it together when a second external-execution tool appears.
+- **Audit persistence**: `SandboxOutput` is already `Serialize`, but it is not yet written to `~/.shirley/audit.log` (see `security.md` 6.3).

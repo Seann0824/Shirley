@@ -22,9 +22,9 @@ export function ToolProgressIndicator({
     <div className="flex items-center gap-2 px-2 pt-1.5 text-caption text-muted">
       {running && <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />}
       <span>
-        {running ? "正在调用工具" : "工具调用"} · 已调用 {total} 个
+        {running ? "Calling tools" : "Tool calls"} · {total} called
       </span>
-      {highCount && <span className="hidden sm:inline">· 调用次数较多，可能需要更长时间…</span>}
+      {highCount && <span className="hidden sm:inline">· Many calls, this may take longer...</span>}
     </div>
   );
 }

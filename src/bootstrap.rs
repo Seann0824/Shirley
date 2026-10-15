@@ -1,18 +1,18 @@
-//! 应用装配（Bootstrap）：把「配置从哪来」与「用哪个界面渲染」解耦。
+//! Application assembly (Bootstrap): decouples "where config comes from" from "which interface renders it".
 //!
-//! 在引入桌面界面（`docs/desktop-interface.md`）之前，装配逻辑写死在 `main.rs`
-//! 里、装配完直接调 `interface::run`。现在把它抽成一个 [`AgentFactory`]：
-//! **TUI 与桌面界面共享同一份装配产物**（同一套模型配置 / 工具 / 会话目录），
-//! 只是渲染方式不同。
+//! Before the desktop interface was introduced (`docs/desktop-interface.md`), the assembly logic was hardcoded in `main.rs`
+//! and called `interface::run` directly after assembling. Now it is extracted into an [`AgentFactory`]:
+//! **the TUI and the desktop interface share the same assembly output** (the same model config / tools / session catalog),
+//! only the rendering differs.
 //!
-//! 这是「兄弟界面、共享 LCA」里的 **LCA 之一**：SDK 的 `Agent` 是另一个。
-//! 两个界面都是它的消费者，谁都不独占装配。
+//! This is **one of the LCAs** in "sibling interfaces, shared LCA": the SDK's `Agent` is the other.
+//! Both interfaces are its consumers; neither monopolizes assembly.
 //!
-//! 多会话（`docs/multi-session.md` 决策 5）：装配不再是「造一个 `Agent`」，
-//! 而是产出 [`AgentFactory`]——**一个能按会话反复造 `Agent` 的工厂**。
-//! 每个会话各自 [`AgentFactory::build_agent`] 出一个独立 `Agent`（模型配置 /
-//! 工具定义由工厂复用，`todo` / 会话日志在 `Agent::new` 内部按实例
-//! 隔离），从而支持多会话并行。
+//! Multi-session (`docs/multi-session.md` decision 5): assembly is no longer "build one `Agent`",
+//! but produces an [`AgentFactory`] -- **a factory that can repeatedly build `Agent`s per session**.
+//! Each session gets its own independent `Agent` via [`AgentFactory::build_agent`] (model config /
+//! tool definitions are reused by the factory; `todo` / session logs are isolated per instance inside `Agent::new`),
+//! thereby supporting parallel sessions.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -36,53 +36,53 @@ use crate::skills::{
 use crate::todo::{TodoContextProvider, TodoStore, TodoTool};
 use crate::tools;
 
-/// 压缩指令：所有会话共用（不随会话变化）。文案维护在 `prompts/compression_instruction.md`。
+/// Compression instruction: shared by all sessions (does not vary by session). The text lives in `prompts/compression_instruction.md`.
 const COMPRESSION_INSTRUCTION: &str = include_str!("../prompts/compression_instruction.md");
 
-/// 装配完成的运行时依赖：两个界面都能拿它起界面。
+/// The assembled runtime dependencies: both interfaces can use it to bring up their UI.
 ///
-/// 它本身**不持有 `Agent`**——多会话下每个会话各有一个 `Agent`，由
-/// [`AgentFactory::build_agent`] 按需造出。工厂持有的是「造 `Agent` 所需的一切」。
+/// It **does not itself hold an `Agent`** -- under multi-session each session has its own `Agent`, built on demand by
+/// [`AgentFactory::build_agent`]. What the factory holds is "everything needed to build an `Agent`".
 pub struct AgentFactory {
-    /// 模型配置：所有会话共用（`Clone` 后交给每个 `Agent`）。
+    /// Model config: shared by all sessions (`Clone`d and handed to each `Agent`).
     model_config: ModelConfig,
-    /// 系统提示词（函数形式：每次解析读当前工作目录与项目 `Agent.md`）。
+    /// System prompt (function form: each resolution reads the current working dir and the project's `Agent.md`).
     system_prompt: SystemPrompt,
-    /// 压缩策略（触发阈值 / 保留比例 / 摘要模板）。来自配置，所有会话共用。
+    /// Compression strategy (trigger threshold / retain ratio / summary template). From config, shared by all sessions.
     compression_config: CompressionConfig,
     max_steps: usize,
-    /// 工作目录（工作区根）。桌面界面用它做 `@` 文件检索（`workspace_search`）；
-    /// TUI-only 构建下没人读，故放行 dead_code。
+    /// Working dir (workspace root). The desktop interface uses it for `@` file search (`workspace_search`);
+    /// under a TUI-only build nobody reads it, so allow dead_code.
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub working_dir: PathBuf,
-    /// 模型目录（`/model` 用），异步拉取、失败回退静态列表。
+    /// Model catalog (for `/model`), fetched asynchronously, falling back to a static list on failure.
     pub model_catalog: Arc<dyn ModelCatalog>,
-    /// 会话目录（`/session` 用）。
+    /// Session catalog (for `/session`).
     pub session_catalog: Arc<dyn SessionCatalog>,
-    /// 缺模型服务配置（缺 `base_url`）：界面据此进入 `/login` 引导。
+    /// Missing model service config (missing `base_url`): the interface uses this to enter the `/login` guide.
     pub needs_login: bool,
-    /// 记忆根目录：`[全局, 工作区]`（`docs/memory.md` §3.1）。`roots[0]`（全局）是
-    /// **写入主根**，读时合并（工作区覆盖全局）。所有会话共用同一份目录。
+    /// Memory root dirs: `[global, workspace]` (`docs/memory.md` §3.1). `roots[0]` (global) is the
+    /// **primary write root**; reads merge (workspace overrides global). All sessions share the same dirs.
     memory_roots: Vec<PathBuf>,
-    /// curator 独立模型配置（V2-C，`docs/memory.md` §10）：`[memory]` 表配了
-    /// `curator_*` 时用它，否则为 `None`——curator 回退主模型（诚实回退，不假装异源）。
+    /// The curator's separate model config (V2-C, `docs/memory.md` §10): used when the `[memory]` table configures
+    /// `curator_*`, otherwise `None` -- the curator falls back to the main model (honest fallback, does not pretend to be cross-source).
     curator_model_config: Option<ModelConfig>,
-    /// 条目数达到该阈值时，在 curation 后触发一次定期整理（睡眠学习）。`0` = 不自动触发。
+    /// When the entry count reaches this threshold, trigger a periodic consolidation after curation (sleep learning). `0` = do not auto-trigger.
     consolidate_after_entries: usize,
-    /// **V2.5** embedding 客户端：`[memory]` 配齐 `embedding_base_url` +
-    /// `embedding_model` 时才构造（`None` = 纯 BM25，诚实降级）。所有会话共用。
+    /// **V2.5** embedding client: constructed only when `[memory]` configures both `embedding_base_url` +
+    /// `embedding_model` (`None` = pure BM25, honest degradation). Shared by all sessions.
     embedder: Option<Arc<Embedder>>,
-    /// 技能目录（`docs/skills.md` P0）：装配时扫一次，所有会话共用（只读、不变）。
-    /// 每个 `Agent` 经 `SkillContextProvider` 每轮末尾注入其 Tier1 目录。
+    /// Skill catalog (`docs/skills.md` P0): scanned once at assembly, shared by all sessions (read-only, unchanging).
+    /// Each `Agent` injects its Tier1 catalog at the end of each round via `SkillContextProvider`.
     skill_catalog: SkillCatalog,
 }
 
-/// 全局记忆相对 `config_dir` 的位置（跨项目）。
+/// The location of global memory relative to `config_dir` (cross-project).
 const GLOBAL_MEMORY_REL: &str = "shirley/memory";
-/// 工作区记忆相对工作区根的位置（随仓库走）。
+/// The location of workspace memory relative to the workspace root (travels with the repo).
 const WORKSPACE_MEMORY_REL: &str = ".shirley/memory";
 
-/// 记忆根目录：`[全局, 工作区]`。拿不到 `config_dir` 时退化为仅工作区。
+/// Memory root dirs: `[global, workspace]`. When `config_dir` is unavailable, degrades to workspace-only.
 fn memory_roots(working_dir: &Path) -> Vec<PathBuf> {
     let mut roots = Vec::new();
     if let Some(config_dir) = dirs::config_dir() {
@@ -93,16 +93,16 @@ fn memory_roots(working_dir: &Path) -> Vec<PathBuf> {
 }
 
 impl AgentFactory {
-    /// 装配全部运行时依赖。工作目录由 [`crate::prompt::workspace_root`] 决定。
+    /// Assemble all runtime dependencies. The working dir is decided by [`crate::prompt::workspace_root`].
     pub fn assemble(working_dir: PathBuf) -> Result<Self, AgentError> {
-        // 配置装载（方案 A）：优先级 `内置默认 < 全局 config.toml < 工作区
-        // .shirley/config.toml < 环境变量`。
+        // Config loading (Plan A): priority `built-in defaults < global config.toml < workspace
+        // .shirley/config.toml < env vars`.
         let settings = Settings::load_default(&working_dir)
             .map_err(|error| AgentError::Other(Box::new(error)))?;
         let needs_login = !settings.is_configured();
 
-        // 模型目录：默认从 chat completions 的 base_url 推导 `/v1/models`，
-        // 也可用配置里的 `models_url` 覆盖。拉取失败回退内置静态列表。
+        // Model catalog: by default derives `/v1/models` from the chat completions base_url,
+        // but can be overridden with `models_url` in config. On fetch failure falls back to the built-in static list.
         let models_url = settings
             .models_url
             .clone()
@@ -122,32 +122,32 @@ impl AgentFactory {
             .thinking(settings.thinking)
             .reasoning_effort(settings.reasoning_effort.clone())
             .maybe_extra_body(settings.extra_body.clone())
-            // 工具传输模式（`docs/tool-calling-refactor.md`）：配置里写了就照办，
-            // 否则默认 `Native`。切换模型时的「按模型声明」由 `model_config_for` 处理。
+            // Tool transport mode (`docs/tool-calling-refactor.md`): if config says so, do it;
+            // otherwise default to `Native`. The "per model declaration" when switching models is handled by `model_config_for`.
             .tool_calling(resolve_tool_calling(&settings))
             .build();
         model_config.context_window_tokens = Some(settings.context_window_tokens);
 
-        // 压缩策略：配置里没写就沿用 SDK 默认（`CompressionConfig::default`）。
+        // Compression strategy: if config does not specify it, follow the SDK default (`CompressionConfig::default`).
         let compression_config = settings.compression.to_sdk();
 
-        // 会话持久化：多会话布局 `<root>/.shirley/sessions/<name>.jsonl`。
+        // Session persistence: multi-session layout `<root>/.shirley/sessions/<name>.jsonl`.
         let file_catalog = session::FileSessionCatalog::new(&working_dir);
         file_catalog
             .adopt_legacy()
             .map_err(|error| AgentError::Other(Box::new(error)))?;
         let session_catalog: Arc<dyn SessionCatalog> = Arc::new(file_catalog);
 
-        // curator 独立模型（V2-C）：`[memory]` 配了 curator_* 才另起一份配置，
-        // 否则为 `None`（回退主模型）。缺省继承主配置的流式 / thinking 等字段。
+        // The curator's separate model (V2-C): only if `[memory]` configures curator_* do we build a separate config,
+        // otherwise `None` (falls back to the main model). Defaults inherit the main config's stream / thinking fields.
         let curator_model_config = build_curator_config(&settings, &model_config);
 
-        // 记忆混合检索的 embedding 客户端（V2.5）：配齐端点 + 模型才启用语义腿；
-        // 否则为 `None`（检索退化为纯 BM25，绝不假装有语义腿）。
+        // The embedding client for memory hybrid retrieval (V2.5): the semantic leg is enabled only with both endpoint + model;
+        // otherwise `None` (retrieval degrades to pure BM25, never pretends there is a semantic leg).
         let embedder = build_embedder(&settings);
 
-        // 技能目录（`docs/skills.md` P0）：装配时扫一次项目级 + 用户级 skill，
-        // 只读、会话间共享；每会话经 `SkillContextProvider` 注入其 Tier1 目录。
+        // Skill catalog (`docs/skills.md` P0): scans project-level + user-level skills once at assembly,
+        // read-only, shared across sessions; each session injects its Tier1 catalog via `SkillContextProvider`.
         let skill_catalog = SkillCatalog::discover(&working_dir, skills::user_home().as_deref());
 
         Ok(Self {
@@ -167,55 +167,55 @@ impl AgentFactory {
         })
     }
 
-    /// 按**已恢复的消息工作集**造一个独立 `Agent`（`docs/multi-session.md` 决策 5）。
+    /// Build an independent `Agent` from the **restored message working set** (`docs/multi-session.md` decision 5).
     ///
-    /// 会话持久化已上移应用层：调用方先 `SessionStore::load()` 拿回历史，再交给这里
-    /// 起 `Agent`（空 `Vec` = 全新会话）。`Agent::new` 会把 system 现生成置顶——
-    /// 日志里不含 system，故恢复出的工作集必然与冷启动一致。
+    /// Session persistence has moved up to the application layer: the caller first `SessionStore::load()`s the history, then hands it here
+    /// to start an `Agent` (empty `Vec` = a fresh session). `Agent::new` generates the system prompt fresh and puts it at the top --
+    /// the log contains no system, so the restored working set is necessarily consistent with a cold start.
     ///
-    /// 模型配置 / 系统提示词 / 压缩策略由工厂复用（`clone`）；`ToolManager`、任务
-    /// 账本、记忆运行时按实例新建——因此不同会话的 `Agent` 互不共享可变状态，可真正
-    /// 并行。
+    /// Model config / system prompt / compression strategy are reused by the factory (`clone`); the `ToolManager`, task
+    /// ledger, and memory runtime are created per instance -- so `Agent`s of different sessions share no mutable state and can truly
+    /// run in parallel.
     ///
-    /// 返回 [`BuiltAgent`]：`Agent` 之外**额外带回记忆运行时句柄**——因为
-    /// `ContextProvider` 是 trait object，驱动方（TUI / desktop）拿不到具体类型，
-    /// 需要在每轮前经该句柄 `set_query`（`docs/memory.md` §4.2）。
+    /// Returns [`BuiltAgent`]: besides the `Agent`, **it brings back a memory runtime handle** -- because
+    /// `ContextProvider` is a trait object, the driver (TUI / desktop) cannot get the concrete type and
+    /// needs to `set_query` via this handle before each round (`docs/memory.md` §4.2).
     pub fn build_agent(&self, messages: Vec<Message>) -> Result<BuiltAgent, AgentError> {
-        // 任务账本（应用层能力）：每个 `Agent` 一份 `TodoStore`，同时交给
-        // `todo` 工具（写）与 `TodoContextProvider`（每轮末尾注入，跨压缩存活）。
-        // 两者共享同一 `Arc`，账本状态随会话隔离。
+        // Task ledger (application-layer capability): one `TodoStore` per `Agent`, given both to the
+        // `todo` tool (write) and `TodoContextProvider` (injected at the end of each round, surviving compaction).
+        // Both share the same `Arc`, so the ledger state is isolated per session.
         let todo_store = Arc::new(TodoStore::new());
 
-        // 记忆（应用层能力）：每个 `Agent` 一份 `MemoryRuntime`（独立 query 槽，
-        // 多会话并发互不干扰），共享同一份 memory 目录（全局 + 工作区）。
+        // Memory (application-layer capability): one `MemoryRuntime` per `Agent` (an independent query slot,
+        // so concurrent sessions do not interfere), sharing the same memory dirs (global + workspace).
         let memory = Arc::new(MemoryRuntime::with_embedder(
             self.memory_store(),
             self.embedder.clone(),
         ));
 
-        // `ToolManager` 非 `Clone`，每次造 `Agent` 都新建一份并重新注册工具：
-        // 工具定义稳定（prefix 缓存友好），`on_register` 钩子（如 web_search 的
-        // 凭据注入）各自执行一次——状态本就按工具实例隔离，可接受（决策 5）。
+        // `ToolManager` is not `Clone`; each `Agent` build creates a fresh one and re-registers tools:
+        // tool definitions are stable (prefix-cache friendly), and `on_register` hooks (e.g. web_search's
+        // credential injection) each run once -- state is isolated per tool instance anyway, which is acceptable (decision 5).
         let mut tool_manager = assemble_tools();
         let _ = tool_manager.register(TodoTool::new(todo_store.clone()));
-        // 主动查记忆工具（只读）：与自动注入共享同一 `MemoryRuntime`。
-        // 记忆写入**不经**任何工具，只由后台 curator 完成（`docs/memory.md` 决策 3）。
+        // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
+        // Memory writes go **through no** tool; they are done only by the background curator (`docs/memory.md` decision 3).
         let _ = tool_manager.register(RecallTool::new(memory.clone()));
 
-        // 技能运行时（应用层能力）：目录只读、跨会话共享；已激活集合**每会话新建**
-        // （激活状态随会话隔离）。`activate_skill` 写、`SkillContextProvider` 读，
-        // 共享同一 `Arc`，与 todo / memory 的运行时分发完全一致。
+        // Skill runtime (application-layer capability): the catalog is read-only and shared across sessions; the activated set is **created fresh per session**
+        // (activation state is isolated per session). `activate_skill` writes, `SkillContextProvider` reads,
+        // sharing the same `Arc`, exactly like the runtime dispatch of todo / memory.
         let skill_catalog = Arc::new(self.skill_catalog.clone());
         let skill_runtime = Arc::new(SkillRuntime::new(skill_catalog.clone()));
         let _ = tool_manager.register(ActivateSkillTool::new(skill_runtime.clone()));
         let _ = tool_manager.register(ReadSkillFileTool::new(skill_catalog));
 
-        // SDK 的 `Agent` 只接受**单个** `context_provider`，而这里要注入多份
-        // （任务账本 + 记忆 + 技能）——用 `CompositeContextProvider` 顺序拼接。
+        // The SDK `Agent` accepts only a **single** `context_provider`, but here we need to inject several
+        // (task ledger + memory + skills) -- use `CompositeContextProvider` to concatenate in order.
         let provider = CompositeContextProvider::new(vec![
             Arc::new(TodoContextProvider::new(todo_store.clone())) as Arc<dyn ContextProvider>,
             Arc::new(MemoryContextProvider::new(memory.clone())) as Arc<dyn ContextProvider>,
-            // 技能（Tier1 目录 + Tier2 已激活正文）：每轮末尾追加注入，KV 友好。
+            // Skills (Tier1 catalog + Tier2 activated text): appended at the end of each round, KV-friendly.
             Arc::new(SkillContextProvider::new(skill_runtime.clone())) as Arc<dyn ContextProvider>,
         ]);
 
@@ -238,12 +238,12 @@ impl AgentFactory {
         })
     }
 
-    /// 按模型条目算一份完整 [`ModelConfig`]（`docs/tool-calling-refactor.md` Step 3）。
+    /// Compute a full [`ModelConfig`] from a model entry (`docs/tool-calling-refactor.md` Step 3).
     ///
-    /// 这是「模型配置一次下发」的唯一入口：把「模型值 + 工具协议」一起算好，
-    /// 调用方整份交给 [`shirley_agent_sdk::Agent::set_model_config`]，**不必记**
-    /// 「先 `set_model` 再 `set_tool_calling`」。协议按模型声明的 `tool_mode` 选，
-    /// 未声明回退配置层默认（`self.model_config.tool_calling`）。
+    /// This is the single entry point for "one-shot model config": the "model value + tool protocol" are computed together,
+    /// and the caller hands the whole thing to [`shirley_agent_sdk::Agent::set_model_config`], **without having to remember**
+    /// "first `set_model`, then `set_tool_calling`". The protocol is chosen by the model-declared `tool_mode`,
+    /// falling back to the config-layer default (`self.model_config.tool_calling`) when undeclared.
     pub fn model_config_for(&self, entry: &ModelEntry) -> ModelConfig {
         let mut config = self.model_config.clone();
         config.model = entry.value.clone();
@@ -252,11 +252,11 @@ impl AgentFactory {
         config
     }
 
-    /// `/login` 用：换端点 / 密钥后重算模型配置（`model` 未填则保留当前）。
+    /// For `/login`: after changing the endpoint / key, recompute the model config (keep the current `model` if not filled).
     ///
-    /// 修「`/login` 不重新判定协议」：从 content 端点换到别的端点后，协议跟着回到
-    /// 配置默认，不残留（`docs/tool-calling-refactor.md` Step 3）。协议不随 `model`
-    /// 走——`/login` 填的是「默认模型」，其声明未知，回配置默认最稳。
+    /// Fixes "`/login` does not re-determine the protocol": after switching from a content endpoint to another, the protocol follows back to
+    /// the config default and does not linger (`docs/tool-calling-refactor.md` Step 3). The protocol does not follow `model`
+    /// -- what `/login` fills is the "default model", whose declaration is unknown, so falling back to the config default is safest.
     pub fn model_config_for_login(
         &self,
         base_url: String,
@@ -272,10 +272,10 @@ impl AgentFactory {
         config
     }
 
-    /// 预热模型目录：后台拉一次列表，让**首次**打开 `/model` 也能命中缓存。
+    /// Prewarm the model catalog: fetch the list once in the background so that the **first** open of `/model` also hits the cache.
     ///
-    /// 不阻塞启动，失败静默——`RemoteCatalog` 自身会回退到兜底清单。
-    /// 不在 tokio 运行时里调用（例如单元测试）时直接跳过：预热只是优化，不是必需。
+    /// Does not block startup; failures are silent -- `RemoteCatalog` itself falls back to the fallback list.
+    /// When not called inside a tokio runtime (e.g. unit tests), skip directly: prewarming is just an optimization, not required.
     pub fn prewarm_model_catalog(&self) {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
@@ -286,18 +286,18 @@ impl AgentFactory {
         });
     }
 
-    /// 本工厂的记忆存储（全局 + 工作区多根，读合并、写落主根）。
+    /// This factory's memory store (global + workspace multi-root; reads merge, writes land in the primary root).
     pub fn memory_store(&self) -> MemoryStore {
         MemoryStore::with_roots(self.memory_roots.clone())
     }
 
-    /// 会话结束时触发一次增量 curation（`docs/memory.md` §5.1）。
+    /// Trigger one incremental curation at session end (`docs/memory.md` §5.1).
     ///
-    /// 用**最小 `Agent`**（仅借模型配置，不带工具 / 系统提示词 / 记忆注入）调
-    /// [`Agent::complete`]——一次性、非流式、不碰任何会话工作集。抽取出的候选经
-    /// 确定性自检后合入，并重建 `index.md`。
+    /// Uses a **minimal `Agent`** (only borrowing the model config, without tools / system prompt / memory injection) to call
+    /// [`Agent::complete`] -- one-shot, non-streaming, touching no session working set. The extracted candidates go through
+    /// a deterministic self-check before being merged, and `index.md` is rebuilt.
     ///
-    /// 只读环境探测（§5.4）V1 不做，诚实降级为纯轨迹 curation。
+    /// Read-only environment probing (§5.4) is not done in V1, honestly degrading to pure-trajectory curation.
     pub async fn curate(
         &self,
         messages: &[Message],
@@ -316,10 +316,10 @@ impl AgentFactory {
         .await
     }
 
-    /// 定期整理（睡眠学习，`docs/memory.md` §5.2）：全量扫描 → 模型提议 → 自检 → 合入。
+    /// Periodic consolidation (sleep learning, `docs/memory.md` §5.2): full scan -> model proposal -> self-check -> merge.
     ///
-    /// 与 [`AgentFactory::curate`] 共用 curator 模型（`[memory]` 配了就用独立模型）。
-    /// `sessions_dir` 存在时做**回原始证据核查**。
+    /// Shares the curator model with [`AgentFactory::curate`] (if `[memory]` configures one, use the separate model).
+    /// When `sessions_dir` exists, does **verification against original evidence**.
     pub async fn consolidate(&self) -> Result<memory::ConsolidateOutcome, CuratorError> {
         let agent = self.curator_agent()?;
         let store = self.memory_store();
@@ -328,9 +328,9 @@ impl AgentFactory {
         memory::consolidate(&agent, &store, sessions_dir).await
     }
 
-    /// 当前记忆条目数是否达到定期整理阈值（`[memory] consolidate_after_entries`）。
+    /// Whether the current memory entry count reaches the periodic-consolidation threshold (`[memory] consolidate_after_entries`).
     ///
-    /// 阈值 `0` 表示不自动触发。读目录失败按"不触发"处理（best-effort）。
+    /// A threshold of `0` means do not auto-trigger. A failed directory read is treated as "do not trigger" (best-effort).
     pub fn should_consolidate(&self) -> bool {
         if self.consolidate_after_entries == 0 {
             return false;
@@ -341,7 +341,7 @@ impl AgentFactory {
             .unwrap_or(false)
     }
 
-    /// 造 curator 用的**最小 `Agent`**：仅借模型配置，不带工具 / 系统提示词 / 记忆注入。
+    /// Build the **minimal `Agent`** used by the curator: only borrows the model config, without tools / system prompt / memory injection.
     fn curator_agent(&self) -> Result<Agent, CuratorError> {
         let config = self
             .curator_model_config
@@ -353,30 +353,30 @@ impl AgentFactory {
             .map_err(|error| CuratorError::Model(error.to_string()))
     }
 
-    /// 会话日志目录（curator 回证据核查用）。
+    /// The session log dir (for the curator's evidence verification).
     fn sessions_dir(&self) -> PathBuf {
         self.working_dir.join(".shirley").join("sessions")
     }
 }
 
-/// 从配置解析工具传输模式（`docs/tool-calling-refactor.md`）。
+/// Resolve the tool transport mode from config (`docs/tool-calling-refactor.md`).
 ///
-/// `tool_mode = "content"` → [`ToolCallingMode::Tagged`]；其余（含未表态）
-/// → [`ToolCallingMode::Native`]（结构化 function calling）。
+/// `tool_mode = "content"` -> [`ToolCallingMode::Tagged`]; everything else (including no statement)
+/// -> [`ToolCallingMode::Native`] (structured function calling).
 fn resolve_tool_calling(settings: &Settings) -> ToolCallingMode {
     resolve_tool_calling_for(settings.tool_mode.as_deref(), ToolCallingMode::Native)
 }
 
-/// 把「模型声明的 `tool_mode`」解析成 [`ToolCallingMode`]，未声明时回退 `fallback`。
+/// Resolve a "model-declared `tool_mode`" into a [`ToolCallingMode`], falling back to `fallback` when undeclared.
 ///
-/// 这是「按模型声明自动选协议」的**唯一解析入口**：`model_config_for` 用它，
-/// 用户不必每换一个模型就手动配。
+/// This is the **single resolution entry point** for "auto-select the protocol by model declaration": `model_config_for` uses it,
+/// so users do not have to configure manually every time they switch models.
 ///
-/// 优先级（model-first）：`content` → `Tagged`；`native` → `Native`；
-/// 未声明（`None` / 空串 / 其它值）→ 回退 `fallback`（配置层默认，缺省 `Native`）。
+/// Priority (model-first): `content` -> `Tagged`; `native` -> `Native`;
+/// undeclared (`None` / empty string / other values) -> fall back to `fallback` (config-layer default, `Native` by default).
 ///
-/// 供应商特判（如 Figma Make）不在这里——能力声明归**模型目录数据**
-/// （`ModelEntry::tool_mode`，见 `crate::models`）。
+/// Vendor special-casing (e.g. Figma Make) is not here -- capability declarations belong to **model catalog data**
+/// (`ModelEntry::tool_mode`, see `crate::models`).
 pub fn resolve_tool_calling_for(
     model_tool_mode: Option<&str>,
     fallback: ToolCallingMode,
@@ -388,20 +388,20 @@ pub fn resolve_tool_calling_for(
     match mode.as_deref() {
         Some("content") => ToolCallingMode::Tagged,
         Some("native") => ToolCallingMode::Native,
-        // 未声明 / 认不出的值：回退配置层默认，不猜。
+        // Undeclared / unrecognized value: fall back to the config-layer default, do not guess.
         _ => fallback,
     }
 }
 
-/// 从 `[memory]` 配置构造 curator 独立模型配置；未配置 curator 端点/模型时返回 `None`
-/// （curator 回退主模型）。
+/// Build the curator's separate model config from the `[memory]` config; returns `None` when no curator endpoint/model is configured
+/// (the curator falls back to the main model).
 ///
-/// 继承主配置的 `stream` / `thinking` / `reasoning_effort` / `context_window_tokens`
-/// 等字段，只覆盖 curator 显式给出的端点 / 密钥 / 模型 / 协议——避免"配了 curator 模型
-/// 却丢了主配置的其它字段"。
+/// Inherits the main config's `stream` / `thinking` / `reasoning_effort` / `context_window_tokens`
+/// and other fields, overriding only the endpoint / key / model / protocol explicitly given by the curator -- avoiding "configured a curator model
+/// but lost the main config's other fields".
 fn build_curator_config(settings: &Settings, main: &ModelConfig) -> Option<ModelConfig> {
     let mem = &settings.memory;
-    // 没配任何 curator 键就不另起配置。
+    // If no curator key is configured at all, do not build a separate config.
     if mem.curator_model.is_none()
         && mem.curator_base_url.is_none()
         && mem.curator_api_key.is_none()
@@ -427,10 +427,10 @@ fn build_curator_config(settings: &Settings, main: &ModelConfig) -> Option<Model
     Some(config)
 }
 
-/// 从 `[memory]` 配置构造 embedding 客户端（V2.5 混合检索的语义腿）。
+/// Build the embedding client from the `[memory]` config (the semantic leg of V2.5 hybrid retrieval).
 ///
-/// 需 `embedding_base_url` + `embedding_model` 同时给出才启用；密钥可缺省（本地服务
-/// 常无鉴权）。任缺其一 → `None`（检索退化为纯 BM25）。
+/// Enabled only when both `embedding_base_url` + `embedding_model` are given; the key may be omitted (local services
+/// often have no auth). Missing either -> `None` (retrieval degrades to pure BM25).
 fn build_embedder(settings: &Settings) -> Option<Arc<Embedder>> {
     let mem = &settings.memory;
     let endpoint = mem
@@ -455,23 +455,23 @@ fn build_embedder(settings: &Settings) -> Option<Arc<Embedder>> {
     Embedder::new(config).ok().map(Arc::new)
 }
 
-/// [`AgentFactory::build_agent`] 的产物：`Agent` 及其配套的记忆运行时句柄。
+/// The output of [`AgentFactory::build_agent`]: the `Agent` and its companion memory runtime handle.
 pub struct BuiltAgent {
     pub agent: Agent,
-    /// 任务账本（每会话一份）：与 `todo` 工具 / `TodoContextProvider` 共享同一 `Arc`，
-    /// 界面据此实时读取任务进度（`TodoStore::view`）并渲染任务卡。
+    /// Task ledger (one per session): shares the same `Arc` as the `todo` tool / `TodoContextProvider`,
+    /// so the interface can read task progress in real time (`TodoStore::view`) and render the task card.
     pub todo: Arc<TodoStore>,
-    /// 记忆运行时（每会话一份）：驱动方在发起一轮前 `set_query`，会话结束交给 curator。
+    /// Memory runtime (one per session): the driver `set_query`s before starting a round, and hands it to the curator at session end.
     pub memory: Arc<MemoryRuntime>,
-    /// 技能运行时（每会话一份）：TUI 的 `/<skill-name>` slash 入口经此句柄直接激活
-    /// （`docs/skills.md` 5.6）。与 `SkillContextProvider` 共享同一 `Arc`。
+    /// Skill runtime (one per session): the TUI's `/<skill-name>` slash entry activates directly via this handle
+    /// (`docs/skills.md` 5.6). Shares the same `Arc` as `SkillContextProvider`.
     pub skills: Arc<SkillRuntime>,
 }
 
-/// 把多个 [`ContextProvider`] 拼成一个：按顺序拼接各自 `context()`，全空返回 `None`。
+/// Concatenate multiple [`ContextProvider`]s into one: joins each `context()` in order; all-empty returns `None`.
 ///
-/// SDK �� `Agent` 只接受单个 `context_provider`，而应用层要同时注入任务账本与记忆
-/// ——这是纯应用层的胶水，不进 SDK。
+/// The SDK `Agent` accepts only a single `context_provider`, whereas the application layer wants to inject the task ledger and memory together
+/// -- this is pure application-layer glue, not in the SDK.
 pub struct CompositeContextProvider {
     providers: Vec<Arc<dyn ContextProvider>>,
 }
@@ -498,14 +498,14 @@ impl ContextProvider for CompositeContextProvider {
     }
 }
 
-/// 造一份注册好全部工具的 `ToolManager`（bash / read_file 总是注册；
-/// web_search 未配置时不入表）。每个 `Agent` 各持一份，工具状态按实例隔离。
+/// Build a `ToolManager` with all tools registered (bash / read_file are always registered;
+/// web_search is not registered when unconfigured). Each `Agent` holds one; tool state is isolated per instance.
 fn assemble_tools() -> ToolManager {
     let mut tool_manager = ToolManager::new();
     let _ = tool_manager.register(tools::bash_tool::tool());
     let _ = tool_manager.register(tools::read_file_tool::tool());
     if let Err(error) = tool_manager.register(tools::web_search_tool::tool()) {
-        eprintln!("[web_search] 未启用：{error}");
+        eprintln!("[web_search] not enabled: {error}");
     }
     tool_manager
 }
@@ -553,10 +553,10 @@ mod tests {
         std::env::temp_dir().join(format!("shirley_bootstrap_{tag}_{}", std::process::id()))
     }
 
-    /// 回归：删除**当前**会话后，前台指针必须落到一份新的空会话，而不是悬在被删会话上。
+    /// Regression: after deleting the **current** session, the foreground pointer must land on a fresh empty session, not dangle on the deleted one.
     ///
-    /// 此前 `agent_delete_session` 只删磁盘、不动 `SessionManager`，`active` 仍指向被删
-    /// 会话，`agent_current_session` 继续返回旧名，前端又把它打开——界面因此卡在被删会话。
+    /// Previously `agent_delete_session` only deleted from disk without touching `SessionManager`, so `active` still pointed at the deleted
+    /// session, `agent_current_session` kept returning the old name, and the frontend opened it again -- the interface got stuck on the deleted session.
     #[test]
     fn deleting_active_session_switches_to_fresh_empty_session() {
         let root = tmp_root("del_active");
@@ -576,28 +576,28 @@ mod tests {
         manager.delete_session("s").unwrap();
 
         let active = manager.active_name().map(str::to_owned);
-        assert_ne!(active.as_deref(), Some("s"), "前台不应再停在被删会话上");
-        assert!(active.is_some(), "删掉前台会话后应补一份空会话");
-        assert!(manager.active_agent().is_some(), "新空会话应已就绪");
+        assert_ne!(active.as_deref(), Some("s"), "the foreground should no longer sit on the deleted session");
+        assert!(active.is_some(), "after deleting the foreground session a fresh empty one should be supplied");
+        assert!(manager.active_agent().is_some(), "the new empty session should be ready");
 
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// 活体冒烟：按**工作区真实配置**装配并跑一轮，验证端点 / 协议 / 密钥可用。
+    /// Live smoke: assemble from the **real workspace config** and run one round, verifying the endpoint / protocol / key work.
     ///
-    /// 依赖外部服务，默认忽略，手动跑：
-    ///   cargo test --bin Shirley live_smoke_against_configured_provider -- --ignored --nocapture
+    /// Depends on an external service; ignored by default, run manually:
+    //   cargo test --bin Shirley live_smoke_against_configured_provider -- --ignored --nocapture
     #[tokio::test]
     #[ignore]
     async fn live_smoke_against_configured_provider() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let factory = AgentFactory::assemble(root).expect("装配失败");
-        let mut built = factory.build_agent(Vec::new()).expect("造 Agent 失败");
+        let factory = AgentFactory::assemble(root).expect("assembly failed");
+        let mut built = factory.build_agent(Vec::new()).expect("failed to build Agent");
         let result = built
             .agent
-            .run("只回复两个字：你好")
+            .run("Reply with just two words: hello")
             .await
-            .expect("请求失败");
+            .expect("request failed");
         let text = result
             .messages
             .iter()
@@ -607,11 +607,11 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("");
-        eprintln!("[smoke] 模型回复: {text:?}");
-        assert!(!text.trim().is_empty(), "应拿到非空回复");
+        eprintln!("[smoke] model reply: {text:?}");
+        assert!(!text.trim().is_empty(), "should get a non-empty reply");
     }
 
-    /// 空实现 provider，便于验证 CompositeContextProvider 的拼接 / 短路语义。
+    /// An empty-impl provider, to verify CompositeContextProvider's concatenation / short-circuit semantics.
     struct StaticProvider(Option<&'static str>);
 
     impl ContextProvider for StaticProvider {
@@ -648,24 +648,24 @@ mod tests {
         );
     }
 
-    /// 回归：CompositeContextProvider 顺序拼接多个 provider 的 `context()`；
-    /// 全空（或空列表）时返回 `None`，不注入空内容。
+    /// Regression: CompositeContextProvider concatenates multiple providers' `context()` in order;
+    /// returns `None` when all are empty (or the list is empty), injecting no empty content.
     #[test]
     fn composite_context_provider_concatenates_and_short_circuits() {
         let both = CompositeContextProvider::new(vec![
-            Arc::new(StaticProvider(Some("账本"))) as Arc<dyn ContextProvider>,
-            Arc::new(StaticProvider(Some("记忆"))) as Arc<dyn ContextProvider>,
+            Arc::new(StaticProvider(Some("ledger"))) as Arc<dyn ContextProvider>,
+            Arc::new(StaticProvider(Some("memory"))) as Arc<dyn ContextProvider>,
         ]);
-        assert_eq!(both.context().as_deref(), Some("账本\n\n记忆"));
+        assert_eq!(both.context().as_deref(), Some("ledger\n\nmemory"));
 
-        // 一方为空：只保留有内容的一侧（不能拼出多余分隔符）。
+        // One side empty: keep only the side with content (must not produce an extra separator).
         let one = CompositeContextProvider::new(vec![
             Arc::new(StaticProvider(None)) as Arc<dyn ContextProvider>,
-            Arc::new(StaticProvider(Some("记忆"))) as Arc<dyn ContextProvider>,
+            Arc::new(StaticProvider(Some("memory"))) as Arc<dyn ContextProvider>,
         ]);
-        assert_eq!(one.context().as_deref(), Some("记忆"));
+        assert_eq!(one.context().as_deref(), Some("memory"));
 
-        // 全空 / 空列表：返回 `None`，绝不注入空串。
+        // All empty / empty list: return `None`, never inject an empty string.
         let none = CompositeContextProvider::new(vec![
             Arc::new(StaticProvider(None)) as Arc<dyn ContextProvider>
         ]);
@@ -673,19 +673,19 @@ mod tests {
         assert_eq!(CompositeContextProvider::new(vec![]).context(), None);
     }
 
-    /// 模型声明优先：`content` / `native` 覆盖 fallback，未声明回退 fallback。
+    /// Model declaration first: `content` / `native` override fallback; undeclared falls back to fallback.
     #[test]
     fn resolve_tool_calling_is_model_first() {
         let native = ToolCallingMode::Native;
         let content = ToolCallingMode::Tagged;
 
-        // 模型声明 content → content（即便 fallback 是 native）。
+        // Model declares content -> content (even if fallback is native).
         assert!(resolve_tool_calling_for(Some("content"), native).is_content());
-        // 模型声明 native → native（即便 fallback 是 content）。
+        // Model declares native -> native (even if fallback is content).
         assert!(!resolve_tool_calling_for(Some("native"), content).is_content());
-        // 大小写 / 空白归一。
+        // Case / whitespace normalized.
         assert!(resolve_tool_calling_for(Some("  CONTENT "), native).is_content());
-        // 未声明 / 空串 / 认不出 → 回退 fallback（两侧都要验证）。
+        // Undeclared / empty string / unrecognized -> fall back to fallback (verify both sides).
         assert!(!resolve_tool_calling_for(None, native).is_content());
         assert!(!resolve_tool_calling_for(Some(""), native).is_content());
         assert!(!resolve_tool_calling_for(Some("wat"), native).is_content());
@@ -693,7 +693,7 @@ mod tests {
         assert!(resolve_tool_calling_for(Some("wat"), content).is_content());
     }
 
-    /// `model_config_for`：模型值 + 工具协议一次算好（`docs/tool-calling-refactor.md` Step 3）。
+    /// `model_config_for`: model value + tool protocol computed together (`docs/tool-calling-refactor.md` Step 3).
     #[test]
     fn model_config_for_applies_entry_tool_mode() {
         let f = factory(tmp_root("mcfg"));
@@ -703,14 +703,14 @@ mod tests {
 
         let config = f.model_config_for(&tagged);
         assert_eq!(config.model, "tagged");
-        assert!(config.tool_calling.is_content(), "声明 content 应选 Tagged 协议");
+        assert!(config.tool_calling.is_content(), "declaring content should pick the Tagged protocol");
 
         let config = f.model_config_for(&plain);
         assert_eq!(config.model, "plain");
-        assert!(!config.tool_calling.is_content(), "未声明应回退配置默认 Native");
+        assert!(!config.tool_calling.is_content(), "undeclared should fall back to the config default Native");
     }
 
-    /// 运行中的会话不得被删除（避免删掉正在写入的日志）。
+    /// A running session must not be deleted (avoid deleting a log being written).
     #[test]
     fn deleting_running_session_is_rejected() {
         let root = tmp_root("del_running");
@@ -727,8 +727,8 @@ mod tests {
         );
         assert!(manager.begin_turn("s", "hello".into()).is_some());
 
-        assert!(manager.delete_session("s").is_err(), "运行中会话应拒绝删除");
-        assert_eq!(manager.active_name(), Some("s"), "拒绝后前台不应改变");
+        assert!(manager.delete_session("s").is_err(), "a running session should refuse deletion");
+        assert_eq!(manager.active_name(), Some("s"), "the foreground should not change after a refusal");
 
         let _ = std::fs::remove_dir_all(&root);
     }

@@ -9,12 +9,12 @@ export type FileMentionSearchState = {
   loading: boolean;
   error: string | null;
   selectedIndex: number;
-  /** 打开浮层（空 query 立即拉一次，不防抖）。 */
+  /** Opens the popover (an empty query fetches immediately, no debounce). */
   open: () => void;
   setQuery: (query: string) => void;
   close: () => void;
   moveSelection: (delta: number) => void;
-  /** 确认当前高亮项，返回被选中的条目（浮层不可确认时返回 null）。 */
+  /** Confirms the currently highlighted item and returns the selected entry (null when the popover cannot confirm). */
   confirmSelection: () => FileReference | null;
   retry: () => void;
 };
@@ -22,12 +22,12 @@ export type FileMentionSearchState = {
 const SEARCH_DEBOUNCE_MS = 120;
 
 /**
- * `@` 引用的**无头搜索控制器**：只管「候选浮层 + 异步检索」，
- * 不碰任何输入框 DOM。检索走 Rust 侧 `agent_search_files`（应用层），
- * 前端不持有工作区文件状态。
+ * Headless search controller for `@` references: only handles "candidate popover + async
+ * search", never touches any input DOM. Search goes through the Rust side's
+ * `agent_search_files` (application layer); the frontend holds no workspace file state.
  *
- * 编辑区（`MentionEditor`）在用户敲 `@` 时 `open()`、随输入 `setQuery()`，
- * 选中后把返回的 `FileReference` 插成 inline chip。
+ * The editor (`MentionEditor`) calls `open()` when the user types `@` and `setQuery()` as
+ * the input changes; on selection the returned `FileReference` is inserted as an inline chip.
  */
 export function useFileMentionSearch(project: string | null): FileMentionSearchState {
   const [popoverOpen, setPopoverOpen] = useState(false);
@@ -38,8 +38,8 @@ export function useFileMentionSearch(project: string | null): FileMentionSearchS
   const [selectedIndex, setSelectedIndex] = useState(0);
   const searchTimerRef = useRef<number | null>(null);
   const lastQueryRef = useRef("");
-  // 当前项目（工作区）：检索必须带项目 id。用 ref 规避闭包过期，
-  // 项目切换不需要重建搜索控制器。
+  // Current project (workspace): search must carry the project id. A ref avoids stale
+  // closures so switching projects does not require rebuilding the search controller.
   const projectRef = useRef(project);
   projectRef.current = project;
 
@@ -53,7 +53,7 @@ export function useFileMentionSearch(project: string | null): FileMentionSearchS
   const executeSearch = useCallback(async (searchQuery: string) => {
     lastQueryRef.current = searchQuery;
     const projectId = projectRef.current;
-    // 没有前台项目（工作区）：没有可检索的文件，直接给空结果，别打后端。
+    // No foreground project (workspace): no files to search, so return empty and skip the backend.
     if (!projectId) {
       setResults([]);
       setError(null);
@@ -70,7 +70,7 @@ export function useFileMentionSearch(project: string | null): FileMentionSearchS
       const message =
         reason instanceof Error && reason.message.trim()
           ? reason.message
-          : "加载失败，请稍后重试";
+          : "Failed to load, please try again later";
       setError(message);
       setResults([]);
     } finally {
@@ -101,7 +101,7 @@ export function useFileMentionSearch(project: string | null): FileMentionSearchS
     setResults([]);
     setError(null);
     setSelectedIndex(0);
-    // 空 query 立即拉一次（不防抖），让用户一敲 `@` 就有候选。
+    // An empty query fetches immediately (no debounce) so candidates appear the moment `@` is typed.
     void executeSearch("");
   }, [cancelPendingSearch, executeSearch]);
 

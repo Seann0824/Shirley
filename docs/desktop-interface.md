@@ -1,387 +1,522 @@
-**Shirley 技术方案 · 桌面界面（Desktop Interface）**
+# docs/desktop-interface.md
 
-> **状态：方案期（尚未实现）。** 本文是迁移 shiwen 聊天 UI 为 Shirley 桌面界面的技术方案。
-> **已确认决策**：形态 1（Tauri 2 + React/TS，直接 copy）/ 与 TUI 并存 / 允许引入 Node 构建链 / 审批流保留但第一期不展示。
-> 落地后请把「实现落地」一节补上，并同步 `docs/README.md` / `Agent.md` 的文档索引。
+**Shirley technical design · Desktop Interface**
+
+> **Status: design phase (not yet implemented).** This document is the technical design for migrating
+> the shiwen chat UI to a Shirley desktop interface.
+> **Confirmed decisions**: form 1 (Tauri 2 + React/TS, direct copy) / coexists with the TUI /
+> introducing a Node build chain is allowed / the approval flow is kept but not shown in phase one.
+> After landing, please fill in the "implementation landing" section and sync the document index in
+> `docs/README.md` / `Agent.md`.
 >
-> 参考源：`/Users/sean/Desktop/repo/shiwen-open-source`（下称 **shiwen**）。
+> Reference source: `/Users/sean/Desktop/repo/shiwen-open-source` (hereafter **shiwen**).
 
 ---
 
-**一、这份文档要解决什么**
+**1. What this document solves**
 
-用户喜欢 shiwen 的**聊天交互与 UI**（不是它的业务），希望在 Shirley 里新增一个界面，用 Tauri 把 shiwen 的聊天 UI 迁移过来，去掉其中的 shiwen 定制逻辑。
+The user likes shiwen's **chat interaction and UI** (not its business), and wants to add an interface
+to Shirley, migrating shiwen's chat UI over with Tauri and stripping out shiwen's custom logic.
 
-Shirley 现在只有一个界面：`src/interface/` 下的 ratatui TUI。本方案新增第二个界面——一个 Tauri 桌面窗口 + React 前端——与 TUI **并存**，两者**共享同一套底层（LCA）**。
+Shirley currently has only one interface: the ratatui TUI under `src/interface/`. This design adds a
+second interface -- a Tauri desktop window + React frontend -- that **coexists** with the TUI, the
+two **sharing the same underlying layer (LCA)**.
 
 ---
 
-**二、关键结论：是「兄弟界面」，不是「TUI 上叠一层 web」**
+**2. Key conclusion: it is a "sibling interface", not "a web layer stacked on top of the TUI"**
 
-一个必须先澄清的形态问题（用户原话在问）：
+A shape question that must be clarified first (the user asked in these terms):
 
-- ❌ **不是**「TUI 上多一层 web」。ratatui 会接管终端（alternate screen / raw mode / 鼠标捕获），webview 是独立原生窗口，**两者不能同时画同一份对话**；且 `interface/` 里全是 TUI 专属逻辑（`tui.rs` 事件循环、`ui.rs` 的 `MessageCache`/换行估算、`selection.rs` 鼠标选区、`markdown.rs` 转 ratatui `Line`/`Span`），对 web 毫无用处。
-- ✅ **是**「两个并列界面，共享同一个 LCA」。TUI 与 desktop 是**同一份 `Agent` 的两个消费者**，各自渲染，互不干扰。
+- ❌ It is **not** "an extra web layer on top of the TUI". ratatui takes over the terminal
+  (alternate screen / raw mode / mouse capture), the webview is an independent native window, and
+  **the two cannot draw the same conversation at the same time**; moreover `interface/` is full of
+  TUI-specific logic (`tui.rs` event loop, `ui.rs`'s `MessageCache`/line-wrap estimation,
+  `selection.rs` mouse selection, `markdown.rs` converting to ratatui `Line`/`Span`), which is
+  useless for the web.
+- ✅ It **is** "two sibling interfaces sharing the same LCA". The TUI and desktop are **two consumers
+  of the same `Agent`**, each rendering on its own, not interfering.
 
 ```
                     ┌───────────────────────────────┐
-                    │  main.rs（装配层，唯一入口）      │
+                    │  main.rs (assembly layer, the only entry) │
                     │  settings / session / tools /   │
                     │  prompt / model_config          │
                     └───────────────┬─────────────────┘
-                                    │ 构造出 Agent + catalogs
+                                    │ constructs Agent + catalogs
                     ┌───────────────┴─────────────────┐
                     ▼                                 ▼
         ┌───────────────────────┐        ┌───────────────────────┐
         │  interface/ (TUI)     │        │  interface/desktop/    │
-        │  ratatui 渲染          │        │  Tauri 壳 + React web  │
+        │  ratatui rendering     │        │  Tauri shell + React web  │
         └───────────┬───────────┘        └───────────┬───────────┘
-                    │ 消费 AgentEvent               │ 消费 AgentEvent
+                    │ consumes AgentEvent               │ consumes AgentEvent
                     └───────────────┬─────────────────┘
                                     ▼
                     ┌───────────────────────────────┐
                     │  shirley-agent-sdk::Agent      │
-                    │  run_stream() → AgentEvent 流   │
+                    │  run_stream() → AgentEvent stream   │
                     └───────────────────────────────┘
 ```
 
-**LCA（公共逻辑）= SDK 的 `Agent`（`run_stream()` → `AgentEvent` 流）+ `main.rs` 的应用装配。** `AgentEvent` 就是那个公共接口：TUI 在 `tui.rs::apply` 里消费它，desktop 在 Tauri command 里消费它、转成 webview 事件。**两边对接的是同一个事件流，不是同一套渲染。**
+**LCA (common logic) = the SDK's `Agent` (`run_stream()` -> `AgentEvent` stream) + `main.rs`'s
+application assembly.** `AgentEvent` is that common interface: the TUI consumes it in `tui.rs::apply`,
+and the desktop consumes it in Tauri commands, turning it into webview events. **Both sides connect
+to the same event stream, not the same rendering.**
 
 ---
 
-**三、共享边界（要定死的东西）**
+**3. Shared boundary (the things to pin down)**
 
-| 层 | 归属 | 说明 |
+| Layer | Ownership | Notes |
 | --- | --- | --- |
-| `src/settings.rs` / `session.rs` / `models.rs` / `prompt.rs` / `tools/` | **共享** | crate 根下的模块，与界面无关，两个界面都用 |
-| `src/main.rs` 的装配 | **共享，需小改** | 现在是「装配完直接 `interface::run`」，要抽成 `Bootstrap` 并按模式分派 |
-| `shirley-agent-sdk`（`Agent` / `AgentEvent`） | **共享** | 不动 |
-| `src/interface/`（tui/ui/app/update/event/selection/markdown/command） | **TUI 专属** | 原样保留 |
-| `src/interface/desktop/`（Tauri 壳 + `web/`） | **desktop 专属** | 新增 |
+| `src/settings.rs` / `session.rs` / `models.rs` / `prompt.rs` / `tools/` | **shared** | modules at the crate root, interface-independent, used by both interfaces |
+| `src/main.rs`'s assembly | **shared, needs a small change** | currently "assemble then directly `interface::run`"; extract into `Bootstrap` and dispatch by mode |
+| `shirley-agent-sdk` (`Agent` / `AgentEvent`) | **shared** | untouched |
+| `src/interface/` (tui/ui/app/update/event/selection/markdown/command) | **TUI-specific** | kept as-is |
+| `src/interface/desktop/` (Tauri shell + `web/`) | **desktop-specific** | new |
 
-**两处需要先做的重构**
+**Two refactors needed first**
 
-1. **`main.rs` 抽 `Bootstrap` + 分派**。把现在 `main.rs` 第 26–104 行的装配（settings / models catalog / tools / model_config / session / Agent）抽成一个 `Bootstrap` 结构，两个界面都能拿到同一个 `Agent` + catalogs。**不是复制装配，是真的共享。**
+1. **Extract `Bootstrap` + dispatch in `main.rs`.** Extract the assembly currently at lines 26-104 of
+   `main.rs` (settings / models catalog / tools / model_config / session / Agent) into a `Bootstrap`
+   struct, so both interfaces get the same `Agent` + catalogs. **Not copying the assembly, but truly
+   sharing it.**
    ```rust
    let bootstrap = Bootstrap::assemble(working_dir)?;
-   match mode {                                  // 来自 --desktop / 环境变量
+   match mode {                                  // from --desktop / environment variable
        Mode::Tui     => interface::tui::run(bootstrap).await,
        Mode::Desktop => interface::desktop::run(bootstrap).await,
    }
    ```
-2. **slash 指令归属**（`src/interface/command.rs` 的 `/login` `/model` `/session` `/rewind`）。这些是应用级行为，desktop 也需要。**第一步先不共享**：desktop 先只做渲染与收发，指令留到后续里程碑再下沉为共享 `commands` 模块。
+2. **Slash-command ownership** (`/login` `/model` `/session` `/rewind` in
+   `src/interface/command.rs`). These are application-level behaviors that the desktop also needs.
+   **Do not share them in the first step**: the desktop first does only rendering and send/receive,
+   and the commands are sunk into a shared `commands` module in a later milestone.
 
 ---
 
-**四、迁移范围：copy 什么，删什么**
+**4. Migration scope: what to copy, what to delete**
 
-**原则：最小迁移成本——关键代码直接 copy，再接 SDK。**
+**Principle: minimum migration cost -- copy the key code directly, then wire up the SDK.**
 
-### 4.1 要 copy 的（shiwen 路径 → Shirley 落点）
+### 4.1 What to copy (shiwen path -> Shirley landing)
 
-| shiwen 源 | 作用 | 处置 |
+| shiwen source | Role | Disposition |
 | --- | --- | --- |
-| `apps/web/src/lib/components/ai/AiConversationSurface.tsx` | 会话外壳（transcript + composer） | copy |
-| `apps/web/src/lib/components/ai/AiConversationTranscript.tsx` | 消息列表 + 自动滚动 + 头像 | copy（minimap 已抽出，改由宿主 `App.tsx` 挂在聊天区最外层容器 `<main>` 的左边缘） |
-| `apps/web/src/lib/components/ai/AiChatComposer.tsx` | 输入框（自适应 / Enter 发送 / 停止） | copy |
-| `apps/web/src/lib/components/ai/AiMessageTimeline.tsx` | 文本块与工具卡按 `content_offset` 交错 | copy |
-| `apps/web/src/lib/components/ai/AiMarkdown.tsx` | 流式 markdown（基于 `streamdown`） | copy（去掉 citation 插件） |
-| `apps/web/src/lib/components/ai/AiAssistantAvatar.tsx` | 助手头像 | copy（换 Shirley 形象或留占位） |
-| `apps/web/src/lib/components/ai/AiToolExecutionCard.tsx` / `AiToolActivityDisclosure.tsx` | 工具执行卡片 / 活动折叠 | copy（审批链路代码保留，渲染第一期不展示） |
-| `apps/web/src/lib/chat-input.ts` | Enter 发送判定 | copy |
-| `packages/ui/src/chat.tsx`（`Message` / `Bubble` / `MessageScroller` / `useMessageAutoScroll`） | 聊天基础原语 | copy |
-| `packages/ui/src/tokens.css` | Tailwind 4 设计 token | copy |
-| `packages/ui/src/utils.ts`（`cn`） | class 合并 | copy |
-| 必要的 `packages/ui/src/{button,textarea,scroll-area,...}` | 依赖原语 | 按需 copy |
+| `apps/web/src/lib/components/ai/AiConversationSurface.tsx` | conversation shell (transcript + composer) | copy |
+| `apps/web/src/lib/components/ai/AiConversationTranscript.tsx` | message list + auto-scroll + avatar | copy (the minimap is already extracted; the host `App.tsx` mounts it at the left edge of the chat area's outermost container `<main>`) |
+| `apps/web/src/lib/components/ai/AiChatComposer.tsx` | input box (auto-resize / Enter to send / stop) | copy |
+| `apps/web/src/lib/components/ai/AiMessageTimeline.tsx` | interleaves text blocks and tool cards by `content_offset` | copy |
+| `apps/web/src/lib/components/ai/AiMarkdown.tsx` | streaming markdown (based on `streamdown`) | copy (drop the citation plugin) |
+| `apps/web/src/lib/components/ai/AiAssistantAvatar.tsx` | assistant avatar | copy (swap for a Shirley figure or leave a placeholder) |
+| `apps/web/src/lib/components/ai/AiToolExecutionCard.tsx` / `AiToolActivityDisclosure.tsx` | tool execution card / activity collapsible | copy (keep the approval-path code, do not render it in phase one) |
+| `apps/web/src/lib/chat-input.ts` | Enter-to-send decision | copy |
+| `packages/ui/src/chat.tsx` (`Message` / `Bubble` / `MessageScroller` / `useMessageAutoScroll`) | chat base primitives | copy |
+| `packages/ui/src/tokens.css` | Tailwind 4 design tokens | copy |
+| `packages/ui/src/utils.ts` (`cn`) | class merge | copy |
+| the needed `packages/ui/src/{button,textarea,scroll-area,...}` | dependency primitives | copy as needed |
 
-### 4.2 要剥离的（shiwen 定制逻辑，**迁移前先确认**）
+### 4.2 What to strip (shiwen custom logic, **confirm before migrating**)
 
-| shiwen 专有 | 为什么只属于 shiwen | 处置 |
+| shiwen-specific | Why it belongs only to shiwen | Disposition |
 | --- | --- | --- |
-| **A2UI surfaces**（`A2uiTurnSurface` / `A2uiClientAction` / `AiQuestionSurface`） | shiwen 自有的服务端驱动结构化 UI 协议 | 删 |
-| **实体提及 / chips**（`EntityChips` / `EntityMentionPopover` / `useEntityMentions`） | article/space/document/material——shiwen 知识库 | **迁移其交互骨架，对象改绑工作区文件**（见 4.3） |
-| **引用**（`[[citation:id]]` 插件 / `inlineCitationMarkdown` / `StreamCitations`） | 绑定 shiwen 检索 + 实体 URL | 删 |
-| **工具审批流**（`approval_state` / `onToolDecision` / 卡片上的 approve/reject） | shiwen human-in-the-loop 关卡；Shirley 暂无权限层 | **保留代码，第一期不展示**（用户已确认） |
-| **实体/空间/文章锚定**（`host_kind` / `promoted_space_id` / `host_repository`） | shiwen 工作区模型 | 删 |
-| **会话分享**（`AiConversationShare` / 公开分享） | shiwen 功能 | 删 |
-| **OCR / 素材上传**（`fetchMaterialOcrStatuses` / `handleMaterialUploaded`） | shiwen 桌面应用 | 删 |
-| **桌面工作区切换器**（`useDesktopWorkspaces` / `DesktopScreen`） | shiwen 桌面登录/工作区（绑定其账号体系） | 删 shiwen 实现；**Shirley 自建多项目 UX**（见 4.5） |
-| **SSE 线格式**（`packages/ai-session` 的 `parseAiStreamEvent` / `streamAiMessage`） | shiwen 服务端协议 | **重绑**到 Shirley 的 `AgentEvent`（见第六节） |
-| `AiConversationMinimap`（轮次缩略图） | 聊天区左侧一排小短线，hover 预览 / 点击跳转历史用户轮次 | copy（已启用：挂在**聊天区最外层容器 `<main>`**（撑开内容、不含 sidebar 的那块）的**左边缘**——`App.tsx` 持 `transcriptViewportRef` 经 transcript 透传给 `MessageScroller`，再把 minimap 以 `className="left-3"`（距 `main` 左边缘 12px）定位到 `main` 内、`section` 之外；并**按可用留白宽度自适应显隐**——`App.tsx` 用 `ResizeObserver` 量 `main` 宽，左侧留白 `(main 宽 - 760) / 2` 放不下 12 + 40px 时直接隐藏，绝不与聊天内容重合） |
-| `lucide-react` 之外的 shiwen 依赖（tiptap / blocknote / pdfjs / tesseract 等） | shiwen 文档/OCR 栈 | 不引入 |
+| **A2UI surfaces** (`A2uiTurnSurface` / `A2uiClientAction` / `AiQuestionSurface`) | shiwen's own server-driven structured UI protocol | delete |
+| **Entity mentions / chips** (`EntityChips` / `EntityMentionPopover` / `useEntityMentions`) | article/space/document/material -- shiwen's knowledge base | **migrate its interaction skeleton, rebind the object to workspace files** (see 4.3) |
+| **Citations** (`[[citation:id]]` plugin / `inlineCitationMarkdown` / `StreamCitations`) | bound to shiwen retrieval + entity URLs | delete |
+| **Tool approval flow** (`approval_state` / `onToolDecision` / approve/reject on the card) | shiwen's human-in-the-loop gate; Shirley has no permission layer yet | **keep the code, do not show it in phase one** (the user confirmed) |
+| **Entity/space/article anchoring** (`host_kind` / `promoted_space_id` / `host_repository`) | shiwen's workspace model | delete |
+| **Conversation sharing** (`AiConversationShare` / public sharing) | shiwen feature | delete |
+| **OCR / material upload** (`fetchMaterialOcrStatuses` / `handleMaterialUploaded`) | shiwen desktop app | delete |
+| **Desktop workspace switcher** (`useDesktopWorkspaces` / `DesktopScreen`) | shiwen desktop login/workspace (bound to its account system) | delete the shiwen implementation; **Shirley builds its own multi-project UX** (see 4.5) |
+| **SSE wire format** (`parseAiStreamEvent` / `streamAiMessage` in `packages/ai-session`) | shiwen server protocol | **rebind** to Shirley's `AgentEvent` (see section 6) |
+| `AiConversationMinimap` (turn thumbnails) | a row of small dashes on the left of the chat area, hover to preview / click to jump to a historical user turn | copy (already enabled: mounted at the **left edge** of the **chat area's outermost container `<main>`** (the block that expands the content and excludes the sidebar) -- `App.tsx` holds `transcriptViewportRef` and passes it through the transcript to `MessageScroller`, then positions the minimap inside `main`, outside `section`, with `className="left-3"` (12px from the left edge of `main`); and it **auto-shows/hides based on the available whitespace width** -- `App.tsx` uses `ResizeObserver` to measure the `main` width, and hides it outright when the left whitespace `(main width - 760) / 2` cannot fit 12 + 40px, never overlapping the chat content) |
+| shiwen dependencies beyond `lucide-react` (tiptap / blocknote / pdfjs / tesseract etc.) | shiwen document/OCR stack | do not introduce |
 
-> **确认点**：上表每一条都需用户签字。
+> **Confirmation points**: every row in the table above needs the user's sign-off.
 >
-> **已确认（用户）**：
-> - **审批流保留代码，第一期不展示**——`approval_state` / `onToolDecision` 的数据结构与回调链路先原样迁入，渲染层第一期不画审批按钮；后续接权限层时再启用。
-> - **`@` 引用保留交互、对象重绑工作区文件**（见 4.3）——不再按"entity 概念一律删"处理。
-> - 其余条目默认全部删除。
+> **Confirmed (user)**:
+> - **Keep the approval-flow code, do not show it in phase one** -- the data structures and callback
+>   chain of `approval_state` / `onToolDecision` are migrated as-is first, and the render layer does
+>   not draw approval buttons in phase one; enable it later when the permission layer is wired up.
+> - **Keep the `@` reference interaction, rebind the object to workspace files** (see 4.3) -- no
+>   longer handled as "delete everything entity-related".
+> - All other rows are deleted by default.
 
-### 4.3 `@` 引用（迁移 + 重绑，**已落地**）
+### 4.3 `@` references (migration + rebinding, **landed**)
 
-shiwen 的 `@` 逻辑（输入 `@` 触发候选浮层、选中生成 chip、`EntityChips` 回显）交互骨架值得留，
-但它绑定的对象是 shiwen 知识库实体（article/space/document/category/conversation/material）。
-Shirley 里真实存在的可引用对象只有**工作区里的文件与目录**，故**重绑**而非照搬：
+shiwen's `@` logic (typing `@` triggers a candidate popover, selecting generates a chip, `EntityChips`
+echoes it) has a skeleton worth keeping, but the object it binds to is a shiwen knowledge-base entity
+(article/space/document/category/conversation/material). The only referenceable objects that really
+exist in Shirley are **files and directories in the workspace**, so it is **rebound** rather than
+copied:
 
-| shiwen 源 | Shirley 落点 | 变化 |
+| shiwen source | Shirley landing | Change |
 | --- | --- | --- |
-| `lib/entity-mentions/useEntityMentions.ts` | `web/src/lib/file-mentions/useFileMentionSearch.ts` | 对象换成 `FileReference`；检索走 Rust 侧 `agent_search_files`（本地文件系统），不再分页 / cursor；**只保留无头搜索控制器**（浮层状态 + 异步检索），输入区 DOM 归编辑区管 |
-| `lib/entity-mentions/EntityChips.tsx` | `web/src/lib/file-mentions/FileChips.tsx` | 图标收敛为 文件 / 目录；去掉 material OCR / 删除资料；`FileChip`（单个，可内联）+ `InlineReferences`（正文按占位符与引用交错） |
-| `lib/entity-mentions/EntityMentionPopover.tsx` | `web/src/lib/file-mentions/FileMentionPopover.tsx` | 去掉分组（article/space/…）、OCR 徽标、分页「加载更多」；只留结果列表 + 键盘选择（搜索框由编辑区承载，`showSearch=false`） |
-| `lib/entity-mentions/entityLoader.ts` | Rust `src/workspace_search.rs` + `agent_search_files` | 检索落到应用层（工作区遍历 + 关键词排序），不经 SDK |
+| `lib/entity-mentions/useEntityMentions.ts` | `web/src/lib/file-mentions/useFileMentionSearch.ts` | the object becomes `FileReference`; search goes through the Rust side `agent_search_files` (local filesystem), no more paging / cursor; **keep only the headless search controller** (popover state + async search), the input area DOM is managed by the editor |
+| `lib/entity-mentions/EntityChips.tsx` | `web/src/lib/file-mentions/FileChips.tsx` | icons converge to file / directory; drop material OCR / delete-material; `FileChip` (single, inlineable) + `InlineReferences` (body interleaves placeholders and references) |
+| `lib/entity-mentions/EntityMentionPopover.tsx` | `web/src/lib/file-mentions/FileMentionPopover.tsx` | drop grouping (article/space/...), OCR badges, paging "load more"; keep only the result list + keyboard selection (the search box is carried by the editor, `showSearch=false`) |
+| `lib/entity-mentions/entityLoader.ts` | Rust `src/workspace_search.rs` + `agent_search_files` | search lands in the application layer (workspace traversal + keyword ranking), not through the SDK |
 
-- **引用如何进模型**：`@` 只作用于界面——选中后在光标处插入一个内联 chip，发送时
-  由 `shell.rs::compose_prompt` 把引用路径拼进**这一轮**的 prompt。**引用不是 Agent 的对外
-  契约**：`Message` / `AgentEvent` 都不动，SDK 未因此新增任何对外类型（见第八节验收第 4 条）。
-- **检索边界**：只在工作区根下遍历，跳过 `.git` / `node_modules` / `target` / `dist` 等，
-  条目数设上限；这与 `read_file` 工具的工作区约束同源，但**在应用层实现**，不碰 SDK。
+- **How a reference enters the model**: `@` only acts on the interface -- after selection an inline
+  chip is inserted at the cursor, and on send `shell.rs::compose_prompt` splices the reference path
+  into **this round's** prompt. **A reference is not part of the Agent's external contract**:
+  neither `Message` nor `AgentEvent` changes, and the SDK adds no external type because of it (see
+  section 8, acceptance item 4).
+- **Search boundary**: traverse only under the workspace root, skipping `.git` / `node_modules` /
+  `target` / `dist` etc., with a cap on the entry count; this is the same origin as the `read_file`
+  tool's workspace constraint, but **implemented in the application layer**, not touching the SDK.
 
-#### 4.3.0 内联混排：`contenteditable` 富输入（**已落地**）
+#### 4.3.0 Inline mixed layout: `contenteditable` rich input (**landed**)
 
-初版把引用做成「正文外的 `references` 数组 + 输入框顶部的 `FileChips` 块」：chip 与文字
-**分属两层**，视觉上永远堆在正文上方，无法「文字 + tag 同行」。根因是输入控件是 `<textarea>`——
-它只能渲染纯文本，**无法承载内联节点**。修复即把输入区换成 `contenteditable` 富输入：
+The first version made references a "body-external `references` array + a `FileChips` block at the
+top of the input box": the chips and the text **belonged to two layers**, always stacked above the
+body, unable to have "text + tag on the same line". The root cause is that the input control was a
+`<textarea>` -- it can only render plain text and **cannot carry inline nodes**. The fix is to swap
+the input area for `contenteditable` rich input:
 
-- **正文 = 一条带占位符的字符串**。编辑区里 chip 是 `contenteditable=false` 的内联 `<span>`；
-  序列化时写成 `U+FFFC`（OBJECT REPLACEMENT CHARACTER）占位符。于是「文字 + 引用」仍是一条
-  有序字符串：**第 N 个占位符 ↔ `references[N]`**。发送前用 `stripTokens` 剥掉占位符，
-  引用仍走既有 `references` 数组（Rust `compose_prompt` 一行没改）。
-- **编辑期不重渲染 DOM**（否则光标必丢）。React 只渲染编辑区根 `<div>`，内部内容由
-  `MentionEditor` 命令式维护；普通输入交给浏览器原生编辑，`onInput` 只做序列化上报。
-  仅在**结构变化**（插入 / 删除 chip、外部重置 / 清空）时 `rebuild` 整段 DOM，并用
-  `pendingCaret` 恢复光标。
-- **键盘整块删 chip**：命中 chip 占位符的退格 / 前向删除，手写删除该 chip 节点 +
-  对应 `references[i]` + 重建（否则浏览器删的是字符、引用数组会错位）。
-- **`contenteditable=false` 的光标死角（已修）**：chip 是不可编辑的内联节点，浏览器既
-  不把光标放进「chip 与相邻文字之间」，方向键也跨不过它，点击落点也不可靠。三处补齐：
-  ① 方向键跨 chip 边界时手动 `setCaretAt`（普通文字仍走原生）；② 点击 chip 按落点左/右
-  半区把光标吸附到 chip 前 / 后；③ 退格 / 前向删除在占位符处整块删。统一用
-  「序列化文本偏移 ↔ DOM 位置」（`caretOffset` / `setCaretAt` / `chipOffset`）换算。
-- **用原生 `beforeinput`，不用 React 的 `onBeforeInput`（已修）**：React 18 的
-  `onBeforeInput` 是 `textInput`/`keypress` 合成的旧接口，`nativeEvent.inputType` **恒为
-  `undefined`**——原先基于它的删除 / 换行分支全是死代码（这正是「删除失灵」的根因）。
-  改为在编辑区根节点上 `addEventListener("beforeinput")`：只有原生事件能拿到 `inputType`
-  且 `preventDefault` 能阻止默认编辑。
-- **发送后回显**：用户消息的 `content` 保留占位符，渲染时走 `InlineReferences` 按占位符与
-  `message.references` 交错，chip 落回它在正文里的原始位置——不再堆顶部。
-- **实现落点**：`web/src/lib/file-mentions/` 下 `editor-dom.ts`（序列化 / 光标 / 重建 DOM）、
-  `MentionEditor.tsx`（富输入）、`useFileMentionSearch.ts`（无头检索）、`FileChips.tsx`
-  （`FileChip` / `InlineReferences`）。`AiChatComposer` 新增 `inputSlot`，传入时替换内置 textarea。
-  `src/App.tsx` 用 `input` + `references` 两个 state 接线，`send()` 判空用 `stripTokens`。
+- **The body = a string with placeholders**. Inside the editor a chip is a `contenteditable=false`
+  inline `<span>`; on serialization it is written as a `U+FFFC` (OBJECT REPLACEMENT CHARACTER)
+  placeholder. Thus "text + reference" is still an ordered string: **the Nth placeholder <-> 
+  `references[N]`**. Before sending, `stripTokens` strips the placeholders, and the references still
+  go through the existing `references` array (not a single line of Rust `compose_prompt` changed).
+- **Do not re-render the DOM during editing** (otherwise the caret is necessarily lost). React only
+  renders the editor root `<div>`, and the inner content is maintained imperatively by
+  `MentionEditor`; ordinary input is left to the browser's native editing, and `onInput` only does
+  serialization reporting. Only on a **structural change** (insert / delete chip, external reset /
+  clear) does it `rebuild` the whole DOM segment, restoring the caret with `pendingCaret`.
+- **Delete a whole chip with the keyboard**: on backspace / forward-delete hitting a chip
+  placeholder, manually delete that chip node + the corresponding `references[i]` + rebuild
+  (otherwise the browser deletes a character and the references array goes out of alignment).
+- **The `contenteditable=false` caret dead zones (fixed)**: a chip is a non-editable inline node, so
+  the browser neither puts the caret "between the chip and the adjacent text", nor lets the arrow
+  keys cross it, nor places a click reliably. Three patches: (1) manually `setCaretAt` when the arrow
+  keys cross a chip boundary (ordinary text still uses native); (2) clicking a chip snaps the caret
+  to before / after the chip based on which half was hit; (3) backspace / forward-delete deletes the
+  whole block at a placeholder. All uniformly use the "serialized-text offset <-> DOM position"
+  conversion (`caretOffset` / `setCaretAt` / `chipOffset`).
+- **Use native `beforeinput`, not React's `onBeforeInput` (fixed)**: React 18's `onBeforeInput` is
+  the old `textInput`/`keypress` composite interface, and `nativeEvent.inputType` is **always
+  `undefined`** -- so the previous delete / newline branches based on it were all dead code (which is
+  exactly the root cause of "deletion does not work"). Change to
+  `addEventListener("beforeinput")` on the editor root node: only a native event can get `inputType`
+  and `preventDefault` can stop the default editing.
+- **Echo after sending**: the user message's `content` keeps the placeholders, and rendering goes
+  through `InlineReferences`, interleaving by placeholder and `message.references`, so the chip
+  returns to its original position in the body -- no longer stacked at the top.
+- **Implementation landing**: under `web/src/lib/file-mentions/`, `editor-dom.ts` (serialization /
+  caret / DOM rebuild), `MentionEditor.tsx` (rich input), `useFileMentionSearch.ts` (headless
+  search), `FileChips.tsx` (`FileChip` / `InlineReferences`). `AiChatComposer` gains an `inputSlot`
+  which, when passed, replaces the built-in textarea. `src/App.tsx` wires it with the two states
+  `input` + `references`, and `send()` uses `stripTokens` for the emptiness check.
 
-### 4.3.1 markdown 渲染对齐（**已修**）
+### 4.3.1 Markdown render alignment (**fixed**)
 
-`AiMarkdown.tsx` 与 shiwen **逐字节相同**（只差 `cn` 的 import 路径），所以渲染不一致**不在组件**，
-在 **CSS**：Shirley 的 `styles/index.css` 漏了 shiwen 的那行 `@source`。
+`AiMarkdown.tsx` is **byte-for-byte identical** to shiwen (only the `cn` import path differs), so the
+inconsistent rendering is **not in the component** but in the **CSS**: Shirley's `styles/index.css`
+is missing shiwen's `@source` line.
 
-Tailwind 4 默认**不扫描 `node_modules`**。streamdown 把 markdown 各块级元素的 utility 类
-（`mt-6` / `text-2xl` / `border-border` / `text-muted-foreground` / `divide-y` / `wrap-anywhere` …）
-写在它打包后的 JS 字符串里；不显式告诉 Tailwind 去扫这份 JS，这些类**一个都不会被编进产物 CSS**，
-markdown 就以「无样式」渲染（标题不放大、列表没间距、代码块没边框/底色、引用块没竖线）。
-shiwen 的 `index.css` 有 `@source ".../node_modules/streamdown/dist/*.js"`，Shirley 迁移时漏掉。
+Tailwind 4 does **not scan `node_modules`** by default. streamdown writes the utility classes for
+each markdown block element (`mt-6` / `text-2xl` / `border-border` / `text-muted-foreground` /
+`divide-y` / `wrap-anywhere` ...) into its bundled JS strings; without explicitly telling Tailwind to
+scan that JS, **not a single one** of these classes is compiled into the output CSS, and markdown
+renders "unstyled" (headings not enlarged, lists without spacing, code blocks without border /
+background, blockquotes without the vertical bar). shiwen's `index.css` has
+`@source ".../node_modules/streamdown/dist/*.js"`, which was missed during the Shirley migration.
 
-修复：在 `web/src/styles/index.css` 补回该 `@source`（路径按 Shirley 的 `web/` 层级写成
-`../../node_modules/streamdown/dist/*.js`），并补齐代码块滚动条的 `-track` / `-thumb:hover` 两条
-（对齐 shiwen `globals.css`）。**改前端目录结构时，这行 `@source` 的相对路径要跟着调。**
+Fix: restore that `@source` in `web/src/styles/index.css` (path written per Shirley's `web/` level as
+`../../node_modules/streamdown/dist/*.js`), and add the code-block scrollbar's `-track` /
+`-thumb:hover` rules (aligning with shiwen's `globals.css`). **When changing the frontend directory
+structure, the relative path of this `@source` line must be adjusted accordingly.**
 
-### 4.3.2 聊天区固定宽度 + 连续工具调用收集（**已对齐**）
+### 4.3.2 Fixed chat width + consecutive tool-call collection (**aligned**)
 
-shiwen 的 `AiConversationSurface` 把**转写区 + 输入框**一起包在
-`<section className="mx-auto flex h-full w-full max-w-190 min-h-0 flex-col">` 里
-（`max-w-190` = `calc(var(--spacing) * 190)` = 760px）。Shirley 原先没这层包裹，聊天区随窗口拉满。
-修复：`App.tsx` 补上同款 `<section className="mx-auto w-full max-w-190 min-h-0 flex-1 flex-col">`
-包裹 `AiConversationTranscript` + 错误行 + 输入框，聊天区与输入框都固定宽度居中。
+shiwen's `AiConversationSurface` wraps **the transcript area + input box** together in
+`<section className="mx-auto flex h-full w-full max-w-190 min-h-0 flex-col">`
+(`max-w-190` = `calc(var(--spacing) * 190)` = 760px). Shirley originally lacked this wrapper, so the
+chat area stretched to fill the window. Fix: `App.tsx` adds the same
+`<section className="mx-auto w-full max-w-190 min-h-0 flex-1 flex-col">` wrapping
+`AiConversationTranscript` + the error line + the input box, so both the chat area and the input box
+are fixed-width and centered.
 
-「连续工具调用收集到一起」：shiwen 的 `FreeChatAssistantMessage` 只把**用户可见**的执行项
-（`pending` / 审批中 / 带 `entity_url` 的完成项）单独成卡，其余**全部**塞进一个
-`AiToolActivityDisclosure` 折叠区，渲染成一行「查看处理过程 · N 项」。Shirley 没有 entity / 审批渲染，
-所以执行项都归入折叠区，连续的工具调用被收成一行，而不是每个调用铺一张卡。
-`AiToolActivityDisclosure` 内部仍按 `content_offset` 排序、并对连续失败做聚合（`toolErrorUtils`）。
-**折叠区的落点见 4.3.4**：不再全部堆在正文顶部，而是作为线性段落流中的一段，按事件顺序与正文/思考交错。
+"Collect consecutive tool calls together": shiwen's `FreeChatAssistantMessage` only makes the
+**user-visible** execution items (`pending` / approving / completed items with an `entity_url`) into
+separate cards, and stuffs **all** the rest into a single `AiToolActivityDisclosure` collapsible,
+rendered as one line "View process - N items". Shirley has no entity / approval rendering, so all
+execution items go into the collapsible, and consecutive tool calls are collected into one line
+rather than one card per call. Inside `AiToolActivityDisclosure` it still sorts by `content_offset`
+and aggregates consecutive failures (`toolErrorUtils`). **The collapsible's landing is in 4.3.4**:
+rather than all stacked at the top of the body, it is one segment in the linear paragraph flow,
+interleaved with body / thinking in event order.
 
-### 4.3.3 markdown 渲染对标 TUI（**已落地**）
+### 4.3.3 Markdown rendering benchmarked against the TUI (**landed**)
 
-4.3.1 补 `@source` 只解决了「utility 类没被编进产物」——streamdown 的默认样式本身
-仍偏「营销页」气质（`text-3xl` 标题、`bg-muted` 行内代码、`my-4`/`space-y-4` 大间距），
-而且它依赖一组 **shadcn 式 token**，Shirley 的 `tokens.css` 并不完整。所以
-「desktop markdown 不如 TUI 优雅」是**两层问题**，4.3.1 只修了第一层。本小节修第二层：
-**不再追求与 shiwen 逐像素一致，而是直接对标 TUI（`src/interface/markdown.rs`）的排版与配色**。
+4.3.1's `@source` fix only solved "utility classes were not compiled into the output" -- streamdown's
+default styling itself still has a "marketing page" feel (`text-3xl` headings, `bg-muted` inline
+code, `my-4`/`space-y-4` large spacing), and it depends on a set of **shadcn-style tokens** that
+Shirley's `tokens.css` does not fully provide. So "desktop markdown is less elegant than the TUI" is
+a **two-layer problem**, and 4.3.1 only fixed the first layer. This subsection fixes the second
+layer: **no longer chasing pixel-for-pixel parity with shiwen, but directly benchmarking the TUI's
+(`src/interface/markdown.rs`) typography and color scheme.**
 
-三个具体 bug（都已修）：
+Three concrete bugs (all fixed):
 
-1. **`--color-sidebar` 未定义**。streamdown 把代码块 / 表格外层容器画成 `bg-sidebar` +
-   `border-sidebar`，Shirley 的 `tokens.css` 没有这一项 → 这些类解析为空，容器**没底色、没边框**。
-   修复：`tokens.css` 补 `--color-sidebar`（light `#f1f1ee` / dark `#20201e`，取 inset 同系）。
-2. **`bg-muted` 语义冲突**。Shirley 把 `--color-muted` 当**文本灰**（`#676763`），
-   而 streamdown 拿 `bg-muted` 当**浅色底**（行内代码、表头）→ 变成「深灰底 + 深色字」，对比度极差。
-   修复：在 `index.css` 里把行内代码改回浅色 inset 底 + 细边框（`[data-streamdown="inline-code"]`），
-   表头底色同理。
-3. **标题被 `twMerge` 放大**。`AiMarkdown.tsx` 的 `h1/h2/h3` 覆写用
-   `cn("... text-title-sm ...", className)`，streamdown 传入的 `text-3xl`/`text-2xl` 在**后**，
-   `twMerge` 后置者胜出 → 标题过大。修复：不靠 `twMerge` 斗优先级，直接在
-   `index.css` 用 `[data-streamdown^="heading-"]` 逐级收敛字号（H1 1.25rem → H4+ 0.8125rem），
-   并把 H4–H6 降为 muted 色。
+1. **`--color-sidebar` undefined**. streamdown paints the code block / table outer container as
+   `bg-sidebar` + `border-sidebar`, and Shirley's `tokens.css` has no such item -> these classes
+   resolve to nothing, and the container has **no background, no border**. Fix: add
+   `--color-sidebar` to `tokens.css` (light `#f1f1ee` / dark `#20201e`, same family as inset).
+2. **`bg-muted` semantic conflict**. Shirley treats `--color-muted` as a **text gray** (`#676763`),
+   while streamdown uses `bg-muted` as a **light background** (inline code, table header) -> it
+   becomes "dark gray background + dark text", with terrible contrast. Fix: in `index.css` change the
+   inline code back to a light inset background + thin border
+   (`[data-streamdown="inline-code"]`), and likewise for the table header background.
+3. **Headings enlarged by `twMerge`**. `AiMarkdown.tsx`'s `h1/h2/h3` overrides use
+   `cn("... text-title-sm ...", className)`, and the `text-3xl`/`text-2xl` passed by streamdown come
+   **after**, so after `twMerge` the later one wins -> headings too large. Fix: do not fight
+   priority via `twMerge`; instead use `[data-streamdown^="heading-"]` in `index.css` to converge the
+   font size level by level (H1 1.25rem -> H4+ 0.8125rem), and downgrade H4-H6 to the muted color.
 
-其余对齐（写在 `web/src/styles/index.css` 的 `[data-ai-markdown]` 作用域内，**不影响应用其它 UI**）：
+Other alignments (written inside the `[data-ai-markdown]` scope in `web/src/styles/index.css`, **not
+affecting the rest of the app UI**):
 
-| 元素 | TUI（`markdown.rs`） | desktop 覆盖 |
+| Element | TUI (`markdown.rs`) | desktop override |
 | --- | --- | --- |
-| 块间距 | 块间约一行 | `[data-ai-markdown] > * > * + *` 统一 `0.75rem`（清掉 `my-4`/`mt-6`） |
-| 行内代码 | 黄色前景 | 浅色 inset 底 + 细边框，同号字 |
-| 代码块 | 边框 + 语言标签 + 暗色 | 外层 `sidebar` 底 + `line` 边框；body 用 `canvas` 底 |
-| 引用块 | `│` 竖线 + 斜体 + 暗色 | `border-left: 2px line-strong` + italic + muted |
-| 表格 | `│` / `─┼─` 网格 | 表头 `inset` 底、单元格 `line` 边框 |
-| 链接 | 蓝色下划线 | `--color-link` + underline |
-| 分割线 | `─` 暗色 | `line` 色、`0.75rem` 上下距 |
+| Block spacing | about one line between blocks | `[data-ai-markdown] > * > * + *` uniformly `0.75rem` (clearing `my-4`/`mt-6`) |
+| Inline code | yellow foreground | light inset background + thin border, same font size |
+| Code block | border + language label + dark | outer `sidebar` background + `line` border; body on `canvas` background |
+| Blockquote | `│` bar + italic + dark | `border-left: 2px line-strong` + italic + muted |
+| Table | `│` / `─┼─` grid | header `inset` background, cell `line` border |
+| Link | blue underline | `--color-link` + underline |
+| Rule | `─` dark | `line` color, `0.75rem` vertical margin |
 
-> 这些规则**未放进 Tailwind layer**（写在 `@layer utilities` 之后），因此能稳定压过
-> streamdown 编进 utilities 层的默认类——这是「用 CSS 覆盖第三方组件默认样式」的常规做法，
-> 不依赖 `twMerge` 的先后顺序。改 `AiMarkdown.tsx` 的 `BASE_COMPONENTS` 时记得：
-> 组件层字号会被这里的 CSS 再盖一次，两者要一起看。
+> These rules are **not put into a Tailwind layer** (written after `@layer utilities`), so they can
+> reliably override streamdown's default classes compiled into the utilities layer -- this is the
+> standard way to "override a third-party component's default styles with CSS", not relying on
+> `twMerge`'s order. When changing `AiMarkdown.tsx`'s `BASE_COMPONENTS`, remember: the component-layer
+> font size is covered again by the CSS here, so the two must be looked at together.
 
-### 4.3.4 线性段落与整轮过程折叠（代码已实现，UI 待用户验证）
+### 4.3.4 Linear paragraphs and whole-turn process collapsing (code implemented, UI awaiting user verification)
 
-`AiSegment` 保存按事件顺序排列的 `content`、`tools`、`compact`。相邻同类型增量合并，
-工具完成事件原地更新对应执行项。原始 thinking 不进入可见段落流。
+`AiSegment` holds the `content`, `tools`, `compact` arranged in event order. Adjacent increments of
+the same type are merged, and a tool completion event updates the corresponding execution item in
+place. Raw thinking does not enter the visible paragraph flow.
 
-对照用户提供的 Codex 截图，一轮助手消息只渲染一个过程折叠：
+Following the Codex screenshots provided by the user, a turn of assistant messages renders only one
+process collapsible:
 
-- 执行中显示「正在处理…」，过程默认展开；用户可手动收起，后续增量不会反复打开它。
-- 完成时自动收起，标题显示「处理用时 1分 11秒」等实际前端计时；没有计时数据的历史显示
-  「处理过程」，不伪造耗时。分隔线固定在折叠标题行下方，展开内容在线下增长，
-  不再把分隔线挂在整个折叠容器底部。最终答复在外部显示。
-- compact 记录归入整轮过程，保持原有时序，可单独展开摘要。compact 不再把外层拆成多组。
-- 工具组以「读取文件、搜索网页 · N 项」等文字概括，展开过程后默认展示简洁活动行。
-  每行可展开参数与输出，失败显示明确状态；长内容局部滚动，普通工具不再铺满大卡片。
-- 本地缓存保留已收到的工具输出、失败状态和已知耗时；历史快照没有输出时如实说明。
-  窗口重启后没有持久化的耗时/工具输出不会被补造。
-- 停止或失败显示对应标题，不把工具执行前的中间说明当最终答复。
+- While executing it shows "Working...", and the process is expanded by default; the user can
+  collapse it manually, and later increments do not reopen it.
+- On completion it collapses automatically, and the title shows the actual frontend timing such as
+  "Worked for 1m 11s"; history without timing data shows "Process", without fabricating a duration.
+  The divider is fixed below the collapsible title line, and the expanded content grows below the
+  line, no longer hanging the divider at the bottom of the whole collapsible container. The final
+  answer is shown outside.
+- The compact record is included in the whole-turn process, keeping its original time order, and the
+  summary can be expanded separately. compact no longer splits the outer layer into multiple groups.
+- A tool group is summarized with text like "Read files, searched web - N items", and after expanding
+  the process it shows concise activity lines by default. Each line can expand its arguments and
+  output, and failures show a clear status; long content scrolls locally, and ordinary tools no
+  longer fill a large card.
+- The local cache retains the received tool output, failure status, and known durations; when a
+  historical snapshot has no output it says so honestly. After a window restart, timing / tool output
+  that was not persisted is not fabricated.
+- Stop or failure shows the corresponding title, not treating the intermediate explanation before
+  tool execution as the final answer.
 
-耗时在 React 状态更新函数外取样和清理，避免 StrictMode 重放更新函数时丢失。
-切回仍在执行的会话时，最后一轮恢复流式展示；本次进程中已有起始计时会保留。
+Timing is sampled and cleaned up outside the React state-update function, avoiding loss when
+StrictMode replays the updater. When switching back to a session still executing, the last turn
+resumes streaming display; a start time already recorded in this process is retained.
 
-**手动验收（尚未由用户实际验证）：**
+**Manual acceptance (not yet actually verified by the user):**
 
-1. 打开包含多次 compact 的旧会话：每轮仅有一个「处理过程」，最终正文在其下方；
-   展开后可按时序找到原来的工具与所有压缩摘要。
-2. 发起需要读文件、执行命令的任务：运行时展开过程，结束后自动收起并显示真实耗时；
-   手动重新展开可看见说明和工具活动行，逐项可展开参数与输出。
-3. 执行中手动收起过程：新事件不自动抢回展开状态；仍能看到运行指示，完成后最终正文出现。
-4. 展开工具详情后切换会话再切回：已接收的输出与失败状态保留；运行中的会话仍显示处理中。
-5. 停止或制造工具/请求错误：停止与失败状态明确，过程可回看，中间说明不冒充最终答复。
-6. 窄窗口与键盘操作：标题截断不撑宽聊天区，Tab 可聚焦折叠标题，Enter/Space 可展开收起。
-7. 反复展开/收起过程，并展开工具详情和压缩摘要：分隔线始终紧跟标题，
-   与标题的间距、左右边界保持不变；收起后隐藏内容的 padding 不残留空白。
+1. Open an old session containing multiple compacts: each turn has only one "Process", with the final
+   body below it; after expanding, the original tools and all compression summaries can be found in
+   time order.
+2. Start a task that needs to read files and run commands: expand the process while running; after it
+   ends it collapses automatically and shows the real duration; manually re-expanding shows the
+   explanation and tool activity lines, each item expandable for arguments and output.
+3. Manually collapse the process while executing: new events do not automatically reclaim the
+   expanded state; the running indicator is still visible, and the final body appears on completion.
+4. After expanding tool details, switch sessions and switch back: the received output and failure
+   status are retained; a running session still shows "working".
+5. Stop or manufacture a tool/request error: stop and failure states are clear, the process can be
+   reviewed, and the intermediate explanation does not masquerade as the final answer.
+6. Narrow window and keyboard operation: the title truncates without widening the chat area, Tab can
+   focus the collapsible title, and Enter/Space can expand/collapse.
+7. Repeatedly expand/collapse the process, and expand tool details and compression summaries: the
+   divider always follows the title, and its spacing and left/right boundaries stay unchanged; after
+   collapsing, the hidden content's padding leaves no leftover blank space.
 
-不编写 UI 单元测试。静态验证仅执行前端 typecheck 与 production build，不能代替上述人工验收。
+Do not write UI unit tests. Static verification only runs the frontend typecheck and production
+build, which cannot replace the manual acceptance above.
 
-### 4.3.5 聊天航线地图（代码已实现，UI 待用户验收）
+### 4.3.5 Chat flight-route map (code implemented, UI awaiting user acceptance)
 
-`AiMarkdown` 注册 `flightmap` renderer；`FlightMapRenderer` 通过 lazy import 加载地图和 ECharts，
-并以局部错误边界隔离加载/渲染失败。`FlightMap` 必须先 `echarts.use()` 安装 Geo、Tooltip、
-Lines、Scatter、EffectScatter 和 Canvas，再注册底图、创建图表。仅 import 扩展不会完成注册，
-缺少 Canvas 会在初始化时抛错；没有局部兜底时会导致 React 聊天界面白屏。
+`AiMarkdown` registers a `flightmap` renderer; `FlightMapRenderer` loads the map and ECharts via
+lazy import, and isolates load/render failures with a local error boundary. `FlightMap` must first
+`echarts.use()` to install Geo, Tooltip, Lines, Scatter, EffectScatter, and Canvas, then register the
+base map and create the chart. Importing the extensions alone does not complete the registration;
+missing Canvas throws on initialization; without a local fallback this would white-screen the React
+chat interface.
 
-地图支持展开大图、滚轮/按钮缩放、拖动平移、复位、点击地点和航段查看详情。
-Geo 使用 `preserveAspect: "contain"` 保持底图比例；ECharts 6 中仅设置 `aspectScale`，
-再同时指定四边边距，会按容器宽高分别拉伸地图。内嵌图和展开大图都必须等比例适配。
-`flightMapLabels` 在缩放、平移、尺寸变化后按屏幕像素测量文字并重新避让；
-小范围隐藏放不下的标签，放大后逐步显示机场代码和备注。隐藏标注不删除地点或航段，完整信息仍在详情区。
+The map supports expanding to a large view, wheel/button zoom, drag to pan, reset, and clicking a
+place and a leg to see details. Geo uses `preserveAspect: "contain"` to keep the base map's aspect
+ratio; in ECharts 6, setting only `aspectScale` and then also specifying all four margins stretches
+the map by the container's width and height separately. Both the inline map and the expanded large
+view must fit proportionally. `flightMapLabels` measures text in screen pixels and re-avoids after
+zoom, pan, and size changes; it hides labels that do not fit at a small range, and progressively
+shows airport codes and notes as it zooms in. Hiding a label does not delete the place or leg; the
+full information is still in the detail area.
 
-`flightMapData` 解析 `path`、`closed` 和 `routes`，按明确顺序连接，并显示箭头和航段编号。
-同一机场只定义一次，`path` 可以重复访问；往返/重复航段按方向分配不同曲率，避免整段重合。
-不同航段仍可能在平面上交叉，不能保证任意路线图零交叉。只有旧 `origin + points` 的消息仍按起点辐射渲染，
-不会从标题猜测行程；正确的逐段地图需要重新生成包含 `path` 或 `routes` 的消息。
-输出契约见 [flight-map skill](../.agents/skills/flight-map/SKILL.md)。
+`flightMapData` parses `path`, `closed`, and `routes`, connects them in explicit order, and shows
+arrows and leg numbers. The same airport is defined only once, and `path` may revisit it; round-trip /
+repeated legs are assigned different curvatures by direction, avoiding full overlap. Different legs
+may still cross on the plane, so zero crossings cannot be guaranteed for an arbitrary route map. Only
+messages with the old `origin + points` still render as radiating from the origin, and no itinerary
+is guessed from the title; a correct leg-by-leg map requires regenerating the message with `path` or
+`routes`. The output contract is in
+[flight-map skill](../.agents/skills/flight-map/SKILL.md).
 
-手动验收（未执行，不代表 UI 通过）：
+Manual acceptance (not executed, does not mean the UI passes):
 
-1. 运行 `cargo desktop`，打开原先导致白屏的会话；预期地图和其他消息可查看，能够继续输入。
-2. 用多个相邻机场生成地图，缩小到标签拥挤再逐级放大；预期无空间的标签隐藏，空间足够后重新出现，备注在更高缩放级别显示。
-3. 点击「展开大图」，使用滚轮、加减按钮和拖动，再点复位；预期能缩放/平移，复位后全部航段可见。Esc 和关闭按钮都应返回聊天。
-4. 使用 `path: ["A", "B", "C"]` 和 `closed: true`（A/B/C 必须是已定义地点）；预期 A→B→C→A，编号与箭头方向一致。
-5. 使用 `path: ["A", "B", "A", "B"]`；预期三段航线分开走弧线，点击编号列表能突出对应航段。
-6. 点击地图标记、航段和下方列表；预期详情区显示对应代码、备注、方向和航段顺序。小范围被隐藏的标签仍能从列表查看。
-7. 输入错误 JSON 或不存在的机场引用；预期仅地图卡片显示解析错误，其他聊天仍可操作。
-8. 改变窗口尺寸和明暗主题；预期地图重新适配、文字避让，切主题保留当前缩放和平移位置。
-9. 在窄窗口、宽窗口和展开大图之间切换，并缩放/复位；预期底图北朝上、轮廓比例一致，
-   可有留白，不能随容器宽高被压扁或拉长。
+1. Run `cargo desktop` and open the session that previously caused a white screen; expect the map and
+   other messages to be viewable, and to be able to continue typing.
+2. Generate a map with multiple adjacent airports, zoom out until the labels are crowded, then zoom
+   in level by level; expect labels with no room to hide and reappear when there is room, and notes
+   to show at a higher zoom level.
+3. Click "Expand large view", use the wheel, the +/- buttons, and drag, then click reset; expect to
+   zoom/pan, and after reset all legs are visible. Both Esc and the close button should return to the
+   chat.
+4. Use `path: ["A", "B", "C"]` and `closed: true` (A/B/C must be defined places); expect A->B->C->A,
+   with numbering consistent with the arrow direction.
+5. Use `path: ["A", "B", "A", "B"]`; expect three legs to arc separately, and clicking the numbered
+   list to highlight the corresponding leg.
+6. Click a map marker, a leg, and the list below; expect the detail area to show the corresponding
+   code, note, direction, and leg order. Labels hidden at a small range are still viewable from the
+   list.
+7. Enter invalid JSON or a nonexistent airport reference; expect only the map card to show a parse
+   error, and the rest of the chat to remain operable.
+8. Change the window size and the light/dark theme; expect the map to re-fit, the text to re-avoid,
+   and switching theme to preserve the current zoom and pan position.
+9. Switch between a narrow window, a wide window, and the expanded large view, and zoom/reset;
+   expect the base map north-up and the outline proportions consistent, possibly with whitespace,
+   but not squashed or stretched by the container's width and height.
 
-### 4.4 要保留的（用户真正喜欢的「聊天交互和 UI」）
+### 4.4 What to keep (the "chat interaction and UI" the user really likes)
 
-- `AiChatComposer`：自适应增高 textarea、Enter 发送 / Shift+Enter 换行、发送 / 停止按钮。
-- `AiMessageTimeline`：按 `content_offset` 把文本块与工具卡按时间线交错。
-- `AiMarkdown`：流式 markdown 渲染（`streamdown`，`parseIncompleteMarkdown`）。
-- `useMessageAutoScroll`：跟随最新（离底才停止跟随）。
-- 工具执行卡片 / 活动折叠的视觉。
-- 聊天区固定宽度（`max-w-190`，见 4.3.2）。
-- 连续工具调用收集成折叠区（见 4.3.2）。
-- `tokens.css` 的暖灰设计语言。
+- `AiChatComposer`: auto-growing textarea, Enter to send / Shift+Enter for a newline, send / stop
+  buttons.
+- `AiMessageTimeline`: interleaves text blocks and tool cards on a timeline by `content_offset`.
+- `AiMarkdown`: streaming markdown rendering (`streamdown`, `parseIncompleteMarkdown`).
+- `useMessageAutoScroll`: follows the latest (stops following only when scrolled off the bottom).
+- The visuals of the tool execution card / activity collapsible.
+- Fixed chat width (`max-w-190`, see 4.3.2).
+- Consecutive tool calls collected into a collapsible (see 4.3.2).
+- `tokens.css`'s warm-gray design language.
 
-### 4.5 多项目（多工作区）UX（**已落地**）
+### 4.5 Multi-project (multi-workspace) UX (**landed**)
 
-Shirley 是独立 app，不绑定单一目录。左侧栏把**多个工作区登记为「项目」**，每个项目下挂自己的会话：
+Shirley is a standalone app, not bound to a single directory. The left sidebar **registers multiple
+workspaces as "projects"**, each with its own sessions:
 
-**交互原则：每个项目 item 上常驻一个「＋ 新建会话」按钮（可直接在该项目下开新会话），其余操作全部收进右键菜单**（默认不可见、不占版面）——左侧栏因此干净，操作密度高时也不会被一排悬停按钮淹没。右键菜单是自建的轻量原语（`src/ui/context-menu.tsx`，`react-dom` portal，**不引入新依赖**），Esc / 点空白 / 滚动 / resize 关闭，贴边自动回收到视口内。菜单项里的破坏性操作（归档 / 删除）在**菜单内二次确认**。
+**Interaction principle: each project item has a permanently visible "+ New session" button (you can
+open a new session directly under that project), and all other operations are tucked into a
+right-click menu** (hidden by default, not taking layout space) -- so the left sidebar stays clean
+and is not flooded by a row of hover buttons even when operation density is high. The right-click
+menu is a self-built lightweight primitive (`src/ui/context-menu.tsx`, `react-dom` portal, **no new
+dependency**), closing on Esc / clicking blank / scroll / resize, and auto-recovering into the
+viewport when near an edge. Destructive operations in menu items (archive / delete) are **confirmed
+a second time inside the menu**.
 
-- **新建会话**（项目行上的常驻「＋」按钮）：在**该项目**下开一个空会话并聚焦输入框；若目标非当前前台项目，先切到前台再打开（按钮对任意项目都可用，不限于当前项目）。
-- **登记项目**：右键「项目」分组标题 → 「新建项目」→ 原生文件夹选择器（`tauri-plugin-dialog`）；同一目录按规范路径去重，此前归档过的则**恢复**而非新增。
-- **重命名项目**：右键项目行 → 「重命名」→ 内联编辑，只改展示名（不动路径 / 会话数据）。
-- **归档项目**（= 用户口中的「移除」）：右键项目行 → 「归档」→ 菜单内二次确认。**只置 `archived = true` 并释放内存运行时，不删磁盘数据**；项目从「项目」分组移入底部「归档」分组（默认收起）。
-- **恢复项目**：右键归档分组里的项目行 → 「恢复」，项目回到「项目」分组，下次打开懒加载。
-- **展开 / 折叠项目**：点项目名只切换该分组的展开 / 折叠，**不切换当前会话**——只要用户没有主动切换 / 操作 session，切项目不应改变选中的 session（点项目名不再自动打开该项目"当前会话"）。切到别的项目（及其会话）只由**显式动作**触发：点会话行、点项目行的「＋ 新建会话」。项目内会话的置顶 / 折叠状态用 `localStorage` 记忆。
-- **会话行操作**（右键）：置顶 / 取消置顶、重命名（内联编辑）、删除（菜单内二次确认）。
-- **侧边栏折叠 / 展开**：右上角常驻「收起」按钮（`PanelLeftClose`）把整栏宽度收到 0（`transition-[width]` 平滑过渡）；折叠后主区左上角浮出「展开」按钮（`PanelLeftOpen`，绝对定位，不占布局）。偏好存 `localStorage`（`shirley.desktop.sidebar-collapsed`）。**窗口放不下时自动收起**：`matchMedia('(max-width: 900px)')` 跨入窄视口即折叠（900 = sidebar 256 + 内容 760 已放不下），只单向收、不自动弹回——尊重用户之后的显式展开。
+- **New session** (the permanent "+" button on a project row): opens an empty session **under that
+  project** and focuses the input box; if the target is not the current foreground project, switch to
+  the foreground first, then open (the button works for any project, not just the current one).
+- **Register a project**: right-click the "Projects" group header -> "New project" -> native folder
+  picker (`tauri-plugin-dialog`); the same directory is deduped by canonical path, and a
+  previously archived one is **restored** rather than added.
+- **Rename a project**: right-click a project row -> "Rename" -> inline edit, changing only the
+  display name (not the path / session data).
+- **Archive a project** (= what the user calls "remove"): right-click a project row -> "Archive" ->
+  confirm a second time in the menu. **Only sets `archived = true` and releases the in-memory
+  runtime, not deleting on-disk data**; the project moves from the "Projects" group to the "Archived"
+  group at the bottom (collapsed by default).
+- **Restore a project**: right-click a project row in the archived group -> "Restore", the project
+  returns to the "Projects" group and is lazily loaded next time.
+- **Expand / collapse a project**: clicking the project name only toggles that group's
+  expand/collapse, **not the current session** -- as long as the user has not actively switched /
+  operated a session, switching projects should not change the selected session (clicking a project
+  name no longer automatically opens that project's "current session"). Switching to another project
+  (and its session) is only triggered by **explicit actions**: clicking a session row, or clicking a
+  project row's "+ New session". A project's session pin/collapse state is remembered with
+  `localStorage`.
+- **Session-row operations** (right-click): pin / unpin, rename (inline edit), delete (confirm a
+  second time in the menu).
+- **Sidebar collapse / expand**: a permanently visible "Collapse" button in the top right
+  (`PanelLeftClose`) shrinks the whole bar's width to 0 (`transition-[width]` smooth transition);
+  after collapsing, an "Expand" button floats out at the top left of the main area (`PanelLeftOpen`,
+  absolutely positioned, not taking layout space). The preference is stored in `localStorage`
+  (`shirley.desktop.sidebar-collapsed`). **Auto-collapse when the window cannot fit**:
+  `matchMedia('(max-width: 900px)')` collapses on entering a narrow viewport (900 = sidebar 256 +
+  content 760 no longer fits), only one-way collapsing, not auto-popping back -- respecting the
+  user's subsequent explicit expand.
 
-前端视图键 = `project::session`（会话名只在项目内唯一，跨项目会重名）；事件带 `project` + `session` 两个字段供路由。
-注册表与命令契约见第六节。
+The frontend view key = `project::session` (a session name is unique only within a project and may
+collide across projects); events carry both `project` and `session` fields for routing. The registry
+and command contract are in section 6.
 
 ---
 
-**五、技术选型**
+**5. Technology choices**
 
-| 维度 | 选择 | 理由 |
+| Dimension | Choice | Reason |
 | --- | --- | --- |
-| 桌面壳 | **Tauri 2** | 与 shiwen 一致；Rust 后端天然能直接调 `Agent` |
-| 前端 | **React 18 + TypeScript + Vite + Tailwind 4** | 忠实复刻 shiwen 交互，形态 1 |
-| 包管理 | **npm**（独立 `package.json`，放在 desktop 前端目录） | shiwen 用 npm；不与 Rust workspace 冲突 |
-| markdown | `streamdown` | shiwen 同款，流式渲染体验一致 |
-| 原语 | `@radix-ui/*` + `lucide-react` + `class-variance-authority` + `tailwind-merge` + `clsx` | shiwen `@shiwen/ui` 的依赖集，按需最小引入 |
-| 前后端通信 | Tauri **command + event** | 前端 `invoke` 发消息，后端 `emit` 推 `AgentEvent` |
+| Desktop shell | **Tauri 2** | consistent with shiwen; the Rust backend can naturally call `Agent` directly |
+| Frontend | **React 18 + TypeScript + Vite + Tailwind 4** | faithfully reproduces shiwen's interaction, form 1 |
+| Package management | **npm** (an independent `package.json`, placed in the desktop frontend directory) | shiwen uses npm; does not conflict with the Rust workspace |
+| markdown | `streamdown` | same as shiwen, consistent streaming render experience |
+| Primitives | `@radix-ui/*` + `lucide-react` + `class-variance-authority` + `tailwind-merge` + `clsx` | shiwen `@shiwen/ui`'s dependency set, minimally introduced as needed |
+| Frontend-backend communication | Tauri **command + event** | the frontend `invoke`s to send, the backend `emit`s to push `AgentEvent` |
 
-**代价（需用户知情）**：本方案会给这个**纯 Rust 仓库引入 Node/npm/Vite 构建链**。这是形态 1 的固有代价；若不可接受则退回形态 2（Rust 原生 webview + 手写前端），但那样无法复刻交互。
+**Cost (the user must be informed)**: this design will **introduce a Node/npm/Vite build chain into
+this pure-Rust repository**. This is the inherent cost of form 1; if unacceptable, fall back to form
+2 (native Rust webview + hand-written frontend), but then the interaction cannot be reproduced.
 
 ---
 
-**六、SDK 接入：把 shiwen 的流换成 Shirley 的 `AgentEvent`**
+**6. SDK integration: swap shiwen's stream for Shirley's `AgentEvent`**
 
-这是「接入我们的 SDK 消费」的核心。shiwen 前端消费的是 SSE（`parseAiStreamEvent` → `onThinking` / `onDelta` / `onTool` / `onCitations` / `onA2ui` / `onDone`）。Shirley 侧把它替换为对 `AgentEvent` 的消费：
+This is the core of "consuming our SDK". The shiwen frontend consumes SSE (`parseAiStreamEvent` ->
+`onThinking` / `onDelta` / `onTool` / `onCitations` / `onA2ui` / `onDone`). The Shirley side replaces
+it with consuming `AgentEvent`:
 
-| Shirley `AgentEvent` | 前端行为 |
+| Shirley `AgentEvent` | Frontend behavior |
 | --- | --- |
-| `ContentDelta(text)` | 追加到当前 assistant 消息正文（`onDelta`） |
-| `ReasoningDelta(text)` | 追加到思考区（`onThinking`） |
-| `MessageAdded(msg)` | 落一条消息（assistant 落库时结束流式态） |
-| `ToolStarted { call_id, name, arguments }` | 插入「运行中」工具卡（含调用参数） |
-| `ToolFinished { call_id, name, ok, output, elapsed_ms }` | 把工具卡置为完成 / 失败 |
-| `Usage(usage)` | 更新页脚 usage / 缓存命中率 |
-| `ContextUsage { used, limit }` | 更新上下文占用 |
-| `CompressionStarted` / `CompressionFinished` | 压缩状态提示 |
-| `Finished(RunResult)` | 结束本轮（对应 `onDone`） |
-| `Err(AgentError)` | 错误态（对应 `onError`） |
+| `ContentDelta(text)` | append to the current assistant message body (`onDelta`) |
+| `ReasoningDelta(text)` | append to the thinking area (`onThinking`) |
+| `MessageAdded(msg)` | add a message (end the streaming state when the assistant is persisted) |
+| `ToolStarted { call_id, name, arguments }` | insert a "running" tool card (with call arguments) |
+| `ToolFinished { call_id, name, ok, output, elapsed_ms }` | set the tool card to completed / failed |
+| `Usage(usage)` | update the footer usage / cache hit rate |
+| `ContextUsage { used, limit }` | update the context usage |
+| `CompressionStarted` / `CompressionFinished` | compression status hint |
+| `Finished(RunResult)` | end this round (corresponds to `onDone`) |
+| `Err(AgentError)` | error state (corresponds to `onError`) |
 
-**Rust 侧桥接**（示意，已按多项目多会话演进）：
+**Rust-side bridge** (illustrative, already evolved for multi-project multi-session):
 ```rust
 #[tauri::command]
 async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, project: String, text: String, session: Option<String>) -> Result<(), String> {
-    // 按 `project` 拿到该项目运行时（懒加载），再按**会话名**取（未传则回落该项目前台会话）；
-    // 运行期间把该会话的 Agent 移入后台任务，结束后按名放回。不同会话各持独立 Agent，可真正并行。
+    // get that project's runtime by `project` (lazy load), then take it by **session name**
+    // (falling back to that project's foreground session if not passed);
+    // during the run, move that session's Agent into a background task, and put it back by name
+    // when done. Different sessions each hold an independent Agent, so they can truly run in parallel.
     let runtime = state.ensure_runtime(&project).await?;
     let name = resolve_session(&runtime, session).await?;
-    // `begin_turn` = 取走 Agent + 乐观记入用户消息（`apply_event` 有意忽略
-    // `MessageAdded(User)`，用户消息须由驱动方记录——与 TUI `submit` 对称）。
+    // `begin_turn` = take the Agent + optimistically record the user message (`apply_event`
+    // intentionally ignores `MessageAdded(User)`, the user message must be recorded by the driver
+    // -- symmetric with the TUI `submit`).
     let mut agent = runtime.sessions.lock().await
-        .begin_turn(&name, text.clone()).ok_or("agent 正在运行中")?;
+        .begin_turn(&name, text.clone()).ok_or("agent is already running")?;
     tauri::async_runtime::spawn(async move {
         let mut stream = agent.run_stream(&text);
         while let Some(event) = stream.next().await {
@@ -389,7 +524,8 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, project: Str
                 Ok(event) => Ok(AgentEventWire::from_event(event).with_route(&project, &name)),
                 Err(error) => Err(error.to_string()),
             };
-            // 事实源在 SessionManager：把事件喂给**对应会话**（按名，不依赖 active 指针）。
+            // the source of truth is in SessionManager: feed the event to the **corresponding
+            // session** (by name, not relying on the active pointer).
             runtime.sessions.lock().await.apply_event(&name, update);
         }
         runtime.sessions.lock().await.restore_agent(&name, agent);
@@ -397,105 +533,160 @@ async fn agent_send(state: State<'_, DesktopState>, app: AppHandle, project: Str
     Ok(())
 }
 ```
-每个 `Session` 自持一条 `broadcast` 通道；`agent_subscribe { project, session }` 在同一把锁内
-**先 `subscribe` 再 `snapshot`**（保证不丢 / 不重），起一个 per-session pump 任务把
-该会话事件经 `agent://event` 推给前端；`agent_unsubscribe { project, session }` abort 该 pump。
-前端按 `AgentEventWire` 的 `project` + `session` 把事件路由到对应会话视图（键 = `project::session`，见 `web/src/lib/bridge.ts`）。
+Each `Session` self-holds a `broadcast` channel; `agent_subscribe { project, session }` **first
+`subscribe` then `snapshot`** under the same lock (guaranteeing no loss / no duplication), and starts
+a per-session pump task that pushes that session's events to the frontend via `agent://event`;
+`agent_unsubscribe { project, session }` aborts that pump. The frontend routes events to the
+corresponding session view by `AgentEventWire`'s `project` + `session` (key = `project::session`, see
+`web/src/lib/bridge.ts`).
 
-**Tauri commands 一览**（`src/interface/desktop/shell.rs`）：
+**Tauri commands at a glance** (`src/interface/desktop/shell.rs`):
 
-**多项目多会话**：Shirley 作为独立 app 不绑定单一目录，可把**多个工作区**登记为「项目」。
-项目注册表 `ProjectRegistry`（`src/project.rs`）只记「项目在哪」，落 `<config_dir>/shirley/projects.json`；
-每个项目一个 `AgentFactory`（各读该项目 `<root>/.shirley/config.toml`），会话日志仍落各项目自己的
-`<root>/.shirley/sessions/`（随仓库走）。**项目 id = 规范路径**（全局唯一），会话名只在项目内唯一，
-故**前端路由键 = `project::session`**（与后端 pump 键一致，事件打 `project` + `session`）。
-运行时按项目**懒加载**（`ensure_runtime`）：`runtimes: HashMap<project_id, Arc<Mutex<ProjectRuntime>>>`，
-每个 `ProjectRuntime { factory, sessions }` 持自己的 `SessionManager`；**归档项目 = 释放其内存运行时**
-（`runtimes` 表移除），磁盘数据不动，恢复时下次打开懒加载。
+**Multi-project multi-session**: as a standalone app Shirley is not bound to a single directory and
+can register **multiple workspaces** as "projects". The project registry `ProjectRegistry`
+(`src/project.rs`) only records "where the project is", persisted to
+`<config_dir>/shirley/projects.json`; each project has an `AgentFactory` (each reads that project's
+`<root>/.shirley/config.toml`), and session logs still land in each project's own
+`<root>/.shirley/sessions/` (traveling with the repo). **Project id = canonical path** (globally
+unique), a session name is unique only within a project, so **the frontend route key =
+`project::session`** (the same as the backend pump key, with events tagged `project` + `session`).
+Runtimes are **lazily loaded per project** (`ensure_runtime`):
+`runtimes: HashMap<project_id, Arc<Mutex<ProjectRuntime>>>`, each `ProjectRuntime { factory, sessions }`
+holding its own `SessionManager`; **archiving a project = releasing its in-memory runtime** (removed
+from the `runtimes` table), with on-disk data untouched, lazily loaded again next time it is opened.
 
-| command | 作用 |
+| command | Role |
 | --- | --- |
-| `agent_list_projects { archived? }` | 列出项目（`archived = true` 时含归档项目，供归档列表），按最近打开降序 |
-| `agent_add_project` | 打开原生文件夹选择器新建项目（`tauri-plugin-dialog`）；已登记的目录按路径去重 / 归档则恢复；用户取消返回 `null` |
-| `agent_rename_project { project, name }` | 重命名项目（只改展示名，不动路径 / 会话数据） |
-| `agent_archive_project { project }` | **归档**项目（= 用户口中的「移除」）：只置 `archived = true` + 释放内存运行时，**不删磁盘数据** |
-| `agent_restore_project { project }` | 从归档恢复项目（下次打开懒加载） |
-| `agent_send { project, text, references?, session? }` | 发起一轮 `run_stream`（`session` 缺省回落该项目前台会话），事件经 `agent://event` 推送 |
-| `agent_model_name { project }` | 该项目当前模型名（页脚 / 选择器展示） |
-| `agent_list_models` | 列出可选模型（转发 `ModelCatalog`，全局） |
-| `agent_set_model { project, model }` | 热切换模型（`Agent::set_model`，不重建 Agent） |
-| `agent_search_files { project, query }` | `@` 引用的工作区文件检索（应用层 `workspace_search`，不碰 SDK） |
-| `agent_list_sessions { project }` | 列出该项目全部会话（转发 `SessionCatalog::list`，按最近修改降序） |
-| `agent_current_session { project }` | 该项目当前会话名（无则 `null`） |
-| `agent_new_session { project, title? }` | 新建会话（`title` 省略即匿名，名字稍后由 AI 自动生成）并切换过去（`SessionManager::create_new`） |
-| `agent_switch_session { project, name }` | 切换到指定会话（`SessionManager::switch_to`，与 TUI 同一编排器） |
-| `agent_rename_session { project, name, title }` | 重命名会话（只改标题 sidecar，不改标识 / 内容） |
-| `agent_delete_session { project, name }` | 删除会话（连同日志与标题） |
-| `agent_load_history { project }` | 回放该项目当前会话历史（User / Assistant 正文）供前端重建 transcript |
-| `agent_subscribe { project, session }` | 订阅某会话：同锁内 `subscribe` + `snapshot`，返回 `SessionSnapshotWire { session, items, running }` 并起 pump |
-| `agent_unsubscribe { project, session }` | 退订某会话：abort 其 pump |
-| `agent_cancel { project, session }` | 预留（SDK 取消机制未落地，见 `Agent.md` 缺口 9） |
+| `agent_list_projects { archived? }` | list projects (`archived = true` includes archived projects for the archived list), in descending order of last opened |
+| `agent_add_project` | open the native folder picker to create a project (`tauri-plugin-dialog`); an already-registered directory is deduped by path / restored if archived; returns `null` if the user cancels |
+| `agent_rename_project { project, name }` | rename a project (only the display name, not the path / session data) |
+| `agent_archive_project { project }` | **archive** a project (= what the user calls "remove"): only sets `archived = true` + releases the in-memory runtime, **not deleting on-disk data** |
+| `agent_restore_project { project }` | restore a project from archived (lazily loaded next time) |
+| `agent_send { project, text, references?, session? }` | start a round of `run_stream` (`session` defaults to that project's foreground session), with events pushed via `agent://event` |
+| `agent_model_name { project }` | that project's current model name (footer / selector display) |
+| `agent_list_models` | list selectable models (forwards `ModelCatalog`, global) |
+| `agent_set_model { project, model }` | hot-swap the model (`Agent::set_model`, no Agent rebuild) |
+| `agent_search_files { project, query }` | workspace file search for `@` references (application-layer `workspace_search`, not touching the SDK) |
+| `agent_list_sessions { project }` | list all sessions of that project (forwards `SessionCatalog::list`, in descending order of last modified) |
+| `agent_current_session { project }` | that project's current session name (`null` if none) |
+| `agent_new_session { project, title? }` | create a new session (`title` omitted means anonymous, the name is auto-generated by the AI later) and switch to it (`SessionManager::create_new`) |
+| `agent_switch_session { project, name }` | switch to the specified session (`SessionManager::switch_to`, the same orchestrator as the TUI) |
+| `agent_rename_session { project, name, title }` | rename a session (only the title sidecar, not the identifier / content) |
+| `agent_delete_session { project, name }` | delete a session (together with the log and title) |
+| `agent_load_history { project }` | replay that project's current session history (User / Assistant body) for the frontend to rebuild the transcript |
+| `agent_subscribe { project, session }` | subscribe to a session: `subscribe` + `snapshot` under the same lock, returning `SessionSnapshotWire { session, items, running }` and starting a pump |
+| `agent_unsubscribe { project, session }` | unsubscribe from a session: abort its pump |
+| `agent_cancel { project, session }` | reserved (the SDK cancellation mechanism is not landed, see `Agent.md` gap 9) |
 
-> **模型切换选择器**：放在发送按钮旁边（`AiChatComposer` 的 `trailingAction` 槽位，`ModelSelector.tsx`）。目录与切换都走 Rust 侧（`agent_list_models` / `agent_set_model`），前端不持有模型状态——与 TUI 的 `/model` 同语义，只是从「浮层面板」变成「发送栏内联下拉」。
+> **Model-switch selector**: placed next to the send button (`AiChatComposer`'s `trailingAction`
+> slot, `ModelSelector.tsx`). Both the catalog and the switch go through the Rust side
+> (`agent_list_models` / `agent_set_model`), and the frontend does not hold model state -- the same
+> semantics as the TUI's `/model`, just changing from a "popover panel" to a "send-bar inline
+> dropdown".
 
-> **会话管理（左侧栏 `SessionSidebar.tsx`）**：参照 Codex 的 `/resume` picker，在项目分组下提供列出 / 切换 / 新建 / 重命名（内联编辑）/ 删除（菜单内二次确认）；**每个项目行常驻「＋ 新建会话」按钮**，项目分组标题行右键提供新建项目，项目行右键提供重命名 / 归档，归档行右键提供恢复（见 4.5）。**除项目行上的「新建会话」外所有操作都在右键菜单里**。**点「新建会话」不再要求先输名**——直接开一个空会话并聚焦输入框（聚焦用户意图而非管理逻辑）；会话名在**首条消息发出后由 AI 自动生成**（见下），用户想改再走重命名。会话目录与全部操作都走 Rust 侧 `SessionCatalog`——**与 TUI 共用同一个实现、同一份 `<root>/.shirley/sessions` 数据**（见 `docs/session.md` 八.决策 7）。切换 / 新建 / 删除经 `SessionManager`（每个会话各持独立 `Agent`，运行中只拒绝该会话）。**前端按会话订阅事件**：切到某会话即 `agent_subscribe`（拿 `SessionSnapshot` 重建 transcript）+ 订阅其事件流；切走 `agent_unsubscribe`。后台会话照常运行，事件按 `AgentEventWire.session` 路由到各自视图，不串台。
+> **Session management (left sidebar `SessionSidebar.tsx`)**: modeled on Codex's `/resume` picker,
+> providing list / switch / new / rename (inline edit) / delete (confirm a second time in the menu)
+> under the project grouping; **each project row has a permanent "+ New session" button**, the
+> project group header row right-click provides new project, a project row right-click provides
+> rename / archive, and an archived row right-click provides restore (see 4.5). **All operations
+> except "New session" on a project row are in the right-click menu**. **Clicking "New session" no
+> longer requires entering a name first** -- it directly opens an empty session and focuses the input
+> box (focusing on user intent rather than management logic); the session name is **auto-generated by
+> the AI after the first message is sent** (see below), and the user can rename it if they want to
+> change it. The session catalog and all operations go through the Rust side `SessionCatalog` --
+> **sharing the same implementation and the same `<root>/.shirley/sessions` data as the TUI** (see
+> `docs/session.md` 8 decision 7). Switch / new / delete go through `SessionManager` (each session
+> holds its own independent `Agent`, and while running only that session is rejected). **The frontend
+> subscribes to events per session**: switching to a session does `agent_subscribe` (takes a
+> `SessionSnapshot` to rebuild the transcript) + subscribes to its event stream; switching away does
+> `agent_unsubscribe`. Background sessions keep running as usual, and events are routed to their
+> respective views by `AgentEventWire.session`, without crosstalk.
 
-> **会话自动命名**：新建会话的名字最初是时间戳占位（`fresh_name()`，见 `docs/session.md`）。首轮 `run_stream` 结束后，`agent_send` 的任务在 `restore_agent` 之前调 `auto_title_session(&agent, &catalog, &name)`：若该会话**还没有自定义标题**（目录里 `label == name`，即从未命名 / 重命名过），就用其**首条用户消息**（`session::first_user_message`）经一次无工具、非流式的补全（SDK `Agent::complete`）生成短标题，清洗（`session::sanitize_title`）后写入 `<name>.title` sidecar。任何一步失败都静默忽略、留待下轮再试；用户手动改过名后 `label != name`，自动命名不再覆盖。**这就是 `Agent::complete` 的用途**——一个"用一次模型调用做点小事"的通用原语，不碰 `Agent` 的会话状态（`&self` 可调）。
+> **Automatic session naming**: a new session's name is initially a timestamp placeholder
+> (`fresh_name()`, see `docs/session.md`). After the first round of `run_stream`, the `agent_send`
+> task calls `auto_title_session(&agent, &catalog, &name)` before `restore_agent`: if the session
+> **does not yet have a custom title** (`label == name` in the catalog, i.e. never named / renamed),
+> it uses its **first user message** (`session::first_user_message`) through one tool-free,
+> non-streaming completion (SDK `Agent::complete`) to generate a short title, and after cleaning
+> (`session::sanitize_title`) writes it to the `<name>.title` sidecar. Any step failing is silently
+> ignored and retried next round; once the user has manually renamed it, `label != name` and
+> automatic naming no longer overrides it. **This is the use of `Agent::complete`** -- a general
+> primitive for "using one model call to do a small thing", not touching the `Agent`'s session state
+> (callable on `&self`).
 
-> **注意**：`AgentEvent` 目前是 `Debug + Clone`（`Clone` 是每会话 `broadcast` 通道复用事件所需），**未派生 `Serialize`**。桥接层需要一个 `to_wire` 把 `AgentEvent` / `Message` 映射成前端 DTO（不直接给 SDK 加 `Serialize`，保持 SDK 契约小、协议差异收敛在边界——与 `docs/README.md` 原则一一致）。已落地为 `src/interface/desktop/wire.rs`。
+> **Note**: `AgentEvent` is currently `Debug + Clone` (`Clone` is needed for the per-session
+> `broadcast` channel to reuse events), and **does not derive `Serialize`**. The bridge layer needs a
+> `to_wire` to map `AgentEvent` / `Message` into frontend DTOs (not adding `Serialize` to the SDK
+> directly, keeping the SDK contract small and protocol differences converging at the boundary --
+> consistent with `docs/README.md` principle 1). Landed as `src/interface/desktop/wire.rs`.
 >
-> 为支撑工具卡，`ToolStarted` / `ToolFinished` 两个既有变体**扩展了字段**（`arguments` / `ok` / `output` / `elapsed_ms`）。这是 SDK 对外契约的一次小改：字段是**追加**的，既有消费者（TUI 用 `..` 忽略）零改动；仍未派生 `Serialize`。
+> To support tool cards, the two existing variants `ToolStarted` / `ToolFinished` **had fields
+> appended** (`arguments` / `ok` / `output` / `elapsed_ms`). This is a small change to the SDK's
+> external contract: the fields are **appended**, and existing consumers (the TUI ignores them with
+> `..`) need zero changes; it still does not derive `Serialize`.
 
 ---
 
-**七、任务拆分（里程碑）**
+**7. Task breakdown (milestones)**
 
-**M0 · 骨架与文档**（已完成）
-- [x] 本文档 `docs/desktop-interface.md`
-- [x] 同步 `docs/README.md` / `Agent.md` 索引
-- [x] 确认第四节剥离清单（审批保留代码、第一期不展示；Node 构建链已允许）
+**M0 · skeleton and documentation** (done)
+- [x] This document `docs/desktop-interface.md`
+- [x] Sync the `docs/README.md` / `Agent.md` index
+- [x] Confirm the section-4 strip list (keep the approval code, do not show it in phase one; the
+  Node build chain is allowed)
 
-**M1 · 最小迁移：能渲染静态假数据**（已完成）
-- [x] `main.rs` 抽 `Bootstrap` + `Mode` 分派（TUI 行为不变）
-- [x] 建 `src/interface/desktop/`（Tauri 2 壳）+ `src/interface/desktop/web/`（React+TS+Vite+Tailwind 4）
-- [x] copy 4.1 的组件与 `tokens.css`，去掉 shiwen import（`@shiwen/ui` → 本地）
-- [x] 删 4.2 的定制逻辑（审批链路代码保留，渲染第一期不展示）
-- [x] 前端 `npm run dev` 用 mock 桥渲染假对话（不依赖 Tauri 壳）
+**M1 · minimal migration: render static fake data** (done)
+- [x] Extract `Bootstrap` + `Mode` dispatch in `main.rs` (TUI behavior unchanged)
+- [x] Create `src/interface/desktop/` (Tauri 2 shell) + `src/interface/desktop/web/` (React+TS+Vite+Tailwind 4)
+- [x] copy the components from 4.1 and `tokens.css`, removing the shiwen import (`@shiwen/ui` -> local)
+- [x] Delete the custom logic from 4.2 (keep the approval-path code, do not render it in phase one)
+- [x] Frontend `npm run dev` renders a fake conversation with a mock bridge (not depending on the Tauri shell)
 
-**M2 · 接入 SDK：发消息 → 流式回复闭环**（已完成）
-- [x] `to_wire(AgentEvent) -> DTO`（`src/interface/desktop/wire.rs`）
-- [x] Tauri command `agent_send` + event `agent://event`（`src/interface/desktop/shell.rs`）
-- [x] 前端 `lib/bridge.ts` 消费事件（Tauri / mock 双模式），替换 shiwen 的 SSE 消费
-- [x] `ToolStarted` / `ToolFinished` 事件扩展携带 `arguments` / `ok` / `output` / `elapsed_ms`
+**M2 · integrate the SDK: send message -> streaming reply loop** (done)
+- [x] `to_wire(AgentEvent) -> DTO` (`src/interface/desktop/wire.rs`)
+- [x] Tauri command `agent_send` + event `agent://event` (`src/interface/desktop/shell.rs`)
+- [x] Frontend `lib/bridge.ts` consumes events (Tauri / mock dual mode), replacing shiwen's SSE consumption
+- [x] `ToolStarted` / `ToolFinished` events extended to carry `arguments` / `ok` / `output` / `elapsed_ms`
 
-**M3 · 补齐会话与指令**
-- [x] 模型切换选择器（放在发送按钮旁，`ModelSelector.tsx` + `agent_list_models` / `agent_set_model`）
-- [x] `@` 引用：工作区文件/目录的提及浮层 + chip 展示（见 4.3；`agent_search_files` + `file-mentions/`）
-- [x] 会话管理：列表 / 切换 / 新建（点开即空会话、AI 自动命名）/ 重命名 / 删除（`SessionSidebar.tsx` + `SessionCatalog`，与 TUI 共用数据）
-- [x] **多项目（多工作区）**：登记 / 切换 / 重命名 / 归档 / 恢复（`ProjectRegistry` + `agent_*_project` 命令，见 4.5）
-- [ ] `/login` `/session` 等指令的 desktop 呈现
-- [ ] 思考显示 / 工具参数展开 / 滚动等交互对齐 TUI
+**M3 · complete sessions and commands**
+- [x] Model-switch selector (placed next to the send button, `ModelSelector.tsx` + `agent_list_models` / `agent_set_model`)
+- [x] `@` references: workspace file/directory mention popover + chip display (see 4.3; `agent_search_files` + `file-mentions/`)
+- [x] Session management: list / switch / new (open an empty session, AI auto-names it) / rename / delete (`SessionSidebar.tsx` + `SessionCatalog`, sharing data with the TUI)
+- [x] **Multi-project (multi-workspace)**: register / switch / rename / archive / restore (`ProjectRegistry` + `agent_*_project` commands, see 4.5)
+- [ ] desktop presentation of commands like `/login` `/session`
+- [ ] Interaction alignment with the TUI (thinking display / tool-argument expansion / scrolling)
 
-**M4 · 收敛与文档**
-- [x] markdown 渲染对齐 shiwen（补 `@source` 让 Tailwind 扫 streamdown，见 4.3.1）
-- [ ] 若指令逻辑重复，下沉共享 `commands` 模块
-- [ ] 更新 `Agent.md`、`docs/architecture.md`（新增 desktop 数据流图）
-
----
-
-**八、验收口径**
-
-1. `cargo run`（默认）行为与今天完全一致（TUI 不受影响）。
-2. `cargo desktop`（= `cargo run --features desktop -- --desktop`）打开 Tauri 窗口，能发消息、看到流式回复与工具执行卡片。
-3. 前端不出现任何 shiwen 专有概念（A2UI / entity / citation / space / share）；审批链路代码保留但第一期不渲染审批态。`@` 引用是**重绑到工作区文件**后的通用交互，不算 shiwen 概念。
-4. `Agent` / `AgentEvent` 契约不变（SDK 未因桌面界面新增对外类型）。
-5. `cargo test` 全绿（含既有红测试基线不变）。
+**M4 · convergence and documentation**
+- [x] Align markdown rendering with shiwen (add `@source` so Tailwind scans streamdown, see 4.3.1)
+- [ ] If the command logic is duplicated, sink it into a shared `commands` module
+- [ ] Update `Agent.md`, `docs/architecture.md` (add the desktop data-flow diagram)
 
 ---
 
-**九、风险与未决**
+**8. Acceptance criteria**
 
-- ~~**Node 工具链**：引入 npm 会改变仓库性质，需用户明确接受（已问）。~~ → **已确认允许**：用户接受引入 Node/npm/Vite 构建链。
-- **`streamdown` 体量**：需要评估打包体积与离线可用性。
-- **中文字体**：`tokens.css` 依赖 Songti / PingFang 等系统字体，跨平台需兜底。
-- ~~**窗口与 TUI 的会话一致性**：两个界面共享会话目录，需确认「同一时刻只开一个界面」还是允许并存。~~ → **已决策：允许并存，不加锁。** 两个界面各自扫描同一份 `<root>/.shirley/sessions`，同一会话被两边同时写入时互相覆盖是**已知且可接受**的行为（无锁、无协调）。
+1. `cargo run` (default) behaves exactly as today (the TUI is unaffected).
+2. `cargo desktop` (= `cargo run --features desktop -- --desktop`) opens a Tauri window, and can send
+   messages and see streaming replies and tool execution cards.
+3. The frontend shows no shiwen-specific concepts (A2UI / entity / citation / space / share); the
+   approval-path code is kept but the approval state is not rendered in phase one. `@` references
+   are a general interaction after **rebinding to workspace files**, not a shiwen concept.
+4. The `Agent` / `AgentEvent` contract is unchanged (the SDK adds no external type because of the
+   desktop interface).
+5. `cargo test` is all green (including the pre-existing red-test baseline unchanged).
+
+---
+
+**9. Risks and open issues**
+
+- ~~**Node toolchain**: introducing npm changes the nature of the repository and requires the user's
+  explicit acceptance (already asked).~~ -> **Confirmed allowed**: the user accepts introducing the
+  Node/npm/Vite build chain.
+- **`streamdown` size**: the bundle size and offline availability need to be evaluated.
+- **CJK fonts**: `tokens.css` depends on system fonts such as Songti / PingFang, which need a
+  cross-platform fallback.
+- ~~**Session consistency between the window and the TUI**: the two interfaces share the session
+  catalog, so it needs to be confirmed whether "only one interface at a time" or coexistence is
+  allowed.~~ -> **Decided: coexistence is allowed, no lock.** The two interfaces each scan the same
+  `<root>/.shirley/sessions`, and when the same session is written by both sides at the same time,
+  overwriting each other is **known and acceptable** behavior (no lock, no coordination).

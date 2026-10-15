@@ -22,16 +22,16 @@ const SAFE_REHYPE_PLUGINS = Object.entries(defaultRehypePlugins)
 const DISABLED_LINK_SAFETY = { enabled: false } as const;
 
 const AI_MARKDOWN_TRANSLATIONS = {
-  copied: "已复制",
-  copyCode: "复制代码",
-  copyTable: "复制表格",
-  copyTableAsCsv: "复制为 CSV",
-  copyTableAsMarkdown: "复制为 Markdown",
-  copyTableAsTsv: "复制为 TSV",
-  downloadFile: "下载文件",
-  downloadTable: "下载表格",
-  downloadTableAsCsv: "下载为 CSV",
-  downloadTableAsMarkdown: "下载为 Markdown",
+  copied: "Copied",
+  copyCode: "Copy code",
+  copyTable: "Copy table",
+  copyTableAsCsv: "Copy as CSV",
+  copyTableAsMarkdown: "Copy as Markdown",
+  copyTableAsTsv: "Copy as TSV",
+  downloadFile: "Download file",
+  downloadTable: "Download table",
+  downloadTableAsCsv: "Download as CSV",
+  downloadTableAsMarkdown: "Download as Markdown",
 } satisfies Partial<StreamdownTranslations>;
 
 export function aiMarkdownExternalLinkProps(className: string | undefined) {
@@ -45,9 +45,10 @@ export function aiMarkdownExternalLinkProps(className: string | undefined) {
   };
 }
 
-// 自定义围栏代码块渲染器：```flightmap 代码块交给 FlightMap 画静态地图。
-// 这是 streamdown 的公开扩展点（plugins.renderers），不改动 Message / 事件协议——
-// 地图只是正文 markdown 里的一个代码块，走既有文本链路。
+// Custom fenced-code-block renderer: a ```flightmap block is handed to FlightMap to draw
+// a static map. This is streamdown's public extension point (plugins.renderers) and does
+// not touch the Message / event protocol — the map is just a code block in the body
+// markdown, flowing through the existing text pipeline.
 const MARKDOWN_PLUGINS: StreamdownProps["plugins"] = {
   renderers: [{ language: "flightmap", component: FlightMapRenderer }],
 };

@@ -16,9 +16,9 @@ export type AiTranscriptMessage = {
   role: "user" | "assistant";
   content: string;
   status?: "streaming" | "complete" | "error";
-  /** 用户消息上引用的工作区文件/目录（`@` 引用回显用）。 */
+  /** Workspace files/dirs referenced on the user message (for `@` reference echo). */
   references?: FileReference[];
-  /** 本轮助手回复的处理用时（毫秒）；用于「处理用时 Ns」折叠标题。 */
+  /** Processing time for this turn's assistant reply (ms); used for the "Took Ns" disclosure label. */
   durationMs?: number;
   stopReason?: StopReason;
 };
@@ -37,7 +37,7 @@ export function AiConversationTranscript({
   conversationKey: string;
   extraContentKey?: string;
   pendingLabel?: string;
-  /** 外部滚动视口 ref（上层要把 minimap 等兄弟组件挂到同一视口时传入）。 */
+  /** External scroll viewport ref (passed in when the parent wants sibling components like the minimap on the same viewport). */
   viewportRef?: RefObject<HTMLDivElement>;
   emptyContent?: ReactNode;
   renderMessageContent?: (message: AiTranscriptMessage, index: number) => ReactNode;
@@ -95,7 +95,7 @@ export function AiConversationTranscript({
                         message.content
                       )
                     ) : message.status === "streaming" ? (
-                      <span className="shimmer">正在操作…</span>
+                      <span className="shimmer">Working...</span>
                     ) : null}
                   </Bubble>
                 </Message>

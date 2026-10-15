@@ -1,259 +1,305 @@
-**Shirley 技术方案 · Content 工具调用协议（Content Tool-Calling Protocol）**
+**Shirley technical design · Content tool-calling protocol (Content Tool-Calling Protocol)**
 
-> **状态：已落地（P1）。** 本文设计一层**可插拔**的「content 工具解析协议」——
-> 当某个模型 / 端点不支持原生 tool calling 时，改用纯文本约定让模型声明工具调用，
-> SDK 在适配层把文本解析回 `Message::Assistant.tool_calls`，从而**复用现有 ReAct 循环**。
+> **Status: landed (P1).** This document designs a **pluggable** "content tool-parsing protocol" --
+> when a model / endpoint does not support native tool calling, it switches to a plain-text convention
+> for the model to declare tool calls, and the SDK, in the adapter layer, parses the text back into
+> `Message::Assistant.tool_calls`, thereby **reusing the existing ReAct loop**.
 >
-> 参考实现来自 `figmaagent`（commit `86fd6e8^`，其 XML 协议后被原生 function calling 取代；
-> 该 commit 已在 `figmaagent` 仓库回滚恢复，`63b4480`）。本文只描述 Shirley 侧的落地设计，
-> 不复制 figmaagent 的业务。
+> The reference implementation comes from `figmaagent` (commit `86fd6e8^`; its XML protocol was later
+> replaced by native function calling; that commit has been restored by rollback in the `figmaagent`
+> repository, `63b4480`). This document only describes the landing design on the Shirley side, and does
+> not copy figmaagent's business logic.
 >
-> **review 结论（第十二节）已确认**：① v1 = 声明式 + 自定义 trait 两档；② 终止语义与原生
-> function calling 的 stop 一致（无工具调用即结束），**不引入** `is_terminal`；③ 目录注入走
-> 扩展 `SystemPromptContext`；④ **暂不移植** `zod-to-doc`，视后续报错再定。
+> **The review conclusions (section 12) are confirmed**: (1) v1 = two gears, declarative + a custom
+> trait; (2) the termination semantics are the same as native function calling's stop (no tool call means
+> end), and `is_terminal` is **not introduced**; (3) catalog injection goes through an extended
+> `SystemPromptContext`; (4) `zod-to-doc` is **not ported for now**, to be decided based on later errors.
 >
-> **落地情况（当前代码）**：协议核心在 `crates/shirley-agent-sdk/src/adapter/tool_calling.rs`
-> （字符级状态机 + 流式解析器 + `render_schema_doc` + `encode_messages_for_content` +
-> `parse_content_response`），对外只暴露 `ToolCallingMode::{Native,Tagged}`（挂在
-> `ModelConfig.tool_calling`）；接入点在 `adapter/mod.rs::invoke()`，**runtime 零改动**。
-> 提示词正文抽到 `crates/shirley-agent-sdk/prompts/tool_calling_instructions.md` 与
-> `tool_calling_errors.md`（`include_str!`，与仓库 prompts 约定一致）。端到端集成测试见
-> `crates/shirley-agent-sdk/tests/tool_calling_content.rs`（mock 纯文本端点跑完整 ReAct）。
-> 收口细节与后续项见 `docs/tool-calling-refactor.md`。
+> **Landing status (current code)**: the protocol core is in
+> `crates/shirley-agent-sdk/src/adapter/tool_calling.rs` (character-level state machine + streaming
+> parser + `render_schema_doc` + `encode_messages_for_content` + `parse_content_response`), exposing
+> externally only `ToolCallingMode::{Native,Tagged}` (attached to `ModelConfig.tool_calling`); the
+> integration point is `adapter/mod.rs::invoke()`, with **zero runtime changes**. The prompt body text is
+> extracted into `crates/shirley-agent-sdk/prompts/tool_calling_instructions.md` and
+> `tool_calling_errors.md` (`include_str!`, consistent with the repository's prompts convention). For
+> the end-to-end integration test see `crates/shirley-agent-sdk/tests/tool_calling_content.rs` (a mock
+> plain-text endpoint runs a complete ReAct loop). For containment details and follow-ups see
+> `docs/tool-calling-refactor.md`.
 
-**一、这份文档要解决什么**
+**1. What this document solves**
 
-现状：Shirley 的工具调用**完全依赖供应商原生 tool_calls**。
+Status quo: Shirley's tool calling **depends entirely on the vendor's native tool_calls**.
 
-- 请求侧：三个协议的 `encode_request` 都把 `ToolDefinition` 编码进 `tools` 字段；
-- 响应侧：`decode` / `decode_stream` 从结构化字段解析 `tool_calls`；
-- 运行侧：`runtime/agent.rs` **只认 `Message::Assistant.tool_calls`**——非空就并发执行工具、回灌
-  `Message::Tool`、继续下一轮；为空就 `Finished`。
+- Request side: all three protocols' `encode_request` encode `ToolDefinition` into the `tools` field;
+- Response side: `decode` / `decode_stream` parse `tool_calls` from structured fields;
+- Run side: `runtime/agent.rs` **only recognizes `Message::Assistant.tool_calls`** -- if non-empty, run
+  the tools concurrently, re-inject `Message::Tool`, and continue the next round; if empty, `Finished`.
 
-问题：**不是所有模型 / 端点都支持原生 tool calling**（本地小模型、部分 OpenAI 兼容网关、
-纯 completion 端点）。这些模型并非不能「用工具」——它们能在文本里写出「我要调用 X，参数是 Y」，
-只是没有结构化通道。
+Problem: **not all models / endpoints support native tool calling** (local small models, some
+OpenAI-compatible gateways, pure completion endpoints). These models are not incapable of "using tools"
+-- they can write in text "I want to call X with arguments Y", they just have no structured channel.
 
-目标：加一层**正交于 `ModelProtocol` 的「工具传输模式」**，让这类模型也能驱动工具，
-且**不破坏现有原生路径**。定位是**拓展能力**（可选、可插拔），不是替换。
+Goal: add a layer of **"tool transport mode" orthogonal to `ModelProtocol`**, so such models can also
+drive tools, and **without breaking the existing native path**. The positioning is **capability
+extension** (optional, pluggable), not replacement.
 
-**二、关键洞察：接入点在适配层，循环零改动**
+**2. Key insight: the integration point is the adapter layer, with zero loop changes**
 
-figmaagent 的做法印证了一条最小改动路径：**把文本 content 解析成 `tool_calls`，其余一切照旧**。
+figmaagent's approach confirms a minimal-change path: **parse the text content into `tool_calls`, and
+everything else stays the same**.
 
 ```mermaid
 flowchart LR
-  A["模型返回文本 content"] --> B["ContentToolProtocol::parse_calls"]
+  A["model returns text content"] --> B["ContentToolProtocol::parse_calls"]
   B --> C["Message::Assistant{ content, tool_calls }"]
-  C --> D["runtime/agent.rs 主循环"]
-  D -->|tool_calls 非空| E["并发执行工具"]
-  E --> F["回灌 Message::Tool"]
+  C --> D["runtime/agent.rs main loop"]
+  D -->|tool_calls non-empty| E["run tools concurrently"]
+  E --> F["re-inject Message::Tool"]
   F --> A
-  D -->|tool_calls 为空| G["Finished"]
+  D -->|tool_calls empty| G["Finished"]
 ```
 
-因为循环只认 `tool_calls`，content 协议**不需要碰 runtime**。但它不止影响「解码」，还影响三处：
+Because the loop only recognizes `tool_calls`, the content protocol **does not need to touch the
+runtime**. But it affects more than "decoding"; it affects three places:
 
-| 环节 | 原生模式 | content 模式 |
+| Stage | Native mode | content mode |
 | --- | --- | --- |
-| 编码（tools 声明） | 发结构化 `tools` 字段 | **不发** `tools`，改把工具目录写进 system prompt |
-| 解码（产出调用） | 读结构化 `tool_calls` | 从文本 content **解析**出 `tool_calls` |
-| 工具结果回灌 | `Message::Tool`（role=tool） | 模型不认 role=tool → **渲染回文本**（user 消息） |
+| encoding (tools declaration) | send the structured `tools` field | **do not send** `tools`; instead write the tool catalog into the system prompt |
+| decoding (produce calls) | read the structured `tool_calls` | **parse** `tool_calls` out of the text content |
+| tool-result re-injection | `Message::Tool` (role=tool) | the model does not recognize role=tool -> **render back into text** (a user message) |
 
-所以它是一个**与协议正交的维度**，最自然的落点是 `ModelConfig` 的一个字段。
+So it is a **dimension orthogonal to the protocol**, and the most natural landing point is a field of
+`ModelConfig`.
 
-**三、设计目标与非目标**
+**3. Design goals and non-goals**
 
-**目标**
+**Goals**
 
-1. **可插拔**：协议格式与解析方法可声明、可替换；不写死 XML。
-2. **零破坏**：`Native` 是默认；三个既有协议、`Message` 模型、runtime 主循环都不动。
-3. **收敛在适配层**：协议差异不渗漏到 message / runtime（沿用仓库既有原则）。
-4. **可观测**：解析失败 / 标签外噪音可上报，不静默吞掉。
+1. **Pluggable**: the protocol format and parsing method are declarable and replaceable; XML is not
+   hard-coded.
+2. **Zero breakage**: `Native` is the default; the three existing protocols, the `Message` model, and
+   the runtime main loop are all untouched.
+3. **Converge in the adapter layer**: protocol differences do not leak into message / runtime (following
+   the repository's existing principle).
+4. **Observable**: parse failures / out-of-tag noise can be reported, not silently swallowed.
 
-**非目标**
+**Non-goals**
 
-- ~~不做流式「边收边解析并立即执行」~~ → **已实现流式解析**（见五之补 2、九）：SDK 内部增量解析原始协议文本、只对外吐**可见增量**（`thinking` → `ReasoningDelta`、`description` → `ContentDelta`，工具块屏蔽）。但**不在流式中执行工具**——工具执行仍由 `Finished` 后的 `tool_calls` 驱动（这点不变）。
-- 不引入第二种 `Message` 表示，不改 `ToolCall` 结构。
-- 不把「工具目录长什么样」写进 SDK 业务——目录文本由协议实现提供，SDK 只调用。
+- ~~Do not do streaming "parse while receiving and execute immediately"~~ -> **streaming parsing is
+  implemented** (see the supplement to section 5, and section 9): inside the SDK, incrementally parse
+  the raw protocol text, emitting externally only the **visible increments** (`thinking` ->
+  `ReasoningDelta`, `description` -> `ContentDelta`, with the tool block masked). But **tools are not
+  executed during streaming** -- tool execution is still driven by `tool_calls` after `Finished` (this
+  is unchanged).
+- Do not introduce a second `Message` representation, and do not change the `ToolCall` structure.
+- Do not write "what the tool catalog looks like" into the SDK's business logic -- the catalog text is
+  provided by the protocol implementation, and the SDK only calls it.
 
-**四、协议格式（v1：XML 标签协议）**
+**4. Protocol format (v1: XML tag protocol)**
 
-格式源自 figmaagent `86fd6e8^`。一次 assistant 回复是一个 XML-like 文档：
+The format comes from figmaagent `86fd6e8^`. One assistant reply is an XML-like document:
 
 ```xml
-<thinking>分析用户意图、当前进度、下一步要做什么（可选，内部思考）</thinking>
-<description>给用户看的简短回答，纯文本或轻量 markdown</description>
+<thinking>analyze the user's intent, current progress, and what to do next (optional, internal thinking)</thinking>
+<description>a short answer for the user, plain text or lightweight markdown</description>
 <tool>
-  <name>工具名</name>
-  <params>合法 JSON 字符串</params>
+  <name>tool name</name>
+  <params>a valid JSON string</params>
 </tool>
 ```
 
-**规则**
+**Rules**
 
-- 每轮**恰好一个** `<tool>` 块（一次一个调用；多次调用 = 多轮循环）。
-- `<params>` 内必须是**合法 JSON**（双引号、转义字符），不写注释。
-- 标签外**禁止任何字符**（含空行、说明文字）。
-- `<thinking>` / `<description>` 可选且可并列；顶层标签必须显式闭合。代码片段中的
-  XML 示例只作为文本，工具调用必须有完整的 `<tool>…</tool>` 边界。
+- Each round has **exactly one** `<tool>` block (one call at a time; multiple calls = multiple loop
+  rounds).
+- Inside `<params>` there must be **valid JSON** (double quotes, escaped characters), with no comments.
+- **No characters** are allowed outside the tags (including blank lines and explanatory text).
+- `<thinking>` / `<description>` are optional and can be side by side; top-level tags must be explicitly
+  closed. An XML example inside a code snippet is only text, and a tool call must have a complete
+  `<tool>...</tool>` boundary.
 
-**解析产出 → 内部类型映射**
+**Parse output -> internal type mapping**
 
-| XML 片段 | 内部字段 |
+| XML fragment | Internal field |
 | --- | --- |
-| `<thinking>…</thinking>` | `Message::Assistant.reasoning_content` |
-| `<description>…</description>` | `Message::Assistant.content` |
-| `<tool><name>…</name>` | `ToolCall.name` |
-| `<tool><params>…</params>` | `ToolCall.arguments`（字符串，原样保留 JSON） |
-| （协议无 id） | `ToolCall.id` 使用进程内递增序号合成；不同响应不会复用 ID |
+| `<thinking>...</thinking>` | `Message::Assistant.reasoning_content` |
+| `<description>...</description>` | `Message::Assistant.content` |
+| `<tool><name>...</name>` | `ToolCall.name` |
+| `<tool><params>...</params>` | `ToolCall.arguments` (a string, preserving the JSON as-is) |
+| (the protocol has no id) | `ToolCall.id` is synthesized from an in-process incrementing sequence; different responses never reuse an ID |
 
-**工具结果回灌格式**（content 模式特有；原生模式用 `Message::Tool`）：
+**Tool-result re-injection format** (specific to content mode; native mode uses `Message::Tool`):
 
 ```text
 {"status":"success","tool":"fig_add_rect"}
-<工具输出的文本数据>
+<the tool's output text data>
 ```
 
-首行是**结构化头**，第二行起是文本。`status ∈ {success, parameter_error, not_found, error, cancel}`。
+The first line is a **structured header**, and from the second line on is text. `status ∈ {success, parameter_error, not_found, error, cancel}`.
 
-**五、可插拔抽象**
+**5. Pluggable abstraction**
 
-SDK 新增 `ToolCalling`，作为 `ModelConfig` 字段（默认 `Native`）：
+The SDK adds `ToolCalling`, as a `ModelConfig` field (default `Native`):
 
 ```rust
 pub enum ToolCalling {
-    Native,                                   // 现状：结构化 tools + 结构化 tool_calls
-    Content(Arc<dyn ContentToolProtocol>),    // 扩展：文本协议
+    Native,                                   // status quo: structured tools + structured tool_calls
+    Content(Arc<dyn ContentToolProtocol>),    // extension: a text protocol
 }
 
-/// 可插拔的内容工具解析协议：声明「工具调用格式」与「解析方法」。
+/// A pluggable content tool-parsing protocol: declares "the tool-call format" and "the parsing method".
 pub trait ContentToolProtocol: Send + Sync {
-    /// 工具目录 + 输出契约 → 注入 system prompt 的文本
+    /// tool catalog + output contract -> text injected into the system prompt
     fn render_instructions(&self, tools: &[&ToolDefinition]) -> String;
-    /// 从 assistant 文本解析工具调用（0..n）
+    /// parse tool calls out of the assistant text (0..n)
     fn parse_calls(&self, text: &str) -> Vec<ParsedToolCall>;
-    /// 把工具结果渲染成回灌消息（角色 / 包裹由协议决定）
+    /// render a tool result into a re-injection message (role / wrapping decided by the protocol)
     fn render_result(&self, call: &ToolCall, outcome: &ToolOutcome) -> Message;
-    /// 该工具名是否表示「任务完成」（循环终止）。默认 false。
+    /// whether this tool name means "task complete" (loop termination). Default false.
     fn is_terminal(&self, _name: &str) -> bool { false }
 }
 ```
 
-内置一个**声明式**实现 `TaggedToolProtocol`（`bon::Builder`），把 XML 协议变成「配置即声明」：
+A built-in **declarative** implementation `TaggedToolProtocol` (`bon::Builder`) turns the XML protocol
+into "configuration as declaration":
 
 ```rust
 TaggedToolProtocol::builder()
-    .tool_tag("tool")        // <tool>…</tool>
-    .name_tag("name")        // <name>…</name>
+    .tool_tag("tool")        // <tool>...</tool>
+    .name_tag("name")        // <name>...</name>
     .params_tag("params")    // <params>{JSON}</params>
     .result_template("{\"status\":\"{status}\",\"tool\":\"{name}\"}\n{output}")
     .terminal_tool("fig_finish")
     .build()
 ```
 
-两档扩展性：
+Two gears of extensibility:
 
-- 换标签名 / params 编码 / 回灌模板 → **改声明**；
-- 完全自定义（fenced-JSON、正则、其他标记）→ 自己 `impl ContentToolProtocol`。
+- Change the tag names / params encoding / re-injection template -> **change the declaration**;
+- Fully custom (fenced-JSON, regex, other markers) -> `impl ContentToolProtocol` yourself.
 
-**五之补、能力标识与自动选择（声明来自模型提供商）**
+**Supplement to section 5: capability declaration and automatic selection (the declaration comes from the model provider)**
 
-`ToolCalling` 由谁决定？**由模型提供商声明**，应用层据此选择，而不是让用户每换一个模型就手动配。
+Who decides `ToolCalling`? **The model provider declares it**, and the application layer selects
+accordingly, rather than making the user configure it manually every time they switch models.
 
-1. **提供商声明**：模型列表接口（`GET /v1/models`）在每个模型条目上**多带一个字段**做标识，
-   约定为 `tool_mode`（`"native" | "content"`，可选）。`src/models.rs` 的 `ModelDto` 读它、
-   `ModelEntry` 携带它（新增 `tool_mode: Option<String>`，缺省 = 未声明）。
-2. **选择规则**（**model-first**，优先级从高到低）：
-   - 读**模型条目**声明：`content` → `ToolCalling::Content`，`native` → `ToolCalling::Native`；
-   - 模型条目未声明 `tool_mode`（或值认不出）→ 回退**配置层默认**
-     （`[provider] tool_mode = "native" | "content"`，缺省 `Native`）。
-   > 模型条目声明优先于配置：配置只是「模型没表态时」的兜底默认，不覆盖模型自身的声明。
-   > 这样用户换到支持声明能力的模型时自动生效，无需手动改配置。
-3. **「不支持就降级」**：当提供商把某模型标为 `content`（即不支持 function call），
-   应用层自动走 content 协议——**这就是「发现当前模型不支持 function call 就走当前协议」**。
-   检测方式先以**声明为准**（零成本、确定性），不做能力探测。
-4. **落地接缝（已实现）**：解析入口是应用层 `bootstrap::resolve_tool_calling_for(model_tool_mode, fallback)`；
-   热切换经 SDK 新增的 [`Agent::set_tool_calling`]（与 `set_model` / `set_provider` 同风格的运行期接缝，
-   不重建 `Agent`）。**两个界面都接入**：
-   - **TUI** `/model`：`App::picker_confirm` 手里已有完整 `ModelEntry`，直接解析后 `set_tool_calling`；
-   - **desktop** `agent_set_model`：按 `model` 值反查模型目录条目拿 `tool_mode`（前端不感知协议，
-     只传模型值），再解析 + `set_tool_calling`。
-   回退值 `fallback` 由 `AgentFactory::default_tool_calling()`（配置层产物）提供，经 TUI 构造时注入 `App`。
+1. **Provider declaration**: the model-list interface (`GET /v1/models`) carries **one extra field** on
+   each model entry as an identifier, conventionally `tool_mode` (`"native" | "content"`, optional).
+   `src/models.rs`'s `ModelDto` reads it, and `ModelEntry` carries it (a new `tool_mode: Option<String>`,
+   absent = undeclared).
+2. **Selection rule** (**model-first**, priority from high to low):
+   - read the **model entry** declaration: `content` -> `ToolCalling::Content`, `native` -> `ToolCalling::Native`;
+   - if the model entry does not declare `tool_mode` (or the value is unrecognized) -> fall back to the
+     **config-layer default** (`[provider] tool_mode = "native" | "content"`, default `Native`).
+   > A model-entry declaration takes precedence over the config: the config is only the fallback default
+   > "when the model does not express an opinion", and does not override the model's own declaration.
+   > This way, when the user switches to a model that declares its capabilities, it takes effect
+   > automatically, with no manual config change.
+3. **"Degrade if unsupported"**: when the provider marks a model as `content` (i.e. it does not support
+   function call), the application layer automatically uses the content protocol -- **this is exactly
+   "discovering the current model does not support function call and using the current protocol"**.
+   The detection method relies on the **declaration first** (zero cost, deterministic), and does not do
+   capability probing.
+4. **Landing seam (implemented)**: the parsing entry is the application layer
+   `bootstrap::resolve_tool_calling_for(model_tool_mode, fallback)`;
+   hot-switching goes through the SDK's newly added [`Agent::set_tool_calling`] (a runtime seam in the
+   same style as `set_model` / `set_provider`, without rebuilding the `Agent`). **Both interfaces are
+   wired in**:
+   - **TUI** `/model`: `App::picker_confirm` already has the full `ModelEntry` in hand, and calls
+     `set_tool_calling` after parsing directly;
+   - **desktop** `agent_set_model`: looks up the model catalog entry by the `model` value to get
+     `tool_mode` (the frontend is unaware of the protocol and only passes the model value), then parses
+     + `set_tool_calling`.
+   The fallback value `fallback` is provided by `AgentFactory::default_tool_calling()` (a config-layer
+   product), injected into `App` when the TUI is constructed.
 
-> 为什么放「模型目录」而不是 prompt 里试探：Shirley 的原则是**边界划在确定性部分**
-> （见 `docs/README.md` 设计原则），模型能力由 provider 元数据声明，比让模型自己猜可靠。
+> Why put it in the "model catalog" rather than probing in the prompt: Shirley's principle is to **draw
+> the boundary at the deterministic part** (see `docs/README.md` design principles); model capabilities
+> are declared by provider metadata, which is more reliable than letting the model guess.
 
-**六、解析器设计（字符级状态机）**
+**6. Parser design (character-level state machine)**
 
-参考 `figmaagent/apps/figmaagent/src/shared/parser/parser.ts`，并为 Shirley 的工具执行收紧边界：
+Referencing `figmaagent/apps/figmaagent/src/shared/parser/parser.ts`, and tightening the boundary for
+Shirley's tool execution:
 
-1. **任意分片**：`write(chunk)` 增量喂入，状态跨分片保持——`<na` + `me>` 被切成两块也能拼回。
-   （这是「累积后一次解析」与「流式解析」共用的内核。）
-2. **协议边界**：只有回复开头是协议标签时才解析；`thinking` / `description` 内的协议标签
-   视为正文，Markdown 代码围栏内的标签也不参与解析。未闭合的 `tool` 不执行。
-3. **尖括号噪音回退**：遇到不匹配的 `</xxx>` 或裸 `<`，把该序列**还原为普通文本**追加到当前内容，
-   而非报错——模型偶尔输出 `a < b` 不能毁掉整轮。
-4. **自闭合兼容**：`<x/>`、`<></>` 跳过，不产内容。
-5. **W3C XML 名称字符**：标签名按 `NameStartChar` / `NameChar` 规范匹配（支持 Unicode），
-   非法字符即回退为文本。
+1. **Arbitrary fragmentation**: `write(chunk)` is fed incrementally, with state maintained across
+   fragments -- `<na` + `me>` split into two pieces can still be reassembled.
+   (This is the kernel shared by "accumulate then parse once" and "streaming parse".)
+2. **Protocol boundary**: parse only when the start of the reply is a protocol tag; protocol tags inside
+   `thinking` / `description` are treated as body text, and tags inside Markdown code fences do not
+   participate in parsing. An unclosed `tool` is not executed.
+3. **Angle-bracket noise fallback**: on encountering an unmatched `</xxx>` or a bare `<`, **restore the
+   sequence to ordinary text** and append it to the current content, rather than erroring -- the model
+   occasionally outputting `a < b` must not ruin the whole round.
+4. **Self-closing compatibility**: `<x/>`, `<></>` are skipped and produce no content.
+5. **W3C XML name characters**: tag names are matched per the `NameStartChar` / `NameChar` spec
+   (Unicode supported), and an illegal character falls back to text.
 
-> **流式解析已实现**（`ContentStreamParser` / `TaggedStreamParser`）：同一套字符级状态机既支持
-> **最终态解析**（`parse` 在 `Finished` 时对完整 content 跑一次，产出结构化 `tool_calls`），
-> 也支持**流式解析**（`stream_parser()` 逐块喂入，只吐 `thinking` / `description` 可见增量、
-> 屏蔽 `<tool>` 块）。两路共用内核，行为一致（单测 `stream_parser_is_split_insensitive` 保证
-> 任意分片下可见增量拼接结果一致）。
+> **Streaming parsing is implemented** (`ContentStreamParser` / `TaggedStreamParser`): the same
+> character-level state machine supports both
+> **final-state parsing** (`parse` runs once over the complete content at `Finished`, producing
+> structured `tool_calls`),
+> and **streaming parsing** (`stream_parser()` is fed block by block, emitting only the `thinking` /
+> `description` visible increments and masking the `<tool>` block). The two paths share the kernel and
+> behave consistently (the unit test `stream_parser_is_split_insensitive` guarantees that the
+> concatenation of visible increments is identical under arbitrary fragmentation).
 
-**七、接入点与改动面**
+**7. Integration points and change surface**
 
-**SDK（`crates/shirley-agent-sdk`）**
+**SDK (`crates/shirley-agent-sdk`)**
 
-| 位置 | 改动 |
+| Location | Change |
 | --- | --- |
-| `adapter/tool_calling.rs`（新增） | `ToolCalling` / `ContentToolProtocol` / `TaggedToolProtocol` / `ParsedToolCall` / `ToolOutcome` |
-| `adapter/mod.rs` | `ModelConfig` 加 `tool_calling`（默认 `Native`）；`invoke()` 内做 **content 包装**（见下） |
-| `runtime/agent.rs` | `system_message()` 在 content 模式追加 `render_instructions(tools)`；执行完工具后若命中 `is_terminal` 则终止本轮循环 |
-| `lib.rs` | 导出新类型 |
+| `adapter/tool_calling.rs` (new) | `ToolCalling` / `ContentToolProtocol` / `TaggedToolProtocol` / `ParsedToolCall` / `ToolOutcome` |
+| `adapter/mod.rs` | add `tool_calling` to `ModelConfig` (default `Native`); do the **content wrapping** inside `invoke()` (see below) |
+| `runtime/agent.rs` | `system_message()` appends `render_instructions(tools)` in content mode; after running tools, terminate this round's loop if `is_terminal` is hit |
+| `lib.rs` | export the new types |
 
-**`invoke()` 里的 content 包装（关键——三协议零改动）**
+**The content wrapping inside `invoke()` (key -- zero changes to the three protocols)**
 
-1. **编码前**：把 `Message::Tool` 经 `render_result` 渲染成文本消息（模型不认 role=tool）；
-2. **编码后**：从请求体移除原生 `"tools"` 字段（三协议都在顶层 `"tools"`）；
-3. **解码后**：若 `Assistant.tool_calls` 为空，`parse_calls(content)` 填充。
+1. **Before encoding**: render `Message::Tool` into a text message via `render_result` (the model does
+   not recognize role=tool);
+2. **After encoding**: remove the native `"tools"` field from the request body (all three protocols put
+   it at the top-level `"tools"`);
+3. **After decoding**: if `Assistant.tool_calls` is empty, fill it with `parse_calls(content)`.
 
-> 为什么放 `invoke` 而非塞进三个 encoder：content 协议**与底层协议无关**，做成 codec 之上的一层
-> wrapper，三个 codec 一行不改，符合「协议差异收敛在适配层」。
+> Why put it in `invoke` rather than stuffing it into the three encoders: the content protocol is
+> **independent of the underlying protocol**, made into a wrapper layer above the codec, so the three
+> codecs do not change a single line, consistent with "protocol differences converge in the adapter
+> layer".
 
-**应用层（`src/`）**
+**Application layer (`src/`)**
 
-| 位置 | 改动 |
+| Location | Change |
 | --- | --- |
-| `settings.rs` | `[provider]` 加 `tool_mode = "native" \| "content"`（可选，`deny_unknown_fields` 同步） |
-| `models.rs` | `ModelDto` / `ModelEntry` 增 `tool_mode` 字段（提供商声明的能力标识，见五之补） |
-| `bootstrap.rs` | 按「配置 > 模型声明 > 默认」解析出 `ToolCalling`，接进 `ModelConfig` |
+| `settings.rs` | add `tool_mode = "native" \| "content"` to `[provider]` (optional, `deny_unknown_fields` in sync) |
+| `models.rs` | add a `tool_mode` field to `ModelDto` / `ModelEntry` (the capability identifier declared by the provider, see the supplement to section 5) |
+| `bootstrap.rs` | resolve `ToolCalling` per "config > model declaration > default", and wire it into `ModelConfig` |
 
-**八、system 约束（注入工具目录 + 输出契约）**
+**8. system constraints (inject the tool catalog + the output contract)**
 
-content 模式的可用性**取决于 prompt 是否把契约讲清楚**——模型没有结构化通道，全靠自然语言约定。
-figmaagent 的 system prompt 是最佳实践样本，需要移植的约束（**均已落地**，见下）：
+The usability of content mode **depends on whether the prompt states the contract clearly** -- the
+model has no structured channel and relies entirely on a natural-language convention. figmaagent's
+system prompt is a best-practice sample; the constraints that need porting (**all landed**, see below):
 
-> **已落地**：`TaggedToolProtocol::render_instructions`（`tool_calling.rs`）现在按 figmaagent
-> 的四节结构输出——`# 工具调用协议`（ReAct 循环说明）/ `# 输出格式（务必严格遵守）`（XML 契约）/
-> `# 可用工具`（工具目录）/ `# 工具结果回灌`（回灌识别规则）；由 `Agent::system_message()`
-> 拼进 system prompt 前部。工具参数不再 dump 原始 JSON Schema，改由 `render_schema_doc`
-> （移植自 figmaagent `zod-to-doc.ts`）渲染成紧凑可读文档（`key?: type  // 注释`）。
+> **Landed**: `TaggedToolProtocol::render_instructions` (`tool_calling.rs`) now outputs figmaagent's
+> four-section structure -- `# Tool-Calling Protocol` (ReAct loop explanation) / `# Output Format (strictly
+> follow)` (the XML contract) / `# Available Tools` (the tool catalog) / `# Tool-Result Re-injection`
+> (the re-injection recognition rule); `Agent::system_message()` splices it into the front of the system
+> prompt. Tool parameters are no longer dumped as raw JSON Schema, but rendered by `render_schema_doc`
+> (ported from figmaagent `zod-to-doc.ts`) into a compact, readable document (`key?: type  // comment`).
 
-1. **工具目录**（**已落地**）：`render_instructions` 输出工具清单（名 / 描述 / 参数 schema）。
-   figmaagent 用 `zod-to-doc` 把 JSON Schema 渲染成紧凑文本，Shirley 以 `render_schema_doc`
-   1:1 移植（输入直接吃 `ToolDefinition.parameters`）：
+1. **Tool catalog** (**landed**): `render_instructions` outputs the tool list (name / description /
+   parameter schema). figmaagent uses `zod-to-doc` to render JSON Schema into compact text; Shirley
+   ports it 1:1 with `render_schema_doc` (its input consumes `ToolDefinition.parameters` directly):
 
    ```text
    ## 1. fig_add_rect
-   描述：在画布上创建矩形
-   参数：
+   description: create a rectangle on the canvas
+   parameters:
    {
-     count?: number (>=1)   // 数量
-     color: {               // 颜色
+     count?: number (>=1)   // count
+     color: {               // color
        r: number (>=0, <=1)
        g: number (>=0, <=1)
        b: number (>=0, <=1)
@@ -261,75 +307,103 @@ figmaagent 的 system prompt 是最佳实践样本，需要移植的约束（**�
    }
    ```
 
-   渲染规则：`key?: type // 注释`；`enum` → `a | b`；`number` 带 `>= / <=`；`string` 带 `len/format`；
-   对象 / 数组递归。**token 友好优先于 schema 完整**；`schemars` 注入的 ±`MAX_SAFE_INTEGER`
-   哨兵约束被过滤（对 LLM 无意义）。非常规结构回退 `any`，不 panic。
-   （Shirley 的 `ToolDefinition.parameters` 本就是 JSON Schema，渲染器可直接吃它，无需另造中间模型。）
+   Rendering rules: `key?: type // comment`; `enum` -> `a | b`; `number` with `>= / <=`; `string` with
+   `len/format`; objects / arrays recursive. **Token friendliness takes priority over schema
+   completeness**; the ±`MAX_SAFE_INTEGER` sentinel constraints injected by `schemars` are filtered out
+   (meaningless to an LLM). An unconventional structure falls back to `any`, without panicking.
+   (Shirley's `ToolDefinition.parameters` is already JSON Schema, so the renderer can consume it
+   directly, with no need to build a separate intermediate model.)
 
-2. **输出契约**（**已落地**）：明确「每次回复只含 XML、标签外禁止字符、需要工具时恰好一个 `<tool>`、
-   params 是合法 JSON」，并点明「不发 `<tool>` = 本轮结束」。
-3. **回灌识别规则**（**已落地**）：告诉模型「最新 user 消息以回灌模板（默认 `{"tool":"…"}`）开头 =
-   工具返回值，不是新指令」，据此判断下一步（成功核对是否完成 / 失败调整重试）。
-4. **回放保留标签（KV 缓存必要）**：content 模式下**所有** assistant 消息（含无工具调用的普通回答）
-   回放时都经 [`ContentToolProtocol::render_assistant`] **确定性重渲染**成协议原文——`<thinking>` /
-   `<description>` / `<tool>` 标签**逐字节保留**，不透传剥壳后的纯文本。原因有二：① 模型必须看到自己
-   上一轮的带标签原文，工具调用链才不断；② **标签本身是 KV 缓存前缀的一部分**——确定性重渲染保证跨轮
-   前缀稳定，删标签会让前缀逐轮漂移、缓存全灭。这与「注入位置放前部」（见上条）是同一条缓存约束的两面。
-   > 解码侧 `parse_content_response` 仍把标签**剥掉**给 UI（用户看不到 XML 外壳）；保留标签只发生在
-   > **回放（编码）**方向，两个方向职责不同。
-5. **终止语义**：与原生 function calling 的 **stop 一致**——**本轮没有 `<tool>`（解析后
-   `tool_calls` 为空）= 结束**。因此**不引入 `is_terminal`**，也不需要 `fig_finish` 这类终止工具；
-   模型「想结束」就直接只输出 `<description>`。契约里要说清「要继续做事就必须发 `<tool>`」。
-   （figmaagent 之所以需要 `fig_finish`，是因为它的契约强制每轮恰好一个 `<tool>`，永不出现
-   「无 tool」的结束态；Shirley 沿用「无 tool = 停」，无需这个特例。）
-6. **注入位置（已定：扩展 `SystemPromptContext`）**：放 **system prompt 前部**（工具集在会话内
-   稳定 → 稳定前缀 → KV 缓存友好）。与 `docs/todo.md` 的「末尾追加」取舍**相反**——账本是每轮
-   变化的易变内容，工具目录是稳定内容，位置应相反。
+2. **Output contract** (**landed**): make clear "each reply contains only XML, no characters outside
+   tags, exactly one `<tool>` when a tool is needed, and params is valid JSON", and point out "not
+   sending `<tool>` = this round ends".
+3. **Re-injection recognition rule** (**landed**): tell the model "the latest user message starting with
+   the re-injection template (default `{"tool":"..."}`) = a tool return value, not a new instruction",
+   and judge the next step accordingly (on success, check whether it is complete / on failure, adjust
+   and retry).
+4. **Replay preserves tags (necessary for the KV cache)**: in content mode, **all** assistant messages
+   (including ordinary answers with no tool call) are, on replay, **deterministically re-rendered** into
+   the protocol's original text via [`ContentToolProtocol::render_assistant`] -- the `<thinking>` /
+   `<description>` / `<tool>` tags are **preserved byte for byte**, and the shell-stripped plain text is
+   not passed through. There are two reasons: (1) the model must see its own previous round's tagged
+   original text for the tool-call chain to be unbroken; (2) **the tags themselves are part of the KV
+   cache prefix** -- deterministic re-rendering guarantees a stable prefix across rounds, whereas
+   deleting tags would make the prefix drift round by round and kill the cache. This is the two sides of
+   the same cache constraint as "put the injection position at the front" (see the previous item).
+   > The decoding side `parse_content_response` still **strips** the tags for the UI (the user does not
+   > see the XML shell); preserving tags only happens in the **replay (encoding)** direction; the two
+   > directions have different responsibilities.
+5. **Termination semantics**: the same as native function calling's **stop** -- **no `<tool>` this round
+   (`tool_calls` empty after parsing) = end**. Therefore **`is_terminal` is not introduced**, and there
+   is no need for a termination tool like `fig_finish`; when the model "wants to end" it simply outputs
+   only `<description>`. The contract should state clearly "to keep doing things you must send `<tool>`".
+   (The reason figmaagent needs `fig_finish` is that its contract forces exactly one `<tool>` per round,
+   so a "no tool" end state never occurs; Shirley follows "no tool = stop", so this special case is not
+   needed.)
+6. **Injection position (decided: extend `SystemPromptContext`)**: put it at the **front of the system
+   prompt** (the tool set is stable within the session -> stable prefix -> KV-cache friendly). This is
+   the **opposite** of `docs/todo.md`'s "append at the end" trade-off -- the ledger is volatile content
+   that changes every round, while the tool catalog is stable content, so the positions should be
+   opposite.
 
-**实现路径（已定）**：扩展 `SystemPromptContext`，让 `SystemPrompt` 函数在构造时拿到工具目录
-（工具集在 `Agent::new` 时已知），由提示词函数把 `render_instructions(tools)` 拼进 system prompt
-前部。**前缀稳定、缓存友好。**（不复用 `ContextProvider`——它在末尾，会破坏前缀缓存。）
+**Implementation path (decided)**: extend `SystemPromptContext`, so that the `SystemPrompt` function
+gets the tool catalog at construction time (the tool set is known at `Agent::new`), and the prompt
+function splices `render_instructions(tools)` into the front of the system prompt. **Stable prefix,
+cache-friendly.** (Do not reuse `ContextProvider` -- it is at the end, and would break the prefix cache.)
 
-**九、与 figmaagent 的取舍**
+**9. Trade-offs vs figmaagent**
 
-| figmaagent | Shirley v1 | 理由 |
+| figmaagent | Shirley v1 | Reason |
 | --- | --- | --- |
-| 每轮**必须**恰好一个 `<tool>`，靠 `fig_finish` 停 | 「无 `<tool>` = 结束」，与原生 stop 一致；**不引入** `fig_finish` / `is_terminal` | 与既有循环一致，最小改动 |
-| 前端字符级**流式**解析（RxJS） | **流式解析可见增量**（`ContentStreamParser`）+ **最终态解析 `tool_calls`** | 显示流实时（`thinking` / `description` 边收边吐，屏蔽工具块），控制流仍在 `Finished`；与 figmaagent 同源 |
-| 后端只透传文本流 | SDK 内统一包装 | 与协议正交，收在一处 |
+| Each round **must** have exactly one `<tool>`, stopped by `fig_finish` | "no `<tool>` = end", consistent with native stop; **does not introduce** `fig_finish` / `is_terminal` | consistent with the existing loop, minimal change |
+| Frontend character-level **streaming** parsing (RxJS) | **streaming parsing of visible increments** (`ContentStreamParser`) + **final-state parsing of `tool_calls`** | the display stream is real-time (`thinking` / `description` emitted as they arrive, tool block masked), while the control flow is still at `Finished`; same origin as figmaagent |
+| The backend only passes through the text stream | unified wrapping inside the SDK | orthogonal to the protocol, collected in one place |
 
-**十、被否掉的方案**
+**10. Rejected approaches**
 
-- **塞进三个 encoder**：协议差异污染三处，且 content 与底层协议无关。
-- **做成新的 `ModelProtocol` 变体**：content 可与任意底层协议组合（OpenAI 兼容文本端点 /
-  completion），是**正交维度**，不是并列协议。
-- **改 `Message` 模型**：不需要——`tool_calls` 已能表达。
-- ~~**v1 就做流式解析**~~ → **已做**：见五之补 2。当初的顾虑（状态机 + UI 联动成本）由「复用既有字符级状态机」+「对外仍是统一的 `AgentEvent`（UI 零改动）」化解。
+- **Stuff it into the three encoders**: protocol differences pollute three places, and content is
+  independent of the underlying protocol.
+- **Make it a new `ModelProtocol` variant**: content can combine with any underlying protocol
+  (OpenAI-compatible text endpoint / completion), and is an **orthogonal dimension**, not a parallel
+  protocol.
+- **Change the `Message` model**: not needed -- `tool_calls` can already express it.
+- ~~**Do streaming parsing in v1**~~ -> **done**: see the supplement to section 5, item 2. The original
+  concern (the cost of state machine + UI coordination) was resolved by "reusing the existing
+  character-level state machine" + "the external output is still a unified `AgentEvent` (zero UI
+  changes)".
 
-**十一、验证清单**
+**11. Verification checklist**
 
-- **单测**：`TaggedToolProtocol` 覆盖 parser 关键行为——分片、协议边界、噪音回退、
-  自闭合、非法标签名。
-- **集成**：mock 一个「只回文本」的端点，验证一轮 content 工具调用 → 回灌 → 第二轮 → `Finished`。
-- **回归**：`Native` 路径完全不变（三协议既有测试全绿）。
-- **缓存**：content 模式下 system prompt 前缀稳定（工具目录位置不变）。
+- **Unit tests**: `TaggedToolProtocol` covers the parser's key behaviors -- fragmentation, protocol
+  boundary, noise fallback, self-closing, illegal tag names.
+- **Integration**: mock a "text-only" endpoint, and verify one content tool call -> re-injection ->
+  second round -> `Finished`.
+- **Regression**: the `Native` path is completely unchanged (the three protocols' existing tests all
+  green).
+- **Cache**: in content mode, the system prompt prefix is stable (the tool-catalog position does not
+  change).
 
-**十二、已确认决策（review 结论）**
+**12. Confirmed decisions (review conclusions)**
 
-| # | 问题 | 结论 |
+| # | Question | Conclusion |
 | --- | --- | --- |
-| 1 | 范围 | **「声明式 `TaggedToolProtocol` + 自定义 trait」两档 + 流式解析**。能力标识由**模型提供商**在模型列表里声明（`tool_mode` 字段，见五之补），发现不支持 function call 就自动走本协议。 |
-| 2 | 终止语义 | **与原生 function calling 的 stop 一致**：判断本轮**是否有工具调用**决定是否结束——没有 `<tool>` 就结束，有就继续。**不引入** `is_terminal` / `fig_finish`。 |
-| 3 | 目录注入 | **扩展 `SystemPromptContext`**（不是复用 `ContextProvider`）。 |
-| 4 | 参数渲染 | **暂不移植** `zod-to-doc`。自研协议无法保证模型传参正确，将来**视报错情况**再决定是否加类型约束 / 渲染约束。 |
+| 1 | Scope | **two gears, "declarative `TaggedToolProtocol` + a custom trait", + streaming parsing**. The capability identifier is declared by the **model provider** in the model list (the `tool_mode` field, see the supplement to section 5); on discovering it does not support function call, automatically use this protocol. |
+| 2 | Termination semantics | **the same as native function calling's stop**: decide whether to end by whether this round **has a tool call** -- no `<tool>` means end, yes means continue. **Does not introduce** `is_terminal` / `fig_finish`. |
+| 3 | Catalog injection | **extend `SystemPromptContext`** (not reusing `ContextProvider`). |
+| 4 | Parameter rendering | **do not port** `zod-to-doc` for now. A self-made protocol cannot guarantee the model passes arguments correctly, so in the future, **depending on the errors**, decide whether to add type constraints / rendering constraints. |
 
-**遗留（待后续验证时定）**：content 协议下模型传参出错时，是否需要「参数类型约束 / 报错回灌
-重试」——先观察真实报错再决定（承接决策 4）。
+**Remaining (to be decided during later verification)**: under the content protocol, when the model
+passes wrong arguments, whether "parameter type constraints / error re-injection and retry" is needed --
+observe the real errors first before deciding (following decision 4).
 
-**十三、与其它文档的关系**
+**13. Relationship to other documents**
 
-- `docs/adapter-layer.md`：本文是「多协议」之外的**正交**维度（传输模式 vs 协议）。
-- `docs/responses-api.md` / `docs/anthropic-messages-api.md`：原生 tool_calls 路径，本文不动。
-- `docs/todo.md`：`ContextProvider` 接缝的另一使用者；注入位置取舍相反（见八.5）。
-- `docs/security.md`：content 解析出的工具调用与原生调用**走同一条执行路径**（同一沙盒 / 权限层），
-  不因来源不同而降低约束。
+- `docs/adapter-layer.md`: this document is an **orthogonal** dimension beyond "multi-protocol"
+  (transport mode vs protocol).
+- `docs/responses-api.md` / `docs/anthropic-messages-api.md`: the native tool_calls path, untouched by
+  this document.
+- `docs/todo.md`: another user of the `ContextProvider` seam; the injection-position trade-off is
+  opposite (see 8.5).
+- `docs/security.md`: the tool calls parsed from content and native calls **go through the same
+  execution path** (the same sandbox / permission layer), and the constraints are not lowered because of
+  a different source.

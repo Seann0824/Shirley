@@ -1,2 +1,2 @@
-# 项目指南（{{guide_file}}）
+# Project guide ({{guide_file}})
 {{guide}}

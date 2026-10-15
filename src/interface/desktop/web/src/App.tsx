@@ -10,6 +10,7 @@ import { AssistantMessage } from "@/components/AssistantMessage";
 import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
+import { NewChatControls } from "@/components/ai/NewChatControls";
 import { AiConversationSkeleton } from "@/components/ai/AiConversationSkeleton";
 import { AiConversationMinimap } from "@/components/ai/AiConversationMinimap";
 import { InlineReferences } from "@/lib/file-mentions/FileChips";
@@ -26,11 +27,12 @@ import type { FileReference } from "@/lib/file-mentions/types";
 import { agentBridge, type ProjectEntry, type SessionSubscription } from "@/lib/bridge";
 import type { AgentEventWire, SessionSnapshot, TaskViewWire, UsageWire } from "@/types/wire";
 import type { AiSegment, AiToolExecution } from "@/types/ai";
+import { cn } from "@/ui/utils";
 
 let messageSeq = 0;
 const nextId = () => `m${++messageSeq}`;
 
-/** 侧边栏折叠偏好（仅本地 UI 状态，不跨端 / 不落库）。 */
+/** Sidebar collapse preference (local UI state only; not synced / persisted). */
 const SIDEBAR_STORAGE_KEY = "shirley.desktop.sidebar-collapsed";
 
 function readBool(key: string, fallback: boolean): boolean {
@@ -46,25 +48,43 @@ function writeBool(key: string, value: boolean) {
   try {
     window.localStorage.setItem(key, value ? "1" : "0");
   } catch {
-    // localStorage 不可用（隐私模式等）时静默降级：状态仅当次会话有效。
+    // Silently degrade when localStorage is unavailable (private mode, etc.): state is valid for this session only.
   }
 }
 
-/** 视口窄于该宽度时自动收起侧边栏（sidebar 256px + 内容 760px 已放不下）。 */
+/** Auto-collapse the sidebar when the viewport is narrower than this (256px sidebar + 760px content no longer fits). */
 const SIDEBAR_AUTO_COLLAPSE_PX = 900;
 
-/** 聊天区固定宽度（`max-w-190` = 190 × 4px = 760px），用于算对话轨迹可用的左侧留白。 */
+/** Fixed chat-area width (`max-w-190` = 190 x 4px = 760px), used to compute the left gutter available for the minimap. */
 const CHAT_MAX_WIDTH_PX = 760;
-/** 对话轨迹定位：距 `main` 左边缘 12px（`left-3`）。 */
+/** Minimap position: 12px from the `main` left edge (`left-3`). */
 const MINIMAP_LEFT_PX = 12;
-/** 对话轨迹宽度：40px（`w-10`）。 */
+/** Minimap width: 40px (`w-10`). */
 const MINIMAP_WIDTH_PX = 40;
 
 /**
- * 一条「待发送」消息：任务运行中用户提前提交，排队等上一轮结束后自动发送。
+ * Pseudo project id for Chat mode (aligned with Rust `shell.rs::CHAT_PROJECT_ID`).
  *
- * 与 `dispatchTurn` 的入参一一对应（`display` 回显、`text` 发模型、`refs` / `sendPaths`
- * 为 `@` 引用）。按会话存进 `SessionView.pending`，切走再切回不丢。
+ * Chat mode is **not associated with any user project**, but reuses the same
+ * project-scoped commands: the backend routes this id to the runtime under
+ * `<config_dir>/shirley/chat`, so the frontend needs no separate contract for Chat —
+ * session / model / file / skill commands just pass `project = __chat__` as usual.
+ */
+const CHAT_PROJECT_ID = "__chat__";
+
+/**
+ * UI mode: Chat (no associated project) / Work (switchable associated project). **Derived
+ * from the foreground project**; not persisted separately.
+ */
+type AppMode = "chat" | "work";
+
+/**
+ * A "pending" message: submitted early by the user while a turn is running, queued to
+ * send automatically once the previous turn ends.
+ *
+ * Corresponds one-to-one with `dispatchTurn`'s params (`display` for echo, `text` sent
+ * to the model, `refs` / `sendPaths` for `@` references). Stored per session in
+ * `SessionView.pending`; not lost when switching away and back.
  */
 type PendingTurn = {
   id: string;
@@ -77,28 +97,31 @@ type PendingTurn = {
 };
 
 /**
- * 单个会话的视图状态（transcript + 每轮段落 + busy / 错误）。
+ * View state for a single session (transcript + per-turn segments + busy / error).
  *
- * 多项目多会话：事件按 `project` + `session` 打标，每个会话各持一份视图；当前会话
- * 渲染，后台会话照常累加（不因切走丢上下文）。切换会话 = 换渲染哪一份 + 换订阅哪个
- * 事件流。视图键是 `project::session`——会话名只在项目内唯一，跨项目会重名。
+ * Multi-project multi-session: events are tagged with `project` + `session`; each
+ * session holds its own view; the current session renders while background sessions keep
+ * accumulating (context is not lost when switching away). Switching sessions = changing
+ * which view renders + which event stream is subscribed. The view key is
+ * `project::session` — session names are unique only within a project, so they collide
+ * across projects.
  */
 type SessionView = {
   messages: AiTranscriptMessage[];
   turnSegments: Record<string, AiSegment[]>;
   busy: boolean;
   error: string;
-  /** 历史快照尚未到达：先乐观展示，渲染骨架屏。 */
+  /** History snapshot not yet arrived: render optimistically, showing a skeleton. */
   loading: boolean;
-  /** 任务账本快照（`null` = 空账本 / 无账本）。驱动任务卡与状态行。 */
+  /** Task-ledger snapshot (`null` = empty ledger / no ledger). Drives the task card and status line. */
   todo: TaskViewWire | null;
-  /** 正在压缩上下文（`compression_started` → `compression_finished`）。 */
+  /** Compressing context (`compression_started` -> `compression_finished`). */
   compressing: boolean;
-  /** 上下文占用（used / limit tokens），来自 `context_usage` 事件。 */
+  /** Context usage (used / limit tokens), from the `context_usage` event. */
   contextUsage: { used: number; limit: number } | null;
-  /** 最近一次上报的用量，来自 `usage` 事件。 */
+  /** Most recently reported usage, from the `usage` event. */
   usage: UsageWire | null;
-  /** 待发送队列：busy 时用户提前提交的消息，上一轮结束后自动依次发送。 */
+  /** Pending queue: messages the user submitted early while busy, sent automatically in order once the previous turn ends. */
   pending: PendingTurn[];
 };
 
@@ -117,7 +140,7 @@ function emptyView(): SessionView {
   };
 }
 
-/** 视图键：跨项目不重名。 */
+/** View key: unique across projects. */
 const viewKey = (project: string, session: string) => `${project}::${session}`;
 
 type SessionLocation = { project: string; session: string };
@@ -130,11 +153,12 @@ function removeLocations(history: NavigationHistory, remove: (entry: SessionLoca
 }
 
 /**
- * 运行态状态行：压缩中 / 上下文占用。放在输入框上方、任务卡下方。
+ * Runtime status line: compressing / context usage. Placed above the input, below the task card.
  *
- * 对标 TUI footer 的上下文占用提示：desktop 此前完全不处理 `compression_*` /
- * `context_usage` 事件，压缩期间界面静默、用户不知道发生了什么。这里给一个
- * 轻量、不抢戏的反馈——没有可展示信息时整行不占位。
+ * Mirrors the TUI footer's context-usage hint: desktop previously did not handle
+ * `compression_*` / `context_usage` events at all, so the UI was silent during
+ * compression and the user did not know what was happening. This gives a lightweight,
+ * unobtrusive feedback — the whole line takes no space when there is nothing to show.
  */
 function SessionStatusLine({
   compressing,
@@ -153,12 +177,12 @@ function SessionStatusLine({
       {compressing && (
         <span className="inline-flex items-center gap-1.5">
           <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
-          正在压缩上下文
+          Compressing context
         </span>
       )}
       {percent !== null && (
         <span className="font-utility">
-          上下文 {percent}%
+          Context {percent}%
         </span>
       )}
     </div>
@@ -166,10 +190,12 @@ function SessionStatusLine({
 }
 
 /**
- * 待发送队列：任务运行中用户提前提交、排队等上一轮结束后自动发送的消息。
+ * Pending queue: messages the user submitted early while a turn was running, queued to
+ * send automatically once the previous turn ends.
  *
- * 只在前台会话有排队项时出现，逐条展示正文（去掉 chip 占位符）并允许移除。
- * 发送顺序 = 入队顺序（先提交先发）。
+ * Only appears when the foreground session has queued items; shows each body (with chip
+ * placeholders stripped) and allows removal. Send order = enqueue order (first
+ * submitted, first sent).
  */
 function PendingQueue({ turns, onRemove }: { turns: PendingTurn[]; onRemove: (id: string) => void }) {
   if (turns.length === 0) return null;
@@ -177,7 +203,7 @@ function PendingQueue({ turns, onRemove }: { turns: PendingTurn[]; onRemove: (id
     <div className="mx-3 mb-1 rounded-card border border-line bg-surface px-3 py-2 shadow-card">
       <div className="mb-1 flex items-center gap-1.5 text-caption text-muted">
         <Clock className="size-3.5" aria-hidden="true" />
-        待发送 · {turns.length}
+        Pending · {turns.length}
       </div>
       <ul className="flex flex-col gap-1">
         {turns.map((turn) => (
@@ -185,7 +211,7 @@ function PendingQueue({ turns, onRemove }: { turns: PendingTurn[]; onRemove: (id
             <span className="min-w-0 flex-1 truncate">{stripTokens(turn.display)}</span>
             <button
               type="button"
-              aria-label="取消这条待发送消息"
+              aria-label="Remove this pending message"
               className="mt-0.5 shrink-0 rounded-control p-0.5 text-muted transition-colors hover:bg-selected hover:text-ink"
               onClick={() => onRemove(turn.id)}
             >
@@ -199,16 +225,16 @@ function PendingQueue({ turns, onRemove }: { turns: PendingTurn[]; onRemove: (id
 }
 
 export function App() {
-  // 每个会话一份视图（后台会话也保留，切回不丢），键为 `project::session`。
+  // One view per session (background sessions are kept too, so switching back does not lose them), keyed by `project::session`.
   const [views, setViews] = useState<Record<string, SessionView>>({});
-  // 项目列表（活跃）与当前项目。
+  // Project list (active) and current project.
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState<string | null>(null);
   const [input, setInput] = useState("");
   const [references, setReferences] = useState<FileReference[]>([]);
   const [model, setModel] = useState("");
-  // UI 级错误（项目 / 会话 / 模型切换失败）；运行期错误进各会话视图的 `error`。
+  // UI-level error (project / session / model switch failure); runtime errors go into each session view's `error`.
   const [uiError, setUiError] = useState("");
   const [navigationHistory, setNavigationHistory] = useState<NavigationHistory>({ entries: [], index: -1 });
   const [navigationBusy, setNavigationBusy] = useState(false);
@@ -229,10 +255,15 @@ export function App() {
       return { entries, index: entries.length - 1 };
     });
   }, [activeProject, sessionName]);
-  // 侧边栏折叠：用户手动偏好（持久化）。窗口过窄时自动置为收起，之后仍可手动展开。
+  // Sidebar collapse: user's manual preference (persisted). Auto-collapsed when the window is too narrow; can still be manually expanded afterward.
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     readBool(SIDEBAR_STORAGE_KEY, false),
   );
+  // UI mode is derived from "whether the foreground is attached to a project": pseudo
+  // project `__chat__` => Chat (no associated project), otherwise => Work. There is no
+  // separate mode state — switching projects / switching to Chat switches the mode,
+  // avoiding two sources of truth.
+  const mode: AppMode = activeProject === CHAT_PROJECT_ID ? "chat" : "work";
 
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => {
@@ -242,7 +273,7 @@ export function App() {
     });
   }, []);
 
-  // 窗口放不下时自动收起：跨入窄视口即折叠（不自动弹回，尊重用户之后的显式选择）。
+  // Auto-collapse when the window cannot fit: folds as soon as a narrow viewport is entered (does not auto-expand, respecting the user's later explicit choice).
   useEffect(() => {
     const query = window.matchMedia(`(max-width: ${SIDEBAR_AUTO_COLLAPSE_PX}px)`);
     const apply = (matches: boolean) => {
@@ -257,16 +288,16 @@ export function App() {
   const mentionSearch = useFileMentionSearch(activeProject);
   const slashSearch = useSkillSlashSearch(activeProject);
   const editorRef = useRef<MentionEditorHandle>(null);
-  // 对话轨迹（minimap）要挂到聊天区最外层容器（main）的左侧边缘，需要共享滚动视口。
+  // The minimap attaches to the left edge of the chat area's outermost container (main) and needs to share the scroll viewport.
   const transcriptViewportRef = useRef<HTMLDivElement>(null);
-  // 对话轨迹只在左侧留白放得下时显示——放不下直接隐藏，绝不与聊天内容重合。
+  // The minimap shows only when the left gutter fits it — otherwise it is hidden outright, never overlapping the chat content.
   const mainRef = useRef<HTMLElement>(null);
   const [minimapFits, setMinimapFits] = useState(false);
   useEffect(() => {
     const el = mainRef.current;
     if (!el) return;
     const measure = () => {
-      // section 居中且最大 760px：左侧留白 = (main 宽 - 760) / 2（main 宽不足 760 时为 0）。
+      // The section is centered and max 760px: left gutter = (main width - 760) / 2 (0 when main width is under 760).
       const gutter = Math.max(0, (el.clientWidth - CHAT_MAX_WIDTH_PX) / 2);
       setMinimapFits(gutter >= MINIMAP_LEFT_PX + MINIMAP_WIDTH_PX);
     };
@@ -275,13 +306,13 @@ export function App() {
     observer.observe(el);
     return () => observer.disconnect();
   }, []);
-  // 当前订阅句柄（切走时退订）。
+  // Current subscription handle (unsubscribed when switching away).
   const subRef = useRef<SessionSubscription | null>(null);
-  // 每个会话当前在跑的 assistant 轮次 id（事件按它落点），键为 `project::session`。
+  // The assistant turn id currently running for each session (events land on it), keyed by `project::session`.
   const turnRef = useRef<Map<string, string>>(new Map());
-  // 每个会话本轮的起始时间戳（算「处理用时 Ns」），键为 `project::session`。
+  // Start timestamp of this turn for each session (to compute "Worked for Ns"), keyed by `project::session`.
   const turnStartRef = useRef<Map<string, number>>(new Map());
-  // 快照应用前缓冲事件（订阅与快照之间到达的增量不丢）。
+  // Buffer events before the snapshot is applied (deltas arriving between subscribe and snapshot are not lost).
   const readyRef = useRef<Set<string>>(new Set());
   const bufferRef = useRef<Map<string, AgentEventWire[]>>(new Map());
 
@@ -297,12 +328,14 @@ export function App() {
     }
   }, []);
 
-  // 把一个事件应用到指定会话的视图（纯函数式更新，避免闭包过期）。
+  // Apply an event to the given session's view (functional update to avoid stale closures).
   const applyEvent = useCallback((key: string, event: AgentEventWire) => {
-    // 用户点击停止：后端**保留**本轮（用户消息 + 半截流式回复）作为下一轮参考，
-    // 不再回退删除（需求 2），并以 `finished(cancelled)` 收尾。这里只把本轮
-    // assistant 从 streaming 标记为 complete、清掉 `busy`——**不丢弃条目、不回退输入**
-    // （与 TUI `App::complete_turn` 的打断语义一致）。
+    // User clicked stop: the backend **keeps** this turn (user message + half-finished
+    // streaming reply) for the next turn to reference, instead of rolling back and
+    // deleting them (requirement 2), and finishes with `finished(cancelled)`. Here we
+    // only mark this turn's assistant from streaming to complete and clear `busy` —
+    // **without discarding entries or rolling back input** (matching the TUI
+    // `App::complete_turn` interruption semantics).
     if (event.type === "finished" && event.stop_reason === "cancelled") {
       const startedAt = turnStartRef.current.get(key);
       const durationMs = startedAt !== undefined ? Math.max(0, Date.now() - startedAt) : undefined;
@@ -322,7 +355,7 @@ export function App() {
               segments.map((segment) => segment.kind === "tools" ? {
                 ...segment,
                 executions: segment.executions.map((execution) => execution.status === "running" ? {
-                  ...execution, status: "error" as const, error: "已中断，执行状态需确认",
+                  ...execution, status: "error" as const, error: "Interrupted; execution status needs confirmation",
                 } : execution),
               } : segment),
             ])),
@@ -369,7 +402,7 @@ export function App() {
         };
       }
       let updated = applyWireEvent(next, event, assistantId);
-      // 轮次收尾（完成 / 出错）：把本轮耗时写到 assistant 消息上，供「处理用时 Ns」折叠。
+      // Turn finished (complete / error): write this turn's duration onto the assistant message for the "Worked for Ns" disclosure.
       if (finishing && assistantId) {
         if (durationMs !== undefined) {
           updated = {
@@ -384,29 +417,36 @@ export function App() {
     });
   }, []);
 
-  // 先响应交互：立刻把前台会话切过去并进入加载态（渲染骨架屏），不等后端往返。
-  // 打开会话 / 切换会话都在取历史快照**之前**调它——历史快照要走一次
-  // `agent_subscribe` 往返，不能让用户对着旧会话干等。
-  const beginSessionLoad = useCallback((project: string, session: string) => {
+  // Respond to interaction first: immediately switch the foreground session and enter
+  // the loading state (render a skeleton), without waiting for the backend round trip.
+  // Both opening and switching sessions call this **before** fetching the history
+  // snapshot — the snapshot needs an `agent_subscribe` round trip, and the user should
+  // not be left staring at the old session.
+  const beginSessionLoad = useCallback((project: string, session: string, silent = false) => {
     const key = viewKey(project, session);
     setSessionName(session);
     setViews((prev) => {
       const existing = prev[key];
-      // 已有缓存内容（后台会话跑过）直接复用、不闪骨架；否则占位加载。
+      // Cached content already exists (a background session has run): reuse it without flashing a skeleton; otherwise show a loading placeholder.
+      // `silent`: a newly created empty session is known to be empty (lazy session), so
+      // no skeleton is needed — it settles into an empty view directly, with no loading
+      // flicker when switching Chat/Work.
+      const loading = !silent;
       if (existing && existing.messages.length > 0) {
-        return { ...prev, [key]: { ...existing, loading: true } };
+        return { ...prev, [key]: { ...existing, loading } };
       }
-      // 待发送队列是纯前端状态、不在后端快照里——重建视图时必须原样保留，
-      // 否则切走再切回（或重开会话）会把它清空。
-      return { ...prev, [key]: { ...emptyView(), loading: true, pending: existing?.pending ?? [] } };
+      // The pending queue is pure frontend state and is not in the backend snapshot — it
+      // must be preserved as-is when rebuilding the view, otherwise switching away and
+      // back (or reopening the session) would clear it.
+      return { ...prev, [key]: { ...emptyView(), loading, pending: existing?.pending ?? [] } };
     });
   }, []);
 
-  // 订阅一个会话：退订旧的，拿快照重建视图，再叠加之后的事件。
+  // Subscribe to a session: unsubscribe the old one, rebuild the view from the snapshot, then layer on subsequent events.
   const openSession = useCallback(
-    async (project: string, session: string) => {
+    async (project: string, session: string, silent = false) => {
       const key = viewKey(project, session);
-      beginSessionLoad(project, session);
+      beginSessionLoad(project, session, silent);
       const bridge = await agentBridge();
       subRef.current?.unsubscribe();
       subRef.current = null;
@@ -416,7 +456,7 @@ export function App() {
       let sub;
       try {
         sub = await bridge.openSession(project, session, (event) => {
-          // 快照尚未应用：先缓冲，待快照落地后按序补放（不丢、不重）。
+          // Snapshot not yet applied: buffer first, then replay in order once it lands (nothing lost or duplicated).
           if (!readyRef.current.has(key)) {
             const buffer = bufferRef.current.get(key) ?? [];
             buffer.push(event);
@@ -426,7 +466,7 @@ export function App() {
           applyEvent(key, event);
         });
       } catch (e) {
-        // 订阅失败：退出加载态并如实报错，别让骨架屏一直转下去。
+        // Subscription failed: exit the loading state and report the error truthfully, instead of letting the skeleton spin forever.
         const message = e instanceof Error ? e.message : String(e);
         setViews((prev) => ({
           ...prev,
@@ -471,7 +511,7 @@ export function App() {
             ...view,
             messages,
             turnSegments,
-            // 快照不含待发送队列（后端不知道它）；保留本地已排队的条目。
+            // The snapshot does not include the pending queue (the backend does not know about it); keep the locally queued items.
             pending: cached?.pending ?? [],
           },
         };
@@ -484,7 +524,7 @@ export function App() {
     [applyEvent, beginSessionLoad],
   );
 
-  // 选中一个项目：切前台 + 打开它当前会话。
+  // Select a project: switch foreground + open its current session.
   const selectProject = useCallback(
     async (project: string) => {
       try {
@@ -505,7 +545,10 @@ export function App() {
     [activeProject, openSession],
   );
 
-  // 启动：载入项目列表，选第一个（最近打开）并打开它当前会话。
+  // Startup: load the project list, open the most recently opened project (Work). Chat
+  // is not persistent — clicking Chat in the top bar enters it (reusing the same
+  // project-scoped commands, project = pseudo project `__chat__`). Chat sessions still
+  // show up as the sidebar's "recent" list loads (independent of whether Chat mode is active).
   useEffect(() => {
     void (async () => {
       const bridge = await agentBridge();
@@ -524,7 +567,7 @@ export function App() {
       setUiError("");
       const bridge = await agentBridge();
       const entry = await bridge.addProject();
-      if (!entry) return; // 用户取消
+      if (!entry) return; // user cancelled
       await reloadProjects();
       await selectProject(entry.id);
     } catch (e) {
@@ -551,7 +594,7 @@ export function App() {
         setUiError("");
         await (await agentBridge()).archiveProject(project);
         setNavigationHistory((prev) => removeLocations(prev, (entry) => entry.project === project));
-        // 归档的是当前项目：清空前台，切到下一个可用项目（可能为空）。
+        // The archived project is the current one: clear the foreground and switch to the next available project (possibly none).
         if (project === activeProject) {
           subRef.current?.unsubscribe();
           subRef.current = null;
@@ -574,7 +617,7 @@ export function App() {
     async (project: string, name: string) => {
       try {
         setUiError("");
-        // 跨项目直达目标会话，避免中途打开该项目的旧会话、污染导航历史。
+        // Jump straight to the target session across projects, avoiding opening that project's old session midway and polluting the navigation history.
         setActiveProject(project);
         beginSessionLoad(project, name);
         const bridge = await agentBridge();
@@ -595,8 +638,8 @@ export function App() {
     setNavigationBusy(true);
     try {
       const bridge = await agentBridge();
-      // 直接交给后端查找：未发送消息的惰性会话只在内存里，不会出现在磁盘列表。
-      // 切换成功后才移动历史游标；失败时仍留在原会话，可重试。
+      // Hand it to the backend to find: a lazy session with no messages sent lives only in memory and won't appear in the disk list.
+      // Only move the history cursor after a successful switch; on failure stay in the original session and allow retry.
       await bridge.switchSession(target.project, target.session);
       setNavigationHistory((prev) => ({ ...prev, index }));
       setActiveProject(target.project);
@@ -610,25 +653,46 @@ export function App() {
     }
   }, [navigationHistory, navigationBusy, openSession]);
 
-  // 在指定项目下新建会话（项目行上的「＋」可直接作用于任意项目，不限于前台）。
+  // Create a session under the given project (the "+" on a project row can act on any project, not just the foreground).
   const newSession = useCallback(
     async (project: string) => {
       try {
         setUiError("");
         const bridge = await agentBridge();
-        // 不带标题：名字在首条消息后由 AI 自动生成，用户想改再手动重命名。
+        // No title: the name is auto-generated by the AI after the first message; the user can rename it manually if desired.
         const entry = await bridge.newSession(project, null);
         setActiveProject(project);
-        beginSessionLoad(project, entry.name);
-        await openSession(project, entry.name);
+        // silent: a newly created empty session is known to be empty; skip the skeleton (no loading flicker when switching Chat/Work).
+        beginSessionLoad(project, entry.name, true);
+        await openSession(project, entry.name, true);
         await bridge.modelName(project).then(setModel);
-        // 直接聚焦输入框——新建会话的意图是"马上开始聊"，而不是先做管理。
+        // Focus the input directly — the intent of creating a session is "start chatting now", not managing first.
         editorRef.current?.focus();
       } catch (e) {
         setUiError(e instanceof Error ? e.message : String(e));
       }
     },
     [openSession, beginSessionLoad],
+  );
+
+  // Switching Chat / Work within the new-chat flow: create a lazy empty session in the
+  // target context (the Chat pseudo project or the first project), thereby switching the
+  // mode along with it. When Work and there is no project, trigger "new project" instead.
+  const switchNewChatMode = useCallback(
+    async (next: AppMode) => {
+      if (next === mode) return;
+      if (next === "chat") {
+        await newSession(CHAT_PROJECT_ID);
+        return;
+      }
+      const first = projects[0]?.id;
+      if (!first) {
+        await addProject();
+        return;
+      }
+      await newSession(first);
+    },
+    [mode, projects, newSession, addProject],
   );
 
   const renameSession = useCallback(
@@ -650,7 +714,7 @@ export function App() {
         const bridge = await agentBridge();
         await bridge.deleteSession(project, name);
         setNavigationHistory((prev) => removeLocations(prev, (entry) => entry.project === project && entry.session === name));
-        // 删的若是前台会话，重新打开后端选中的会话（可能为空）。
+        // If the deleted one is the foreground session, reopen the backend-selected session (possibly empty).
         if (project === activeProject && name === sessionName) {
           const current = await bridge.currentSession(project).catch(() => null);
           if (current) await openSession(project, current);
@@ -667,7 +731,36 @@ export function App() {
     [activeProject, openSession, sessionName],
   );
 
-  /** 把一条已解析好的消息排进待发送队列（busy 时用）。 */
+  // Move a session to another project. **Does not auto-switch to the target session**
+  // (to avoid an unexpected jump) — when the moved one is the foreground session, the
+  // source project's foreground session has been replaced by the backend, so reopen the
+  // source project's current session to align the view.
+  const moveSession = useCallback(
+    async (project: string, name: string, targetProject: string) => {
+      try {
+        setUiError("");
+        const bridge = await agentBridge();
+        await bridge.moveSession(project, name, targetProject);
+        setNavigationHistory((prev) =>
+          removeLocations(prev, (entry) => entry.project === project && entry.session === name),
+        );
+        if (project === activeProject && name === sessionName) {
+          const current = await bridge.currentSession(project).catch(() => null);
+          if (current) await openSession(project, current);
+          else {
+            subRef.current?.unsubscribe();
+            subRef.current = null;
+            setSessionName(null);
+          }
+        }
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [activeProject, openSession, sessionName],
+  );
+
+  /** Enqueue an already-parsed message into the pending queue (used while busy). */
   const enqueueTurn = useCallback((turn: PendingTurn) => {
     const key = viewKey(turn.project, turn.session);
     setViews((prev) => {
@@ -676,7 +769,7 @@ export function App() {
     });
   }, []);
 
-  /** 从待发送队列里移除一条（用户撤销）。 */
+  /** Remove an item from the pending queue (user undo). */
   const removePending = useCallback((key: string, id: string) => {
     setViews((prev) => {
       const view = prev[key];
@@ -685,8 +778,8 @@ export function App() {
     });
   }, []);
 
-  /** 把一条消息作为新一轮发给模型（回显 user + 起 assistant 流式占位）。
-   *  `display` 是回显正文（保留 chip 占位符），`text` 是发给模型的纯文本。 */
+  /** Send a message to the model as a new turn (echo user + start an assistant streaming placeholder).
+   *  `display` is the echo body (chip placeholders preserved), `text` is the plain text sent to the model. */
   const dispatchTurn = useCallback(
     async (
       project: string,
@@ -730,7 +823,7 @@ export function App() {
     [views, applyEvent],
   );
 
-  /** 提交一轮：空闲则立即发送，运行中则排进 pending，等上一轮结束自动发送。 */
+  /** Submit a turn: send immediately when idle, otherwise enqueue into pending and send automatically once the previous turn ends. */
   const submit = useCallback(
     async (project: string, session: string, text: string, display: string, refs: FileReference[], sendPaths: string[]) => {
       const key = viewKey(project, session);
@@ -743,8 +836,8 @@ export function App() {
     [views, dispatchTurn, enqueueTurn],
   );
 
-  // 待发送队列自动 flush：某会话空闲（busy 由 true→false）且队列非空时，弹队首发送。
-  // 用 `flushingRef` 防止「移除队首」触发的重渲染在 `busy` 尚未置位时重复弹队。
+  // Auto-flush the pending queue: when a session goes idle (busy true->false) with a non-empty queue, pop the head and send.
+  // Use `flushingRef` to prevent the re-render triggered by "removing the head" from popping the queue again before `busy` is set.
   const flushingRef = useRef<Set<string>>(new Set());
   useEffect(() => {
     for (const [key, view] of Object.entries(views)) {
@@ -771,9 +864,10 @@ export function App() {
     const key = viewKey(project, session);
 
     const refs = references;
-    // `/` 技能入口（与 TUI 同语义）：技能以 chip 形式出现在输入框里；chip 之后的
-    // 文本即 args。无参 = 只激活 + 本地系统提示（不发模型）；有参 = 激活 + 把 args
-    // 作为本轮 prompt。desktop 无本地内置 slash 指令，只有 chip 才走这条路径。
+    // `/` skill entry (same semantics as the TUI): the skill appears as a chip in the
+    // input; the text after the chip is args. No args = activate only + a local system
+    // notice (not sent to the model); with args = activate + use args as this turn's
+    // prompt. Desktop has no local built-in slash commands; only a chip takes this path.
     const skill = refs.find((reference) => reference.kind === "skill");
     if (skill) {
       try {
@@ -788,7 +882,7 @@ export function App() {
       setUiError("");
       const args = stripTokens(input).trim();
       if (!args) {
-        // 无参：只激活，不打扰模型，给一条本地系统提示（保留 chip 回显）。
+        // No args: activate only, don't bother the model, show a local system notice (chip echo preserved).
         setViews((prev) => {
           const view = prev[key] ?? emptyView();
           return {
@@ -800,7 +894,7 @@ export function App() {
                 {
                   id: nextId(),
                   role: "user",
-                  content: `${CHIP_TOKEN} 已激活技能（本轮起每轮注入其指令）。`,
+                  content: `${CHIP_TOKEN} Skill activated (its instructions will be injected every turn from now on).`,
                   status: "complete",
                   references: [skill],
                 },
@@ -810,15 +904,17 @@ export function App() {
         });
         return;
       }
-      // 有参：激活后把 args 当本轮 prompt 继续走正常发送流程；display 保留 chip，
-      // 但**不把技能名当引用路径发给后端**（sendPaths 为空）。运行中则排队。
+      // With args: after activating, treat args as this turn's prompt and continue
+      // through the normal send flow; display keeps the chip, but **the skill name is not
+      // sent to the backend as a reference path** (sendPaths empty). Enqueue if running.
       await submit(project, session, args, `${CHIP_TOKEN}${args}`, [skill], []);
       return;
     }
 
-    // 发给模型 / 判空的正文要剥掉占位符（占位符不是用户文字）；但**回显用的
-    // content 必须保留占位符**——`InlineReferences` 正是按占位符位置把 chip 落回
-    // 正文的，剥掉就一个 tag 都渲染不出来（曾经的 bug）。
+    // The body sent to the model / checked for emptiness must strip placeholders
+    // (placeholders are not user text); but **the echo content must keep the
+    // placeholders** — `InlineReferences` places chips back into the body by placeholder
+    // position, so stripping them renders not a single tag (a past bug).
     const plain = stripTokens(input).trim();
     if (!plain) return;
     setInput("");
@@ -838,9 +934,10 @@ export function App() {
     const project = activeProject;
     const session = sessionName;
     if (!project || !session) return;
-    // 只发取消信号：真正的收尾（回退本轮 + 把 `busy` 置 false）由后端回推的
-    // `finished(cancelled)` 事件统一完成——避免这里先乐观置 `busy=false`，用户
-    // 立刻重发时又与后端“agent 正在运行中”判定打架。
+    // Only send the cancel signal: the real wrap-up (roll back this turn + set `busy`
+    // false) is done uniformly by the backend-pushed `finished(cancelled)` event —
+    // avoiding setting `busy=false` optimistically here, which would clash with the
+    // backend's "agent is currently running" check if the user resends immediately.
     await (await agentBridge()).cancel(project, session).catch(() => {});
   }, [activeProject, sessionName]);
 
@@ -864,11 +961,106 @@ export function App() {
       : emptyView();
   const busy = view.busy;
   const error = uiError || view.error;
+  // New chat (Codex-style empty session): a session is attached but has no messages yet,
+  // and is not loading / running. In this state the input is centered with Chat/Work and
+  // project switching below — i.e. the standalone "new chat" flow.
+  const isNewChat =
+    Boolean(activeProject && sessionName) &&
+    !view.loading &&
+    view.messages.length === 0 &&
+    !view.busy;
+
+  // Welcome content (empty-session main area): shared by the centered new-chat flow and "switching to a session with no messages".
+  const heroNode = (
+    <div className="flex flex-col items-center gap-4 px-4 py-6 text-center sm:py-10">
+      <img
+        src="/brand/shirley-character.png"
+        alt="Shirley Fenette from Code Geass, long orange hair, wearing an Ashford Academy uniform"
+        width={768}
+        height={1152}
+        className="h-[clamp(140px,32vh,280px)] w-auto max-w-full object-contain"
+        draggable={false}
+      />
+      <div className="space-y-2">
+        <h1 className="font-display text-title-sm text-ink">Shirley</h1>
+        <p className="text-body-sm text-muted">
+          Start chatting with Shirley. Type <kbd className="font-utility">@</kbd> to reference workspace files, or <kbd className="font-utility">/</kbd> to invoke a skill.
+        </p>
+      </div>
+    </div>
+  );
+
+  // Composer (with slash / mention popovers and the model selector). Shared by the
+  // centered new-chat flow and normal sessions; the popovers use `absolute bottom-full`
+  // positioned relative to this container, so both must reuse the same container structure.
+  const composerNode = (
+    <div className="relative w-full shrink-0 px-3 pb-3">
+      {slashSearch.open && (
+        <div className="absolute inset-x-3 bottom-full z-30 mb-1">
+          <SkillSlashPopover
+            open={slashSearch.open}
+            query={slashSearch.query}
+            results={slashSearch.results}
+            error={slashSearch.error}
+            selectedIndex={slashSearch.selectedIndex}
+            onSelect={(result) => editorRef.current?.insertSkill(result)}
+            onRetry={() => {}}
+          />
+        </div>
+      )}
+      {!slashSearch.open && mentionSearch.popoverOpen && (
+        <div className="absolute inset-x-3 bottom-full z-30 mb-1">
+          <FileMentionPopover
+            open={mentionSearch.popoverOpen}
+            query={mentionSearch.query}
+            results={mentionSearch.results}
+            loading={mentionSearch.loading}
+            error={mentionSearch.error}
+            selectedIndex={mentionSearch.selectedIndex}
+            onSelect={(result) => editorRef.current?.insertReference(result)}
+            onRetry={mentionSearch.retry}
+            showSearch={false}
+          />
+        </div>
+      )}
+      <AiChatComposer
+        id="shirley-composer"
+        label="Send message"
+        value={stripTokens(input)}
+        placeholder="Message Shirley… (@ to reference files, / to invoke a skill)"
+        busy={busy}
+        onValueChange={() => {}}
+        onSend={() => void send()}
+        onStop={() => void stop()}
+        trailingAction={
+          <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
+        }
+        inputSlot={
+          <MentionEditor
+            ref={editorRef}
+            id="shirley-composer"
+            label="Send message"
+            value={input}
+            references={references}
+            placeholder="Message Shirley… (@ to reference files, / to invoke a skill)"
+            autoFocus
+            search={mentionSearch}
+            slash={slashSearch}
+            onChange={(text, refs) => {
+              setInput(text);
+              setReferences(refs);
+            }}
+            onSubmit={() => void send()}
+          />
+        }
+      />
+    </div>
+  );
 
   return (
     <DesktopChrome
-      title={(activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "新建会话" : "Shirley")}
-      projectName={projects.find((entry) => entry.id === activeProject)?.name}
+      title={(activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
+      projectName={mode === "chat" ? "Chat" : projects.find((entry) => entry.id === activeProject)?.name}
       sidebarCollapsed={sidebarCollapsed}
       canGoBack={navigationHistory.index > 0}
       canGoForward={navigationHistory.index < navigationHistory.entries.length - 1}
@@ -883,9 +1075,10 @@ export function App() {
       onNewChat={() => activeProject ? void newSession(activeProject) : void addProject()}
       onAddProject={() => void addProject()}
     >
-      {/* 左侧 sidebar：NewChat / 置顶 / 项目（多项目 + 会话导航）。 */}
+      {/* Left sidebar: NewChat / pinned / projects (multi-project + session navigation). */}
       <SessionSidebar
         collapsed={sidebarCollapsed}
+        chatProjectId={CHAT_PROJECT_ID}
         onCurrentTitleChange={updateCurrentTitle}
         projects={projects}
         activeProject={activeProject}
@@ -897,15 +1090,32 @@ export function App() {
         onNew={(project) => void newSession(project)}
         onRename={(project, name, title) => void renameSession(project, name, title)}
         onDelete={(project, name) => void deleteSession(project, name)}
+        onMove={(project, name, targetProject) => void moveSession(project, name, targetProject)}
       />
-      {/* 右侧主区：固定宽度居中（对齐 shiwen AiConversationSurface 的 max-w-190 = 760px）。
-          聊天区与输入框都不随窗口拉宽，长文本按阅读舒适宽度换行。 */}
+      {/* Right main area: fixed-width centered (aligned with shiwen AiConversationSurface's max-w-190 = 760px).
+          Neither the chat area nor the input stretches with the window; long text wraps at a comfortable reading width. */}
       <main ref={mainRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
         {view.loading ? (
-          // 历史快照尚未到达：先渲染骨架屏，给用户「正在加载消息记录」的即时反馈。
+          // History snapshot not yet arrived: render a skeleton first, giving the user immediate "loading message history" feedback.
           <div className="min-h-0 flex-1 overflow-hidden">
             <AiConversationSkeleton />
+          </div>
+        ) : isNewChat ? (
+          // Standalone new-chat (Codex-style empty session) flow: welcome content +
+          // centered input + Chat/Work and associated-project switching below. It
+          // automatically degrades to the normal session layout once the first message is sent.
+          <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 overflow-y-auto">
+            {heroNode}
+            {composerNode}
+            <NewChatControls
+              mode={mode}
+              projects={projects}
+              activeProject={activeProject}
+              onSelectMode={(next) => void switchNewChatMode(next)}
+              onSelectProject={(project) => void newSession(project)}
+              onAddProject={() => void addProject()}
+            />
           </div>
         ) : (
         <AiConversationTranscript
@@ -913,24 +1123,7 @@ export function App() {
           conversationKey={activeProject && sessionName ? viewKey(activeProject, sessionName) : "main"}
           viewportRef={transcriptViewportRef}
           extraContentKey={busy ? "busy" : ""}
-          emptyContent={
-            <div className="flex flex-col items-center gap-4 px-4 py-6 text-center sm:py-10">
-              <img
-                src="/brand/shirley-character.png"
-                alt="《Code Geass》中的夏利·菲内特，橙色长发，身穿阿什弗德学园制服"
-                width={768}
-                height={1152}
-                className="h-[clamp(140px,32vh,280px)] w-auto max-w-full object-contain"
-                draggable={false}
-              />
-              <div className="space-y-2">
-                <h1 className="font-display text-title-sm text-ink">Shirley</h1>
-                <p className="text-body-sm text-muted">
-                  开始和 Shirley 对话吧。输入 <kbd className="font-utility">@</kbd> 引用工作区文件，或 <kbd className="font-utility">/</kbd> 调用技能。
-                </p>
-              </div>
-            </div>
-          }
+          emptyContent={heroNode}
           renderMessageContent={(message) =>
             message.role === "assistant" ? (
               <AssistantMessage
@@ -947,87 +1140,31 @@ export function App() {
           }
         />
         )}
-        {error && (
-          <p className="mx-3 mb-1 text-body-sm text-danger-ink" role="alert">
-            {error}
-          </p>
+        {!isNewChat && (
+          <>
+            {error && (
+              <p className="mx-3 mb-1 text-body-sm text-danger-ink" role="alert">
+                {error}
+              </p>
+            )}
+            {/* Task ledger: model-maintained task progress, resident above the input — the most direct signal that "the task is progressing". */}
+            {view.todo && <TaskCard task={view.todo} />}
+            {/* Runtime status line: compressing / context usage. Gives the "process" visible feedback instead of a silent UI. */}
+            <SessionStatusLine
+              compressing={view.compressing}
+              contextUsage={view.contextUsage}
+            />
+            {/* Pending queue: messages submitted early while running, sent automatically once the previous turn ends. */}
+            <PendingQueue
+              turns={view.pending}
+              onRemove={(id) => activeProject && sessionName && removePending(viewKey(activeProject, sessionName), id)}
+            />
+            {composerNode}
+          </>
         )}
-        {/* 任务账本：模型自维护的任务进度，常驻在输入框上方——「任务在推进」最直接的信号。 */}
-        {view.todo && <TaskCard task={view.todo} />}
-        {/* 运行态状态行：压缩中 / 上下文占用。让「过程」有可见反馈，而不是界面静默。 */}
-        <SessionStatusLine
-          compressing={view.compressing}
-          contextUsage={view.contextUsage}
-        />
-        {/* 待发送队列：运行中提前提交的消息，上一轮结束后自动发送。 */}
-        <PendingQueue
-          turns={view.pending}
-          onRemove={(id) => activeProject && sessionName && removePending(viewKey(activeProject, sessionName), id)}
-        />
-        <div className="relative shrink-0 px-3 pb-3">
-          {slashSearch.open && (
-            <div className="absolute inset-x-3 bottom-full z-30 mb-1">
-              <SkillSlashPopover
-                open={slashSearch.open}
-                query={slashSearch.query}
-                results={slashSearch.results}
-                error={slashSearch.error}
-                selectedIndex={slashSearch.selectedIndex}
-                onSelect={(result) => editorRef.current?.insertSkill(result)}
-                onRetry={() => {}}
-              />
-            </div>
-          )}
-          {!slashSearch.open && mentionSearch.popoverOpen && (
-            <div className="absolute inset-x-3 bottom-full z-30 mb-1">
-              <FileMentionPopover
-                open={mentionSearch.popoverOpen}
-                query={mentionSearch.query}
-                results={mentionSearch.results}
-                loading={mentionSearch.loading}
-                error={mentionSearch.error}
-                selectedIndex={mentionSearch.selectedIndex}
-                onSelect={(result) => editorRef.current?.insertReference(result)}
-                onRetry={mentionSearch.retry}
-                showSearch={false}
-              />
-            </div>
-          )}
-          <AiChatComposer
-            id="shirley-composer"
-            label="发送消息"
-            value={stripTokens(input)}
-            placeholder="给 Shirley 发消息…（@ 引用文件，/ 调用技能）"
-            busy={busy}
-            onValueChange={() => {}}
-            onSend={() => void send()}
-            onStop={() => void stop()}
-            trailingAction={
-              <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
-            }
-            inputSlot={
-              <MentionEditor
-                ref={editorRef}
-                id="shirley-composer"
-                label="发送消息"
-                value={input}
-                references={references}
-                placeholder="给 Shirley 发消息…（@ 引用文件，/ 调用技能）"
-                autoFocus
-                search={mentionSearch}
-                slash={slashSearch}
-                onChange={(text, refs) => {
-                  setInput(text);
-                  setReferences(refs);
-                }}
-                onSubmit={() => void send()}
-              />
-            }
-          />
-        </div>
         </section>
-        {/* 对话轨迹：挂在聊天区最外层容器（main）的左侧边缘，hover 预览历史用户轮次。
-            只在左侧留白放得下时显示——窗口放不下就直接隐藏，绝不与聊天内容重合。 */}
+        {/* Minimap: attached to the left edge of the chat area's outermost container (main), hover to preview past user turns.
+            Shown only when the left gutter fits it — hidden outright when the window cannot fit it, never overlapping the chat content. */}
         {minimapFits && view.messages.some((message) => message.role === "user") && (
           <AiConversationMinimap
             messages={view.messages}
@@ -1041,10 +1178,11 @@ export function App() {
 }
 
 /**
- * 把一个事件应用到视图（纯函数）。
+ * Apply an event to the view (pure function).
  *
- * 合并规则对标 TUI `append_streaming_delta`：连续同类型的增量并进同一段，类型一换
- * 就新开一段——渲染顺序天然是 思考 → 正文 → 工具 → 正文 → 思考 → 工具 ……。
+ * Merge rule mirrors the TUI `append_streaming_delta`: consecutive deltas of the same
+ * kind merge into one segment, and a change of kind starts a new segment — so the render
+ * order is naturally reasoning -> content -> tools -> content -> reasoning -> tools ...
  */
 function applyWireEvent(
   view: SessionView,
@@ -1103,12 +1241,13 @@ function applyWireEvent(
       };
     }
     case "todo_updated": {
-      // 任务账本变更：只更新结构化视图，不进消息流——任务卡是独立于 transcript 的
-      // 「当前进度」指示，模型每次调用 `todo` 工具都会刷新它。
+      // Task-ledger change: update only the structured view, not the message stream — the
+      // task card is a "current progress" indicator independent of the transcript, and
+      // every `todo` tool call by the model refreshes it.
       return { ...view, todo: event.todo };
     }
     case "compression_started": {
-      // 压缩期间给状态行一个明确信号（对标 TUI 的「正在压缩上下文」）。
+      // Give the status line an explicit signal during compression (mirrors the TUI's "Compressing context").
       return { ...view, compressing: true };
     }
     case "compression_finished": {
@@ -1208,6 +1347,7 @@ function updateTool(
       summary: event.output.slice(0, 200),
       result_json: event.output,
       error: event.ok ? null : event.output,
+      error_kind: event.error_kind,
     };
     next[segmentIndex] = { ...segment, executions };
   }
@@ -1218,11 +1358,13 @@ function updateTool(
 }
 
 /**
- * 从会话快照重建视图（订阅一个已积累历史的会话时用）。
+ * Rebuild the view from a session snapshot (used when subscribing to a session with
+ * accumulated history).
  *
- * 快照是 `ItemWire` 序列（message / tools）；两条 user 消息之间的所有 assistant /
- * 工具条目归并成**同一轮** assistant（与实时流的"一轮一个 assistantId"口径一致）。
- * 返回视图 + 最后一个 assistant 轮次 id（供后续增量落点）。
+ * The snapshot is an `ItemWire` sequence (message / tools); all assistant / tool entries
+ * between two user messages are merged into the **same turn** assistant (consistent with
+ * the live stream's "one assistantId per turn"). Returns the view + the last assistant
+ * turn id (as the landing spot for subsequent deltas).
  */
 function viewFromSnapshot(snapshot: SessionSnapshot): {
   view: SessionView;
@@ -1242,8 +1384,8 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
     return currentAssistantId;
   };
 
-  // 保序 + 相邻同类合并：连续 content / tools 段并成一段，与实时流
-  // （appendSegment）同一口径。跨类不合并，时间顺序不变。
+  // Preserve order + merge adjacent same-kind: consecutive content / tools segments merge
+  // into one, consistent with the live stream (appendSegment). No cross-kind merging; time order preserved.
   const pushSegment = (id: string, segment: AiSegment): void => {
     const list = turnSegments[id];
     const last = list.at(-1);
@@ -1260,7 +1402,7 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
 
   for (const item of snapshot.items) {
     if (item.kind === "compact" || (item.kind === "message" && item.role === "summary")) {
-      // 与实时 compact 事件保持相同投影；兼容旧 summary 快照。
+      // Same projection as the live compact event; also compatible with old summary snapshots.
       const id = ensureAssistant();
       pushSegment(id, { kind: "compact", text: item.content });
       continue;
@@ -1271,7 +1413,7 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
         currentAssistantId = null;
         continue;
       }
-      // assistant / system / error 落到 assistant 轮次。
+      // assistant / system / error land on the assistant turn.
       const id = ensureAssistant();
       pushSegment(id, { kind: "content", text: item.content });
       const message = messages.find((m) => m.id === id);

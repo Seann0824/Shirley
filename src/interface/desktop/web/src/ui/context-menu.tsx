@@ -12,24 +12,26 @@ import { createPortal } from "react-dom";
 import { cn } from "./utils";
 
 /**
- * 轻量右键菜单（context menu）——刻意不引入新依赖。
+ * Lightweight context menu — deliberately avoids new dependencies.
  *
- * 为什么自建：左侧栏的操作（会话置顶 / 重命名 / 删除，项目重命名 / 归档 / 恢复、
- * 新建项目）希望**默认隐藏、右键才出现**，而不是每个条目挂一排悬停按钮。Radix 没有
- * 内置 context-menu，装 `@radix-ui/react-context-menu` 会新增依赖与体积；这里用
- * `react-dom` 的 `createPortal` 实现最小可用版：`<ContextMenu>` 包住触发器，在触发器
- * 上右键即在光标处弹出 `menu`。
+ * Why build our own: sidebar actions (session pin / rename / delete, project rename /
+ * archive / restore, new project) should be **hidden by default and appear on right-click**,
+ * rather than each row carrying a row of hover buttons. Radix has no built-in context menu,
+ * and installing `@radix-ui/react-context-menu` would add a dependency and weight; here we
+ * implement a minimal usable version with `react-dom`'s `createPortal`: `<ContextMenu>`
+ * wraps the trigger, and right-clicking the trigger pops up `menu` at the cursor.
  *
- * 交互：右键打开 → 点菜单项执行并关闭 / 点空白或 Esc 关闭 / 窗口滚动或 resize 关闭
- * （避免菜单与锚点错位）。菜单贴边时自动回收到视口内。
+ * Interaction: right-click to open -> click a menu item to run and close / click blank space
+ * or press Esc to close / window scroll or resize to close (avoiding the menu and anchor
+ * drifting apart). When the menu would overflow the edge, it is pulled back into the viewport.
  */
 
 type MenuState = { x: number; y: number } | null;
 
-/** 供菜单项在触发后关闭菜单。 */
+/** Lets a menu item close the menu after it is triggered. */
 const CloseCtx = createContext<() => void>(() => {});
 
-/** 菜单项：`tone="danger"` 用于删除这类破坏性操作。 */
+/** Menu item: `tone="danger"` is for destructive actions like delete. */
 export function ContextMenuItem({
   onSelect,
   children,
@@ -43,7 +45,7 @@ export function ContextMenuItem({
   icon?: ReactNode;
   tone?: "default" | "danger";
   disabled?: boolean;
-  /** 默认点选后关闭菜单；二次确认这类需要留在菜单内的项设 `false`。 */
+  /** Closes the menu after selection by default; set `false` for items that must stay in the menu, like double confirmation. */
   closeOnSelect?: boolean;
 }) {
   const close = useContext(CloseCtx);
@@ -75,15 +77,15 @@ export function ContextMenuSeparator() {
 }
 
 /**
- * 包住触发器：在 `children` 上右键即打开 `menu`。`menu` 可传函数
- * `(close) => ReactNode`，需要手动关闭（如二次确认）时用。
+ * Wraps the trigger: right-clicking `children` opens `menu`. `menu` may be a function
+ * `(close) => ReactNode`, used when you need to close manually (e.g. double confirmation).
  */
 export function ContextMenu({
   children,
   menu,
   className,
 }: {
-  /** 普通节点 = 仅右键触发；函数 = `(open) => node`，可让自定义按钮调用 `open(event)` 打开菜单。 */
+  /** A plain node = right-click only; a function = `(open) => node`, letting a custom button call `open(event)` to open the menu. */
   children: ReactNode | ((open: (event: React.MouseEvent) => void) => ReactNode);
   menu: ReactNode | ((close: () => void) => ReactNode);
   className?: string;
@@ -101,7 +103,7 @@ export function ContextMenu({
 
   const close = useCallback(() => setPos(null), []);
 
-  // 关闭：Esc / 滚动 / 缩放（点空白由遮罩层处理）。
+  // Close: Esc / scroll / zoom (clicking blank space is handled by the overlay).
   useEffect(() => {
     if (!pos) return;
     const onKey = (event: KeyboardEvent) => {
@@ -109,7 +111,7 @@ export function ContextMenu({
     };
     window.addEventListener("keydown", onKey);
     window.addEventListener("resize", close);
-    // capture 阶段监听滚动，任何祖先滚动都能收到。
+    // Listen for scroll in the capture phase so any ancestor scroll is caught.
     window.addEventListener("scroll", close, true);
     return () => {
       window.removeEventListener("keydown", onKey);
@@ -118,7 +120,7 @@ export function ContextMenu({
     };
   }, [pos, close]);
 
-  // 贴边回收：渲染后量一次菜单尺寸，超出视口就往上/往左挪。
+  // Edge pull-back: measure the menu size once after render and shift up/left if it overflows the viewport.
   useLayoutEffect(() => {
     if (!pos || !menuRef.current) return;
     const rect = menuRef.current.getBoundingClientRect();

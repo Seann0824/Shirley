@@ -1,31 +1,31 @@
-**Shirley 技术方案 · 测试与基准（P1）**
+**Shirley technical design · Testing and benchmarks (P1)**
 
-**一、现状**
+**1. Current state**
 
-全仓库 3 个测试，全部在 `read` 工具。SDK 侧 0 测试。而 SDK 里最该测的恰恰是"语义微妙、改错会静默出错"的地方：
+The whole repository has 3 tests, all in the `read` tool. The SDK side has 0 tests. Yet the parts of the SDK that most need testing are precisely the "subtle semantics, silently wrong when changed" spots:
 
-- `Usage` 的 `Option` 语义（"未上报" ≠ 0）
-- `Usage::Add` 的"保留已知一侧"合并逻辑
-- `cache_hit_rate` 的 `None` 分支
-- `active_messages` 的 summary 切片
-- 压缩阈值的整数比较
+- the `Option` semantics of `Usage` ("not reported" != 0)
+- the "keep the known side" merge logic of `Usage::Add`
+- the `None` branch of `cache_hit_rate`
+- the summary slicing of `active_messages`
+- the integer comparison of the compaction threshold
 
-这些一旦被改坏，UI 上的数字会安静地变错，不会报错。
+Once these are broken, the numbers in the UI quietly go wrong without raising an error.
 
-**二、测试分层**
+**2. Test layers**
 
-| 层 | 测什么 | 工具 |
+| Layer | What it tests | Tool |
 | --- | --- | --- |
-| 单元 | Usage、Message 编解码、参数 schema、宏展开 | `#[test]` / `trybuild` |
-| 契约 | 协议 codec 的请求/响应转换 | 固定 JSON 快照 |
-| 集成 | ReAct 循环、压缩、取消、重试 | 假模型服务 |
-| 基准 | 缓存命中率 | 真实 API + 阈值 |
+| Unit | Usage, Message encode/decode, argument schema, macro expansion | `#[test]` / `trybuild` |
+| Contract | Request/response conversion of the protocol codec | Fixed JSON snapshots |
+| Integration | ReAct loop, compaction, cancellation, retry | Fake model service |
+| Benchmark | Cache hit rate | Real API + threshold |
 
-**三、单元测试（优先）**
+**3. Unit tests (priority)**
 
-**3.1 `Usage` 语义**
+**3.1 `Usage` semantics**
 
-这是最该先写的一组，因为它承载了作者刻意的设计决策：
+This is the first group that should be written, because it carries the author's deliberate design decisions:
 
 ```rust
 #[test]
@@ -33,7 +33,7 @@ fn adding_unreported_cache_does_not_become_zero() {
     let a = Usage { input_tokens: 100, cached_input_tokens: None, ..Default::default() };
     let b = Usage { input_tokens: 100, cached_input_tokens: Some(50), ..Default::default() };
     let sum = a + b;
-    // 不能变成 Some(50) 之外的任何东西；且不能因为 a 是 None 就丢掉 b
+    // must not become anything other than Some(50); and must not drop b just because a is None
     assert_eq!(sum.cached_input_tokens, Some(50));
     assert_eq!(sum.input_tokens, 200);
 }
@@ -52,30 +52,30 @@ fn cache_hit_rate_is_none_when_reported_zero_input() {
         cache_reported_input_tokens: Some(0),
         ..Default::default()
     };
-    assert_eq!(usage.cache_hit_rate(), None); // 分母为 0 不返回 NaN
+    assert_eq!(usage.cache_hit_rate(), None); // a zero denominator does not return NaN
 }
 ```
 
-**3.2 `active_messages` 切片**
+**3.2 `active_messages` slicing**
 
-压缩是"不可逆"的，`start_index` 语义容易改坏：
+Compaction is "irreversible", and the `start_index` semantics are easy to break:
 
 ```rust
 #[test]
 fn active_messages_keeps_leading_system_and_latest_summary() {
     // System, User, Assistant, ContextSummary, User, Assistant
-    // 期望：System + ContextSummary 及其之后
+    // expected: System + ContextSummary and everything after it
 }
 
 #[test]
 fn active_messages_uses_last_summary_when_multiple() {
-    // 两个 ContextSummary，只从最后一个开始
+    // two ContextSummary, start only from the last one
 }
 ```
 
-**3.3 压缩阈值**
+**3.3 Compaction threshold**
 
-`should_schedule_compression` 用整数比较避免浮点问题，要守住边界：
+`should_schedule_compression` uses an integer comparison to avoid floating-point issues; the boundary must be guarded:
 
 ```rust
 #[test]
@@ -86,19 +86,19 @@ fn compression_triggers_at_exactly_eighty_percent() {
 }
 ```
 
-**3.4 宏展开**
+**3.4 Macro expansion**
 
-用 `trybuild` 锁定宏的编译期约束（`Agent.md` 里列的踩坑点）：
+Use `trybuild` to lock down the macro's compile-time constraints (the pitfalls listed in `Agent.md`):
 
-- 缺少 `#[param(description)]` → 编译失败
-- 参数解构 → 编译失败
-- 函数名与 mod 不同层 → 编译失败
+- missing `#[param(description)]` -> compile failure
+- parameter destructuring -> compile failure
+- function name and mod at different levels -> compile failure
 
-同时测 `Arguments` 的 `deny_unknown_fields` 是否生效。
+Also test whether `Arguments`'s `deny_unknown_fields` takes effect.
 
-**四、契约测试**
+**4. Contract tests**
 
-协议 codec 的输入输出用固定 JSON 快照，避免每次重构都靠肉眼看：
+Use fixed JSON snapshots for the protocol codec's inputs and outputs, so that every refactor does not rely on eyeballing:
 
 ```mermaid
 graph TD
@@ -110,57 +110,57 @@ graph TD
     CC --> F5["response_with_usage.json"]
 ```
 
-用 `insta` 或手写快照对比。重点覆盖 `Usage` 的 `prompt_tokens_details.cached_tokens` 缺失/存在两种情况。
+Use `insta` or hand-written snapshot comparison. Focus on covering both the missing and present cases of `Usage`'s `prompt_tokens_details.cached_tokens`.
 
-**五、集成测试：假模型服务**
+**5. Integration tests: fake model service**
 
-需要一个可控的假模型，才能测循环、重试、取消：
+A controllable fake model is needed to test the loop, retry, and cancellation:
 
 ```rust
 // crates/shirley-agent-sdk/tests/support/mock_server.rs
 pub struct MockModel {
-    // 按顺序返回预设响应
+    // return preset responses in order
     responses: Vec<ModelResponse>,
-    // 记录收到的请求，用于断言 prefix 稳定性
+    // record received requests, to assert prefix stability
     received: Arc<Mutex<Vec<Value>>>,
 }
 ```
 
-可以基于 `wiremock` 或最小 `axum` 实现。要覆盖的场景：
+It can be implemented on top of `wiremock` or a minimal `axum`. Scenarios to cover:
 
-1. 正常一轮：user → assistant（无工具）→ Finished
-2. 工具调用：assistant(tool_calls) → tool → assistant → Finished
-3. 多工具并发：验证 `FuturesUnordered` 的结果顺序与 `tool_call_id` 对应
-4. 无限工具循环：验证 `max_steps` 生效（见 `runtime-hardening.md`）
-5. 429 后成功：验证重试
-6. 压缩失败：验证降级不中断
-7. 取消：验证 `StopReason::Cancelled` 且历史完整
+1. A normal round: user -> assistant (no tools) -> Finished
+2. Tool call: assistant(tool_calls) -> tool -> assistant -> Finished
+3. Multiple tools concurrently: verify the result order of `FuturesUnordered` matches `tool_call_id`
+4. Infinite tool loop: verify `max_steps` takes effect (see `runtime-hardening.md`)
+5. Success after 429: verify retry
+6. Compaction failure: verify the degradation does not abort
+7. Cancellation: verify `StopReason::Cancelled` and a complete history
 
-**六、缓存命中率基准**
+**6. Cache hit-rate benchmark**
 
-`plan.md` 明确要求过这件事，一直没做：
+`plan.md` explicitly asked for this and it has never been done:
 
-> 其实，就是用一些简单的case，然后去跑一些 api 接口测试一下缓存命中多少。设置一个阈值。
+> Actually, it is just using some simple cases, then running some API endpoints to test how much is cached. Set a threshold.
 
-方案：一个独立的、默认 `#[ignore]` 的集成测试，读环境变量拿真实 key，跑固定序列：
+Plan: a standalone integration test, `#[ignore]` by default, that reads the real key from an environment variable and runs a fixed sequence:
 
-1. 第一轮：长 system prompt + 工具定义 → 记录 `cached_input_tokens`（预期接近 0）
-2. 第二轮：同一前缀 + 新 user 消息 → 记录命中率（预期高）
-3. 断言第二轮命中率 > 阈值（建议先测出实际值再定，比如 0.5）
+1. First round: long system prompt + tool definitions -> record `cached_input_tokens` (expected close to 0)
+2. Second round: same prefix + a new user message -> record the hit rate (expected high)
+3. Assert the second round's hit rate > threshold (suggest measuring the actual value first, e.g. 0.5)
 
-关键：**任何会改动请求前缀的代码都要重跑这个基准**。`Agent.md` 第七节第一条就是"别破坏 prefix 稳定性"，这个基准是那条规则的执行手段。
+Key: **any code that changes the request prefix must rerun this benchmark**. The first item of section 7 of `Agent.md` is "do not break prefix stability", and this benchmark is the enforcement mechanism for that rule.
 
-**七、性能**
+**7. Performance**
 
-流式落地后，`MessageCache` 每帧重建会变成瓶颈（现在是每来一条消息整体置 `None`，长会话 O(n²)）。需要：
+After streaming lands, rebuilding `MessageCache` every frame becomes a bottleneck (currently it sets the whole thing to `None` for every incoming message, which is O(n²) for long sessions). Needed:
 
-- 改成增量追加：新消息只渲染新增部分，追加到 `lines` 与 `row_offsets`。
-- `visible_lines` 去掉每帧 `.to_vec()` 克隆。
-- 顺带修 `row_offsets` 的换行估算与 ratatui `Wrap` 不一致的问题（见 `roadmap.md` 提到的滚动偏移）。
+- Change it to incremental appending: only render the newly added part of a new message and append it to `lines` and `row_offsets`.
+- Remove the per-frame `.to_vec()` clone in `visible_lines`.
+- Along the way, fix the mismatch between `row_offsets`'s line-wrap estimation and ratatui's `Wrap` (see the scroll offset mentioned in `roadmap.md`).
 
-**八、CI**
+**8. CI**
 
-新增 `.github/workflows/ci.yml`：
+Add `.github/workflows/ci.yml`:
 
 ```yaml
 - cargo fmt --check
@@ -168,11 +168,11 @@ pub struct MockModel {
 - cargo test --all
 ```
 
-当前 36 条 clippy 警告（`shirley-agent-sdk` 32 条 + 应用层 4 条）要么修掉，要么显式 `allow` 并写明原因。`-D warnings` 是让"顺手能修的"不再堆积的唯一办法。
+The current 36 clippy warnings (`shirley-agent-sdk` 32 + application layer 4) should either be fixed or explicitly `allow`ed with a written reason. `-D warnings` is the only way to stop "things that could be fixed in passing" from piling up.
 
-**九、验收**
+**9. Acceptance**
 
-1. `cargo test --all` 覆盖 Usage 语义、压缩切片、阈值边界。
-2. 假模型集成测试覆盖 7 个场景。
-3. 缓存命中率基准有可执行脚本与阈值。
-4. CI 绿灯，`clippy -D warnings` 通过。
+1. `cargo test --all` covers Usage semantics, compaction slicing, and threshold boundaries.
+2. The fake-model integration tests cover 7 scenarios.
+3. The cache hit-rate benchmark has an executable script and a threshold.
+4. CI is green and `clippy -D warnings` passes.

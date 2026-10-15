@@ -27,20 +27,20 @@ import {
 } from "./toolErrorUtils";
 
 const TOOL_LABELS: Record<string, string> = {
-  bash: "执行命令",
-  read_file: "读取文件",
-  web_search: "搜索互联网",
-  todo: "更新任务",
+  bash: "Run command",
+  read_file: "Read file",
+  web_search: "Search the web",
+  todo: "Update tasks",
 };
 
 type ToolStatus = "pending" | "running" | "complete" | "error" | "rejected";
 
 const STATUS_LABELS: Record<ToolStatus, string> = {
-  pending: "待批准",
-  running: "进行中",
-  complete: "已完成",
-  error: "未完成",
-  rejected: "已拒绝",
+  pending: "Awaiting approval",
+  running: "In progress",
+  complete: "Completed",
+  error: "Incomplete",
+  rejected: "Rejected",
 };
 
 function StatusIcon({ status }: { status: ToolStatus }) {
@@ -60,7 +60,7 @@ function ToolErrorDetail({
 }) {
   const [expanded, setExpanded] = useState(false);
   const raw = rawToolErrorText(execution);
-  if (!raw || errorKind === "approval") return null;
+  if (!raw) return null;
   return (
     <div className="px-4 pb-3 md:px-5">
       <Button
@@ -71,7 +71,7 @@ function ToolErrorDetail({
         onClick={() => setExpanded((value) => !value)}
         aria-expanded={expanded}
       >
-        {expanded ? "收起详情" : "详情"}
+        {expanded ? "Hide details" : "Details"}
         <ChevronDown
           className={cn("transition-transform duration-150", expanded && "rotate-180")}
           size={14}
@@ -118,7 +118,7 @@ export function AiToolExecutionCard({
   const summary = failed
     ? friendlyToolError(errorKind ?? "generic")
     : execution.summary ||
-      (pending ? "批准后 Shirley 会立即执行。" : running ? "Shirley 正在操作…" : "操作已完成");
+      (pending ? "Shirley will run it as soon as you approve." : running ? "Shirley is working..." : "Action completed");
 
   const header = (
     <CardHeader
@@ -136,7 +136,7 @@ export function AiToolExecutionCard({
           <Badge variant={status === "error" ? "destructive" : "secondary"}>
             {STATUS_LABELS[status]}
           </Badge>
-          {resolved && <Badge variant="secondary">已解决</Badge>}
+          {resolved && <Badge variant="secondary">Resolved</Badge>}
         </div>
         <CardDescription className="mt-1 leading-relaxed">
           {summary}
@@ -149,7 +149,7 @@ export function AiToolExecutionCard({
     <Card
       className={cn("my-3 gap-0 overflow-hidden py-0 shadow-none", className)}
       data-ai-tool={execution.tool_name}
-      aria-label={`${TOOL_LABELS[execution.tool_name] || execution.tool_name}执行结果`}
+      aria-label={`${TOOL_LABELS[execution.tool_name] || execution.tool_name} result`}
     >
       {header}
       {failed && errorKind && <ToolErrorDetail execution={execution} errorKind={errorKind} />}
@@ -163,7 +163,7 @@ export function AiToolExecutionCard({
               disabled={deciding}
               onClick={() => onDecision(execution, "approve")}
             >
-              允许执行
+              Allow
             </Button>
             <Button
               type="button"
@@ -172,7 +172,7 @@ export function AiToolExecutionCard({
               disabled={deciding}
               onClick={() => onDecision(execution, "reject")}
             >
-              拒绝
+              Reject
             </Button>
           </CardFooter>
         </>

@@ -1,27 +1,44 @@
 import type { AiToolExecution } from "@/types/ai";
 
-export type ToolErrorKind = "timeout" | "approval" | "missing_context" | "generic";
+/// Mirrors the SDK's `ErrorKind` (see `types/wire.ts`), plus `generic` for the
+/// "no structured kind available" fallback (e.g. a cancellation synthesized by the UI).
+export type ToolErrorKind =
+  | "transport"
+  | "rate_limited"
+  | "server_error"
+  | "bad_request"
+  | "unsupported"
+  | "tool_failure"
+  | "internal"
+  | "generic";
 
+/**
+ * Classify a failed execution by the stable `error_kind` the SDK reported on the
+ * `tool_finished` event. We deliberately do **not** match on the error text: the text
+ * is display-only and may change (or be localized), while the kind is a stable contract.
+ */
 export function classifyToolError(execution: AiToolExecution): ToolErrorKind {
-  const text = `${execution.error ?? ""} ${execution.summary ?? ""}`.toUpperCase();
-  if (text.includes("APPROVAL_REQUIRED")) return "approval";
-  if (text.includes("TOOL_TIMEOUT") || text.includes("超时")) return "timeout";
-  if (text.includes("MISSING_USER_CONTEXT") || text.includes("缺少") || text.includes("上下文")) {
-    return "missing_context";
-  }
-  return "generic";
+  return execution.error_kind ?? "generic";
 }
 
 export function friendlyToolError(kind: ToolErrorKind): string {
   switch (kind) {
-    case "timeout":
-      return "这个工具响应较慢，已自动跳过";
-    case "approval":
-      return "需要你确认后才能继续";
-    case "missing_context":
-      return "缺少必要的上下文信息";
+    case "transport":
+      return "The tool couldn't reach the network and was skipped automatically";
+    case "rate_limited":
+      return "The tool was rate limited and was skipped automatically";
+    case "server_error":
+      return "The tool's service returned an error and it was skipped automatically";
+    case "bad_request":
+      return "The tool call was malformed and was skipped automatically";
+    case "unsupported":
+      return "The tool isn't available here and was skipped automatically";
+    case "tool_failure":
+      return "The tool ran into a problem and was skipped automatically";
+    case "internal":
+      return "The tool hit an internal error and was skipped automatically";
     case "generic":
-      return "工具执行遇到问题，已自动跳过";
+      return "The tool ran into a problem and was skipped automatically";
   }
 }
 
@@ -56,30 +73,25 @@ export type ToolRenderItem =
   { kind: "single"; execution: AiToolExecution } | AggregatedToolErrorGroup;
 
 /**
- * Group consecutive, non-approval failed tool executions into one aggregated
- * item. Approval-required failures stay individual because they need user
- * action. Pending, running, and complete executions always stay individual.
+ * Group consecutive failed tool executions into one aggregated item. Pending, running,
+ * and complete executions always stay individual.
  */
 export function aggregateToolExecutions(executions: readonly AiToolExecution[]): ToolRenderItem[] {
   const items: ToolRenderItem[] = [];
   let index = 0;
   while (index < executions.length) {
     const execution = executions[index];
-    const isFailed = execution.status === "error";
-    const errorKind = isFailed ? classifyToolError(execution) : null;
-    const canAggregate = isFailed && errorKind !== "approval";
-    if (!canAggregate) {
+    if (execution.status !== "error") {
       items.push({ kind: "single", execution });
       index += 1;
       continue;
     }
+    const errorKind = classifyToolError(execution);
     const group: AiToolExecution[] = [execution];
     let next = index + 1;
     while (next < executions.length) {
       const candidate = executions[next];
       if (candidate.status !== "error") break;
-      const candidateKind = classifyToolError(candidate);
-      if (candidateKind === "approval") break;
       group.push(candidate);
       next += 1;
     }
@@ -88,7 +100,7 @@ export function aggregateToolExecutions(executions: readonly AiToolExecution[]):
         kind: "aggregated-error",
         key: `aggregated:${group[0].id}:${group.length}`,
         executions: group,
-        errorKind: errorKind!,
+        errorKind,
       });
     } else {
       items.push({ kind: "single", execution: group[0] });

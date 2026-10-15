@@ -1,67 +1,68 @@
-# Shirley 技术方案 · 插件与插件市场（详细设计）
+# Shirley technical design · Plugins and plugin marketplace (detailed design)
 
-> 配套文档：`docs/plugin-marketplace.md`（方向与决策）。本文把它落到**可实现的接口、类型、
-> 接线、数据流、测试**。**状态：设计（未落地）**。SDK 零改动是硬约束（与 skills / todo /
-> memory 同款）。
+> Companion document: `docs/plugin-marketplace.md` (direction and decisions). This document lands it
+> into **implementable interfaces, types, wiring, data flow, and tests**. **Status: design (not
+> landed)**. Zero SDK changes is a hard constraint (same as skills / todo / memory).
 >
-> 阅读顺序：先看第一节的「一张图 + 一个竖切」，再看对应章节。
+> Reading order: first look at section 1's "one diagram + one vertical slice", then the corresponding
+> chapters.
 
 ---
 
-## 一、总览：一条竖切 + 分层
+## 1. Overview: one vertical slice + layers
 
-**目标竖切（P0+P1，本文主要交付物）**：
+**Target vertical slice (P0+P1, the main deliverable of this document)**:
 
 ```
-本地插件目录 my-plugin/
+local plugin directory my-plugin/
   ├── shirley-plugin.json      # manifest
   ├── skills/weather/SKILL.md  # kind=skill
-  └── mcp.json                 # kind=mcp（stdio server）
+  └── mcp.json                 # kind=mcp (stdio server)
 
-/plugin add ./my-plugin   →  导入 → 归一化 → 注册
-   ├── skill  → SkillCatalog 多一条 → 每轮注入 Tier1 目录
-   └── mcp    → 起 stdio server → tools/list → 每个 tool 包成 impl Tool → ToolManager
+/plugin add ./my-plugin   →  import → normalize → register
+   ├── skill  → one more entry in SkillCatalog → inject the Tier1 catalog each round
+   └── mcp    → start the stdio server → tools/list → wrap each tool as impl Tool → ToolManager
 ```
 
-模型调 `weather`（MCP 工具）能跑通、能调 `activate_skill("weather")` 拿到指令 ——
-**这条打通，市场只是它的 UI**。
+The model calling `weather` (an MCP tool) works, and `activate_skill("weather")` gets the
+instructions -- **once this is through, the marketplace is just its UI**.
 
-**分层（沿用仓库既有范式）**：
+**Layers (following the repository's existing paradigm)**:
 
 ```
-应用层 src/plugins/（本文新增，与 src/skills/ 平级）
-├── mod.rs          # 门面：PluginHost / 重导出
-├── manifest.rs     # shirley-plugin.json 解析（宽容）
-├── model.rs        # 归一化 Plugin 模型（kind 枚举）
-├── discovery.rs    # 扫插件目录 / git 源
-├── registry.rs     # 已启用插件登记（plugins.json 读写 + lock）
-├── importer/       # 适配层：native / claude_code / codex / mcpb
-├── mcp/            # MCP client 子系统（transport / client / tool）
-└── wire.rs         # bootstrap 接线：把归一化模型变成「skill 列表 + 工具工厂 + 命令候选」
+application layer src/plugins/ (new in this document, at the same level as src/skills/)
+├── mod.rs          # facade: PluginHost / re-exports
+├── manifest.rs     # shirley-plugin.json parsing (lenient)
+├── model.rs        # the normalized Plugin model (kind enum)
+├── discovery.rs    # scan plugin directories / git sources
+├── registry.rs     # enabled-plugin registration (plugins.json read/write + lock)
+├── importer/       # adapter layer: native / claude_code / codex / mcpb
+├── mcp/            # MCP client subsystem (transport / client / tool)
+└── wire.rs         # bootstrap wiring: turn the normalized model into "skill list + tool factory + command candidates"
 ```
 
-SDK（`crates/shirley-agent-sdk/`）**不动**。插件注册复用两个既有接缝：
-`ToolManager::register`（工具）与 `SkillCatalog` / `SkillContextProvider`（skill）。
+The SDK (`crates/shirley-agent-sdk/`) is **untouched**. Plugin registration reuses two existing
+seams: `ToolManager::register` (tools) and `SkillCatalog` / `SkillContextProvider` (skills).
 
 ---
 
-## 二、归一化模型（`src/plugins/model.rs`）
+## 2. Normalized model (`src/plugins/model.rs`)
 
 ```rust
-/// 一个已导入的插件（归一化后）。所有 kind 都是「声明」，注册发生在后面。
+/// An imported plugin (after normalization). Every kind is a "declaration"; registration happens later.
 #[derive(Debug, Clone)]
 pub struct Plugin {
-    /// 插件名（manifest.name；冲突时由 registry 加后缀）。
+    /// Plugin name (manifest.name; the registry adds a suffix on collision).
     pub name: String,
     pub version: String,
     pub description: Option<String>,
-    /// 插件根目录（本地目录 / git checkout 后的目录）。
+    /// Plugin root directory (local directory / the directory after a git checkout).
     pub root: PathBuf,
-    /// 来源（用于 lock 与展示）。
+    /// Source (for lock and display).
     pub source: PluginSource,
-    /// 各 kind 的清单（导入器填）。
+    /// The manifests of each kind (filled by the importer).
     pub capabilities: Capabilities,
-    /// 声明的权限（**只记录不强制**，见第八节）。
+    /// Declared permissions (**recorded only, not enforced**, see section 8).
     pub permissions: Vec<Permission>,
 }
 
@@ -71,22 +72,22 @@ pub enum PluginSource {
     Git { url: String, rev: String },
 }
 
-/// 各 kind 的清单。每个都是「插件根下的相对路径」，注册器据此去读。
+/// The manifest of each kind. Each is a "relative path under the plugin root"; the registrar reads it accordingly.
 #[derive(Debug, Clone, Default)]
 pub struct Capabilities {
-    pub skills: Vec<PathBuf>,      // 含 SKILL.md 的目录
-    pub commands: Vec<PathBuf>,    // *.md slash 命令
-    pub agents: Vec<PathBuf>,      // 子 agent *.md（后置）
-    pub mcp: Vec<McpServerDecl>,   // MCP server 声明
-    pub ui: Vec<UiRendererDecl>,   // UI 渲染器声明（后置，见第七节）
+    pub skills: Vec<PathBuf>,      // directories containing SKILL.md
+    pub commands: Vec<PathBuf>,    // *.md slash commands
+    pub agents: Vec<PathBuf>,      // sub-agent *.md (deferred)
+    pub mcp: Vec<McpServerDecl>,   // MCP server declarations
+    pub ui: Vec<UiRendererDecl>,   // UI renderer declarations (deferred, see section 7)
 }
 
-/// MCP server 声明（归一化自 .mcp.json / config.toml / manifest）。
+/// MCP server declaration (normalized from .mcp.json / config.toml / manifest).
 #[derive(Debug, Clone)]
 pub struct McpServerDecl {
     pub name: String,
     pub transport: McpTransport,
-    /// 需要用户提供但未配置的键（manifest 的 userConfig 归一化而来）。
+    /// Keys that the user must provide but are not configured (normalized from the manifest's userConfig).
     pub config_required: Vec<ConfigField>,
 }
 
@@ -97,24 +98,25 @@ pub enum McpTransport {
 }
 ```
 
-**设计要点**：
+**Design points**:
 
-- **所有路径存「相对插件根」**，不存绝对路径 —— 插件移动 / git checkout 位置变化后不失效。
-  注册时用 `plugin.root.join(rel)` 解析。
-- `Capabilities` 用 `Vec` 而非 `Option`，空 = 无该类能力，省去 `Option` 判断。
-- `PluginSource::Git` 带 `rev`（commit SHA），是 lock 的内容指纹来源。
+- **All paths store "relative to the plugin root"**, not absolute paths -- so they do not break when
+  the plugin moves / the git checkout location changes. Resolve at registration time with
+  `plugin.root.join(rel)`.
+- `Capabilities` uses `Vec` rather than `Option`; empty = no such capability, saving `Option` checks.
+- `PluginSource::Git` carries `rev` (commit SHA), the source of the lock's content fingerprint.
 
 ---
 
-## 三、manifest（`src/plugins/manifest.rs`）
+## 3. Manifest (`src/plugins/manifest.rs`)
 
-**文件**：`shirley-plugin.json`（插件根）。
+**File**: `shirley-plugin.json` (the plugin root).
 
 ```json
 {
   "name": "flight",
   "version": "1.0.0",
-  "description": "航班查询 + 航线地图",
+  "description": "Flight lookup + route map",
   "author": { "name": "Shirley" },
   "capabilities": {
     "skills": ["skills/"],
@@ -128,35 +130,37 @@ pub enum McpTransport {
 }
 ```
 
-**解析规则（对齐 `skills/parse.rs` 的宽容哲学）**：
+**Parsing rules (aligned with `skills/parse.rs`'s lenient philosophy)**:
 
-| 情况 | 处理 |
+| Case | Handling |
 | --- | --- |
-| 缺 `shirley-plugin.json` | 视为**约定目录插件**：`skills/` `commands/` `mcp.json` 存在即收（兼容 Claude Code 风格） |
-| `name` 缺失 | 用目录名（与 skill 名取目录名同款） |
-| `version` 缺失 | `"0.0.0"`；lock 时用 `source.rev` 兜底 |
-| `capabilities` 缺失 | 回退约定目录自动发现 |
-| 未知键 | 宽容忽略（`#[serde(default)]`，不 `deny_unknown_fields`） |
-| JSON 语法错误 | 记 warn、跳过该插件（不拖垮其它） |
+| Missing `shirley-plugin.json` | treat as a **convention-directory plugin**: if `skills/` `commands/` `mcp.json` exist, accept them (compatible with the Claude Code style) |
+| Missing `name` | use the directory name (the same as a skill name taking the directory name) |
+| Missing `version` | `"0.0.0"`; fall back to `source.rev` in the lock |
+| Missing `capabilities` | fall back to convention-directory auto-discovery |
+| Unknown keys | leniently ignored (`#[serde(default)]`, no `deny_unknown_fields`) |
+| JSON syntax error | log a warn, skip that plugin (do not drag down the others) |
 
-**为什么宽容**：兼容是核心目标。外来格式千奇百怪，解析器必须「能救则救」。
+**Why lenient**: compatibility is a core goal. Foreign formats vary wildly, and the parser must "save
+what it can".
 
 ---
 
-## 四、发现与登记（`discovery.rs` + `registry.rs`）
+## 4. Discovery and registration (`discovery.rs` + `registry.rs`)
 
-### 4.1 发现位置
+### 4.1 Discovery locations
 
-| 层级 | 路径 | 说明 |
+| Level | Path | Description |
 | --- | --- | --- |
-| 项目级 | `<root>/.shirley/plugins/<name>/` | 随仓库走 |
-| 用户级 | `<config_dir>/shirley/plugins/<name>/` | 全局 |
-| git 源 | `<config_dir>/shirley/plugins/.cache/<name>@<rev>/` | `/plugin add <url>` 拉取后落此 |
+| Project level | `<root>/.shirley/plugins/<name>/` | travels with the repository |
+| User level | `<config_dir>/shirley/plugins/<name>/` | global |
+| git source | `<config_dir>/shirley/plugins/.cache/<name>@<rev>/` | where `/plugin add <url>` lands after fetching |
 
-与 skill 的差别：**skill 是「扫到即用」，插件是「显式启用才生效」**（决策 5）。
-所以发现（scan）与启用（enabled）是两件事。
+Difference from skills: **skills are "use as soon as scanned", plugins are "only take effect when
+explicitly enabled"** (decision 5). So discovery (scan) and enabling (enabled) are two separate
+things.
 
-### 4.2 启用登记（`<config_dir>/shirley/plugins.json`）
+### 4.2 Enable registration (`<config_dir>/shirley/plugins.json`)
 
 ```json
 {
@@ -174,129 +178,139 @@ pub enum McpTransport {
 }
 ```
 
-- **`enabled`**：默认 `false`。`/plugin add` 只登记不启用；`/plugin enable` 才生效。
-- **`content_hash`**：插件目录全部文件的哈希（排除 `.git`）。**同版本号内容漂移**能被发现。
-- **`enabled_capabilities`**：支持**按 kind 单独启停**（开放问题 3 的答案：支持）。
-  比如只启 skill 不启 MCP（不想起子进程）。
+- **`enabled`**: defaults to `false`. `/plugin add` only registers, does not enable; only
+  `/plugin enable` takes effect.
+- **`content_hash`**: the hash of all files in the plugin directory (excluding `.git`). **Content drift
+  under the same version number** can be detected.
+- **`enabled_capabilities`**: supports **enabling/disabling per kind** (the answer to open question 3:
+  yes). E.g. enable only skill, not MCP (do not want to start a subprocess).
 
-### 4.3 数据流
+### 4.3 Data flow
 
 ```mermaid
 flowchart TD
-    Scan["scan()：扫三个根目录 → Vec&lt;Plugin 候选&gt;"] --> Reg["registry：与 plugins.json 求交"]
-    Reg -->|enabled| Host["PluginHost：启用的插件集"]
-    Host --> Wire["wire.rs：归一化模型 → 装配产物"]
+    Scan["scan(): scan the three root directories -> Vec<Plugin candidate>"] --> Reg["registry: intersect with plugins.json"]
+    Reg -->|enabled| Host["PluginHost: the enabled plugin set"]
+    Host --> Wire["wire.rs: normalized model -> assembly product"]
     Wire --> Boot["AgentFactory::assemble / build_agent"]
 ```
 
-**装配时机**：`AgentFactory::assemble` 里扫一次（与 `skill_catalog` 同级），
-产出 `PluginHost`（只读、跨会话共享）。**但 MCP 连接是每会话的**（见第六节）。
+**Assembly timing**: scan once in `AgentFactory::assemble` (at the same level as `skill_catalog`),
+producing a `PluginHost` (read-only, shared across sessions). **But MCP connections are per-session**
+(see section 6).
 
 ---
 
-## 五、适配层：导入器（`src/plugins/importer/`）
+## 5. Adapter layer: importers (`src/plugins/importer/`)
 
 ```rust
-/// 把一个源翻译成归一化 Plugin。只做映射，不注册、不执行、不起进程。
+/// Translate a source into a normalized Plugin. Only does mapping; does not register, execute, or start processes.
 pub trait PluginImporter: Send + Sync {
-    /// 能否处理这个源（探测标志文件）。
+    /// Whether it can handle this source (detect a marker file).
     fn can_import(&self, root: &Path) -> bool;
-    /// 翻译。`root` 是插件根目录。
+    /// Translate. `root` is the plugin root directory.
     fn import(&self, root: &Path, source: PluginSource) -> Result<Plugin, ImportError>;
 }
 ```
 
-### 5.1 NativeImporter（P0）
+### 5.1 NativeImporter (P0)
 
-读 `shirley-plugin.json`；缺则约定目录发现。**永远兜底**（放链尾）。
+Reads `shirley-plugin.json`; if missing, convention-directory discovery. **Always the fallback** (put
+at the end of the chain).
 
-### 5.2 ClaudeCodeImporter（P2）
+### 5.2 ClaudeCodeImporter (P2)
 
-探测 `<root>/.claude-plugin/plugin.json`。映射：
+Detects `<root>/.claude-plugin/plugin.json`. Mapping:
 
-| Claude Code | → 归一化 |
+| Claude Code | -> normalized |
 | --- | --- |
 | `.claude-plugin/plugin.json#name/version/description` | `Plugin.name/version/description` |
-| `skills/`（或 manifest `skills`） | `Capabilities.skills` |
+| `skills/` (or the manifest's `skills`) | `Capabilities.skills` |
 | `commands/*.md` | `Capabilities.commands` |
-| `.mcp.json` | `Capabilities.mcp`（解析成 `McpServerDecl`） |
-| `agents/` | `Capabilities.agents`（后置） |
-| `hooks/` `output-styles/` `themes/` `monitors/` `bin/` `package.json` | **忽略 + 记 warn** |
+| `.mcp.json` | `Capabilities.mcp` (parsed into `McpServerDecl`) |
+| `agents/` | `Capabilities.agents` (deferred) |
+| `hooks/` `output-styles/` `themes/` `monitors/` `bin/` `package.json` | **ignored + log a warn** |
 
-**命令语法差异**：Claude 的 `.md` 无参；Codex 的带 `$1..$9` / `$ARGUMENTS`。
-归一化时**保留原文**，展开发生在命令层（`CommandOutcome::Prompt`）。
+**Command-syntax difference**: Claude's `.md` takes no args; Codex's has `$1..$9` / `$ARGUMENTS`.
+Normalization **preserves the original text**; expansion happens at the command layer
+(`CommandOutcome::Prompt`).
 
-### 5.3 CodexImporter（P2）
+### 5.3 CodexImporter (P2)
 
-Codex 没有「插件包」，只有 `~/.codex/config.toml`。探测 `config.toml` 存在且含
-`[mcp_servers]`。映射：
+Codex has no "plugin pack", only `~/.codex/config.toml`. Detect that `config.toml` exists and contains
+`[mcp_servers]`. Mapping:
 
-| Codex | → 归一化 |
+| Codex | -> normalized |
 | --- | --- |
-| `[mcp_servers.<name>]` | `McpServerDecl`（`command`/`args` → Stdio；`url` → Http） |
+| `[mcp_servers.<name>]` | `McpServerDecl` (`command`/`args` -> Stdio; `url` -> Http) |
 | `~/.codex/prompts/*.md` | `Capabilities.commands` |
 | `.agents/skills/` | `Capabilities.skills` |
 
-**注意**：Codex 配置是**全局单文件**，不是「一个目录 = 一个插件」。导入器把**每个
-`mcp_servers` 条目**当成一个「伪插件」导入（`name` 用 server 名）。这是「抹平差异」
-里最脏的一处，需在 UX 上说清（导入 Codex = 逐 server 导入）。
+**Note**: the Codex config is a **global single file**, not "one directory = one plugin". The importer
+imports **each `mcp_servers` entry** as a "pseudo-plugin" (`name` uses the server name). This is the
+dirtiest spot in "smoothing over differences", and must be made clear in the UX (importing Codex =
+importing server by server).
 
-### 5.4 McpbImporter（后置）
+### 5.4 McpbImporter (deferred)
 
-`.mcpb` 是 zip（含 `manifest.json` + server 代码）。解压到缓存目录 → 读 manifest →
-产出一个 `mcp` kind 的 Plugin。**P3 之后**。
+`.mcpb` is a zip (containing `manifest.json` + server code). Extract to a cache directory -> read the
+manifest -> produce a Plugin of kind `mcp`. **After P3**.
 
-### 5.5 导入器链
+### 5.5 Importer chain
 
 ```rust
-// 按顺序尝试，第一个 can_import() == true 的胜出；NativeImporter 兜底。
+// Try in order; the first can_import() == true wins; NativeImporter is the fallback.
 let importers: Vec<Box<dyn PluginImporter>> = vec![
     Box::new(ClaudeCodeImporter),
     Box::new(CodexImporter),
     Box::new(McpbImporter),
-    Box::new(NativeImporter),   // 兜底，can_import 恒 true
+    Box::new(NativeImporter),   // fallback, can_import is always true
 ];
 ```
 
 ---
 
-## 六、MCP 子系统（`src/plugins/mcp/`）—— 最重的部分
+## 6. MCP subsystem (`src/plugins/mcp/`) -- the heaviest part
 
-MCP 是「运行期加工具」的唯一正道。设计三件事：**transport / client / tool 包装**。
+MCP is the only proper way to "add tools at runtime". Three things to design: **transport / client /
+tool wrapping**.
 
 ### 6.1 transport
 
 ```rust
 pub enum Transport {
-    /// 子进程 stdio（本地 server）。
+    /// Child-process stdio (local server).
     Stdio { child: Child, stdin: ChildStdin, reader: BufReader<ChildStdout> },
-    /// HTTP（远端 server）。
+    /// HTTP (remote server).
     Http { client: reqwest::Client, url: String, headers: HeaderMap },
 }
 ```
 
-**stdio 子进程的边界（关键）**：MCP server 是**外来可执行文件**，必须在沙盒里起。
-但沙盒（`SandboxBackend`）当前**非 object-safe、只能跑一次性命令**，不能长驻。
-所以 P1 的折中：
+**The boundary of the stdio subprocess (key)**: an MCP server is an **external executable** and must
+be started inside the sandbox. But the sandbox (`SandboxBackend`) is currently **not object-safe and
+can only run one-shot commands**, not long-running ones. So the P1 compromise:
 
-- **stdio server 用 `tokio::process::Command` 直起**，但施加：`env_clear()` + 只注入声明的
-  env、`current_dir` 钉在工作区、stdin/stdout 走管道。
-- **在插件 manifest 的 `permissions` 里要求 `network` 才允许 Http transport**；未声明则拒。
-- **如实标注降级**：与 `SandboxOutput.degraded` 同款——P1 的 stdio 隔离**弱于**真沙盒，
-  在 UI / 日志里写明「MCP server 未沙盒隔离（P1）」。**不假装隔离**。
+- **Start the stdio server directly with `tokio::process::Command`**, but apply: `env_clear()` +
+  inject only the declared env, pin `current_dir` at the workspace, and route stdin/stdout through
+  pipes.
+- **Require `network` in the plugin manifest's `permissions` before allowing Http transport**;
+  otherwise reject.
+- **Honestly label the degradation**: the same as `SandboxOutput.degraded` -- P1's stdio isolation is
+  **weaker than** a real sandbox, so state in the UI / logs "MCP server is not sandbox-isolated (P1)".
+  **Do not pretend it is isolated**.
 
-> 真沙盒后端（`sandbox-exec` / `bwrap`）落地后，stdio 应改走它。这是与
-> `docs/sandbox.md` 的对接点。
+> Once a real sandbox backend (`sandbox-exec` / `bwrap`) lands, stdio should switch to it. This is the
+> docking point with `docs/sandbox.md`.
 
-### 6.2 client（协议层）
+### 6.2 client (protocol layer)
 
-实现 MCP 的 JSON-RPC 子集：`initialize` / `tools/list` / `tools/call`。
+Implement a JSON-RPC subset of MCP: `initialize` / `tools/list` / `tools/call`.
 
 ```rust
 pub struct McpClient {
     transport: Transport,
     next_id: AtomicU64,
-    /// server 能力（initialize 后填充）。
+    /// server capabilities (filled after initialize).
     capabilities: ServerCapabilities,
 }
 
@@ -307,20 +321,20 @@ impl McpClient {
 }
 ```
 
-- `initialize` 做**协议版本协商** + 能力交换。
-- `tools/list` 返回的 `McpToolDef { name, description, input_schema }` —— **`input_schema`
-  就是 JSON Schema**，与 `ToolDefinition.parameters` **同构**（`Agent.md` 已确认 Responses /
-  ChatCompletions 都用 JSON Schema）。**零转换**。
-- 请求带 `timeout`（`tokio::time::timeout`），超时归 `McpError::Timeout`。
+- `initialize` does **protocol version negotiation** + capability exchange.
+- `tools/list` returns `McpToolDef { name, description, input_schema }` -- **`input_schema` is JSON
+  Schema**, **isomorphic to `ToolDefinition.parameters`** (`Agent.md` already confirms Responses /
+  ChatCompletions both use JSON Schema). **Zero conversion**.
+- Requests carry a `timeout` (`tokio::time::timeout`); a timeout maps to `McpError::Timeout`.
 
-### 6.3 tool 包装（**最巧的一步**）
+### 6.3 tool wrapping (**the cleverest step**)
 
-每个 MCP 工具包成 `impl Tool`，直接进 `ToolManager`：
+Wrap each MCP tool as an `impl Tool` and put it directly into `ToolManager`:
 
 ```rust
 pub struct McpTool {
-    definition: ToolDefinition,          // 由 McpToolDef 直接构造
-    client: Arc<tokio::sync::Mutex<McpClient>>,  // 共享同一连接
+    definition: ToolDefinition,          // constructed directly from McpToolDef
+    client: Arc<tokio::sync::Mutex<McpClient>>,  // shares the same connection
     remote_name: String,
 }
 
@@ -339,207 +353,226 @@ impl Tool for McpTool {
 }
 ```
 
-**关键点**：
+**Key points**:
 
-- **命名空间**：`definition.name = format!("mcp__{server}__{tool}")`（Claude 风格）。
-  避免与内置工具 / 其它 server 撞名。
-- **连接共享**：`Arc<tokio::sync::Mutex<McpClient>>`——stdio 是**单连接**，并发工具调用
-  需串行化（或用 JSON-RPC id 做请求多路复用，P1 先串行，简单正确）。
-- **错误映射**：MCP 错误 → `ToolError::ExecutionError`；`ToolError` 的四类语义见
-  `docs/tool-lifecycle.md`。MCP 的「工具不存在」应映射 `NotFoundError`（模型可换工具）。
-- **`ToolContext` 用不上**：MCP 工具无状态，状态在 client 里。空实现即可。
+- **Namespace**: `definition.name = format!("mcp__{server}__{tool}")` (the Claude style). Avoids name
+  collisions with built-in tools / other servers.
+- **Connection sharing**: `Arc<tokio::sync::Mutex<McpClient>>` -- stdio is a **single connection**, so
+  concurrent tool calls need serialization (or multiplex requests by JSON-RPC id; P1 serializes first,
+  simple and correct).
+- **Error mapping**: MCP error -> `ToolError::ExecutionError`; for the four categories of `ToolError`
+  semantics see `docs/tool-lifecycle.md`. MCP's "tool does not exist" should map to `NotFoundError`
+  (the model can switch tools).
+- **`ToolContext` is not needed**: an MCP tool is stateless; the state is in the client. An empty
+  implementation suffices.
 
-### 6.4 生命周期归属（开放问题 2 的答案）
+### 6.4 Lifecycle ownership (the answer to open question 2)
 
-**每个 `Agent`（= 每个会话）起一份 MCP 连接**，由 `build_agent` 触发。
+**Start one MCP connection per `Agent` (= per session)**, triggered by `build_agent`.
 
-- 理由：与 `ToolManager` 一样「每会话新建」，会话隔离天然。
-- 代价：N 个会话 = N 个 server 进程。**可接受**（会话通常 1~3 个）。
-- 退出：`Agent` 被 drop 时，`McpTool` 持有 `Arc<Mutex<McpClient>>`，最后一个引用 drop
-  时 `Drop for McpClient` 关 stdin / kill child。
-- **崩溃重启**：P1 **不做**自动重启（`call_tool` 失败就报错，模型看到 `[mcp] ...` 自己决定）。
-  重启策略记缺口。
+- Reason: like `ToolManager`, "created fresh per session", session isolation is natural.
+- Cost: N sessions = N server processes. **Acceptable** (sessions are usually 1-3).
+- Exit: when the `Agent` is dropped, `McpTool` holds `Arc<Mutex<McpClient>>`, and when the last
+  reference is dropped, `Drop for McpClient` closes stdin / kills the child.
+- **Crash restart**: P1 **does not** auto-restart (`call_tool` errors on failure, and the model sees
+  `[mcp] ...` and decides for itself). The restart policy is recorded as a gap.
 
-> 备选（后置）：全局共享一份连接池 + 引用计数。P1 先每会话一份，简单正确优先。
+> Alternative (deferred): a globally shared connection pool + reference counting. P1 does one per
+> session first, prioritizing simple and correct.
 
 ---
 
-## 七、UI 区域插拔（`ui` kind）—— 两条路线，先做路线 A 的注册点
+## 7. UI region plug-in (`ui` kind) -- two routes, do route A's registration point first
 
-**背景**（已核实）：`AiMarkdown.tsx` 用 streamdown 的 `renderers` 注册
-`{ language: "flightmap", component: FlightMapRenderer }`——**渲染器编译进 web app**。
+**Background** (verified): `AiMarkdown.tsx` uses streamdown's `renderers` to register
+`{ language: "flightmap", component: FlightMapRenderer }` -- **the renderer is compiled into the web
+app**.
 
-### 7.1 路线 A：宿主原生渲染器（可信，P4 前不做插件化）
+### 7.1 Route A: host-native renderer (trusted; no plug-in-ization before P4)
 
-flightmap 现状。**插件只能声明「我产出语言 X」，渲染器本身必须内置**。
-所以路线 A 的「插件化」= 插件在 manifest 声明围栏语言，宿主**已内置**对应 renderer 时才渲染。
+The current flightmap state. **A plugin can only declare "I produce language X"; the renderer itself
+must be built in**. So route A's "plug-in-ization" = the plugin declares the fence language in the
+manifest, and it renders only when the host has the corresponding renderer **already built in**.
 
 ```json
-// ui 声明（后置）
+// ui declaration (deferred)
 { "ui": [{ "kind": "fence", "language": "flightmap" }] }
 ```
 
-**不做**「插件上传 renderer 代码进主包」——那要重编译，等于把供应链塞进二进制。
+**Do not do** "the plugin uploads renderer code into the main bundle" -- that requires recompiling,
+which is equivalent to stuffing the supply chain into the binary.
 
-### 7.2 路线 B：隔离挂载（不可信，目标形态）
+### 7.2 Route B: isolated mounting (untrusted, the target form)
 
-外来 UI bundle 走 `<iframe sandbox="allow-scripts">`（**不含** `allow-same-origin`）
-+ 独立 origin + postMessage 桥。宿主只做**通用挂载点**。
+A foreign UI bundle goes through `<iframe sandbox="allow-scripts">` (**without** `allow-same-origin`) +
+an independent origin + a postMessage bridge. The host only provides a **generic mount point**.
 
-**宿主侧前置改造清单**（P4，全缺）：
+**Host-side prerequisite rework list** (P4, all missing):
 
-| 项 | 现状 | 要做 |
+| Item | Current state | To do |
 | --- | --- | --- |
-| CSP | `tauri.conf.json` `csp=null` | 设 `frame-src` 白名单（插件 bundle 的 origin）+ `script-src` |
-| 挂载点 | 无 iframe 先例 | 新增 `<PluginFrame src=... sandbox="allow-scripts">` 组件 |
-| 消息桥 | 无 | postMessage 协议（宿主↔bundle），**只暴露数据、不暴露 `invoke`** |
-| bundle 宿主 | 无 | 按 `plugin.root` 读盘 → `srcdoc` / 本地 origin serve |
-| capability | 只有 `core:default`+`dialog:default` | 不给 iframe 任何 Tauri capability |
+| CSP | `tauri.conf.json` `csp=null` | set a `frame-src` allowlist (the plugin bundle's origin) + `script-src` |
+| Mount point | no iframe precedent | add a `<PluginFrame src=... sandbox="allow-scripts">` component |
+| Message bridge | none | a postMessage protocol (host<->bundle), **exposing only data, not `invoke`** |
+| bundle host | none | read from disk by `plugin.root` -> `srcdoc` / serve from a local origin |
+| capability | only `core:default`+`dialog:default` | give the iframe no Tauri capability |
 
-**安全铁律**：iframe **绝不**同源、**绝不**能调 Tauri `invoke()`、**绝不**读会话状态。
-bundle 只能通过 postMessage 收宿主喂的数据、回传渲染事件。
+**Security iron rule**: the iframe is **never** same-origin, **never** able to call Tauri `invoke()`,
+and **never** able to read session state. The bundle can only receive data fed by the host via
+postMessage and send rendering events back.
 
-### 7.3 slot 模型（界面区域插拔的语义）
+### 7.3 slot model (the semantics of UI region plug-in)
 
-| slot | 例子 | 路线 |
+| slot | Example | Route |
 | --- | --- | --- |
-| `message.fence:<lang>` | flightmap 代码块 | A（现）/ B（目标） |
-| `composer.trailing` | 发送框右侧动作（模型选择器同款槽位） | A |
-| `sidebar.panel` | 左栏附加面板 | A / B |
-| `tool.card:<name>` | 某工具的专属结果卡 | A / B |
+| `message.fence:<lang>` | a flightmap code block | A (current) / B (target) |
+| `composer.trailing` | the action on the right of the composer (the same slot as the model selector) | A |
+| `sidebar.panel` | an extra panel in the left column | A / B |
+| `tool.card:<name>` | a tool-specific result card | A / B |
 
-**先做 `message.fence`**——有 flightmap 先例、收益最直接。
+**Do `message.fence` first** -- there is a flightmap precedent, and the payoff is the most direct.
 
-### 7.4 TUI 的能力声明
+### 7.4 TUI capability declaration
 
-TUI 的 `markdown.rs` **不认** flightmap（已知缺口）。所以插件声明 UI 能力时**必须带界面标签**：
+The TUI's `markdown.rs` **does not recognize** flightmap (a known gap). So when a plugin declares a UI
+capability it **must carry an interface tag**:
 
 ```json
 { "ui": [{ "kind": "fence", "language": "flightmap", "interfaces": ["desktop"] }] }
 ```
 
-TUI 侧遇到 `interfaces` 不含 `tui` 的围栏 → 降级为代码块。**这修的是「skill 契约与
-客户端渲染能力脱钩」的老问题**。
+On the TUI side, a fence whose `interfaces` does not include `tui` -> degrade to a code block. **This
+fixes the old problem of "the skill contract being decoupled from the client's rendering
+capabilities"**.
 
 ---
 
-## 八、命令层（`/plugin`）
+## 8. Command layer (`/plugin`)
 
-### 8.1 新增 `CommandOutcome` 分支 + `Builtin`
+### 8.1 Add a `CommandOutcome` branch + `Builtin`
 
 ```rust
 // src/interface/command.rs
-enum Builtin { Init, Model, Rewind, Session, Login, Plugin }  // 加 Plugin
+enum Builtin { Init, Model, Rewind, Session, Login, Plugin }  // add Plugin
 
 pub enum CommandOutcome {
-    // ...既有...
-    /// 打开插件管理面板（本地动作）。
+    // ...existing...
+    /// Open the plugin management panel (a local action).
     PluginManager,
-    /// 不是已知指令。
+    /// Not a known command.
     Unknown,
 }
 ```
 
-`resolve` / `fuzzy_match` 的候选来源：内置指令优先，其次 skill 名（已有），
-**最后插件名**（`/plugin` 面板内操作，不进顶层候选，避免污染）。
+Candidate sources for `resolve` / `fuzzy_match`: built-in commands first, then skill names (already
+present), and **finally plugin names** (operated inside the `/plugin` panel, not entering the
+top-level candidates, to avoid pollution).
 
-### 8.2 面板（TUI + desktop 共用编排）
+### 8.2 Panel (TUI + desktop share the orchestration)
 
-`/plugin` 打开模态选择器（与 `/session` / `/model` 同款）：
+`/plugin` opens a modal selector (the same style as `/session` / `/model`):
 
-- 列表：已启用 / 已登记未启用 / 可发现（本地扫描）。
-- 操作：`add <path|url>` / `enable <name>` / `disable <name>` / `remove <name>`。
-- 启用后**热更新**：新增的 skill 进 `SkillCatalog`、MCP 工具进 `ToolManager`。
-  **但 `ToolManager` 非 `Clone`、`Agent` 已持有它** —— 所以启用插件是**下次
-  `build_agent` 生效**（P1），或走 `Agent::unregister_tool` + 重新注册（更复杂，后置）。
+- List: enabled / registered-but-not-enabled / discoverable (local scan).
+- Operations: `add <path|url>` / `enable <name>` / `disable <name>` / `remove <name>`.
+- After enabling, **hot-update**: newly added skills go into `SkillCatalog`, MCP tools go into
+  `ToolManager`. **But `ToolManager` is not `Clone` and the `Agent` already holds it** -- so enabling a
+  plugin takes effect on the **next `build_agent`** (P1), or goes through `Agent::unregister_tool` +
+  re-register (more complex, deferred).
 
-> **诚实边界**：P1 的 `/plugin enable` 对**已存在会话**需要**重建 Agent**（或提示
-> 「新会话生效」）。这与「运行参数热切换」的既有接缝（`set_model` / `set_provider`）
-> 不同——工具表变更没有热接缝。记为缺口。
+> **Honest boundary**: P1's `/plugin enable` requires **rebuilding the Agent** for an **existing
+> session** (or prompting "takes effect in a new session"). This differs from the existing seam of
+> "hot-swapping run parameters" (`set_model` / `set_provider`) -- there is no hot seam for tool-table
+> changes. Recorded as a gap.
 
 ---
 
-## 九、bootstrap 接线（`wire.rs` + `bootstrap.rs`）
+## 9. bootstrap wiring (`wire.rs` + `bootstrap.rs`)
 
-### 9.1 `assemble` 阶段
+### 9.1 `assemble` stage
 
 ```rust
-// AgentFactory::assemble 内，skill_catalog 旁边：
-let plugin_host = PluginHost::load(&working_dir);   // 扫 + 读 plugins.json
-// plugin_host.enabled() → Vec<Plugin>
+// inside AgentFactory::assemble, next to skill_catalog:
+let plugin_host = PluginHost::load(&working_dir);   // scan + read plugins.json
+// plugin_host.enabled() -> Vec<Plugin>
 ```
 
-`PluginHost` 提供：
-- `plugin_skills() -> Vec<SkillMeta>`：把所有启用插件的 `skills/*/SKILL.md` 解析成
-  `SkillMeta`（复用 `skills::parse`）。**并入 skill_catalog**（重名：插件 > 项目 > 用户）。
-- `plugin_commands() -> Vec<CommandEntry>`：命令候选。
-- `mcp_decls() -> Vec<McpServerDecl>`：MCP 声明（每会话起连接用）。
+`PluginHost` provides:
+- `plugin_skills() -> Vec<SkillMeta>`: parse all enabled plugins' `skills/*/SKILL.md` into `SkillMeta`
+  (reusing `skills::parse`). **Merged into skill_catalog** (collision: plugin > project > user).
+- `plugin_commands() -> Vec<CommandEntry>`: command candidates.
+- `mcp_decls() -> Vec<McpServerDecl>`: MCP declarations (used to start a connection per session).
 
-### 9.2 `build_agent` 阶段
+### 9.2 `build_agent` stage
 
 ```rust
-// 1. skill：把插件 skill 并进目录
+// 1. skill: merge plugin skills into the catalog
 let skill_catalog = Arc::new(self.skill_catalog.with_plugin_skills(
     self.plugin_host.plugin_skills()
 ));
 
-// 2. MCP：每会话起连接、注册工具
+// 2. MCP: start a connection per session, register tools
 let mut tool_manager = assemble_tools();
 for decl in self.plugin_host.mcp_decls() {
-    match McpClient::connect(&decl).await {          // build_agent 变 async？
+    match McpClient::connect(&decl).await {          // does build_agent become async?
         Ok(client) => {
             let client = Arc::new(Mutex::new(client));
             for tool_def in client.lock().await.list_tools().await? {
                 tool_manager.register(McpTool::new(tool_def, client.clone()))?;
             }
         }
-        Err(e) => eprintln!("[plugin] mcp `{}` 连接失败：{e}", decl.name),
+        Err(e) => eprintln!("[plugin] mcp `{}` connection failed: {e}", decl.name),
     }
 }
 ```
 
-**问题**：`build_agent` 现在是**同步**的（`fn build_agent(...) -> Result<...>`）。
-MCP 连接是**异步**的。两个选择：
+**Problem**: `build_agent` is currently **synchronous** (`fn build_agent(...) -> Result<...>`). MCP
+connections are **asynchronous**. Two options:
 
-| 方案 | 说明 | 取舍 |
+| Option | Description | Trade-off |
 | --- | --- | --- |
-| A. `build_agent` 变 async | 直接 `.await` 连接 | 改动所有调用方（TUI/desktop 的装配点） |
-| B. 连接延迟到首次调用 | `McpTool::invoke` 里懒连接 | `tools/list` 拿不到（无法注册工具） |
-| C. **预热 + 懒注册** | `assemble` 后台异步连接，连上后**通过热接缝注册工具** | 需要工具热注册接缝（现无） |
+| A. Make `build_agent` async | directly `.await` the connection | changes all callers (the TUI/desktop assembly points) |
+| B. Defer the connection to the first call | lazy connect inside `McpTool::invoke` | `tools/list` is unavailable (cannot register tools) |
+| C. **Warm up + lazy register** | `assemble` connects asynchronously in the background, and registers tools **through the hot seam** once connected | requires a tool hot-registration seam (none now) |
 
-**P1 选 A**：`build_agent` 变 `async`。理由：装配本来就在 async 上下文（TUI 主循环 /
-desktop command 里）。**但** `build_agent` 同步性被多处依赖（`SessionManager` 等），
-需评估。**替代**：新增 `build_agent_async`，同步版保留（无 MCP 时走同步）。
+**P1 chooses A**: make `build_agent` `async`. Reason: assembly is already in an async context (the TUI
+main loop / desktop command). **But** `build_agent`'s synchronicity is depended on in several places
+(`SessionManager` etc.), which needs assessment. **Alternative**: add `build_agent_async` and keep the
+sync version (goes sync when there is no MCP).
 
-> 这是本文**最需要落地时验证**的一处（开放问题 1）。倾向：`build_agent` 保持同步，
-> MCP 连接在 `build_agent` 返回后由调用方 `register_plugin_tools(agent, decls).await`
-> 补上——但 `Agent` 不暴露 `ToolManager` 可变句柄，所以**还是要 SDK 加一个接缝或
-> 在构造时传入已连好的工具**。
+> This is the spot in this document that **most needs verification at landing time** (open question 1).
+> Preference: keep `build_agent` sync, and have the caller make up the MCP connection with
+> `register_plugin_tools(agent, decls).await` after `build_agent` returns -- but `Agent` does not
+> expose a mutable `ToolManager` handle, so **the SDK still needs a new seam, or pass the
+> already-connected tools in at construction**.
 
-### 9.3 更干净的方案：MCP 连接**在 assemble 时建、连接池跨会话共享**
+### 9.3 A cleaner approach: build MCP connections **at assemble time, with the connection pool shared
+across sessions**
 
 ```
 assemble() [async]:
-  扫插件 → 对每个 mcp decl 建一个 McpClient → 放进 Arc<McpPool>
+  scan plugins -> for each mcp decl, build one McpClient -> put into Arc<McpPool>
 build_agent() [sync]:
-  McpPool.tools() 同步返回已 list 好的 Vec<ToolDefinition>（连接时已 list）
-  → 每个包成 McpTool（共享 pool 里的 client）
+  McpPool.tools() synchronously returns the already-listed Vec<ToolDefinition> (listed at connect time)
+  -> wrap each as an McpTool (sharing the client in the pool)
 ```
 
-**优点**：`build_agent` 保持同步；连接只建一次（跨会话共享，省进程）。
-**代价**：连接的生命周期不再随会话——变成**应用级单例**（与 `model_catalog` 同级）。
-**这与 6.4 的「每会话一份」冲突**——需重新拍板。
+**Pros**: `build_agent` stays synchronous; the connection is built only once (shared across sessions,
+saving processes).
+**Cost**: the connection's lifecycle no longer follows the session -- it becomes an **application-level
+singleton** (at the same level as `model_catalog`).
+**This conflicts with 6.4's "one per session"** -- needs a re-decision.
 
-> **修正 6.4**：倾向**应用级连接池**（assemble 建、跨会话共享），因为：
-> ① `build_agent` 保持同步；② server 进程不随会话数线性增长；③ MCP server 通常无
-> 会话状态。**会话隔离**用「工具名前缀含 server 名」保证即可，不需要独立进程。
-> 这条待 Sean 拍板（开放问题 1 的最终答案）。
+> **Revision of 6.4**: leaning toward an **application-level connection pool** (built at assemble,
+> shared across sessions), because: ① `build_agent` stays synchronous; ② server processes do not grow
+> linearly with the number of sessions; ③ MCP servers usually have no session state. **Session
+> isolation** is guaranteed by "the tool-name prefix contains the server name", without needing a
+> separate process. This awaits Sean's decision (the final answer to open question 1).
 
 ---
 
-## 十、分发（git 源 + lock）
+## 10. Distribution (git source + lock)
 
-### 10.1 `marketplace.json`（git 仓库索引）
+### 10.1 `marketplace.json` (a git repository index)
 
 ```json
 {
@@ -551,62 +584,68 @@ build_agent() [sync]:
 }
 ```
 
-`/plugin add <git-url>` → clone 到 `.cache/<name>@<rev>/` → 读 marketplace.json（若有）或
-直接把根当单插件。
+`/plugin add <git-url>` -> clone to `.cache/<name>@<rev>/` -> read marketplace.json (if present) or
+treat the root directly as a single plugin.
 
-### 10.2 lock（内容指纹）
+### 10.2 lock (content fingerprint)
 
-`plugins.json` 里每个插件记 `rev`（git SHA）+ `content_hash`（目录哈希）。
-加载时**校验**：内容变了 → 提示「插件内容已变化，是否重新信任？」（UX 后置，P1 只记 warn）。
+Each plugin in `plugins.json` records `rev` (git SHA) + `content_hash` (directory hash). **Validate** on
+load: if the content changed -> prompt "the plugin content has changed, re-trust?" (UX deferred; P1
+only logs a warn).
 
-### 10.3 中心化 registry（后置）
+### 10.3 Centralized registry (deferred)
 
-只是**再加一种 `PluginSource`**（`Registry { url, name, version }`）。接口不变。
+Just **add another kind of `PluginSource`** (`Registry { url, name, version }`). The interface is
+unchanged.
 
 ---
 
-## 十一、安全与信任（落实）
+## 11. Security and trust (implementation)
 
-| 风险 | 具体处置 | 落点 |
+| Risk | Specific handling | Landing point |
 | --- | --- | --- |
-| 插件带任意代码进进程 | **禁止**；工具只能来自 MCP 或 skill 脚本 | 导入器不执行任何文件 |
-| MCP stdio 越权 | `env_clear` + 声明 env；cwd 钉工作区；P1 标注「未沙盒」 | `mcp/transport.rs` |
-| MCP Http 未授权 | 需 `permissions: ["network"]` 才允许 | `registry` 校验 |
-| UI bundle 同源攻击 | 路线 B 强制 sandbox iframe + 独立 origin；绝不内联 | 第七节 |
-| 供应链篡改 | `rev` + `content_hash`；启用显式 | `registry.rs` |
-| 声明当授权 | `permissions` **只记录不强制**（`PermissionPolicy` 未落地） | 文档明说 |
-| 插件撑爆上下文 | skill 沿用字符上限；MCP 工具描述注入设上限 | `wire.rs` |
-| 插件名冲突 | `mcp__{server}__{tool}` 前缀；插件名冲突加后缀 | `registry.rs` |
+| A plugin brings arbitrary code into the process | **forbidden**; tools can only come from MCP or skill scripts | importers execute no files |
+| MCP stdio privilege escalation | `env_clear` + declared env; cwd pinned at the workspace; P1 labels "not sandboxed" | `mcp/transport.rs` |
+| MCP Http unauthorized | requires `permissions: ["network"]` to allow | `registry` validation |
+| UI bundle same-origin attack | route B forces a sandbox iframe + an independent origin; never inline | section 7 |
+| Supply-chain tampering | `rev` + `content_hash`; explicit enabling | `registry.rs` |
+| Declaration treated as authorization | `permissions` **recorded only, not enforced** (`PermissionPolicy` not landed) | stated plainly in the doc |
+| A plugin blows up the context | skills follow the character cap; MCP tool-description injection has a cap | `wire.rs` |
+| Plugin name collision | `mcp__{server}__{tool}` prefix; plugin name collision gets a suffix | `registry.rs` |
 
 ---
 
-## 十二、测试计划
+## 12. Test plan
 
-**单测（应用层）**：
+**Unit tests (application layer)**:
 
-1. `manifest`：宽容解析（缺 name / 缺 version / 未知键 / 坏 JSON 跳过）。
-2. `importer::claude_code`：给一个样例插件目录，断言映射出的 `Capabilities` 正确。
-3. `importer::codex`：给一个 `config.toml`，断言 `mcp_servers` 逐条转 `McpServerDecl`。
-4. `mcp::tool`：mock 一个 transport（内存 echo server），断言 `list_tools` / `call_tool`
-   + 错误映射（超时 → ExecutionError）。
-5. `registry`：启用 / 停用 / 内容哈希变化检测。
-6. `wire`：插件 skill 并入 `SkillCatalog` 后，`render_directory` 含插件 skill。
-7. **KV 缓存回归**：插件 skill 并入后，目录渲染仍是稳定前缀（对齐
-   `skills/runtime.rs` 的 `activation_is_append_only_kv_friendly`）。
+1. `manifest`: lenient parsing (missing name / missing version / unknown keys / bad JSON skipped).
+2. `importer::claude_code`: given a sample plugin directory, assert the mapped `Capabilities` is
+   correct.
+3. `importer::codex`: given a `config.toml`, assert `mcp_servers` are converted entry by entry into
+   `McpServerDecl`.
+4. `mcp::tool`: mock a transport (an in-memory echo server), assert `list_tools` / `call_tool` + error
+   mapping (timeout -> ExecutionError).
+5. `registry`: enable / disable / content-hash-change detection.
+6. `wire`: after plugin skills are merged into `SkillCatalog`, `render_directory` contains the plugin
+   skills.
+7. **KV cache regression**: after plugin skills are merged, the catalog rendering is still a stable
+   prefix (aligned with `skills/runtime.rs`'s `activation_is_append_only_kv_friendly`).
 
-**集成测试（SDK 外，`tests/`）**：
+**Integration tests (outside the SDK, `tests/`)**:
 
-8. **端到端竖切**：临时目录放一个 native 插件（skill + 一个真 stdio MCP server，如
-   `npx @modelcontextprotocol/server-everything`），`/plugin add` → 启用 → 断言工具表
-   含 `mcp__...__...`、模型能调。
+8. **End-to-end vertical slice**: put a native plugin (a skill + a real stdio MCP server, e.g.
+   `npx @modelcontextprotocol/server-everything`) in a temp directory, `/plugin add` -> enable ->
+   assert the tool table contains `mcp__...__...` and the model can call it.
 
-**不做 mock 冒充验证**（对齐 Sean 偏好）：第 8 条要**真连**一个 MCP server。
+**Do not do mock-instead-of-verification** (aligned with Sean's preference): item 8 must **really
+connect** to an MCP server.
 
 ---
 
-## 十三、文件清单（实现时新建 / 改动）
+## 13. File list (created / changed at implementation time)
 
-**新建（应用层）**：
+**Created (application layer)**:
 
 ```
 src/plugins/mod.rs
@@ -625,57 +664,65 @@ src/plugins/mcp/tool.rs
 src/plugins/wire.rs
 ```
 
-**改动（应用层）**：
+**Changed (application layer)**:
 
-| 文件 | 改动 |
+| File | Change |
 | --- | --- |
 | `src/main.rs` | `mod plugins;` |
-| `src/bootstrap.rs` | `assemble` 加 `PluginHost::load`；`build_agent` 并 skill + 注册 MCP 工具；`AgentFactory` 加 `plugin_host` 字段 |
+| `src/bootstrap.rs` | `assemble` adds `PluginHost::load`; `build_agent` merges skills + registers MCP tools; `AgentFactory` adds a `plugin_host` field |
 | `src/interface/command.rs` | `Builtin::Plugin` + `CommandOutcome::PluginManager` |
-| `src/interface/app.rs` | 插件面板状态 + 操作接线 |
-| `src/interface/ui.rs` | 插件面板渲染 |
+| `src/interface/app.rs` | plugin panel state + operation wiring |
+| `src/interface/ui.rs` | plugin panel rendering |
 | `src/interface/desktop/*` | `agent_list_plugins` / `agent_add_plugin` / ... commands |
-| `src/skills/catalog.rs` | `SkillCatalog::with_plugin_skills`（并集 + 重名规则） |
-| `Cargo.toml` | MCP 需要 `tokio` 的 process/io feature（已有 `tokio`）；HTTP 用 `reqwest`（已有） |
+| `src/skills/catalog.rs` | `SkillCatalog::with_plugin_skills` (union + collision rules) |
+| `Cargo.toml` | MCP needs tokio's process/io feature (`tokio` already present); HTTP uses `reqwest` (already present) |
 
-**SDK 零改动**（硬约束）。若 9.2 发现必须加接缝（如工具热注册），单独记 `docs/sdk-gaps.md`。
+**Zero SDK changes** (hard constraint). If 9.2 finds a seam must be added (e.g. tool hot registration),
+record it separately in `docs/sdk-gaps.md`.
 
 ---
 
-## 十四、分期与验收
+## 14. Phases and acceptance
 
-| 期 | 内容 | 验收 |
+| Phase | Content | Acceptance |
 | --- | --- | --- |
-| **P0** | manifest + 发现 + registry + native 导入器 + skill/command kind 注册 + `/plugin` 面板 | 一个本地插件，skill 进目录、命令可用、启用/停用生效 |
-| **P1** | MCP 子系统（stdio）+ `mcp` kind + 工具包装 | 竖切第 8 条：真 stdio server 的工具能被模型调用 |
-| **P2** | ClaudeCode / Codex 导入器 | 一个真实社区 Claude Code 插件被正确映射 |
-| **P3** | git 源 + marketplace.json + lock | `/plugin add <git-url>` 可用；内容漂移可检测 |
-| **P4** | UI 路线 B（CSP + 隔离挂载 + `message.fence` slot） | 一个插件自带 UI bundle 被隔离渲染 |
-| 后置 | `agent` kind / `hook` kind / 中心化 registry / MCP Http / `.mcpb` | — |
+| **P0** | manifest + discovery + registry + native importer + skill/command kind registration + `/plugin` panel | a local plugin: its skills enter the catalog, commands are usable, enable/disable take effect |
+| **P1** | MCP subsystem (stdio) + `mcp` kind + tool wrapping | vertical slice item 8: a real stdio server's tools can be called by the model |
+| **P2** | ClaudeCode / Codex importers | a real community Claude Code plugin is correctly mapped |
+| **P3** | git source + marketplace.json + lock | `/plugin add <git-url>` works; content drift is detectable |
+| **P4** | UI route B (CSP + isolated mounting + the `message.fence` slot) | a plugin's own UI bundle is rendered in isolation |
+| deferred | `agent` kind / `hook` kind / centralized registry / MCP Http / `.mcpb` | -- |
 
 ---
 
-## 十五、开放问题（需 Sean 拍板）
+## 15. Open questions (need Sean's decision)
 
-1. **MCP 连接归属**：每会话一份（6.4）vs 应用级共享池（9.3）？倾向**共享池**
-   （`build_agent` 保持同步、进程不膨胀），但需确认「server 无会话状态」的前提。
-2. **`build_agent` 是否变 async**：取决于 1。若共享池则保持同步。
-3. **插件热启用的语义**：P1 是「新会话生效」还是「重建当前 Agent」？工具表无热接缝。
-4. **UI 路线 A 是否开放给插件**：若渲染器必须内置，路线 A 退化为「平台独家能力清单」；
-   第三方只能走路线 B。**需拍板**。
-5. **TUI 能力降级**：插件 UI 声明如何标界面（7.4）？TUI 降级成代码块是否可接受？
-6. **Codex 导入的 UX**：Codex 是全局配置不是插件目录，逐 server 导入是否合理？
-7. **`agents` kind 依赖**：`docs/subagent.md` 未落地，插件 agent 先当 skill 还是等？
-8. **兼容验收样本**：P2 拿哪个真实 Claude Code 插件做 Done 的判据？
+1. **MCP connection ownership**: one per session (6.4) vs an application-level shared pool (9.3)?
+   Leaning toward a **shared pool** (`build_agent` stays synchronous, processes do not balloon), but
+   the premise "servers have no session state" needs confirmation.
+2. **Whether `build_agent` becomes async**: depends on 1. With a shared pool, keep it synchronous.
+3. **The semantics of hot plugin enabling**: for P1, "takes effect in a new session" or "rebuild the
+   current Agent"? The tool table has no hot seam.
+4. **Whether UI route A is opened to plugins**: if the renderer must be built in, route A degrades to
+   a "platform-exclusive capability list"; third parties can only go route B. **Needs a decision**.
+5. **TUI capability degradation**: how should a plugin UI declaration tag the interface (7.4)? Is it
+   acceptable for the TUI to degrade to a code block?
+6. **The UX of Codex import**: Codex is a global config, not a plugin directory; is importing server
+   by server reasonable?
+7. **The `agents` kind dependency**: `docs/subagent.md` is not landed; should a plugin agent be treated
+   as a skill first or wait?
+8. **Compatibility acceptance sample**: which real Claude Code plugin should P2 use as the criterion
+   for Done?
 
 ---
 
-**附：与既有文档的关系**
+**Appendix: relationship to existing documents**
 
-- 复用接缝：`docs/skills.md`（skill kind + `SkillCatalog`）、`docs/tool-lifecycle.md`
-  （`ToolManager` / `on_register`）、`runtime/context.rs` 的 `ContextProvider`。
-- 同族：`docs/subagent.md`（agent kind）、`docs/memory.md` / `docs/todo.md`（provider 范式）。
-- 边界：`docs/security.md`（`PermissionPolicy`）、`docs/sandbox.md`（MCP 子进程）、
-  `docs/desktop-interface.md`（UI slot）。
-- 上游：Claude Code plugins、OpenAI Codex、MCP / MCPB / MCP Apps（SEP-1865）、
-  Agent Skills 开放标准。
+- Reused seams: `docs/skills.md` (the skill kind + `SkillCatalog`), `docs/tool-lifecycle.md`
+  (`ToolManager` / `on_register`), `runtime/context.rs`'s `ContextProvider`.
+- Siblings: `docs/subagent.md` (the agent kind), `docs/memory.md` / `docs/todo.md` (the provider
+  paradigm).
+- Boundaries: `docs/security.md` (`PermissionPolicy`), `docs/sandbox.md` (MCP subprocesses),
+  `docs/desktop-interface.md` (UI slots).
+- Upstream: Claude Code plugins, OpenAI Codex, MCP / MCPB / MCP Apps (SEP-1865), the Agent Skills
+  open standard.

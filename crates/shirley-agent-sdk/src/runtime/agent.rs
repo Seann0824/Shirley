@@ -431,17 +431,26 @@ impl Agent {
 
                                         tasks.push(async move {
                                             let started = std::time::Instant::now();
-                                            let (ok, content) = match tools.invoke(call, ctx).await {
-                                                Ok(output) => (true, output.to_string()),
-                                                // TODO: this feels off, but it's fine if the consumer is the AI; external consumers should get the error via AgentEvent instead.
-                                                Err(error) => (false, error.to_string()),
-                                            };
-                                            (call, ok, content, started.elapsed().as_millis() as u64)
+                                            let (ok, content, error_kind) =
+                                                match tools.invoke(call, ctx).await {
+                                                    Ok(output) => (true, output.to_string(), None),
+                                                    // The tool message carries the error text for the
+                                                    // model to read; the stable kind travels on the
+                                                    // event so the UI classifies structurally instead
+                                                    // of sniffing the text.
+                                                    Err(error) => {
+                                                        let kind = crate::SdkError::kind(&error);
+                                                        (false, error.to_string(), Some(kind))
+                                                    }
+                                                };
+                                            (call, ok, content, error_kind, started.elapsed().as_millis() as u64)
                                         });
                                     }
 
                                     let mut tool_messages = Vec::with_capacity(tool_calls.len());
-                                    while let Some((call, ok, content, elapsed_ms)) = tasks.next().await {
+                                    while let Some((call, ok, content, error_kind, elapsed_ms)) =
+                                        tasks.next().await
+                                    {
                                         let tool_message = message::Message::Tool {
                                             tool_call_id: call.id.clone(),
                                             content: Some(content.clone()),
@@ -453,6 +462,7 @@ impl Agent {
                                             name: call.name.clone(),
                                             ok,
                                             output: content.clone(),
+                                            error_kind,
                                             elapsed_ms,
                                         };
 

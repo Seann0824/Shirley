@@ -17,9 +17,10 @@ async fn run_agent(
     mut cancel: tokio::sync::oneshot::Receiver<()>,
     memory: Option<Arc<crate::memory::MemoryRuntime>>,
 ) -> Agent {
-    // 记忆 V2.5：把本轮用户输入作为 query，并**预取 query 向量**（embedding 是异步
-    // HTTP，而 `ContextProvider::context()` 是同步的，只能在这里先算好）。未配置
-    // embedding / 预取失败时是空操作——相关腿退化为纯 BM25，绝不打断对话。
+    // Memory V2.5: use this turn's user input as the query, and **prefetch the query vector**
+    // (embedding is async HTTP, while `ContextProvider::context()` is synchronous, so it can only
+    // be computed ahead of time here). When embedding is unconfigured / prefetch fails it is a no-op --
+    // the relevance leg degrades to pure BM25 and never interrupts the conversation.
     let mut cancelled = if let Some(memory) = memory.as_ref() {
         memory.set_query(prompt.as_str());
         tokio::select! {
@@ -35,7 +36,7 @@ async fn run_agent(
     while !cancelled {
         tokio::select! {
             biased;
-            // 用户打断：优先响应取消信号，drop 掉 stream 让本轮回复立即停止。
+            // User interrupt: respond to the cancel signal first, drop the stream so this turn's reply stops immediately.
             _ = &mut cancel => cancelled = true,
             event = stream.next() => {
                 match event {
@@ -67,12 +68,12 @@ pub struct Tui<'a> {
     terminal: &'a mut ratatui::DefaultTerminal,
     events: EventHandler,
     app: App,
-    /// 向运行中的 agent 任务发送取消信号（用户按 Esc 打断时触发）。
+    /// Sends a cancel signal to the running agent task (triggered when the user presses Esc to interrupt).
     cancel: Option<tokio::sync::oneshot::Sender<()>>,
-    /// 最近一帧渲染后的缓冲区。鼠标松开时据此把选区坐标映射回文本。
+    /// The buffer after the most recent frame render. On mouse release this maps the selection coordinates back to text.
     last_buffer: Option<Buffer>,
-    /// 系统剪贴板句柄，首次复制时惰性创建并常驻。
-    /// 常驻的意义在于：某些平台（X11）需要进程存活期间一直持有剪贴板内容。
+    /// System clipboard handle, created lazily on first copy and kept alive afterwards.
+    /// Keeping it alive matters because some platforms (X11) need the process to hold the clipboard contents for its whole lifetime.
     clipboard: Option<arboard::Clipboard>,
 }
 
@@ -85,8 +86,8 @@ impl<'a> Tui<'a> {
         needs_login: bool,
     ) -> Self {
         let mut app = App::with_manager(sessions, model_catalog);
-        // 未配置模型服务时自动进入 `/login`：把"缺配置"从启动错误变成 TUI 内
-        // 的一次引导。用户可随时 Esc 取消（取消后仍可手动 `/login`）。
+        // Automatically enter `/login` when no model service is configured: turn "missing config" from a startup error
+        // into an in-TUI guide. The user can press Esc to cancel at any time (and can still run `/login` manually afterwards).
         if needs_login {
             app.start_login();
         }
@@ -101,24 +102,24 @@ impl<'a> Tui<'a> {
     }
 
     pub fn draw(&mut self) -> std::io::Result<()> {
-        // 拆开借用，terminal 和 app 都要 &mut。
+        // Split the borrows; both terminal and app need &mut.
         let app = &mut self.app;
         let completed = self.terminal.draw(|frame| {
             ui::draw(frame, app);
-            // 选区高亮画在一切之上：直接给缓冲区单元格叠反色，随帧刷出。
+            // Selection highlight is drawn on top of everything: overlay inverse video directly on buffer cells, flushed each frame.
             if let Some(selection) = app.selection() {
                 selection.highlight(frame.buffer_mut());
             }
         })?;
-        // 仅在存在选区时留存本帧缓冲区（供松开左键时提取文本）：克隆整块缓冲区
-        // 不便宜，没必要每帧都做。拖动过程中每帧都会走到这里，故松开时必有快照。
+        // Only keep this frame's buffer when a selection exists (for extracting text on left-button release): cloning the whole buffer
+        // is not cheap, so there is no need to do it every frame. During a drag we hit this every frame, so a snapshot always exists on release.
         if app.selection().is_some() {
             self.last_buffer = Some(completed.buffer.clone());
         }
         Ok(())
     }
 
-    /// 处理鼠标事件：左键拖动 = 选中并自动复制；滚轮 = 滚动。
+    /// Handle mouse events: left-button drag = select and auto-copy; scroll wheel = scroll.
     fn handle_mouse(&mut self, mouse: MouseEvent) {
         let position = Position::new(mouse.column, mouse.row);
         match mouse.kind {
@@ -131,7 +132,7 @@ impl<'a> Tui<'a> {
         }
     }
 
-    /// 松开左键：提取选中文本并写入系统剪贴板（原地单击不复制）。
+    /// Left-button release: extract the selected text and write it to the system clipboard (a plain click does not copy).
     fn finish_selection(&mut self) {
         let Some(selection) = self.app.take_selection() else {
             return;
@@ -150,7 +151,7 @@ impl<'a> Tui<'a> {
         self.copy_to_clipboard(&text);
     }
 
-    /// 写入系统剪贴板。失败时以系统消息告知，不静默吞掉。
+    /// Write to the system clipboard. On failure, tell the user via a system message; never swallow it silently.
     fn copy_to_clipboard(&mut self, text: &str) {
         let result = match self.clipboard.as_mut() {
             Some(clipboard) => clipboard.set_text(text.to_owned()),
@@ -165,7 +166,7 @@ impl<'a> Tui<'a> {
         };
         if let Err(error) = result {
             self.app
-                .add_system_message(format!("复制到剪贴板失败：{error}"));
+                .add_system_message(format!("failed to copy to clipboard: {error}"));
         }
     }
 
@@ -173,18 +174,18 @@ impl<'a> Tui<'a> {
         self.app.exit();
     }
 
-    /// 把一条 `AgentEvent` 累加到前台会话。
+    /// Accumulate one `AgentEvent` into the foreground session.
     ///
-    /// 累加逻辑收敛在 `Session::apply_event`（与 desktop 共享同一条事件处理路径）——
-    /// TUI 只做转发，不再自己 match 事件。
+    /// The accumulation logic is centralized in `Session::apply_event` (the same event-handling path shared with desktop) --
+    /// the TUI only forwards, no longer matching events itself.
     fn apply(&mut self, update: Result<AgentEvent, String>) {
         self.app.apply_event(update);
     }
 
     pub async fn run(&mut self) -> std::io::Result<()> {
         let (updates_tx, mut updates_rx) = mpsc::unbounded_channel();
-        // 模型列表加载结果独立走一条通道：列表可能来自远端，加载应移出主循环，
-        // 期间 UI 不被阻塞（见 `models::ModelCatalog` 的异步接口）。
+        // The model-list load result travels on its own channel: the list may come from a remote source, so loading should move off the main loop
+        // and the UI must not be blocked meanwhile (see the async interface of `models::ModelCatalog`).
         let (picker_tx, mut picker_rx) = mpsc::unbounded_channel();
         let mut response: Option<JoinHandle<Agent>> = None;
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -192,20 +193,20 @@ impl<'a> Tui<'a> {
             self.draw()?;
             tokio::select! {
                 biased;
-                // 终端事件必须优先于流式更新被消费：AI 回复期间 updates_rx 持续就绪，
-                // 若排在按键之前（biased 模式），Esc 等按键会被无限"饿死"，无法打断。
+                // Terminal events must be consumed before streaming updates: during an AI reply updates_rx is continuously ready,
+                // and if it is queued ahead of key presses (biased mode), keys like Esc would be "starved" forever and could not interrupt.
                 event = self.events.next() => {
-                    // 鼠标事件不走 `update`：选区需要最近一帧的缓冲区与系统剪贴板，
-                    // 这两样只有 `Tui` 持有，故在这里直接处理。
+                    // Mouse events do not go through `update`: selection needs the latest frame's buffer and the system clipboard,
+                    // which only `Tui` holds, so handle them directly here.
                     match event? {
                         Event::Mouse(mouse) => self.handle_mouse(mouse),
                         event => {
                             if let Some(prompt) = update::update(&mut self.app, event)
                                 && let Some(agent) = self.app.take_agent()
                             {
-                                // 记忆：把本轮用户输入作为 query（含 query 向量预取，
-                                // 见 `run_agent`），供 provider 在组装请求时做相关检索
-                                // 注入（core.md 常驻 + top-k 相关，V2.5 混合检索）。
+                                // Memory: use this turn's user input as the query (including query-vector prefetch,
+                                // see `run_agent`), so the provider can do relevance retrieval when assembling the request
+                                // and inject it (core.md resident + top-k relevant, V2.5 hybrid retrieval).
                                 let memory = self.app.memory.clone();
                                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                                 self.cancel = Some(cancel_tx);
@@ -217,14 +218,14 @@ impl<'a> Tui<'a> {
                                     memory,
                                 )));
                             }
-                            // 用户请求打断：向运行中的任务发送取消信号（一次性）。
+                            // User requested interrupt: send a cancel signal to the running task (one-shot).
                             if self.app.interrupt_requested()
                                 && let Some(cancel) = self.cancel.take()
                             {
                                 let _ = cancel.send(());
                             }
-                            // `/model` 触发了模型列表加载：把目录移入后台任务，
-                            // 结果经 `picker_tx` 回传后由上面的分支打开选择器。
+                            // `/model` triggered a model-list load: move the catalog into a background task,
+                            // and after the result comes back via `picker_tx` the branch above opens the picker.
                             if self.app.take_picker_request() {
                                 let catalog = self.app.catalog();
                                 let tx = picker_tx.clone();
@@ -233,21 +234,21 @@ impl<'a> Tui<'a> {
                                     let _ = tx.send(entries);
                                 });
                             }
-                            // `/session` 触发了会话列表加载：会话目录是本地扫描（同步），
-                            // 直接在主循环取列表并打开选择器即可，无需后台任务。
+                            // `/session` triggered a session-list load: the session catalog is a local scan (synchronous),
+                            // so just fetch the list in the main loop and open the picker; no background task needed.
                             if self.app.take_session_picker_request() {
                                 let catalog = self.app.session_catalog();
                                 match catalog.list() {
                                     Ok(entries) => self.app.open_session_picker(entries),
                                     Err(error) => self
                                         .app
-                                        .add_system_message(format!("加载会话列表失败：{error}")),
+                                        .add_system_message(format!("failed to load session list: {error}")),
                                 }
                             }
                         }
                     }
                 }
-                // 模型列表加载完成：打开选择器。
+                // Model-list load finished: open the picker.
                 Some(entries) = picker_rx.recv() => {
                     self.app.open_picker(entries);
                 }
@@ -272,7 +273,7 @@ impl<'a> Tui<'a> {
                     self.cancel = None;
                     let agent = completed.map_err(std::io::Error::other)?;
                     self.app.restore_agent(agent);
-                    // 收尾保留本轮内容，解除流式状态。
+                    // Wrap up: keep this turn's content and clear the streaming state.
                     self.app.complete_turn();
                 }
             }
@@ -288,10 +289,10 @@ impl<'a> Tui<'a> {
             self.app.restore_agent(agent);
             self.app.complete_turn();
         }
-        // 退出前对前台会话跑一次记忆 curation（`docs/memory.md` §5.1）：单会话聊到底、
-        // 直接退出时切换路径永不发生，这里是「本轮结束」唯一能触发 curation 的时机。
-        // best-effort，且**必须 await**——主循环结束后运行时随即关闭，spawn 出去的任务
-        // 可能来不及跑完就被丢弃。
+        // Before exit, run one memory curation on the foreground session (`docs/memory.md` §5.1): for a single session chatted to the end
+        // and then exited directly, the switch path never happens, so this is the only moment that can trigger curation for "this turn ended".
+        // best-effort, and it **must be awaited** -- the runtime shuts down right after the main loop ends, so a spawned task
+        // might be dropped before it finishes.
         self.app.finish().await;
         self.exit();
         Ok(())

@@ -1,25 +1,28 @@
 import type { FileReference } from "./types";
 
 /**
- * 正文里代表一个引用 chip 的占位符（U+FFFC，OBJECT REPLACEMENT CHARACTER）。
+ * Placeholder in the body representing a reference chip (U+FFFC, OBJECT REPLACEMENT CHARACTER).
  *
- * contenteditable 编辑区里，chip 是一个 `contenteditable=false` 的内联元素；
- * 序列化成纯文本时它被写成这个不可见字符，于是「文本 + 引用」仍是一条**有序的
- * 字符串**：第 N 个占位符 ↔ references[N]。发送给模型前把占位符剥掉，引用仍走
- * 既有的 references 数组（Rust `compose_prompt` 不变）。
+ * In the contenteditable editor, a chip is a `contenteditable=false` inline element; when
+ * serialized to plain text it becomes this invisible character, so "text + references" is
+ * still a single **ordered string**: the Nth placeholder <-> references[N]. The placeholders
+ * are stripped before sending to the model, and the references still travel through the
+ * existing references array (Rust `compose_prompt` unchanged).
  */
 export const CHIP_TOKEN = "\uFFFC";
 
 /**
- * 末尾哨兵用的零宽空格（U+200B）。chip 是 `contenteditable=false` 的原子节点，
- * 当它落在编辑区**末尾**时，光标停在「chip 之后」这个 DOM 边界上没有可依附的文本
- * 节点，浏览器**不渲染光标**（看起来像光标消失，直到再敲一个字符才出现）。
- * 因此在末尾 chip 后追加一个零宽空格文本节点，给光标一个可渲染的落点；序列化与
- * 偏移计算统一把它剥掉，用户完全感知不到。
+ * Zero-width space (U+200B) used as a trailing sentinel. A chip is an atomic
+ * `contenteditable=false` node; when it lands at the **end** of the editor, the caret at
+ * the "after the chip" DOM boundary has no text node to attach to, so the browser
+ * **does not render the caret** (it looks like the caret vanished until another character
+ * is typed). So append a zero-width-space text node after a trailing chip to give the caret
+ * a renderable anchor; serialization and offset computation strip it uniformly, so the user
+ * never notices.
  */
 const ZWSP = "\u200B";
 
-/** 序列化一段 DOM 为「带占位符的纯文本」。 */
+/** Serialize a DOM subtree into "plain text with placeholders". */
 function serializeNode(node: Node): string {
   if (node.nodeType === Node.TEXT_NODE) return (node.textContent ?? "").split(ZWSP).join("");
   if (node.nodeType === Node.ELEMENT_NODE) {
@@ -43,7 +46,7 @@ export function serializeEditor(root: HTMLElement): string {
   return out;
 }
 
-/** 从编辑区按 DOM 顺序读出所有 chip（用于「键盘删掉 chip」后的引用对账）。 */
+/** Read all chips from the editor in DOM order (for reconciling references after a chip is deleted via the keyboard). */
 export function readChips(root: HTMLElement): FileReference[] {
   return Array.from(root.querySelectorAll<HTMLElement>("[data-chip='true']")).map((el) => {
     const kind =
@@ -58,7 +61,7 @@ export function readChips(root: HTMLElement): FileReference[] {
   });
 }
 
-/** 用「带占位符的文本 + references」重建编辑区内容（仅结构变化时调用）。 */
+/** Rebuild the editor content from "placeholder text + references" (called only when the structure changes). */
 export function buildEditorContent(
   root: HTMLElement,
   text: string,
@@ -76,11 +79,11 @@ export function buildEditorContent(
       if (reference) root.appendChild(createChip(reference, refIndex - 1));
     }
   });
-  // 末尾是 chip：补一个零宽空格哨兵，让「chip 之后」的光标有落点（否则不渲染）。
+  // A trailing chip: append a zero-width-space sentinel so the "after the chip" caret has an anchor (otherwise it is not rendered).
   if (text.endsWith(CHIP_TOKEN)) root.appendChild(document.createTextNode(ZWSP));
 }
 
-/** 光标在「序列化文本」中的偏移（UTF-16 码元数）。 */
+/** The caret offset in the "serialized text" (in UTF-16 code units). */
 export function caretOffset(root: HTMLElement): number {
   const selection = window.getSelection();
   if (!selection || selection.rangeCount === 0) return serializeEditor(root).length;
@@ -94,7 +97,7 @@ export function caretOffset(root: HTMLElement): number {
   return serializeEditor(holder).length;
 }
 
-/** 把「序列化文本偏移」解析成 DOM 位置 (node, offset)。 */
+/** Resolve a "serialized text offset" into a DOM position (node, offset). */
 export function resolveOffset(root: HTMLElement, offset: number): { node: Node; offset: number } {
   let remaining = offset;
   let result: { node: Node; offset: number } | null = null;
@@ -106,7 +109,7 @@ export function resolveOffset(root: HTMLElement, offset: number): { node: Node; 
         const raw = child.textContent ?? "";
         const length = raw.split(ZWSP).join("").length;
         if (remaining <= length) {
-          // 文本节点里可能含零宽哨兵：把「序列化偏移」映射回真实 DOM 偏移。
+          // The text node may contain the zero-width sentinel: map the "serialized offset" back to the real DOM offset.
           const offsetInNode = remaining + (raw.startsWith(ZWSP) ? 1 : 0);
           result = { node: child, offset: offsetInNode };
           return true;
@@ -116,7 +119,7 @@ export function resolveOffset(root: HTMLElement, offset: number): { node: Node; 
         const el = child as HTMLElement;
         if (el.dataset.chip === "true") {
           if (remaining <= 0) {
-            // chip 之前：优先落进前一个文本节点末尾（否则行首/行尾不渲染光标）。
+            // Before the chip: prefer landing at the end of the previous text node (otherwise the caret is not rendered at the start/end of a line).
             const prev = node.childNodes[i - 1];
             if (prev && prev.nodeType === Node.TEXT_NODE) {
               result = { node: prev, offset: (prev.textContent ?? "").length };
@@ -127,8 +130,9 @@ export function resolveOffset(root: HTMLElement, offset: number): { node: Node; 
           }
           remaining -= 1;
           if (remaining <= 0) {
-            // chip 之后：优先落进后一个文本节点开头（哨兵节点则在零宽字符之后），
-            // 让光标有可渲染的文本落点，而不是停在 chip 与文本之间的边界上。
+            // After the chip: prefer landing at the start of the next text node (or after
+            // the zero-width char for the sentinel node), giving the caret a renderable text
+            // anchor rather than stopping at the boundary between the chip and the text.
             const next = node.childNodes[i + 1];
             if (next && next.nodeType === Node.TEXT_NODE) {
               const raw = next.textContent ?? "";
@@ -156,7 +160,7 @@ export function resolveOffset(root: HTMLElement, offset: number): { node: Node; 
   return result ?? { node: root, offset: root.childNodes.length };
 }
 
-/** 把光标放到「序列化文本」的指定偏移处。 */
+/** Place the caret at the given offset in the "serialized text". */
 export function setCaretAt(root: HTMLElement, offset: number): void {
   const { node, offset: domOffset } = resolveOffset(root, offset);
   const range = document.createRange();
@@ -167,7 +171,7 @@ export function setCaretAt(root: HTMLElement, offset: number): void {
   selection?.addRange(range);
 }
 
-/** 某个 chip 元素在「序列化文本」里的起始偏移（即其占位符的位置）。 */
+/** The start offset of a chip element in the "serialized text" (i.e. the position of its placeholder). */
 export function chipOffset(root: HTMLElement, chip: Node): number | null {
   if (!root.contains(chip)) return null;
   const before = document.createRange();
@@ -178,7 +182,7 @@ export function chipOffset(root: HTMLElement, chip: Node): number | null {
   return serializeEditor(holder).length;
 }
 
-/** 从任意节点向上找到它所属的 chip（点击定位用）；不在 chip 内返回 null。 */
+/** Walk up from any node to find the chip it belongs to (for click positioning); returns null if not inside a chip. */
 export function closestChip(root: HTMLElement, node: Node | null): HTMLElement | null {
   if (!node) return null;
   const el =
@@ -187,17 +191,17 @@ export function closestChip(root: HTMLElement, node: Node | null): HTMLElement |
   return chip && root.contains(chip) ? chip : null;
 }
 
-/** 正文里 CHIP_TOKEN 的个数。 */
+/** The number of CHIP_TOKENs in the body. */
 export function countTokens(text: string): number {
   return text.split(CHIP_TOKEN).length - 1;
 }
 
-/** 剥掉所有引用占位符，得到真正交给模型的纯文本。 */
+/** Strip all reference placeholders to get the plain text actually handed to the model. */
 export function stripTokens(text: string): string {
   return text.split(CHIP_TOKEN).join("");
 }
 
-/** 在光标处插入纯文本（用于粘贴 / Shift+Enter 换行）。 */
+/** Insert plain text at the caret (used for paste / Shift+Enter line breaks). */
 export function insertTextAtCaret(root: HTMLElement, text: string): void {
   const selection = window.getSelection();
   if (
@@ -220,7 +224,7 @@ export function insertTextAtCaret(root: HTMLElement, text: string): void {
   ensureTrailingSentinel(root);
 }
 
-/** 末尾是 chip 时补一个零宽空格哨兵（见 `ZWSP` 说明）。 */
+/** Append a zero-width-space sentinel when a chip is at the end (see the `ZWSP` note). */
 export function ensureTrailingSentinel(root: HTMLElement): void {
   const last = root.lastChild;
   if (

@@ -91,7 +91,7 @@ export function useMessageAutoScroll({
 }: {
   forceKey: string;
   contentKey: string;
-  /** 外部传入的视口 ref（如上层要把滚动容器暴露给兄弟组件时）；缺省自持。 */
+  /** Externally supplied viewport ref (e.g. when the parent exposes the scroll container to sibling components); self-owned by default. */
   viewportRef?: RefObject<HTMLDivElement>;
 }) {
   const internalRef = useRef<HTMLDivElement>(null);

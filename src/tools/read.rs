@@ -4,21 +4,21 @@ use shirley_agent_sdk::workspace::{WorkSpace, WorkspaceError};
 use shirley_agent_sdk::{ToolError, tool};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 
-/// 默认读取行数。模型不指定时用这个值，避免"顺手读整个文件"。
+/// Default line count. Used when the model does not specify, to avoid "reading the whole file by the way".
 const DEFAULT_LINE_COUNT: usize = 200;
 
-/// 单次读取行数硬上限。即便模型显式要求更多，也不会一次灌满上下文。
+/// Hard cap on lines per read. Even if the model explicitly asks for more, it will not flood the context in one go.
 const MAX_LINE_COUNT: usize = 2000;
 
-/// 单次输出字节上限。行数达标但内容过长（如超长压缩文件、单行巨大）时，
-/// 由这一层兜底截断，保证上下文占用可控。
+/// Byte cap per output. When the line count is within limits but the content is too long (e.g. a very long compressed file, a huge single line),
+/// this layer truncates as a fallback, keeping context usage bounded.
 const MAX_OUTPUT_BYTES: usize = 64 * 1024;
 
-/// 二进制探测窗口：开头这么多字节里出现 NUL 就当成二进制文件拒绝。
+/// Binary sniff window: if a NUL appears in this many leading bytes, treat it as a binary file and reject.
 const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
-/// 工作区根目录：优先读环境变量 `SHIRLEY_WORKSPACE`，否则退回当前目录。
-/// 与 `bash` 工具保持同一口径，避免两处漂移。
+/// Workspace root: reads the `SHIRLEY_WORKSPACE` env var first, otherwise falls back to the current directory.
+/// Kept consistent with the `bash` tool to avoid drift between the two.
 fn workspace_root() -> Option<PathBuf> {
     std::env::var("SHIRLEY_WORKSPACE")
         .ok()
@@ -27,8 +27,8 @@ fn workspace_root() -> Option<PathBuf> {
         .or_else(|| std::env::current_dir().ok())
 }
 
-/// 疑似密钥文件：默认拒绝，避免把 `.env` / 私钥读进上下文再发给模型
-/// （见 `docs/security.md` 第三节）。
+/// Suspected secret file: rejected by default, to avoid reading `.env` / private keys into the context and then sending them to the model
+/// (see `docs/security.md` section 3).
 fn is_secret_file(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name == ".env"
@@ -43,7 +43,7 @@ fn is_secret_file(name: &str) -> bool {
         || name.starts_with("id_ed25519")
 }
 
-/// 按字符边界把 `text` 截到不超过 `budget` 字节。
+/// Clip `text` at a character boundary to no more than `budget` bytes.
 fn clip_to_budget(text: &str, budget: usize) -> &str {
     if text.len() <= budget {
         return text;
@@ -58,35 +58,35 @@ fn clip_to_budget(text: &str, budget: usize) -> &str {
     &text[..end]
 }
 
-/// 按行读取工作区内文本文件，返回带行号的片段。
+/// Read a text file inside the workspace by line, returning a line-numbered excerpt.
 ///
-/// 存在的意义是**把读取能力变得可控**：路径受工作区约束、行数与字节数都有
-/// 硬上限，模型不再需要（也不该）用 `cat` 裸读整个文件把上下文灌满。
+/// Its reason to exist is to **make reading controllable**: paths are constrained to the workspace, and both line count and byte count have
+/// hard caps, so the model no longer needs to (and should not) read a whole file raw with `cat` and flood the context.
 ///
-/// 返回纯文本而非结构化 JSON，是刻意为之——模型直接可读，且带行号便于
-/// 后续用 `start_line` 续读。
+/// Returning plain text rather than structured JSON is deliberate -- directly readable by the model, and the line numbers make it easy to
+/// continue reading with `start_line`.
 #[tool(
-    description = "按行读取工作区内文本文件的内容，返回带行号的文本。读取有行数与字节上限；内容被截断时会在末尾提示如何续读。读取大文件请先用 rg/grep 定位，再用本工具读取相关区间，不要用 cat 读整个文件。"
+    description = "Read the contents of a text file inside the workspace by line, returning line-numbered text. Reads have line and byte caps; when content is truncated, a hint on how to continue is shown at the end. For large files, first locate content with rg/grep, then use this tool to read the relevant range; do not read the whole file with cat."
 )]
 pub async fn read_file(
-    #[param(description = "文件路径，相对于工作区根目录；不接受绝对路径或越出工作区的路径")]
+    #[param(description = "file path, relative to the workspace root; absolute paths or paths escaping the workspace are not accepted")]
     path: String,
-    #[param(description = "起始行，从 1 开始；省略时为第 1 行")]
+    #[param(description = "start line, 1-based; defaults to line 1")]
     start_line: Option<usize>,
-    #[param(description = "最多读取多少行，省略时 200 行，上限 2000 行")]
+    #[param(description = "maximum number of lines to read, defaults to 200, hard cap 2000")]
     line_count: Option<usize>,
 ) -> Result<String, ToolError> {
     let root = workspace_root()
-        .ok_or_else(|| ToolError::ExecutionError("无法确定工作区根目录".into()))?;
+        .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
     read_text_range(&root, &path, &path, start_line, line_count).await
 }
 
-/// 受控读取内核：把 `root` 下的相对路径 `path` 按行读出，返回带行号的片段。
+/// Controlled read kernel: reads the relative path `path` under `root` by line, returning a line-numbered excerpt.
 ///
-/// 这是 `read_file`（根 = 工作区）与 `read_skill_file`（根 = skill 目录）**唯一
-/// 的读取实现**——边界只有一处（`docs/security.md`）：路径受 `root` 约束、行数 /
-/// 字节数有硬上限、疑似密钥拒绝、二进制探测。`display` 是给模型看的路径名
-/// （相对引用），与 `path` 分开，方便 skill 场景展示 `scripts/foo.py` 这种形式。
+/// This is the **only read implementation** for `read_file` (root = workspace) and `read_skill_file` (root = skill directory)
+/// -- the boundary lives in one place (`docs/security.md`): paths constrained to `root`, hard caps on line /
+/// byte counts, suspected-secret rejection, binary sniffing. `display` is the path name shown to the model
+/// (a relative reference), kept separate from `path`, so skill scenarios can show forms like `scripts/foo.py`.
 pub(crate) async fn read_text_range(
     root: &Path,
     path: &str,
@@ -96,69 +96,69 @@ pub(crate) async fn read_text_range(
 ) -> Result<String, ToolError> {
     let start_line = start_line.unwrap_or(1);
     if start_line == 0 {
-        return Err(ToolError::ArgumentsError("起始行必须大于 0".into()));
+        return Err(ToolError::ArgumentsError("start line must be greater than 0".into()));
     }
     let requested = line_count.unwrap_or(DEFAULT_LINE_COUNT);
     if requested == 0 {
-        return Err(ToolError::ArgumentsError("读取行数必须大于 0".into()));
+        return Err(ToolError::ArgumentsError("line count must be greater than 0".into()));
     }
     let count = requested.min(MAX_LINE_COUNT);
 
-    // 1. 路径先过根约束：绝对路径与 `..` 越界都在这里被拒绝。
+    // 1. Path first goes through the root constraint: absolute paths and `..` escapes are both rejected here.
     let workspace = WorkSpace::new(root.to_path_buf())
-        .map_err(|error| ToolError::ExecutionError(format!("工作区初始化失败: {error}")))?;
+        .map_err(|error| ToolError::ExecutionError(format!("workspace initialization failed: {error}")))?;
     let resolved = workspace.resolve(path).map_err(|error| match error {
-        // 越界 / 非法路径都是请求侧问题：模型换个路径或写法就能成功，
-        // 所以归为参数错误，而不是执行失败。
+        // Escape / invalid path are both request-side problems: the model can succeed by changing the path or its spelling,
+        // so classify as an argument error rather than an execution failure.
         WorkspaceError::OutsideRoot(_) | WorkspaceError::InvalidPath(_) => {
             ToolError::ArgumentsError(error.to_string())
         }
         WorkspaceError::Io(_) => ToolError::ExecutionError(error.to_string()),
     })?;
 
-    // 2. 密钥文件默认拒绝。
+    // 2. Secret files are rejected by default.
     if let Some(name) = resolved.file_name().and_then(|name| name.to_str())
         && is_secret_file(name)
     {
         return Err(ToolError::ArgumentsError(format!(
-            "拒绝读取疑似密钥文件: {display}"
+            "refusing to read a suspected secret file: {display}"
         )));
     }
 
-    // 3. 目录 / 特殊文件给出明确引导，而不是让读取莫名其妙地失败。
+    // 3. Directories / special files get clear guidance, rather than a baffling read failure.
     let metadata = tokio::fs::metadata(&resolved)
         .await
-        .map_err(|error| ToolError::ExecutionError(format!("读取 {display} 元信息失败: {error}")))?;
+        .map_err(|error| ToolError::ExecutionError(format!("failed to read metadata of {display}: {error}")))?;
     if metadata.is_dir() {
         return Err(ToolError::ExecutionError(format!(
-            "{display} 是目录；查看目录请用 bash 的 ls，本工具只读文件"
+            "{display} is a directory; use bash's ls to list a directory, this tool reads files only"
         )));
     }
     if !metadata.is_file() {
         return Err(ToolError::ExecutionError(format!(
-            "{display} 不是普通文件，无法读取"
+            "{display} is not a regular file and cannot be read"
         )));
     }
 
-    // 4. 打开并做二进制探测。
+    // 4. Open and do binary sniffing.
     let mut file = tokio::fs::File::open(&resolved)
         .await
-        .map_err(|error| ToolError::ExecutionError(format!("打开文件 {display} 失败: {error}")))?;
+        .map_err(|error| ToolError::ExecutionError(format!("failed to open file {display}: {error}")))?;
     let mut sniff = vec![0u8; BINARY_SNIFF_BYTES];
     let sniffed = file
         .read(&mut sniff)
         .await
-        .map_err(|error| ToolError::ExecutionError(format!("读取文件 {display} 失败: {error}")))?;
+        .map_err(|error| ToolError::ExecutionError(format!("failed to read file {display}: {error}")))?;
     if sniff[..sniffed].contains(&0) {
         return Err(ToolError::ExecutionError(format!(
-            "{display} 看起来是二进制文件，已拒绝读取"
+            "{display} looks like a binary file; read refused"
         )));
     }
     file.seek(std::io::SeekFrom::Start(0))
         .await
-        .map_err(|error| ToolError::ExecutionError(format!("定位文件 {display} 失败: {error}")))?;
+        .map_err(|error| ToolError::ExecutionError(format!("failed to seek in file {display}: {error}")))?;
 
-    // 5. 跳到起始行。
+    // 5. Skip to the start line.
     let mut reader = BufReader::new(file);
     let mut buffer = Vec::new();
     let mut line_no = 1usize;
@@ -167,26 +167,26 @@ pub(crate) async fn read_text_range(
         let read = reader
             .read_until(b'\n', &mut buffer)
             .await
-            .map_err(|error| ToolError::ExecutionError(format!("读取文件 {display} 失败: {error}")))?;
+            .map_err(|error| ToolError::ExecutionError(format!("failed to read file {display}: {error}")))?;
         if read == 0 {
             return Ok(format!(
-                "[{display} 在第 {start_line} 行之前已结束，没有可读取的内容]"
+                "[{display} ended before line {start_line}; nothing to read]"
             ));
         }
         line_no += 1;
     }
 
-    // 6. 逐行读取，同时受行数与字节两个上限约束。
+    // 6. Read line by line, bounded by both the line count and byte caps.
     let mut out = String::new();
     let mut emitted = 0usize;
     let mut truncated = false;
     let mut more_lines = false;
     loop {
         if emitted >= count {
-            // 行数已达标，探一下还有没有后续内容，决定是否提示续读。
+            // Line count reached; probe whether there is more content to decide whether to hint continuation.
             buffer.clear();
             let read = reader.read_until(b'\n', &mut buffer).await.map_err(|error| {
-                ToolError::ExecutionError(format!("读取文件 {display} 失败: {error}"))
+                ToolError::ExecutionError(format!("failed to read file {display}: {error}"))
             })?;
             more_lines = read > 0;
             break;
@@ -196,7 +196,7 @@ pub(crate) async fn read_text_range(
         let read = reader
             .read_until(b'\n', &mut buffer)
             .await
-            .map_err(|error| ToolError::ExecutionError(format!("读取文件 {display} 失败: {error}")))?;
+            .map_err(|error| ToolError::ExecutionError(format!("failed to read file {display}: {error}")))?;
         if read == 0 {
             break;
         }
@@ -206,7 +206,7 @@ pub(crate) async fn read_text_range(
         let prefix = format!("{line_no:>6} | ");
 
         let remaining = MAX_OUTPUT_BYTES.saturating_sub(out.len());
-        // 至少要为前缀与换行留出空间，否则这一行放不下，直接截断。
+        // Leave at least room for the prefix and newline; otherwise this line does not fit, truncate directly.
         if remaining <= prefix.len() + 1 {
             truncated = true;
             break;
@@ -220,7 +220,7 @@ pub(crate) async fn read_text_range(
 
         emitted += 1;
         if clipped.len() < text.len() {
-            // 单行超出剩余字节预算，本行已被截断。
+            // A single line exceeds the remaining byte budget; this line was truncated.
             truncated = true;
             break;
         }
@@ -233,16 +233,16 @@ pub(crate) async fn read_text_range(
 
     if emitted == 0 {
         return Ok(format!(
-            "[{display} 在第 {start_line} 行之前已结束，没有可读取的内容]"
+            "[{display} ended before line {start_line}; nothing to read]"
         ));
     }
 
     let last_line = start_line + emitted - 1;
-    let mut result = format!("# {display}（第 {start_line}-{last_line} 行）\n{out}");
+    let mut result = format!("# {display} (lines {start_line}-{last_line})\n{out}");
     if truncated {
         let next = last_line + 1;
         result.push_str(&format!(
-            "[内容已截断；如需继续，请用 start_line={next} 续读]\n"
+            "[content truncated; to continue, use start_line={next}]\n"
         ));
     }
     Ok(result)
@@ -252,11 +252,11 @@ pub(crate) async fn read_text_range(
 mod tests {
     use super::*;
 
-    // 测试会改动进程级的工作区环境变量，串行执行避免相互干扰。
-    // 用 tokio 的 Mutex：guard 允许跨 await 持有，std 的会被 clippy 拦下。
+    // Tests mutate the process-level workspace env var; run serially to avoid interference.
+    // Use tokio's Mutex: the guard may be held across await, std's would be flagged by clippy.
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-    /// 建一个唯一的临时工作区目录。
+    /// Create a unique temporary workspace directory.
     fn temp_workspace(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
             "shirley_read_{tag}_{}_{:?}",
@@ -273,14 +273,14 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("basic");
         std::fs::write(dir.join("a.txt"), "first\nsecond\nthird\n").unwrap();
-        // SAFETY: 测试内串行改环境变量，不与其他线程并发。
+        // SAFETY: env var is changed serially within the test, not concurrently with other threads.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let out = read_file("a.txt".into(), None, None).await.unwrap();
 
-        assert!(out.contains("     1 | first"), "应带行号: {out}");
-        assert!(out.contains("     3 | third"), "应读到第三行: {out}");
-        assert!(!out.contains("已截断"), "内容完整时不应提示截断: {out}");
+        assert!(out.contains("     1 | first"), "should include line numbers: {out}");
+        assert!(out.contains("     3 | third"), "should read the third line: {out}");
+        assert!(!out.contains("truncated"), "should not hint truncation when content is complete: {out}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -294,10 +294,10 @@ mod tests {
 
         let out = read_file("b.txt".into(), Some(3), Some(2)).await.unwrap();
 
-        assert!(out.contains("     3 | line3"), "应从第 3 行开始: {out}");
-        assert!(out.contains("     4 | line4"), "应读两行: {out}");
-        assert!(!out.contains("line5"), "不应越过行数上限: {out}");
-        assert!(out.contains("start_line=5"), "应提示续读位置: {out}");
+        assert!(out.contains("     3 | line3"), "should start at line 3: {out}");
+        assert!(out.contains("     4 | line4"), "should read two lines: {out}");
+        assert!(!out.contains("line5"), "should not exceed the line cap: {out}");
+        assert!(out.contains("start_line=5"), "should hint the continuation position: {out}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -312,9 +312,9 @@ mod tests {
             .unwrap_err();
         assert!(
             matches!(err, ToolError::ArgumentsError(_)),
-            "越界应是参数错误: {err:?}"
+            "escape should be an argument error: {err:?}"
         );
-        assert!(err.to_string().contains("outside workspace"), "应说明越界: {err}");
+        assert!(err.to_string().contains("outside workspace"), "should explain the escape: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -327,7 +327,7 @@ mod tests {
         let err = read_file("/etc/hosts".into(), None, None).await.unwrap_err();
         assert!(
             matches!(err, ToolError::ArgumentsError(_)),
-            "绝对路径应被拒绝: {err:?}"
+            "absolute path should be rejected: {err:?}"
         );
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -340,7 +340,7 @@ mod tests {
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let err = read_file(".env".into(), None, None).await.unwrap_err();
-        assert!(err.to_string().contains("密钥"), "应拒绝密钥文件: {err}");
+        assert!(err.to_string().contains("secret"), "should reject secret files: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -352,7 +352,7 @@ mod tests {
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let err = read_file("bin".into(), None, None).await.unwrap_err();
-        assert!(err.to_string().contains("二进制"), "应拒绝二进制: {err}");
+        assert!(err.to_string().contains("binary"), "should reject binary: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -364,7 +364,7 @@ mod tests {
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let err = read_file("sub".into(), None, None).await.unwrap_err();
-        assert!(err.to_string().contains("目录"), "应引导用 ls: {err}");
+        assert!(err.to_string().contains("directory"), "should guide to use ls: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -372,16 +372,16 @@ mod tests {
     async fn caps_output_bytes() {
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("bytes");
-        // 一行就超过字节上限，必须被截断而不是整段塞进上下文。
+        // A single line already exceeds the byte cap; it must be truncated rather than stuffed into the context whole.
         let big = "a".repeat(MAX_OUTPUT_BYTES * 2);
         std::fs::write(dir.join("big.txt"), big).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let out = read_file("big.txt".into(), None, None).await.unwrap();
-        assert!(out.contains("已截断"), "应提示截断: 长度 {}", out.len());
+        assert!(out.contains("truncated"), "should hint truncation: length {}", out.len());
         assert!(
             out.len() <= MAX_OUTPUT_BYTES + 200,
-            "输出应受字节上限约束，实际 {}",
+            "output should be bounded by the byte cap, actual {}",
             out.len()
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -396,18 +396,18 @@ mod tests {
         std::fs::write(dir.join("m.txt"), "alpha\nbeta\n").unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        // 走宏生成的 `tool()`，验证注册 + 参数反序列化 + 调用的完整链路。
+        // Use the macro-generated `tool()` to verify the full path of registration + argument deserialization + invocation.
         let mut manager = ToolManager::new();
-        manager.register(read_file::tool()).expect("注册应成功");
+        manager.register(read_file::tool()).expect("registration should succeed");
 
         let definition = manager
             .definitions()
             .into_iter()
             .find(|d| d.name == "read_file")
-            .expect("应能拿到 read_file 定义");
+            .expect("should get the read_file definition");
         assert!(
-            definition.description.contains("行"),
-            "描述应说明读取语义: {}",
+            definition.description.contains("line"),
+            "the description should explain the read semantics: {}",
             definition.description
         );
 
@@ -419,10 +419,10 @@ mod tests {
         let output = manager
             .invoke(&call, shirley_agent_sdk::ToolContext::new())
             .await
-            .expect("调用应成功");
+            .expect("invocation should succeed");
         let text = output.as_str().unwrap_or_default();
-        assert!(text.contains("alpha"), "应读到内容: {text}");
-        assert!(!text.contains("beta"), "应受行数限制: {text}");
+        assert!(text.contains("alpha"), "should read the content: {text}");
+        assert!(!text.contains("beta"), "should be bounded by the line count: {text}");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -436,13 +436,13 @@ mod tests {
         std::fs::write(dir.join("many.txt"), body).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        // 显式要求远超上限的行数，也只能读到上限。
+        // Explicitly request far more lines than the cap; still only read up to the cap.
         let out = read_file("many.txt".into(), None, Some(MAX_LINE_COUNT * 2))
             .await
             .unwrap();
         let lines = out.lines().filter(|l| l.contains(" | ")).count();
-        assert_eq!(lines, MAX_LINE_COUNT, "应恰好读到行数上限");
-        assert!(out.contains("已截断"), "应提示还有更多: {out}");
+        assert_eq!(lines, MAX_LINE_COUNT, "should read exactly the line cap");
+        assert!(out.contains("truncated"), "should hint there is more: {out}");
         std::fs::remove_dir_all(&dir).ok();
     }
 }

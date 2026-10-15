@@ -1,48 +1,48 @@
-//! 快捷指令（slash commands）。
+//! Slash commands.
 //!
-//! 仅作用于 TUI 层：用户输入以 `prefix`（默认 `/`）开头时进入指令解析。
-//! 架构上它**不接触 SDK**——指令要么展开成一段自然语言 prompt 发给 AI
-//! （本质就是 prompt，见工作区根 `Agent.md` 的"本质是 prompt"约定），
-//! 要么作为本地系统消息直接提示用户，完全不进入模型。
+//! They act only on the TUI layer: when the user's input starts with `prefix` (default `/`), it enters command parsing.
+//! Architecturally it **does not touch the SDK** -- a command either expands into a natural-language prompt sent to the AI
+//! (it is essentially a prompt, see the "essentially a prompt" convention in the workspace root `Agent.md`),
+//! or acts as a local system message shown directly to the user, never entering the model.
 //!
-//! 当前实现 `/init`、`/model`、`/rewind`、`/session`、`/login`，以及**动态的
-//! `/&lt;skill-name&gt;`**——后者由 harness 直接激活一个 skill（见 `docs/skills.md` 5.6，P2）。
+//! Currently implements `/init`, `/model`, `/rewind`, `/session`, `/login`, and the **dynamic
+//! `/<skill-name>`** -- the latter activates a skill directly via the harness (see `docs/skills.md` 5.6, P2).
 
 use crate::prompt;
 
-/// 指令触发符，默认 `/`。
+/// Command trigger, default `/`.
 pub const DEFAULT_PREFIX: char = '/';
 
-/// 解析结果，由 `App` 消费。
+/// Parse result, consumed by `App`.
 #[derive(Debug)]
 pub enum CommandOutcome {
-    /// 展开为一段 prompt，走现有发送链路（UI 显示展开后内容，AI 收到的也是它）。
+/// Expand into a prompt and go through the existing send path (the UI shows the expanded content, and the AI receives the same).
     Prompt(String),
-    /// TUI 本地动作：直接给一条系统提示，不发给 AI。
+/// TUI local action: show a system hint directly, without sending it to the AI.
     SystemMessage(String),
-    /// TUI 本地动作：打开模型选择器。列表由应用层的模型目录提供，
-    /// 指令本身不关心模型从哪来（见 `models` 模块）。
+/// TUI local action: open the model picker. The list comes from the application-layer model catalog;
+/// the command itself does not care where models come from (see the `models` module).
     ModelPicker,
-    /// TUI 本地动作：回退最后一条用户消息，把原文填回输入框供编辑重发。
-    /// 方案 A：只做最新一条，无需选择面板，候选也不涉及异步加载。
+/// TUI local action: rewind the last user message, filling its original text back into the input box for editing and resending.
+/// Option A: only the most recent one, no selection panel, and candidates involve no async loading.
     Rewind,
-    /// TUI 本地动作：打开会话选择器。会话清单由应用层的会话目录提供
-    /// （见 `crate::session`），指令本身不关心会话从哪来、存哪里。
+/// TUI local action: open the session picker. The session list comes from the application-layer session catalog
+/// (see `crate::session`); the command itself does not care where sessions come from or where they are stored.
     SessionPicker,
-    /// TUI 本地动作：进入分步登录流程（依次询问 base_url / api_key / model）。
-    /// 指令本身不关心配置怎么写、写哪里——那是 `App` 与 `settings` 的事。
+/// TUI local action: enter the step-by-step login flow (asks for base_url / api_key / model in turn).
+/// The command itself does not care how/where config is written -- that is `App`'s and `settings`' concern.
     Login,
-    /// 动态 slash 入口：`/<skill-name> [args]`——由 harness 直接激活该 skill
-    /// （确定性入口，跳过模型的判断，见 `docs/skills.md` 5.6）。
+/// Dynamic slash entry: `/<skill-name> [args]` -- the harness activates that skill directly
+/// (a deterministic entry point that skips the model's judgment, see `docs/skills.md` 5.6).
     ///
-    /// `args` 非空时，激活后把这段文本作为**本轮 prompt** 发出；为空则只激活、
-    /// 不打扰模型（由 `App` 给一条本地系统提示）。
+/// When `args` is non-empty, after activation this text is sent as **this turn's prompt**; when empty, it only activates
+/// without bothering the model (the `App` gives a local system hint).
     ActivateSkill { name: String, args: String },
-    /// 不是已知指令：按普通文本照发（宽松策略，不打断用户）。
+/// Not a known command: send it as ordinary text (lenient policy, do not interrupt the user).
     Unknown,
 }
 
-/// 已知的内置指令。用枚举而非字符串表，避免运行期拼错。
+/// Known built-in commands. An enum instead of a string table, to avoid runtime typos.
 enum Builtin {
     Init,
     Model,
@@ -65,22 +65,22 @@ impl Builtin {
     fn handle(&self) -> CommandOutcome {
         match self {
             Builtin::Init => handle_init(),
-            // 打开模型选择器：模型清单由应用层的 `models` 目录提供，
-            // 指令层只负责"要开这个面板"，不掺和模型从哪来。
+            // Open the model picker: the model list comes from the application-layer `models` catalog;
+            // the command layer is only responsible for "open this panel" and does not meddle in where models come from.
             Builtin::Model => CommandOutcome::ModelPicker,
-            // 回退最新一条用户消息：候选来自 Agent 当前的消息表，指令层只管"发起回退"。
+            // Rewind the latest user message: candidates come from the Agent's current message table; the command layer only "initiates the rewind".
             Builtin::Rewind => CommandOutcome::Rewind,
-            // 打开会话选择器：会话清单由应用层的会话目录提供，
-            // 指令层只负责"要开这个面板"，不掺和会话从哪来、存哪里。
+            // Open the session picker: the session list comes from the application-layer session catalog;
+            // the command layer is only responsible for "open this panel" and does not meddle in where sessions come from or where they are stored.
             Builtin::Session => CommandOutcome::SessionPicker,
-            // 进入分步登录：具体问答与落盘由 `App` 驱动，指令层只管"发起登录"。
+            // Enter step-by-step login: the actual Q&A and persistence are driven by `App`; the command layer only "initiates login".
             Builtin::Login => CommandOutcome::Login,
         }
     }
 }
 
-/// `/init`：若项目已有非空 `Agent.md` 则提示无需重复；
-/// 否则展开成"探索项目并生成 Agent.md"的 prompt 交给 AI。
+/// `/init`: if the project already has a non-empty `Agent.md`, hint that there is no need to repeat;
+/// otherwise expand into a "explore the project and generate Agent.md" prompt handed to the AI.
 fn handle_init() -> CommandOutcome {
     let root = prompt::workspace_root();
     let path = prompt::guide_path(&root);
@@ -90,24 +90,24 @@ fn handle_init() -> CommandOutcome {
 
     if present {
         return CommandOutcome::SystemMessage(format!(
-            "项目已存在 {}（{}），无需重新生成。",
+            "The project already has {} ({}); no need to regenerate.",
             prompt::GUIDE_FILE_NAME,
             path.display()
         ));
     }
 
     CommandOutcome::Prompt(
-        "请为当前项目初始化项目指南（Agent.md）。\
-         先探索工作区根目录下的项目结构、构建与测试方式、代码组织约定，\
-         然后把一份简明准确的中文项目指南写入工作区根目录的 `Agent.md` 文件。\
-         指南应包含：项目是什么、如何构建/运行/测试、关键的代码组织与约定、常见任务入口。\
-         只写可确认的事实，不要编造；无法确定处标注「待确认」。\
-         写完后用一句话汇报你做了什么。"
+        "Please initialize the project guide (Agent.md) for the current project.\
+         First explore the project structure under the workspace root, the build and test methods, and the code organization conventions,\
+         then write a concise and accurate project guide into the `Agent.md` file at the workspace root.\
+         The guide should cover: what the project is, how to build/run/test, key code organization and conventions, and common task entry points.\
+         Only write confirmable facts, do not fabricate; mark anything uncertain as \"to be confirmed\".\
+         When done, report what you did in one sentence."
             .to_owned(),
     )
 }
 
-/// 指令注册与解析。无状态，仅持有触发符与指令清单。
+/// Command registration and parsing. Stateless; holds only the trigger and the command list.
 pub struct CommandManager {
     prefix: char,
     builtins: Vec<Builtin>,
@@ -127,52 +127,52 @@ impl CommandManager {
         }
     }
 
-    /// 已注册指令数量（供测试与 UI 展示）。
+    /// Number of registered commands (for tests and UI display).
     #[allow(dead_code)]
     pub fn command_count(&self) -> usize {
         self.builtins.len()
     }
 
-    /// 模糊匹配候选指令（fuse / fuzzy）。
+    /// Fuzzy-match candidate commands (fuse / fuzzy).
     ///
-    /// 仅当输入以 prefix 开头、且"指令名片段"（首个空白符之前的部分）尚未命中
-    /// 精确指令时才给出建议。返回按得分降序排列的 `(指令名, 得分)`，
-    /// 得分低于 `MIN_SCORE` 的会被过滤掉，避免无意义的噪声。
+    /// Suggestions are given only when the input starts with the prefix and the "command-name fragment" (the part before the first
+    /// whitespace) has not yet matched an exact command. Returns `(command name, score)` sorted by score descending;
+    /// those below `MIN_SCORE` are filtered out to avoid meaningless noise.
     ///
-    /// 例：`/initt` / `/inti` / `/nit` 都应召回 `init`。
+    /// Example: `/initt` / `/inti` / `/nit` should all recall `init`.
     pub fn fuzzy_match(&self, input: &str, skills: &[String]) -> Vec<(String, f64)> {
         let trimmed = input.trim_start();
         if !trimmed.starts_with(self.prefix) {
             return Vec::new();
         }
         let rest = &trimmed[self.prefix.len_utf8()..];
-        // 首个空白前的片段是"正在输入的指令名"。
+        // The fragment before the first whitespace is the "command name being typed".
         let (frag, _) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
         let frag = frag.trim();
-        // 候选名 = 内置指令 + 当前会话可见的 skill（动态 slash 入口）。
-        // skill 名作为**数据**传入，`CommandManager` 保持无状态、不缓存（避免 stale）。
+        // Candidate names = built-in commands + skills visible to the current session (dynamic slash entry).
+        // Skill names are passed in as **data**; `CommandManager` stays stateless and does not cache (to avoid staleness).
         let names: Vec<String> = self
             .builtins
             .iter()
             .map(|b| b.name().to_owned())
             .chain(skills.iter().cloned())
             .collect();
-        // 仅输入触发符（如 `/`）时，列出全部指令供直接选择。
+        // When only the trigger is typed (e.g. `/`), list all commands for direct selection.
         if frag.is_empty() {
             let mut all: Vec<(String, f64)> = names.iter().map(|n| (n.clone(), 1.0)).collect();
             all.sort_by(|a, b| a.0.cmp(&b.0));
             return all;
         }
-        // 精确命中就不必提示（直接回车即可提交）。
+        // No need to suggest on an exact match (pressing Enter submits directly).
         let exact = names.iter().any(|n| n == frag);
         if exact {
             return Vec::new();
         }
 
-        // fuse 匹配：前缀匹配优先（强信号，始终保留），
-        // 否则用归一化编辑距离 score = 1 - dist/max_len 容忍错位/缺字/多字。
-        // 关键：片段是某个指令名的前缀时直接满分，否则用户刚敲出第一个字符
-        // （如 `/i`）就会因编辑距离得分过低被过滤，导致候选"打一个字就消失"。
+        // Fuse matching: prefix match first (a strong signal, always kept),
+        // otherwise a normalized edit distance score = 1 - dist/max_len tolerating transpositions/missing/extra characters.
+        // Key point: when the fragment is a prefix of a command name, score full marks; otherwise a user who has just typed the first
+        // character (e.g. `/i`) would be filtered out by a too-low edit-distance score, making candidates "vanish after one keystroke".
         const MIN_SCORE: f64 = 0.4;
         let mut scored: Vec<(String, f64)> = names
             .iter()
@@ -192,17 +192,17 @@ impl CommandManager {
         scored
     }
 
-    /// 解析一行输入。不以 prefix 开头、或不是已知指令名，都返回 `Unknown`。
+    /// Parse one line of input. If it does not start with the prefix, or is not a known command name, returns `Unknown`.
     ///
-    /// `skills` 是当前会话可见的 skill 名（动态 slash 入口，见 `docs/skills.md` 5.6）。
-    /// 内置指令优先；其次是 skill 名。`/<skill-name> [args]` 命中 skill 时返回
-    /// [`CommandOutcome::ActivateSkill`]，由 harness 直接激活——确定性入口，跳过模型判断。
+    /// `skills` are the skill names visible to the current session (dynamic slash entry, see `docs/skills.md` 5.6).
+    /// Built-in commands take precedence; then skill names. When `/<skill-name> [args]` hits a skill it returns
+    /// [`CommandOutcome::ActivateSkill`], activated directly by the harness -- a deterministic entry point that skips model judgment.
     pub fn resolve(&self, input: &str, skills: &[String]) -> CommandOutcome {
         let trimmed = input.trim();
         if !trimmed.starts_with(self.prefix) {
             return CommandOutcome::Unknown;
         }
-        // 去掉 prefix，取首段���为指令名，其余为参数。
+        // Strip the prefix, take the first segment as the command name and the rest as args.
         let rest = &trimmed[self.prefix.len_utf8()..];
         let (name, args) = rest
             .split_once(char::is_whitespace)
@@ -210,13 +210,13 @@ impl CommandManager {
         let name = name.trim();
         let args = args.trim();
 
-        // 内置指令优先（用户熟悉的 slash 语义，且不被同名 skill 抢走）。
+        // Built-in commands take precedence (the slash semantics users know, and not stolen by a same-named skill).
         for builtin in &self.builtins {
             if builtin.name() == name {
                 return builtin.handle();
             }
         }
-        // 动态 slash 入口：`/<skill-name>` 由 harness 直接激活该 skill。
+        // Dynamic slash entry: `/<skill-name>` is activated directly by the harness.
         if skills.iter().any(|skill| skill == name) {
             return CommandOutcome::ActivateSkill {
                 name: name.to_owned(),
@@ -227,7 +227,7 @@ impl CommandManager {
     }
 }
 
-/// 经典 Levenshtein 编辑距离（按字节/字符数，指令名均为 ASCII，等价）。
+/// Classic Levenshtein edit distance (by bytes/char count; command names are all ASCII, so equivalent).
 fn levenshtein(a: &str, b: &str) -> usize {
     let a: Vec<char> = a.chars().collect();
     let b: Vec<char> = b.chars().collect();
@@ -268,14 +268,14 @@ mod tests {
 
     #[test]
     fn init_expands_to_prompt_when_guide_missing() {
-        // 用一个临时目录作为工作区，确保那里没有 Agent.md。
+        // Use a temp directory as the workspace, ensuring there is no Agent.md there.
         let dir = std::env::temp_dir().join(format!("shirley_cmd_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir); }
         let mgr = CommandManager::new('/');
         match mgr.resolve("/init", &[]) {
-            CommandOutcome::Prompt(p) => assert!(p.contains("Agent.md"), "应展开为生成指南的 prompt: {p}"),
-            other => panic!("应为 Prompt，实际 {other:?}"),
+            CommandOutcome::Prompt(p) => assert!(p.contains("Agent.md"), "should expand into a guide-generating prompt: {p}"),
+            other => panic!("expected Prompt, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
         unsafe { std::env::remove_var("SHIRLEY_WORKSPACE"); }
@@ -285,7 +285,7 @@ mod tests {
     fn rewind_starts_last_turn() {
         let mgr = CommandManager::new('/');
         assert!(matches!(mgr.resolve("/rewind", &[]), CommandOutcome::Rewind));
-        // 带参数也应命中（参数被忽略——只回退最新一条）。
+        // It should also hit with args (args are ignored -- only the latest one is rewound).
         assert!(matches!(mgr.resolve("/rewind 2", &[]), CommandOutcome::Rewind));
     }
 
@@ -293,7 +293,7 @@ mod tests {
     fn model_opens_picker() {
         let mgr = CommandManager::new('/');
         assert!(matches!(mgr.resolve("/model", &[]), CommandOutcome::ModelPicker));
-        // 带参数也应命中（参数由选择器 UI 忽略）。
+        // It should also hit with args (args are ignored by the picker UI).
         assert!(matches!(mgr.resolve("/model gpt", &[]), CommandOutcome::ModelPicker));
     }
 
@@ -301,7 +301,7 @@ mod tests {
     fn session_opens_picker() {
         let mgr = CommandManager::new('/');
         assert!(matches!(mgr.resolve("/session", &[]), CommandOutcome::SessionPicker));
-        // 带参数也应命中（参数由选择器 UI 忽略）。
+        // It should also hit with args (args are ignored by the picker UI).
         assert!(matches!(mgr.resolve("/session 2", &[]), CommandOutcome::SessionPicker));
     }
 
@@ -309,7 +309,7 @@ mod tests {
     fn init_reports_present_when_guide_exists() {
         let dir = std::env::temp_dir().join(format!("shirley_cmd_exist_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        std::fs::write(dir.join(GUIDE_FILE_NAME), "# 项目说明\n").unwrap();
+        std::fs::write(dir.join(GUIDE_FILE_NAME), "# Project notes\n").unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir); }
         let mgr = CommandManager::new('/');
         assert!(matches!(mgr.resolve("/init", &[]), CommandOutcome::SystemMessage(_)));
@@ -321,31 +321,31 @@ mod tests {
     #[test]
     fn fuzzy_recalls_init_from_typos() {
         let mgr = CommandManager::new('/');
-        // 容忍常见手误：错位(inti)、多字(initt)、缺字(nit)、前缀(ini)。
+        // Tolerate common typos: transposition (inti), extra char (initt), missing char (nit), prefix (ini).
         for typo in ["/i", "/inti", "/initt", "/nit", "/ini"] {
             let hits = mgr.fuzzy_match(typo, &[]);
-            assert!(!hits.is_empty(), "{typo} 应召回 init，实际 {hits:?}");
-            assert_eq!(hits[0].0, "init", "{typo} 首选应为 init");
+            assert!(!hits.is_empty(), "{typo} should recall init, got {hits:?}");
+            assert_eq!(hits[0].0, "init", "{typo} should prefer init");
         }
-        // 过重的错字（itn 需 3 次编辑）本就不应召回，避免噪声。
+        // A too-heavy typo (itn needs 3 edits) should not be recalled in the first place, to avoid noise.
         assert!(mgr.fuzzy_match("/itn", &[]).is_empty());
     }
 
     #[test]
     fn slash_alone_lists_all_commands() {
-        // 只输入触发符 `/` 时应列出全部指令，供直接选择。
+        // When only the trigger `/` is typed, all commands should be listed for direct selection.
         let mgr = CommandManager::new('/');
         let hits = mgr.fuzzy_match("/", &[]);
-        assert_eq!(hits.len(), mgr.command_count(), "`/` 应列出全部指令");
+        assert_eq!(hits.len(), mgr.command_count(), "`/` should list all commands");
         assert!(hits.iter().any(|(n, _)| n == "init"));
     }
 
     #[test]
     fn fuzzy_no_suggestion_for_exact_or_plain_text() {
         let mgr = CommandManager::new('/');
-        // 精确命中不提示
-        assert!(mgr.fuzzy_match("/init", &[]).is_empty(), "精确命中不应提示");
-        // 非指令前缀不触发
+        // No suggestion on an exact match
+        assert!(mgr.fuzzy_match("/init", &[]).is_empty(), "an exact match should not suggest");
+        // Not triggered by a non-command prefix
         assert!(mgr.fuzzy_match("hello", &[]).is_empty());
     }
 
@@ -353,29 +353,29 @@ mod tests {
     fn skill_name_resolves_to_activate() {
         let mgr = CommandManager::new('/');
         let skills = vec!["pdf".to_owned(), "docx".to_owned()];
-        // 无参：只激活，args 为空。
+        // No args: only activate, args empty.
         match mgr.resolve("/pdf", &skills) {
             CommandOutcome::ActivateSkill { name, args } => {
                 assert_eq!(name, "pdf");
                 assert!(args.is_empty());
             }
-            other => panic!("应为 ActivateSkill，实际 {other:?}"),
+            other => panic!("expected ActivateSkill, got {other:?}"),
         }
-        // 带参：激活 + 把参数作为本轮 prompt。
-        match mgr.resolve("/docx 把这份文档转成 markdown", &skills) {
+        // With args: activate + use the args as this turn's prompt.
+        match mgr.resolve("/docx convert this document to markdown", &skills) {
             CommandOutcome::ActivateSkill { name, args } => {
                 assert_eq!(name, "docx");
-                assert_eq!(args, "把这份文档转成 markdown");
+                assert_eq!(args, "convert this document to markdown");
             }
-            other => panic!("应为 ActivateSkill，实际 {other:?}"),
+            other => panic!("expected ActivateSkill, got {other:?}"),
         }
-        // 不在目录里的名字仍是普通文本（宽松策略，不打断）。
+        // A name not in the catalog is still ordinary text (lenient policy, no interruption).
         assert!(matches!(mgr.resolve("/nope", &skills), CommandOutcome::Unknown));
     }
 
     #[test]
     fn builtin_wins_over_same_named_skill() {
-        // 内置指令优先：即使目录里有个叫 `model` 的 skill，`/model` 仍开模型选择器。
+        // Built-in precedence: even if the catalog has a skill named `model`, `/model` still opens the model picker.
         let mgr = CommandManager::new('/');
         let skills = vec!["model".to_owned()];
         assert!(matches!(mgr.resolve("/model", &skills), CommandOutcome::ModelPicker));
@@ -385,18 +385,18 @@ mod tests {
     fn fuzzy_match_includes_skill_names() {
         let mgr = CommandManager::new('/');
         let skills = vec!["pdf".to_owned()];
-        // `/` 列出全部：内置 + skill。
+        // `/` lists all: built-ins + skills.
         let all = mgr.fuzzy_match("/", &skills);
         assert_eq!(all.len(), mgr.command_count() + 1);
         assert!(all.iter().any(|(n, _)| n == "pdf"));
-        // 前缀命中 skill 名。
+        // Prefix hits a skill name.
         let hits = mgr.fuzzy_match("/pd", &skills);
         assert_eq!(hits[0].0, "pdf");
     }
 
     #[test]
     fn fuzzy_ignores_args_segment() {
-        // 参数部分不应干扰指令名匹配
+        // The args portion should not interfere with command-name matching
         let mgr = CommandManager::new('/');
         let hits = mgr.fuzzy_match("/inti some extra args", &[]);
         assert!(!hits.is_empty() && hits[0].0 == "init");

@@ -1,28 +1,49 @@
-//! `AgentEvent` → 线格式 DTO 映射。
+//! `AgentEvent` → wire-format DTO mapping.
 //!
-//! 为什么不让 `AgentEvent` 直接派生 `Serialize`：SDK 的对外契约要保持小，
-//! 协议/界面差异收敛在边界（`docs/README.md` 原则一、`docs/desktop-interface.md`
-//! 第六节）。这里把内部事件翻译成前端能消费的 JSON，SDK 不为界面新增对外类型。
+//! Why not let `AgentEvent` derive `Serialize` directly: the SDK's public contract
+//! must stay small, and protocol/UI differences are contained at the boundary
+//! (`docs/README.md` principle 1, `docs/desktop-interface.md` section 6). Here we
+//! translate internal events into JSON the frontend can consume; the SDK gains no
+//! new public types for the interface.
 //!
-//! 唯一对 SDK 的改动是为支撑工具卡给 `ToolStarted` / `ToolFinished` **追加**字段
-//! （`arguments` / `ok` / `output` / `elapsed_ms`）——追加不破坏既有消费者。
+//! The only SDK change is **appending** fields to `ToolStarted` / `ToolFinished` to
+//! support tool cards (`arguments` / `ok` / `output` / `elapsed_ms`) — appending does
+//! not break existing consumers.
 //!
-//! 线格式契约见 `web/src/types/wire.ts`，两边必须同步。
+//! The wire-format contract lives in `web/src/types/wire.ts`; both sides must stay in sync.
 
 #![cfg_attr(not(feature = "desktop"), allow(dead_code))]
 
 use serde::Serialize;
 use shirley_agent_sdk::AgentEvent;
+use shirley_agent_sdk::ErrorKind;
 use shirley_agent_sdk::Usage;
 
 use crate::interface::session::{ItemWire as CoreItemWire, ToolCallWire};
 use crate::todo::TaskView;
 
-/// 前端消费的事件 DTO。`#[serde(tag = "type", rename_all = "snake_case")]`
-/// 与 `web/src/types/wire.ts` 的判别联合一一对应。
+/// Stable snake_case wire name for an [`ErrorKind`]. The frontend switches on these
+/// strings; they mirror the enum variant names and must stay in sync with `types/wire.ts`.
+fn error_kind_str(kind: ErrorKind) -> String {
+    match kind {
+        ErrorKind::Transport => "transport",
+        ErrorKind::RateLimited => "rate_limited",
+        ErrorKind::ServerError => "server_error",
+        ErrorKind::BadRequest => "bad_request",
+        ErrorKind::Unsupported => "unsupported",
+        ErrorKind::ToolFailure => "tool_failure",
+        ErrorKind::Internal => "internal",
+    }
+    .to_string()
+}
+
+/// Event DTO consumed by the frontend. `#[serde(tag = "type", rename_all = "snake_case")]`
+/// maps one-to-one to the discriminated union in `web/src/types/wire.ts`.
 ///
-/// `session` 是事件的来源会话名（多会话下前端据此把事件路由到对应会话的视图，
-/// 避免后台会话的流式增量串到前台）。`None` = 未打标（旧前端可忽略该字段）。
+/// `session` is the event's source session name (with multiple sessions the frontend
+/// routes the event to the right session's view, so a background session's streaming
+/// deltas don't leak into the foreground). `None` = untagged (older frontends may
+/// ignore this field).
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEventWire {
@@ -55,6 +76,9 @@ pub enum AgentEventWire {
         name: String,
         ok: bool,
         output: String,
+        /// Stable error class on failure (`None` on success), as a snake_case string the
+        /// frontend switches on. This replaces sniffing the error text for classification.
+        error_kind: Option<String>,
         elapsed_ms: u64,
     },
     Usage {
@@ -76,10 +100,11 @@ pub enum AgentEventWire {
         project: Option<String>,
         session: Option<String>,
     },
-    /// 任务账本（todo）变更后的结构化快照。`todo: None` = 账本已清空。
+    /// Structured snapshot after the task ledger (todo) changes. `todo: None` = ledger cleared.
     ///
-    /// 账本只在模型调用 `todo` 工具时变化，故后端在 `todo` 工具完成时发一条；
-    /// 前端据此渲染/更新任务卡，而不是解析注入给模型的 XML。
+    /// The ledger only changes when the model calls the `todo` tool, so the backend
+    /// emits one when the `todo` tool finishes; the frontend renders/updates the task
+    /// card from this instead of parsing the XML injected into the model.
     TodoUpdated {
         project: Option<String>,
         session: Option<String>,
@@ -101,7 +126,7 @@ pub enum AgentEventWire {
 pub struct UsageWire {
     pub input_tokens: u64,
     pub output_tokens: u64,
-    /// `None` = 供应商未上报，区别于上报 0。
+    /// `None` = the provider did not report, distinct from reporting 0.
     pub cached_input_tokens: Option<u64>,
     pub cache_reported_input_tokens: Option<u64>,
 }
@@ -117,7 +142,7 @@ impl From<Usage> for UsageWire {
     }
 }
 
-/// 任务账本的结构化线格式（与 `web/src/types/wire.ts` 的 `TaskViewWire` 对齐）。
+/// Structured wire format of the task ledger (aligned with `TaskViewWire` in `web/src/types/wire.ts`).
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskViewWire {
     pub goal: Option<String>,
@@ -127,11 +152,11 @@ pub struct TaskViewWire {
     pub current: Option<String>,
 }
 
-/// 任务账本里的一步。
+/// One step in the task ledger.
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskStepWire {
     pub text: String,
-    /// `pending` / `in_progress` / `completed`（由 `TodoStatus` 序列化）。
+    /// `pending` / `in_progress` / `completed` (serialized by `TodoStatus`).
     pub status: crate::todo::TodoStatus,
 }
 
@@ -155,14 +180,16 @@ impl From<TaskView> for TaskViewWire {
 }
 
 impl AgentEventWire {
-    /// 把内部事件翻译成线格式。`MessageAdded` 只透出角色（前端不消费正文，
-    /// 正文已由增量事件推送）。`project` / `session` 先留空，由 [`Self::with_route`] 打标。
+    /// Translate an internal event into wire format. `MessageAdded` only exposes the
+    /// role (the frontend does not consume the body; it is pushed by delta events).
+    /// `project` / `session` are left empty here and tagged by [`Self::with_route`].
     ///
-    /// **思考（`ReasoningDelta`）返回 `None`**：思考过程程序内部消化，不展示给用户，
-    /// 故不进线格式、不发给前端。返回 `Option` 让调用方直接丢弃。
+    /// **Reasoning (`ReasoningDelta`) returns `None`**: the reasoning process is
+    /// consumed internally and not shown to the user, so it does not enter the wire
+    /// format or reach the frontend. Returning `Option` lets the caller drop it.
     pub fn from_event(event: AgentEvent) -> Option<Self> {
         let wire = match event {
-            // 思考不进 UI：直接吞掉（SDK 仍会产出该事件，供内部观测）。
+            // Reasoning does not reach the UI: swallow it (the SDK still emits the event for internal observation).
             AgentEvent::ReasoningDelta(_) => return None,
             AgentEvent::ContentDelta(text) => Self::ContentDelta {
                 project: None,
@@ -197,6 +224,7 @@ impl AgentEventWire {
                 name,
                 ok,
                 output,
+                error_kind,
                 elapsed_ms,
             } => Self::ToolFinished {
                 project: None,
@@ -205,6 +233,7 @@ impl AgentEventWire {
                 name,
                 ok,
                 output,
+                error_kind: error_kind.map(error_kind_str),
                 elapsed_ms,
             },
             AgentEvent::Usage(usage) => Self::Usage {
@@ -242,10 +271,12 @@ impl AgentEventWire {
         Some(wire)
     }
 
-    /// 给事件打上来源项目 + 会话（多项目多会话下前端据此路由）。
+    /// Tag the event with its source project + session (the frontend routes by this
+    /// with multiple projects and sessions).
     ///
-    /// 项目 id 全局唯一（规范路径），会话名只在项目内唯一——两者一起才是
-    /// 前端的路由键（与后端 pump 的 `project::session` 键对应）。
+    /// The project id is globally unique (canonical path); the session name is unique
+    /// only within a project — together they form the frontend's routing key (matching
+    /// the backend pump's `project::session` key).
     pub fn with_route(mut self, project: &str, session: &str) -> Self {
         let (project_slot, session_slot) = match &mut self {
             Self::ContentDelta {
@@ -298,10 +329,11 @@ fn message_role(message: &shirley_agent_sdk::Message) -> &'static str {
     }
 }
 
-/// 会话视图快照里的一条 UI 条目（与 `web/src/types/wire.ts` 的 `ItemWire` 对齐）。
+/// One UI item in a session-view snapshot (aligned with `ItemWire` in `web/src/types/wire.ts`).
 ///
-/// 由核心层 [`CoreItemWire`]（`interface::session::ItemWire`）1:1 映射而来：
-/// UI 订阅一个已在运行 / 已积累历史的会话时，先拿快照重建视图，再叠加之后的事件。
+/// Mapped 1:1 from the core-layer [`CoreItemWire`] (`interface::session::ItemWire`):
+/// when the UI subscribes to a session that is running / has accumulated history, it
+/// first rebuilds the view from the snapshot, then layers subsequent events on top.
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ItemWire {
@@ -310,7 +342,7 @@ pub enum ItemWire {
     Tools { calls: Vec<ToolCallWireDto> },
 }
 
-/// 快照里单次工具调用的 DTO。
+/// DTO for a single tool call in a snapshot.
 #[derive(Debug, Clone, Serialize)]
 pub struct ToolCallWireDto {
     pub id: String,
@@ -346,7 +378,7 @@ impl From<CoreItemWire> for ItemWire {
     }
 }
 
-/// UI 角色 → 线格式字符串（与 `web/src/types/wire.ts` 的 `role` 对齐）。
+/// UI role → wire-format string (aligned with `role` in `web/src/types/wire.ts`).
 fn role_wire(role: crate::interface::app::Role) -> &'static str {
     use crate::interface::app::Role;
     match role {
@@ -357,19 +389,19 @@ fn role_wire(role: crate::interface::app::Role) -> &'static str {
     }
 }
 
-/// 会话视图快照：一次订阅时下发给 UI 的完整可重建条目列表。
+/// Session-view snapshot: the full rebuildable item list sent to the UI on subscribe.
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionSnapshotWire {
     pub session: String,
     pub items: Vec<ItemWire>,
-    /// 该会话当前是否在跑一轮（前端据此决定 busy 门）。
+    /// Whether this session is currently running a turn (the frontend gates busy on this).
     pub running: bool,
-    /// 该会话当前的任务账本快照（`None` = 空账本 / 无账本）。
+    /// The session's current task-ledger snapshot (`None` = empty / no ledger).
     pub todo: Option<TaskViewWire>,
 }
 
 impl SessionSnapshotWire {
-    /// 由核心层条目构造（会话名 + 条目序列 + 任务账本快照）。
+    /// Constructed from core-layer items (session name + item sequence + task-ledger snapshot).
     pub fn new(
         session: String,
         items: Vec<CoreItemWire>,

@@ -4,7 +4,7 @@ export function AiAssistantAvatar({ responding = false }: { responding?: boolean
   return (
     <span
       role="img"
-      aria-label={responding ? "Shirley 正在回复" : "Shirley"}
+      aria-label={responding ? "Shirley is replying" : "Shirley"}
       className="relative inline-flex size-9 shrink-0 items-center justify-center"
     >
       <img

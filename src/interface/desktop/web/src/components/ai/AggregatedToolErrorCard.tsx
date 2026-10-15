@@ -7,10 +7,10 @@ import { cn } from "@/ui/utils";
 import { friendlyToolError, rawToolErrorText, type ToolErrorKind } from "./toolErrorUtils";
 
 const TOOL_LABELS: Record<string, string> = {
-  bash: "执行命令",
-  read_file: "读取文件",
-  web_search: "搜索互联网",
-  todo: "更新任务",
+  bash: "Run command",
+  read_file: "Read file",
+  web_search: "Search the web",
+  todo: "Update tasks",
 };
 
 function toolLabel(name: string) {
@@ -34,7 +34,7 @@ export function AggregatedToolErrorCard({
     <Card
       className={cn("my-3 gap-0 overflow-hidden py-0 shadow-none", className)}
       data-ai-tool="aggregated-error"
-      aria-label={`${count} 个工具执行遇到问题`}
+      aria-label={`${count} tool executions ran into problems`}
     >
       <CardHeader className="grid grid-cols-[2rem_minmax(0,1fr)] gap-x-3 gap-y-0 px-4 py-4 md:px-5">
         <span className="flex size-8 items-center justify-center rounded-full bg-subtle text-ink">
@@ -42,7 +42,7 @@ export function AggregatedToolErrorCard({
         </span>
         <div className="min-w-0 self-center">
           <div className="flex flex-wrap items-center gap-2">
-            <CardTitle className="text-body-sm">{count} 个工具执行遇到问题</CardTitle>
+            <CardTitle className="text-body-sm">{count} tool executions ran into problems</CardTitle>
           </div>
           <CardDescription className="mt-1 leading-relaxed">{message}</CardDescription>
         </div>
@@ -56,7 +56,7 @@ export function AggregatedToolErrorCard({
           onClick={() => setExpanded((value) => !value)}
           aria-expanded={expanded}
         >
-          {expanded ? "收起" : "查看详情"}
+          {expanded ? "Collapse" : "View details"}
           <ChevronDown
             className={cn("transition-transform duration-150", expanded && "rotate-180")}
             size={14}
@@ -73,7 +73,7 @@ export function AggregatedToolErrorCard({
                     <span className="text-body-sm font-medium">
                       {toolLabel(execution.tool_name)}
                     </span>
-                    <span className="shrink-0 font-utility text-caption text-muted">未完成</span>
+                    <span className="shrink-0 font-utility text-caption text-muted">Incomplete</span>
                   </div>
                   {raw && (
                     <p className="mt-1 break-words font-utility text-caption text-muted">{raw}</p>

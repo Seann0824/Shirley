@@ -1,22 +1,22 @@
-//! 每轮请求末尾注入记忆（`docs/memory.md` §4）。
+//! Inject memory at the end of each request round (`docs/memory.md` 4).
 //!
-//! 复用 SDK 的 [`ContextProvider`] 接缝，与任务账本同款：注入位置是**本轮请求末尾
-//! 的一条 system 消息**——不进 `self.messages`、压缩碰不到、不动前缀缓存。
+//! Reuses the SDK's [`ContextProvider`] seam, same as the task ledger: the injection point is **a system message at the end of this round's request**
+//! -- it does not enter `self.messages`, compaction cannot touch it, and the prefix cache is untouched.
 //!
-//! **两级注入**（§4.1）：
-//! 1. **常驻**：`core.md` 全量（画像 / 明确偏好 / 活跃项目）——小、稳定，缓存友好；
-//! 2. **相关**：按当前 query 从库里检索 top-k 条目的**摘要**（不是全文，全文由
-//!    AI 用 `read_file` ��）。
+//! **Two-level injection** (4.1):
+//! 1. **Resident**: the full `core.md` (profile / explicit preferences / active projects) -- small, stable, cache-friendly;
+//! 2. **Relevant**: the **summaries** of the top-k entries retrieved from the store for the current query (not the full text; the full text is fetched by
+//!    the AI with `read_file`).
 //!
-//! **query 从哪来**：`ContextProvider::context(&self)` 没有参数，拿不到"当前这轮
-//! 用户说了什么"。所以 provider 持有一个共享运行时 [`MemoryRuntime`]，里面有个
-//! `Mutex<Option<String>>` query 槽——驱动方在发起一轮前 [`MemoryRuntime::set_query`]。
-//! 该运行时**按 `Agent`（会话）一份**，多会话并发互不干扰。
+//! **Where the query comes from**: `ContextProvider::context(&self)` takes no argument, so it cannot see "what the user said in this round".
+//! So the provider holds a shared runtime [`MemoryRuntime`], which contains a
+//! `Mutex<Option<String>>` query slot -- the driver sets it via [`MemoryRuntime::set_query`] before starting a round.
+//! This runtime is **one per `Agent` (session)**, so concurrent sessions do not interfere.
 //!
-//! **V2.5 混合检索**：配置了 embedding 时，相关腿走 [`hybrid_search`]（BM25 + 向量，
-//! RRF 融合）；`ContextProvider::context()` 是同步的、而 embedding 是异步 HTTP，故
-//! 查询向量由驱动方在发起一轮前经 [`MemoryRuntime::prefetch_query_vector`] **预取**
-//! 存进 `query_vector` 槽。未配置 embedding → 纯 BM25（诚实降级）。
+//! **V2.5 hybrid retrieval**: when embedding is configured, the relevant leg goes through [`hybrid_search`] (BM25 + vectors,
+//! RRF fusion); `ContextProvider::context()` is synchronous while embedding is async HTTP, so
+//! the query vector is **prefetched** by the driver before starting a round via [`MemoryRuntime::prefetch_query_vector`]
+//! and stored in the `query_vector` slot. Without embedding configured -> pure BM25 (honest degradation).
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -29,28 +29,28 @@ use super::index::{hybrid_search, Scored};
 use super::store::MemoryStore;
 use super::vector::VectorStore;
 
-/// 相关注入的条目上限（§4.3）。
+/// Upper limit of entries for relevant injection (4.3).
 pub const MAX_RELEVANT: usize = 3;
-/// 注入文本总字符上限（§4.3）——防记忆自己垄断上下文。
+/// Total character limit for injected text (4.3) -- prevents memory from monopolizing the context.
 pub const MAX_RENDER_CHARS: usize = 2000;
 
-/// 记忆运行时：持有存储 + 当前 query 槽。`Arc` 共享（provider 与驱动方各持一份）。
+/// Memory runtime: holds the store + the current query slot. Shared via `Arc` (the provider and the driver each hold one).
 pub struct MemoryRuntime {
     store: MemoryStore,
-    /// 本轮 query（发起一轮前由驱动方设置）。`None` 表示未知 → 只做常驻注入。
+    /// This round's query (set by the driver before starting a round). `None` means unknown -> only resident injection.
     query: Mutex<Option<String>>,
-    /// **V2.5**：预取好的本轮 query 向量（配置了 embedding 且预取成功时）。`None` =
-    /// 无向量 → 相关腿退化为纯 BM25。
+    /// **V2.5**: the prefetched query vector for this round (when embedding is configured and prefetch succeeded). `None` =
+    /// no vector -> the relevant leg degrades to pure BM25.
     query_vector: Mutex<Option<Vec<f32>>>,
-    /// **V2.5**：embedding 客户端。`None` = 未配置 → 纯 BM25（诚实降级）。
+    /// **V2.5**: the embedding client. `None` = not configured -> pure BM25 (honest degradation).
     embedder: Option<Arc<Embedder>>,
-    /// **V2-D 命中计数**：本轮检索命中的条目 id → 次数，攒在内存里，curation 落盘时
-    /// 由 [`MemoryRuntime::flush_usage`] 一次性写回（避免每轮都写盘）。
+    /// **V2-D hit counts**: entry ids hit by retrieval this round -> counts, accumulated in memory and written back in one go
+    /// by [`MemoryRuntime::flush_usage`] when curation persists (avoiding a disk write every round).
     usage: Mutex<HashMap<String, u64>>,
 }
 
 impl MemoryRuntime {
-    /// 纯 BM25 运行时（未配置 embedding）。测试与"无 embedding"场景用。
+    /// Pure BM25 runtime (no embedding configured). For tests and the "no embedding" scenario.
     #[allow(dead_code)]
     pub fn new(store: MemoryStore) -> Self {
         Self {
@@ -62,7 +62,7 @@ impl MemoryRuntime {
         }
     }
 
-    /// 带 embedding 的运行时（V2.5 混合检索）。`embedder` 为 `None` 时等同 [`Self::new`]。
+    /// Runtime with embedding (V2.5 hybrid retrieval). When `embedder` is `None`, equivalent to [`Self::new`].
     pub fn with_embedder(store: MemoryStore, embedder: Option<Arc<Embedder>>) -> Self {
         Self {
             store,
@@ -73,8 +73,8 @@ impl MemoryRuntime {
         }
     }
 
-    /// 设置本轮 query（驱动方在 `run_stream` 前调用）。同时**清空上一轮的 query 向量**
-    /// ——避免"新 query 配旧向量"的静默错误；新的向量由 [`Self::prefetch_query_vector`] 填。
+    /// Set this round's query (called by the driver before `run_stream`). Also **clears the previous round's query vector**
+    /// -- avoiding the silent error of "a new query paired with an old vector"; the new vector is filled by [`Self::prefetch_query_vector`].
     pub fn set_query(&self, query: impl Into<String>) {
         *self.query.lock().expect("memory query lock poisoned") = Some(query.into());
         *self
@@ -83,10 +83,10 @@ impl MemoryRuntime {
             .expect("memory query vector lock poisoned") = None;
     }
 
-    /// **V2.5**：预取本轮 query 的 embedding（驱动方在 `run_stream` 前 `await`）。
+    /// **V2.5**: prefetch the embedding for this round's query (the driver `await`s before `run_stream`).
     ///
-    /// 未配置 embedding / query 为空 / 调用失败时都是 `Ok(())`——相关腿退回纯 BM25，
-    /// **绝不让一次 embedding 失败打断对话**（诚实降级：不假装有语义腿）。
+    /// When embedding is not configured / the query is empty / the call fails, it is `Ok(())` -- the relevant leg falls back to pure BM25,
+    /// **never letting an embedding failure interrupt the conversation** (honest degradation: no pretending there is a semantic leg).
     pub async fn prefetch_query_vector(&self) -> Result<(), EmbedError> {
         let Some(embedder) = self.embedder.as_ref() else {
             return Ok(());
@@ -108,8 +108,8 @@ impl MemoryRuntime {
         Ok(())
     }
 
-    /// **V2.5**：把库里**尚无向量**的条目嵌入并落 sidecar（curation 后调用）。同时清理
-    /// 已删除条目残留的向量。未配置 embedding 时空操作。返回新嵌入的条目数。
+    /// **V2.5**: embed entries in the store that **do not yet have a vector** and persist to the sidecar (called after curation). Also cleans up
+    /// residual vectors of deleted entries. A no-op when embedding is not configured. Returns the number of newly embedded entries.
     pub async fn refresh_vectors(&self) -> Result<usize, EmbedError> {
         let Some(embedder) = self.embedder.as_ref() else {
             return Ok(0);
@@ -117,7 +117,7 @@ impl MemoryRuntime {
         let entries = self.store.list_entries().unwrap_or_default();
         let mut vectors = VectorStore::load_merged(self.store.roots(), embedder.model());
 
-        // 清理：只保留当前仍存在的条目 id。
+        // cleanup: keep only the ids of entries that still exist.
         let ids: Vec<String> = entries.iter().map(|(_, entry)| entry.id.clone()).collect();
         let pruned = vectors.retain_ids(ids.iter().map(String::as_str));
 
@@ -147,7 +147,7 @@ impl MemoryRuntime {
         Ok(count)
     }
 
-    /// 载入当前向量库（多根合并）；未配置 embedding 时返回空库。
+    /// Load the current vector store (multi-root merge); returns an empty store when embedding is not configured.
     fn load_vectors(&self) -> VectorStore {
         match self.embedder.as_ref() {
             Some(embedder) => VectorStore::load_merged(self.store.roots(), embedder.model()),
@@ -155,11 +155,11 @@ impl MemoryRuntime {
         }
     }
 
-    /// 供 `recall` 工具调用：按 query 做**混合检索**，返回 top-`limit` 命中（含全文）。
+    /// Called by the `recall` tool: do **hybrid retrieval** by query, returning the top-`limit` hits (with full text).
     ///
-    /// 与自动注入路径（`render`）的区别：这里能 `await`，所以**按需嵌入 query 向量**，
-    /// 不必依赖驱动方预取。未配置 embedding / 嵌入失败时退化为纯 BM25（诚实降级）。
-    /// 命中同样计入 V2-D 的 `usage`（与自动注入共享计数）。
+    /// Unlike the automatic injection path (`render`): here we can `await`, so we **embed the query vector on demand**
+    /// without relying on the driver to prefetch. When embedding is not configured / embedding fails, it degrades to pure BM25 (honest degradation).
+    /// Hits also count toward V2-D's `usage` (shared with automatic injection).
     pub async fn recall(&self, query: &str, limit: usize) -> Vec<Scored> {
         let entries = self.store.list_entries().unwrap_or_default();
         let owned: Vec<(String, Entry)> = entries
@@ -189,9 +189,9 @@ impl MemoryRuntime {
         hits
     }
 
-    /// 渲染本轮要注入的记忆文本（空记忆返回 `None`，不注入空内容）。
+    /// Render the memory text to inject this round (an empty memory returns `None`; empty content is not injected).
     ///
-    /// 供 [`MemoryContextProvider`] 调用，也可被测试直接调用。
+    /// Called by [`MemoryContextProvider`], and can also be called directly by tests.
     pub fn render(&self) -> Option<String> {
         let core = self.store.read_core();
         let query = self.query.lock().expect("memory query lock poisoned").clone();
@@ -202,8 +202,8 @@ impl MemoryRuntime {
                     .into_iter()
                     .map(|(path, entry)| (self.store.relative_path(&path), entry))
                     .collect();
-                // V2.5：配置了 embedding 且有预取的 query 向量 → BM25 + 向量 RRF 融合；
-                // 否则 `query_vector` 为 None → 纯 BM25。
+                // V2.5: embedding configured and a prefetched query vector present -> BM25 + vector RRF fusion;
+                // otherwise `query_vector` is None -> pure BM25.
                 let vectors = self.load_vectors();
                 let query_vector = self
                     .query_vector
@@ -215,7 +215,7 @@ impl MemoryRuntime {
             _ => Vec::new(),
         };
 
-        // V2-D：记命中（供 curation 时 flush 到 `usage_count`）。
+        // V2-D: record hits (flushed to `usage_count` during curation).
         if !relevant.is_empty() {
             let mut usage = self.usage.lock().expect("memory usage lock poisoned");
             for hit in &relevant {
@@ -229,9 +229,9 @@ impl MemoryRuntime {
 
         let mut body = String::new();
         if let Some(core) = &core {
-            // 剥掉 `core.md` 的**程序元信息头**（`# Memory Core` 标题 + `> 由程序维护…`
-            // 注释）再注入：那是写给人类的维护说明，会向模型暗示"存在一个可操作的文件"，
-            // 诱发它用 bash 去读写记忆目录（曾真实发生）。只注入条目正文。
+            // Strip `core.md`'s **program metadata header** (the `# Memory Core` title + `> maintained by the program...`
+            // comment) before injecting: that is maintenance documentation written for humans and would hint to the model that "an operable file exists",
+            // inducing it to use bash to read/write the memory directory (this really happened). Inject only the entry body.
             body.push_str("<core>\n");
             body.push_str(&strip_core_header(core));
             body.push_str("\n</core>\n");
@@ -240,7 +240,7 @@ impl MemoryRuntime {
             body.push_str("<relevant>\n");
             for hit in &relevant {
                 body.push_str(&format!(
-                    "- [{}] {}（{}，{}）\n",
+                    "- [{}] {} ({}, {})\n",
                     type_label(hit.entry.entry_type),
                     escape(&hit.entry.summary()),
                     hit.entry.timeline_date(),
@@ -260,11 +260,11 @@ impl MemoryRuntime {
 }
 
 impl MemoryRuntime {
-    /// **V2-D**：把内存里攒的命中次数写回条目（`usage_count` 累加），并据其维护
-    /// `utility`（缺失时按命中次数推导）。curation 落盘时调用。
+    /// **V2-D**: write the accumulated hit counts in memory back to the entries (`usage_count` accumulation), and maintain
+    /// `utility` accordingly (derived from hit counts when missing). Called when curation persists.
     ///
-    /// 只写回**当前仍存在**的条目（已被取代 / 删除的跳过）；写后清空计数槽。
-    /// 返回实际更新的条目数。
+    /// Only writes back entries that **still exist** (superseded / deleted ones are skipped); clears the count slot after writing.
+    /// Returns the number of entries actually updated.
     pub fn flush_usage(&self) -> Result<usize, MemoryError> {
         let pending: HashMap<String, u64> = {
             let mut usage = self.usage.lock().expect("memory usage lock poisoned");
@@ -283,7 +283,7 @@ impl MemoryRuntime {
         let mut updated = 0;
         for (id, delta) in pending {
             let Some(entry) = by_id.get_mut(&id) else {
-                continue; // 条目已不在库中，丢弃这次计数
+                continue; // the entry is no longer in the store; discard this count
             };
             entry.usage_count = Some(entry.usage_count.unwrap_or(0) + delta);
             if entry.utility.is_none() {
@@ -296,13 +296,13 @@ impl MemoryRuntime {
     }
 }
 
-/// 由命中次数推导 `utility ∈ [0,1)`（饱和曲线：`n/(n+5)`）。
+/// Derive `utility in [0,1)` from the hit count (saturation curve: `n/(n+5)`).
 fn utility_from_usage(usage_count: u64) -> f64 {
     let n = usage_count as f64;
     n / (n + 5.0)
 }
 
-/// 每轮请求末尾注入记忆的提供者。
+/// Provider that injects memory at the end of each request round.
 pub struct MemoryContextProvider {
     runtime: Arc<MemoryRuntime>,
 }
@@ -319,7 +319,7 @@ impl ContextProvider for MemoryContextProvider {
     }
 }
 
-/// 条目用于 embedding 的文本：主题 + id + 正文（`id` 含语义线索，如 `pref-rust-error-style`）。
+/// Text of an entry used for embedding: subject + id + body (`id` carries semantic cues, e.g. `pref-rust-error-style`).
 fn embed_text(entry: &Entry) -> String {
     format!("{}\n{}\n{}", entry.subject, entry.id, entry.body)
 }
@@ -341,18 +341,18 @@ pub(crate) fn status_label(status: EntryStatus) -> &'static str {
     }
 }
 
-/// 剥掉 `core.md` 的元信息头：`# Memory Core` 标题、紧随的 `>` 注释行、以及它们
-/// 之间的空行。保留条目正文（`- [type] ...`）。
+/// Strip `core.md`'s metadata header: the `# Memory Core` title, the immediately following `>` comment lines, and the blank lines
+/// between them. Keeps the entry body (`- [type] ...`).
 ///
-/// **可出现多次**：双根存储下 [`MemoryStore::read_core`] 会把全局根与工作区根各自的
-/// `core.md` 拼在一起，于是会有第二个标题块；这里逐块剥离，只留下条目行。
+/// **May appear multiple times**: with a dual-root store, [`MemoryStore::read_core`] concatenates the global root's and workspace root's
+/// respective `core.md`, so there is a second title block; this strips them block by block, leaving only the entry lines.
 fn strip_core_header(core: &str) -> String {
     let mut out = Vec::new();
     let mut in_header = false;
     for line in core.lines() {
         let trimmed = line.trim();
         if trimmed == "# Memory Core" {
-            in_header = true; // 进入一个元信息头块（跳过其后的空行与 `>` 注释）
+            in_header = true; // enter a metadata header block (skip its following blank lines and `>` comments)
             continue;
         }
         if in_header {
@@ -366,7 +366,7 @@ fn strip_core_header(core: &str) -> String {
     out.join("\n").trim().to_string()
 }
 
-/// XML 文本转义（与 `todo.rs` 同款）。
+/// XML text escaping (same as `todo.rs`).
 fn escape(input: &str) -> String {
     input
         .replace('&', "&amp;")
@@ -379,29 +379,29 @@ mod tests {
 
     #[test]
     fn strip_core_header_drops_metadata_keeps_entries() {
-        let raw = "# Memory Core\n\n> 由程序维护（活跃条目投影）；勿手改。\n\n- [fact] 用户是 Sean。\n- [preference] 偏好 Rust。\n";
+        let raw = "# Memory Core\n\n> Maintained by the program (projection of active entries); do not edit by hand.\n\n- [fact] The user is Sean.\n- [preference] Prefers Rust.\n";
         let stripped = strip_core_header(raw);
-        assert!(!stripped.contains("# Memory Core"), "应剥掉标题: {stripped}");
-        assert!(!stripped.contains("勿手改"), "应剥掉维护注释: {stripped}");
-        assert!(stripped.contains("用户是 Sean。"), "应保留条目: {stripped}");
-        assert!(stripped.starts_with("- [fact]"), "应以首条条目开头: {stripped}");
+        assert!(!stripped.contains("# Memory Core"), "should strip the title: {stripped}");
+        assert!(!stripped.contains("do not edit"), "should strip the maintenance comment: {stripped}");
+        assert!(stripped.contains("The user is Sean."), "should keep the entry: {stripped}");
+        assert!(stripped.starts_with("- [fact]"), "should start with the first entry: {stripped}");
     }
 
     #[test]
     fn strip_core_header_handles_empty_and_bodyless() {
         assert_eq!(strip_core_header(""), "");
-        // 只有头、没有条目 → 空串（不注入空 core）。
-        assert_eq!(strip_core_header("# Memory Core\n\n> 由程序维护；勿手改。\n"), "");
+        // only a header, no entries -> empty string (do not inject an empty core).
+        assert_eq!(strip_core_header("# Memory Core\n\n> Maintained by the program; do not edit.\n"), "");
     }
 
     #[test]
     fn strip_core_header_drops_every_header_block() {
-        // 双根拼接：全局 + 工作区各带一个标题块，两个都要剥掉，只留条目。
-        let raw = "# Memory Core\n\n> 由程序维护；勿手改。\n\n- [fact] 个人事实。\n\n# Memory Core\n\n> 由程序维护；勿手改。\n\n- [fact] 项目事实。\n";
+        // dual-root concatenation: global + workspace each carry a title block; both must be stripped, leaving only entries.
+        let raw = "# Memory Core\n\n> Maintained by the program; do not edit.\n\n- [fact] Personal fact.\n\n# Memory Core\n\n> Maintained by the program; do not edit.\n\n- [fact] Project fact.\n";
         let stripped = strip_core_header(raw);
-        assert_eq!(stripped, "- [fact] 个人事实。\n\n- [fact] 项目事实。");
+        assert_eq!(stripped, "- [fact] Personal fact.\n\n- [fact] Project fact.");
         assert!(!stripped.contains("# Memory Core"));
-        assert!(!stripped.contains("勿手改"));
+        assert!(!stripped.contains("do not edit"));
     }
     use super::*;
     use crate::memory::format::{Confidence, Domain, Entry};
@@ -450,11 +450,11 @@ mod tests {
     fn core_is_always_injected_without_query() {
         let root = tmp("core");
         let store = MemoryStore::new(&root);
-        store.write_core("用户是 Sean，偏好 Rust。").unwrap();
+        store.write_core("The user is Sean and prefers Rust.").unwrap();
         let runtime = MemoryRuntime::new(store);
         let rendered = runtime.render().unwrap();
         assert!(rendered.contains("<memory_context>"));
-        assert!(rendered.contains("用户是 Sean，偏好 Rust。"));
+        assert!(rendered.contains("The user is Sean and prefers Rust."));
         assert!(!rendered.contains("<relevant>"));
     }
 
@@ -467,11 +467,11 @@ mod tests {
                 "pref-rust-error",
                 "rust-error-handling",
                 EntryType::Preference,
-                "偏好用 thiserror。",
+                "Prefers thiserror.",
             ))
             .unwrap();
         store
-            .write_entry(&entry("fact-db", "database", EntryType::Fact, "项目用 Postgres。"))
+            .write_entry(&entry("fact-db", "database", EntryType::Fact, "The project uses Postgres."))
             .unwrap();
         let runtime = MemoryRuntime::new(store);
         runtime.set_query("rust error style");
@@ -506,7 +506,7 @@ mod tests {
     fn truncates_to_budget() {
         let root = tmp("budget");
         let store = MemoryStore::new(&root);
-        store.write_core(&"长".repeat(5000)).unwrap();
+        store.write_core(&"é".repeat(5000)).unwrap();
         let runtime = MemoryRuntime::new(store);
         let rendered = runtime.render().unwrap();
         assert!(rendered.chars().count() <= MAX_RENDER_CHARS + 40);
@@ -518,13 +518,13 @@ mod tests {
         let root = tmp("flush");
         let store = MemoryStore::new(&root);
         store
-            .write_entry(&entry("fact-rust", "rust", EntryType::Fact, "Rust 相关事实。"))
+            .write_entry(&entry("fact-rust", "rust", EntryType::Fact, "Facts about Rust."))
             .unwrap();
         let runtime = MemoryRuntime::new(MemoryStore::new(&root));
 
         runtime.set_query("rust");
         let _ = runtime.render().unwrap();
-        let _ = runtime.render().unwrap(); // 命中两次
+        let _ = runtime.render().unwrap(); // hit twice
         let updated = runtime.flush_usage().unwrap();
         assert_eq!(updated, 1);
 
@@ -535,10 +535,10 @@ mod tests {
             .map(|(_, e)| e)
             .unwrap();
         assert_eq!(saved.usage_count, Some(2));
-        // utility 由命中次数派生（2/(2+5)），非 None。
+        // utility is derived from the hit count (2/(2+5)), not None.
         assert!(saved.utility.is_some());
 
-        // 第二次 flush 无新增命中 → 空操作。
+        // a second flush with no new hits -> no-op.
         assert_eq!(runtime.flush_usage().unwrap(), 0);
     }
 
@@ -552,7 +552,7 @@ mod tests {
         let runtime = MemoryRuntime::new(MemoryStore::new(&root));
         runtime.set_query("topic");
         let _ = runtime.render().unwrap();
-        // 命中之后条目被删（模拟被取代 / 清理）。
+        // after the hit the entry is deleted (simulating supersede / cleanup).
         store.delete_entry("fact-gone").unwrap();
         assert_eq!(runtime.flush_usage().unwrap(), 0);
     }
@@ -562,12 +562,12 @@ mod tests {
         let root = tmp("provider");
         let store = MemoryStore::new(&root);
         store
-            .write_entry(&entry("fact-rust", "rust", EntryType::Fact, "Rust 相关事实。"))
+            .write_entry(&entry("fact-rust", "rust", EntryType::Fact, "Facts about Rust."))
             .unwrap();
         let runtime = Arc::new(MemoryRuntime::new(store));
         let provider = MemoryContextProvider::new(runtime.clone());
-        assert!(provider.context().is_none(), "no query, no core → None");
+        assert!(provider.context().is_none(), "no query, no core -> None");
         runtime.set_query("rust");
-        assert!(provider.context().unwrap().contains("Rust 相关事实。"));
+        assert!(provider.context().unwrap().contains("Facts about Rust."));
     }
 }

@@ -1,386 +1,384 @@
-**Shirley 技术方案 · 上下文压缩优化**
+**Shirley technical design · Context compaction optimization**
 
-这份文档把 `plan.md` 里关于上下文压缩的零散判断，收敛成一个可执行的方案。
-它承接 `runtime-hardening.md` 第六节（压缩健壮性）与 `docs/plan.md` 的 T6，并引入一篇形式化论文
-（Tirmazi et al., *Context Compaction Theory*, arXiv:2608.01326v1）作为理论依据，
-回答三个问题：**为什么现在的压缩会丢任务、压缩在理论上能做到什么、我们这一轮改什么**。
+This document converges the scattered judgments about context compaction in `plan.md` into an executable plan.
+It follows section 6 of `runtime-hardening.md` (compaction robustness) and T6 of `docs/plan.md`, and introduces a formal paper
+(Tirmazi et al., *Context Compaction Theory*, arXiv:2608.01326v1) as theoretical grounding,
+answering three questions: **why today's compaction loses the task, what compaction can achieve in theory, and what we change this round**.
 
-**2026-10-13 回归修复：** session `20261013-142807` 出现 14 次压缩、138 次读取文件、
-58 次命令调用而没有进入修复阶段。已修正以下实现：
+**2026-10-13 regression fix:** session `20261013-142807` had 14 compactions, 138 file reads, and
+58 command invocations without ever entering the fix phase. The following implementation points were corrected:
 
-- 新摘要输入包括旧摘要、待压缩对话、原始当前任务与任务账本快照，输出仍只有一份摘要。
-- 不再在摘要前清空全部工具结果；超预算时先移除摘要请求里的冗长推理草稿，
-  再裁剪大工具结果的中间部分，保留正文、头尾证据与原始调用 ID。
-- 恢复日志后的压缩与普通执行共享“最新摘要 + 后续消息”工作集，不能再压一遍已归档历史。
-  原始日志不因选择工作集而改写；当前任务必要时从归档前缀恢复。
-- `trigger_ratio` 只用于触发压缩。摘要输入预算按窗口减去输出预留计算，
-  估算超额只指导缩减输入，不据此本地拒绝；最终由模型服务的实际容量校验决定。
-  服务端拒绝时仍保留原上下文，不假装压缩成功。
-- `ContextProvider::compaction_context()` 默认不注入，由提供者显式选择必要状态。
-  当前任务账本参与摘要，完整技能与检索记忆不会被无差别复制进去。
-- 账本根据有效内容变更检测长期无进展，重复追加同一条结论不重置提醒。
-- 正常执行请求也按实际消息和工具 schema 的估算口径校准 token 系数。
-- 每轮用户任务默认最多 64 次模型执行请求，压缩不重置计数；达到上限后保留已完成的
-  工具结果，追加未完成提示并返回 `MaxStepsReached`。适配器网络重试仍按原有策略处理，
-  此上限不代表 HTTP 请求总数或单个工具的超时时间。
+- The new summary input includes the old summary, the conversation to be compacted, the original current task, and a task-ledger snapshot; the output is still a single summary.
+- Tool results are no longer all cleared before the summary; when over budget, first remove lengthy reasoning drafts from the summary request,
+  then trim the middle of large tool results, keeping the body, head/tail evidence, and the original call ID.
+- Compaction after restoring a log and normal execution share the "latest summary + subsequent messages" working set, and must not compact already-archived history again.
+  The original log is not rewritten by the choice of working set; the current task is restored from the archived prefix when necessary.
+- `trigger_ratio` is only used to trigger compaction. The summary input budget is computed as the window minus the output reservation;
+  an over-estimate only guides shrinking the input, it does not locally reject on that basis; the final decision is made by the model service's actual capacity check.
+  When the server rejects, the original context is still kept; it does not pretend compaction succeeded.
+- `ContextProvider::compaction_context()` is not injected by default; the provider explicitly chooses the necessary state.
+  The current task ledger participates in the summary; full skills and retrieved memory are not copied in indiscriminately.
+- The ledger detects long-term lack of progress based on effective-content changes; repeatedly appending the same conclusion does not reset the reminder.
+- Normal execution requests also calibrate the token factor using the estimation convention of the actual messages and tool schema.
+- Each round's user task defaults to at most 64 model execution requests, and compaction does not reset the count; after reaching the limit, completed
+  tool results are kept, an unfinished notice is appended, and `MaxStepsReached` is returned. Adapter network retries still follow the original policy;
+  this limit does not represent the total number of HTTP requests or a single tool's timeout.
 
-全局或工作区 `config.toml` 可覆盖执行上限，工作区优先：
+A global or workspace `config.toml` can override the execution limit, with the workspace taking priority:
 
 ```toml
 [runtime]
-max_steps = 128 # 必须大于 0；SDK 调用方使用 Agent builder 的 max_steps
+max_steps = 128 # must be greater than 0; SDK callers use the Agent builder's max_steps
 ```
 
-请求级回归在 `tests/runtime_recovery.rs`，包含连续压缩继承证据、跨压缩执行上限、
-服务端拒绝不破坏原历史、恢复日志不重复压缩归档历史、推理降级保留证据与达到上限后继续任务。以下章节保留早期设计背景，
-以此修复说明及当前实现为准。
+Request-level regressions are in `tests/runtime_recovery.rs`, covering inheriting evidence across successive compactions, the execution limit across compactions,
+the server rejection not destroying the original history, restoring a log without re-compacting archived history, reasoning degradation preserving evidence, and continuing the task after reaching the limit. The following sections keep the early design background;
+the fix notes and the current implementation are authoritative.
 
 ---
 
-**一、为什么单独做这件事**
+**1. Why do this separately**
 
-触发点是一次真实故障：压缩完成后，AI 忘记了用户压缩前下达的任务，
-而压缩摘要里居然给出了"下一步步骤"——但那一步并不是用户提过的。
+The trigger was a real incident: after compaction completed, the AI forgot the task the user had assigned before compaction,
+and the compaction summary even gave a "next step" -- but that step was not something the user had ever mentioned.
 
-这不是调 prompt 能修好的小问题。它暴露了当前实现的两个结构性缺陷（见第二节），
-而论文（见第三节）进一步说明：**压缩的信息损失在理论上无法完全避免，
-LLM 摘要在"精确事实"上必然退化**。所以压缩不是"写句更好的提示词"，
-而是要重新设计**切法、保留策略、以及信息丢失后的退路**。
-
----
-
-**二、现状解剖**
-
-**2.1 当前链路**
-
-```
-should_schedule_compression  →  (input + output) * 100 >= limit * 80
-        ↓ 置 compression_pending
-compress_context             →  active_messages() + 压缩指令（追加为新 system）
-        ↓ 取模型输出的纯文本摘要
-push 到 self.messages 末尾     →  Message::ContextSummary
-        ↓
-active_messages()            →  开头的 system + 从最后一个 ContextSummary 开始的消息
-```
-
-对应 `crates/shirley-agent-sdk/src/runtime/mod.rs`。
-
-**2.2 两个根因（同一个结构问题）**
-
-**根因 A —— 摘要追加在末尾，等于把尾巴也吃掉了。**
-
-`compress_context` 把 `ContextSummary` push 到 `self.messages` 的**最末端**。
-下一轮 `active_messages()` 找"最后一个 summary"，切出来就是 `[system, summary]`：
-
-- 本轮正在进行的用户任务（在 summary 之前）被排除在请求之外；
-- 压缩前后的一段近期对话也全部不再参与请求。
-
-模型只剩一个摘要，自然只能靠摘要活着。**这是"忘记原任务"的直接原因。**
-
-**根因 B —— 压缩指令要求模型编"下一步"。**
-
-`src/main.rs` 的 `compression_instruction` 明确写了"……未解决的问题、下一步"。
-你让它输出下一步，它就会输出，哪怕用户没提过。
-同时指令没有强调"忠实保留用户的原始指令"，摘要因此有越界倾向。
-
-**结论**：切法本身要改，不是调 prompt。
+This is not a small problem fixable by tuning the prompt. It exposed two structural defects in the current implementation (see section 2),
+and the paper (see section 3) further shows: **the information loss of compaction cannot be fully avoided in theory,
+and LLM summaries necessarily degrade on "exact facts"**. So compaction is not "writing a better prompt", but
+redesigning **the cut, the retention strategy, and the fallback after information loss**.
 
 ---
 
-**三、理论依据（论文能拿走什么）**
+**2. Dissecting the status quo**
 
-论文把压缩形式化为两个游戏：
+**2.1 Current chain**
 
-| | Context Selection Game（`S`） | Context Generation Game（`G`） |
+```
+should_schedule_compression  ->  (input + output) * 100 >= limit * 80
+        | set compression_pending
+compress_context             ->  active_messages() + compression instruction (appended as a new system)
+        | take the model's plain-text summary
+push to the end of self.messages ->  Message::ContextSummary
+        |
+active_messages()            ->  the leading system + messages starting from the last ContextSummary
+```
+
+Corresponds to `crates/shirley-agent-sdk/src/runtime/mod.rs`.
+
+**2.2 Two root causes (the same structural problem)**
+
+**Root cause A -- the summary is appended at the end, which eats the tail too.**
+
+`compress_context` pushes the `ContextSummary` to the **very end** of `self.messages`.
+The next round, `active_messages()` finds "the last summary", and what is cut out is `[system, summary]`:
+
+- the user task in progress this round (before the summary) is excluded from the request;
+- a segment of recent conversation before and after compaction also no longer participates in the request.
+
+The model is left with only a summary, so it can only live on the summary. **This is the direct cause of "forgetting the original task".**
+
+**Root cause B -- the compression instruction asks the model to invent a "next step".**
+
+`src/main.rs`'s `compression_instruction` explicitly wrote "... unresolved questions, next step". If you ask it to output a next step, it will, even if the user never mentioned it.
+At the same time the instruction did not emphasize "faithfully preserve the user's original instructions", so the summary had an over-reaching tendency.
+
+**Conclusion**: the cut itself must change, not the prompt.
+
+---
+
+**3. Theoretical grounding (what we can take from the paper)**
+
+The paper formalizes compaction as two games:
+
+| | Context Selection Game (`S`) | Context Generation Game (`G`) |
 | --- | --- | --- |
-| 做法 | 选一个子集保留 | 生成有界长度的新消息（摘要） |
-| 例子 | 截断、丢老消息、Aider repo map、LLMLingua | LLM summarization（Codex / Claude Code / Gemini CLI） |
-| 关系 | `S ⊆ G`，生成更强（可造新 token、可重排、可用更低编码） | |
+| Approach | choose a subset to keep | generate a bounded-length new message (summary) |
+| Examples | truncation, dropping old messages, Aider repo map, LLMLingua | LLM summarization (Codex / Claude Code / Gemini CLI) |
+| Relationship | `S ⊆ G`, generation is stronger (can create new tokens, reorder, use a lower encoding) | |
 
-**核心定理（Theorem 1）**：Context Generation Game **等价于单向通信复杂度**。
-压缩器 = Alice（condenser），未来读摘要的 LLM = Bob（interpreter），摘要 = Alice 发的消息。
+**Core theorem (Theorem 1)**: the Context Generation Game **is equivalent to one-way communication complexity**.
+The compressor = Alice (condenser), the future LLM reading the summary = Bob (interpreter), the summary = the message Alice sends.
 
-> 为在目标错误率 ε 内回答一组查询，所需的最小压缩预算 = 该诱导通信问题在 ε 下的单向随机通信复杂度。
+> To answer a set of queries within a target error rate ε, the minimum compression budget required = the one-way randomized communication complexity of the induced communication problem at ε.
 
-由此得出四条对我们有直接约束力的结论：
+From this come four conclusions directly binding on us:
 
-1. **压缩的最优策略无法独立于"未来会问什么"决定。**
-   这从形式上支持了 `plan.md` 的直觉——"压缩价值由未来查询决定，而非原文长什么样"。
-   因此固定程序化压缩策略注定有损，压缩决策必须交给 LLM（`G` 类），
-   这解释了为什么我们的 `ContextSummary` 方向是对的。
+1. **The optimal compression strategy cannot be decided independently of "what will be asked in the future".**
+   This formally supports `plan.md`'s intuition -- "the value of compression is decided by future queries, not by what the original text looks like".
+   Therefore a fixed programmatic compression strategy is doomed to be lossy, and the compression decision must be handed to the LLM (`G` type).
+   This explains why our `ContextSummary` direction is right.
 
-2. **摘要保不住"精确事实"。**
-   附录 A 的实验：Anthropic 的 compaction endpoint + Opus 4.8 做集合成员查询，
-   压缩后错误率 ≈ 随机猜（false negative 率 0.97 / 0.79 / 0.63），
-   同尺寸 Bloom filter 约 1/3；不压缩的对照组错误率仅 0.04。
-   摘要原文里模型自己写："我无法无损存储这个集合，只能靠看起来像不像来猜。"
-   → **叙述性信息（目标、决策、进度）能保住；精确条目（集合、列表、错误码、文件名、
-   完整文件内容）保不住。** 后者必须靠摘要之外的机制兜。
+2. **A summary cannot preserve "exact facts".**
+   The experiment in Appendix A: Anthropic's compaction endpoint + Opus 4.8 doing set-membership queries,
+   the error rate after compaction ≈ random guessing (false negative rates 0.97 / 0.79 / 0.63),
+   a same-size Bloom filter is about 1/3; the no-compaction control has an error rate of only 0.04.
+   In the summary text the model itself wrote: "I cannot store this set losslessly, I can only guess by whether it looks like it."
+   -> **Narrative information (goals, decisions, progress) can be preserved; exact items (sets, lists, error codes, file names,
+   full file contents) cannot.** The latter must be covered by mechanisms outside the summary.
 
-3. **下界对所有算法成立，上界不保证 LLM 算得出。**
-   论文的 caveat 1：这是信息论结论。下界无懈可击；上界只说明"存在某算法能达到"，
-   不保证 LLM summarizer 能算出来。→ 我们只能优化"够用"，不能追求"最优"。
+3. **The lower bound holds for all algorithms; the upper bound does not guarantee the LLM can compute it.**
+   The paper's caveat 1: this is an information-theoretic conclusion. The lower bound is airtight; the upper bound only says "some algorithm can achieve it",
+   not that an LLM summarizer can compute it. -> We can only optimize "good enough", not pursue "optimal".
 
-4. **多次压缩只会更差。**
-   论文只建模单次压缩，且指出单次是"最有利的情况"；
-   每次压缩只能在上一次结果上再丢信息。Codex 自己也警告"多次压缩会降低质量"。
-   → 我们的设计必须**避免摘要叠摘要**（见 5.2）。
+4. **Multiple compactions only get worse.**
+   The paper only models a single compaction, and points out that a single one is "the most favorable case";
+   each compaction can only lose more information on top of the previous result. Codex itself warns that "multiple compactions degrade quality".
+   -> Our design must **avoid summary-on-summary** (see 5.2).
 
-**论文给出的两条出路**（附录 A 结尾）：① 把 sketch 维护在 LLM 上下文之外（工具/记忆）；
-② 把 sketch 原始状态放进上下文 + 解码指令。
-→ ①是我们任务账本（`todo.md`）的方向。
+**Two ways out given by the paper** (end of Appendix A): (1) maintain the sketch outside the LLM context (tools/memory);
+(2) put the sketch's raw state into the context + a decoding instruction.
+-> (1) is the direction of our task ledger (`todo.md`).
 
 ---
 
-**四、Token 记账（切点预算的前置）**
+**4. Token accounting (the prerequisite for the cut-point budget)**
 
-**4.1 为什么需要**
+**4.1 Why it is needed**
 
-保留尾部的预算口径定为 **上下文窗口的 20%**：
+The budget convention for retaining the tail is set to **20% of the context window**:
 
 ```
 budget = context_window_tokens * 0.20
 ```
 
-要判断"从尾部往前累加到哪一条"，必须知道每条 message 的 token 占用。
+To decide "from the tail backwards, up to which message to accumulate", we must know each message's token usage.
 
-关键事实：**`input_tokens` 无法精确分解到每条 message。**
-它是整个请求的真实总量，包含 system、tool schemas、role 包装、协议特殊 token。
-要精确分摊，除非复刻 chat template——代价过高，不值得。
+A key fact: **`input_tokens` cannot be precisely decomposed per message.** It is the real total of the whole request, including system, tool schemas, role wrappers, and protocol-specific tokens.
+Precise attribution would require replicating the chat template -- too costly, not worth it.
 
-因此目标是**够用的分摊 + 校准**，而不是绝对精确。压缩选切点只需要**相对大小准确**：
-我们知道"砍到哪里能落进预算"就够了。
+So the goal is **a good-enough attribution + calibration**, not absolute precision. Choosing a compaction cut point only needs **relative size accuracy**:
+knowing "where to cut to fit the budget" is enough.
 
-**4.2 三层方案**
+**4.2 Three-layer plan**
 
-| 层 | 内容 | 本轮 |
+| Layer | Content | This round |
 | --- | --- | --- |
-| L1 启发式估算 | CJK 感知的字符 → token 估算 + 消息包装开销 | **做** |
-| L2 API usage 校准 | 用最近一次真实 `input_tokens` 求比例，回乘到估算 | **做** |
-| L3 精确计数接口 | `TokenCounter` trait，未来接 `/count_tokens` 或本地词表 | 留口子，不实现 |
+| L1 heuristic estimation | CJK-aware char -> token estimation + message wrapper overhead | **do** |
+| L2 API usage calibration | use the most recent real `input_tokens` to get a ratio, multiply back onto the estimate | **do** |
+| L3 precise counting interface | the `TokenCounter` trait, later hooking into `/count_tokens` or a local vocabulary | leave a seam, do not implement |
 
-**4.3 估算规则（L1）**
+**4.3 Estimation rules (L1)**
 
-CJK 感知的字符级估算，比 `chars/4` 准很多：
+A CJK-aware character-level estimate, much more accurate than `chars/4`:
 
 ```
 count_text(s):
-  total = Σ 每个字符:
-    CJK   (U+4E00–U+9FFF / U+3040–U+30FF / U+AC00–U+D7AF / U+3000–U+303F) → 1.0
-    ASCII (0x00–0x7F)                                                     → 0.25
-    其他（emoji / 符号 / 其他 Unicode）                                     → 0.5
+  total = Σ for each char:
+    CJK   (U+4E00–U+9FFF / U+3040–U+30FF / U+AC00–U+D7AF / U+3000–U+303F) -> 1.0
+    ASCII (0x00–0x7F)                                                      -> 0.25
+    other (emoji / symbols / other Unicode)                                -> 0.5
   return ceil(total)
 
 count_message(m):
-  return count_text(该消息的全部文本内容) + 包装开销
-    包装开销:
-      role 包装          ≈ 4
-      每个 ToolCall      ≈ count_text(name) + count_text(arguments) + 8
-      Tool 消息          ≈ count_text(tool_call_id) + 4
+  return count_text(all text content of the message) + wrapper overhead
+    wrapper overhead:
+      role wrapper       ≈ 4
+      each ToolCall      ≈ count_text(name) + count_text(arguments) + 8
+      Tool message       ≈ count_text(tool_call_id) + 4
 ```
 
-**4.3.1 系数依据（文献支撑）**
+**4.3.1 Basis for the coefficients (literature support)**
 
-三个系数不是拍脑袋，有实测文献支撑：
+The three coefficients are not arbitrary; they are backed by empirical literature:
 
-- **CJK = 1.0 token/字**：中文 PLM 的 tokenizer 通常把每个汉字当作不可分的 token
-  （Sub-Character Tokenization for Chinese PLMs, arXiv:2106.00400）。
-  《Vowel Signs Are Not Letters》(arXiv:2608.26449) 测出 **Han 脚本的 fertility 因子恰为 1.00x**，
-  汉字在 byte-level BPE 下相对稳定。→ 1.0 是**保守上界**（见下）。
-- **ASCII = 0.25 token/字符**：英文 ≈ 1.2 tokens/word（Tokenizer Tax Across 25 European
-  Languages, arXiv:2605.24718），英文平均词长约 4.7 字符，得 ≈ 0.25。
-- **其他 Unicode = 0.5 token/字符**：失败 BPE merge 会让文本碎片化成单字节 token
-  （Tokenizer Tax for Indian Languages, arXiv:2607.24276）。取 0.5 偏保守。
+- **CJK = 1.0 token/char**: Chinese PLM tokenizers usually treat each Han character as an indivisible token
+  (Sub-Character Tokenization for Chinese PLMs, arXiv:2106.00400).
+  "Vowel Signs Are Not Letters" (arXiv:2608.26449) measured that the **Han script's fertility factor is exactly 1.00x**,
+  and Han characters are relatively stable under byte-level BPE. -> 1.0 is a **conservative upper bound** (see below).
+- **ASCII = 0.25 token/char**: English ≈ 1.2 tokens/word (Tokenizer Tax Across 25 European
+  Languages, arXiv:2605.24718), the average English word length is about 4.7 chars, giving ≈ 0.25.
+- **other Unicode = 0.5 token/char**: failed BPE merges fragment text into single-byte tokens
+  (Tokenizer Tax for Indian Languages, arXiv:2607.24276). 0.5 is on the conservative side.
 
-**为什么必须校准（4.4）而不是靠固定系数**：
-《The Invisible Language Tax》(arXiv:2609.39001) 测了 7 个 2026 主流 tokenizer（含 DeepSeek V3/V4），
-结论是 token 溢价**因模型而异、无统一系数**——简体中文相对英文从 **-5% 到 +40%**。
-现代 BPE（o200k / DeepSeek 新版）能把**两个汉字合成一个 token**，所以 CJK 真实值可能是 0.5~1.0。
-我们取 1.0 是**宁可高估**（早触发压缩，安全侧）；L2 校准会把它拉回真实值。
+**Why we must calibrate (4.4) instead of relying on fixed coefficients**:
+"The Invisible Language Tax" (arXiv:2609.39001) measured 7 mainstream 2026 tokenizers (including DeepSeek V3/V4),
+and concluded that the token premium **varies by model, with no unified coefficient** -- Simplified Chinese relative to English ranges from **-5% to +40%**.
+Modern BPE (o200k / the new DeepSeek) can **merge two Han characters into one token**, so the true CJK value may be 0.5~1.0.
+We take 1.0 to **prefer over-estimation** (trigger compaction earlier, the safe side); L2 calibration pulls it back to the true value.
 
-度量方式沿用学界通行的 **tokens per character / characters per token**
-（Is Sanskrit the most token-efficient?, arXiv:2601.06142）。
+The measurement convention follows the academically standard **tokens per character / characters per token**
+(Is Sanskrit the most token-efficient?, arXiv:2601.06142).
 
-**4.4 校准（L2）**
+**4.4 Calibration (L2)**
 
-每次响应拿到 `real = usage.input_tokens` 后，本地也算一个本次请求的总估计：
+After each response obtains `real = usage.input_tokens`, we also locally compute a total estimate for this request:
 
 ```
-est   = overhead_est(system + tools) + Σ count_message(m)     # 本次请求的 message
+est   = overhead_est(system + tools) + Σ count_message(m)     # the messages of this request
 ratio = real / est
-factor = 0.7 * factor + 0.3 * ratio                           # EMA 平滑，初值 1.0
+factor = 0.7 * factor + 0.3 * ratio                           # EMA smoothing, initial value 1.0
 ```
 
-`factor` 在**聚合时统一回乘**：对每条 message 的原始估算乘同一个系数。
-因为系数一致，累加序不变，切点结果稳定。
-启发式即使偏差 30%，校准后通常能压到 10% 以内。
+`factor` is **multiplied back uniformly at aggregation time**: each message's raw estimate is multiplied by the same coefficient.
+Because the coefficient is the same, the accumulation order is unchanged and the cut result is stable.
+Even if the heuristic is off by 30%, after calibration it can usually be brought within 10%.
 
-**4.5 切点算法（含 tool 配对约束）**
+**4.5 Cut-point algorithm (with the tool-pairing constraint)**
 
 ```text
 fn compute_cut() -> Option<usize>:
-    window = context_window_tokens                 # 未配置 → 返回 None（不压缩）
+    window = context_window_tokens                 # not configured -> return None (no compaction)
     budget = window / 5                            # 20%
 
-    head = 开头连续 System 消息的条数                # 永远保留
+    head = number of leading consecutive System messages  # always kept
     acc = 0; cut = messages.len()
 
-    for i in (head..messages.len()).rev():         # 从尾部往前累加
+    for i in (head..messages.len()).rev():         # accumulate from the tail backwards
         c = factor * count_message(messages[i])
         if acc > 0 and acc + c > budget:
-            break                                  # 再加就超预算
+            break                                  # adding more exceeds the budget
         acc += c
-        cut = i                                    # cut 是保留段起点
-    # 至少保留一条（最后一条用户消息），即使它本身超预算
+        cut = i                                    # cut is the start of the retained segment
+    # keep at least one (the last user message), even if it alone exceeds the budget
 
-    if cut <= head: return None                    # 没有可压内容
+    if cut <= head: return None                    # nothing to compact
 
-    # ---- tool 配对修正 ----
-    # 保留段的第一条不能是 Tool 结果，否则会出现孤儿 tool_call。
-    while cut > head and messages[cut] 是 Tool:
-        cut -= 1                                   # 回退到产出它的 Assistant{tool_calls}
-    # 允许因此略微超预算：正确性优先于预算（孤儿 tool_call 会被 API 400 拒绝）
+    # ---- tool-pairing correction ----
+    # The first message of the retained segment must not be a Tool result, otherwise an orphan tool_call appears.
+    while cut > head and messages[cut] is Tool:
+        cut -= 1                                   # back up to the Assistant{tool_calls} that produced it
+    # Allow a slight over-budget as a result: correctness takes priority over budget (an orphan tool_call would be rejected with an API 400)
 
     if cut <= head: return None
     return Some(cut)
 ```
 
-要点：
+Key points:
 
-- **预算边界浮动**，所以配对修正必须显式做，不能靠"大概对齐"。
-- 一条 `Assistant{tool_calls}` 可能对应多条连续 `Tool` 结果；
-  `while` 回退会把这些一起吞进保留段，配对自然完整。
-- 压缩区域 = `messages[head..cut]`；重建为
-  `[新 ContextSummary] + messages[cut..]`，系统提示词由 `Agent` 另行重新生成置顶。
+- **The budget boundary floats**, so the pairing correction must be done explicitly, not by "roughly aligning".
+- One `Assistant{tool_calls}` may correspond to multiple consecutive `Tool` results;
+  the `while` back-up will swallow them all into the retained segment, so the pairing is naturally complete.
+- The compacted region = `messages[head..cut]`; it is rebuilt as
+  `[new ContextSummary] + messages[cut..]`, and the system prompt is separately regenerated and placed on top by the `Agent`.
 
 ---
 
-**五、压缩设计**
+**5. Compaction design**
 
-**5.1 心智模型：切点压缩 + 保留尾部**
+**5.1 Mental model: cut-point compaction + keep the tail**
 
-压缩不是"压全部"，而是**选一个切点（见 4.5），把切点之前压成一条，切点之后原样保留**：
-
-```
-[system prompt]              ← 永远保留
-[ContextSummary 结构化块]     ← 切点之前的段落被压成这一条
-[近 20% window 的对话 verbatim] ← 保留尾巴，不压
-[current user message]       ← 本轮任务，永远在请求里
-```
-
-这对应论文 Table 1 里的 hybrid 策略（Claude Code / OpenCode：先便宜地 inline 压缩大 tool 输出，
-再 fallback 到 summarization），也是我们该学的分层。
-
-**5.2 分层保留，禁止摘要叠摘要**
-
-现状 `active_messages()` 找"最后一个 summary"、新 summary 又覆盖它，正是"摘要叠摘要"的退化路径。
-新设计：压缩时**重建** `self.messages`，让已压缩段**冻结**：
+Compaction is not "compress everything", but **choose a cut point (see 4.5), compress everything before the cut into one, and keep everything after the cut as-is**:
 
 ```
-self.messages = [system（Agent 重新生成）] + [新 ContextSummary] + messages[cut..]
+[system prompt]              <- always kept
+[ContextSummary structured block]  <- the segment before the cut is compressed into this one
+[the conversation of the recent ~20% window, verbatim] <- keep the tail, do not compress
+[current user message]       <- this round's task, always in the request
 ```
 
-即 `ContextSummary` 不再是"追加在末尾"，而是**插到切点位置**，替换掉切点之前的段落。
-下一次压缩时，新 summary 覆盖的是"上一个 summary + 其后的对话"，语义清楚，
-且避免同一段被反复压缩（论文 caveat 4：多次压缩只会更差）。
+This corresponds to the hybrid strategy in the paper's Table 1 (Claude Code / OpenCode: first cheaply inline-compact large tool output,
+then fall back to summarization), which is the layering we should learn from.
 
-**系统提示词不参与重建**：它由 `Agent` 单独持有（`system_prompt` 字段），
-`CompactParts::rebuild` 直接返回 `[新 ContextSummary] + current_task + remain`，
-既不接收也不复制原消息里的任何 `System`；`compress_context` 随后调用
-`Agent::system_message()` 重新生成一条置顶（`SystemPrompt` 是函数时会被**重新解析**，
-工作目录 / 项目指南的最新状态会随之更新）。这样系统提示词永远不会被压缩产物污染，
-也不会因为"保留开头 system"而在重建里意外带上旧摘要。
+**5.2 Layered retention; no summary-on-summary**
 
-**5.3 摘要模板（XML 标签 + 区分可叙述与精确）**
+The status quo `active_messages()` finds "the last summary" and the new summary overwrites it -- exactly the degradation path of "summary-on-summary".
+New design: on compaction **rebuild** `self.messages`, letting the compacted segment **freeze**:
 
-`ContextSummary` 的 content 从自由文本改为结构化块。
-依据：`plan.md` 提到 XML 标签能提升 LLM 注意力；论文说明要区分信息类型。
+```
+self.messages = [system (regenerated by Agent)] + [new ContextSummary] + messages[cut..]
+```
+
+That is, `ContextSummary` is no longer "appended at the end" but **inserted at the cut position**, replacing the segment before the cut.
+On the next compaction, the new summary overwrites "the previous summary + the conversation after it", the semantics are clear,
+and it avoids compacting the same segment repeatedly (paper caveat 4: multiple compactions only get worse).
+
+**The system prompt does not participate in the rebuild**: it is held separately by the `Agent` (the `system_prompt` field),
+and `CompactParts::rebuild` directly returns `[new ContextSummary] + current_task + remain`,
+neither receiving nor copying any `System` from the original messages; `compress_context` then calls
+`Agent::system_message()` to regenerate one and place it on top (when `SystemPrompt` is a function it is **re-resolved**,
+so the latest state of the working directory / project guide is reflected). This way the system prompt is never polluted by compaction products,
+and it will not accidentally carry the old summary in the rebuild due to "keeping the leading system".
+
+**5.3 Summary template (XML tags + distinguishing narrative from exact)**
+
+The content of `ContextSummary` changes from free text to structured blocks.
+Basis: `plan.md` mentions that XML tags improve LLM attention; the paper says to distinguish information types.
 
 ```text
-<current_goal>忠实复述用户当前真正下达的任务，不得添加</current_goal>
-<hard_constraints>用户明确提出的约束</hard_constraints>
-<decisions>已做的关键决策及原因</decisions>
-<progress>已完成 / 当前状态</progress>
-<open_questions>尚未解决的问题</open_questions>
-<compacted_range>此前对话已压缩，精确细节（文件内容/命令输出/错误/符号列表）不在摘要中，需要时请重新读取或执行</compacted_range>
+<current_goal>Faithfully restate the task the user is actually assigning now; do not add</current_goal>
+<hard_constraints>constraints the user explicitly raised</hard_constraints>
+<decisions>key decisions already made and why</decisions>
+<progress>completed / current state</progress>
+<open_questions>unresolved questions</open_questions>
+<compacted_range>the previous conversation has been compacted; exact details (file contents / command output / errors / symbol lists) are not in the summary; re-read or re-run them when needed</compacted_range>
 ```
 
-要点：
+Key points:
 
-- **删掉"下一步"**。要不要有 next step 由用户说了算，不由压缩器编。
-- 强调"只提炼已发生的内容，不得推演、不得补充未出现的计划"。
-- `<compacted_range>` 提示模型"被压段不再可见、需要时自行重建"——因为论文证明精确信息在 `G` 下必然丢失，
-  不是 prompt 能补救的。
-- 摘要用 **system 角色**（当前 `encode_messages` 已把 `ContextSummary` 降级为 system），保持"背景信息"语义。
+- **Delete "next step"**. Whether there should be a next step is for the user to decide, not for the compactor to invent.
+- Emphasize "only distill what has happened; do not extrapolate, do not add plans that did not appear".
+- `<compacted_range>` tells the model "the compacted segment is no longer visible; rebuild it yourself when needed" -- because the paper proves exact information necessarily
+  disappears under `G`, and no prompt can remedy that.
+- The summary uses the **system role** (the current `encode_messages` already degrades `ContextSummary` to system), preserving the "background information" semantics.
 
-**5.4 重试与降级**
+**5.4 Retry and degradation**
 
-依据 `runtime-hardening.md` 6.1 与 `plan.md`"压缩失败重试有时能成功"：
+Based on section 6.1 of `runtime-hardening.md` and `plan.md`'s "retrying a failed compaction sometimes succeeds":
 
-- 仅在**可恢复失败**上重试（空内容 / 带 tool_calls 的响应），重试 2~3 次。
-- 仍失败 → **不中断**：记 `AgentEvent::CompressionFailed`，把 `compression_pending` 置回 `false`，
-  保留原消息继续本轮任务。
-- 连续失败 2 次 → 本轮内不再尝试压缩，依赖供应商侧截断并上报 `ContextUsage`。
-- **抑制抖动**：压缩后若摘要本身仍接近阈值，不再立刻重复压缩。
+- Retry only on **recoverable failures** (empty content / a response with tool_calls), 2~3 times.
+- Still failing -> **do not abort**: record `AgentEvent::CompressionFailed`, set `compression_pending` back to `false`,
+  keep the original messages and continue this round's task.
+- Two consecutive failures -> no more compaction attempts this round; rely on provider-side truncation and report `ContextUsage`.
+- **Suppress thrashing**: after compaction, if the summary itself is still near the threshold, do not immediately compact again.
 
 ---
 
-**六、落点与改动清单**
+**6. Landing point and change list**
 
-主要落在 `crates/shirley-agent-sdk/src/runtime/mod.rs`，新增一个 `token` 模块，外加 `src/main.rs` 的压缩指令文案。
+Mainly lands in `crates/shirley-agent-sdk/src/runtime/mod.rs`, adding a `token` module, plus the compaction instruction copy in `src/main.rs`.
 
-| 改动 | 位置 | 说明 |
+| Change | Location | Description |
 | --- | --- | --- |
-| 新增 `token` 模块 | `crates/shirley-agent-sdk/src/token/mod.rs` | `TokenCounter` trait + `HeuristicCounter`（带 `factor`） |
-| `compact()` 取代 `compress_context` | `runtime/mod.rs` | 先算切点 → 只对 `messages[..cut]` 生成摘要 → 重建 `self.messages` |
-| 切点计算 `compute_cut()` | `runtime/mod.rs` | 见 4.5：20% 预算 + tool 配对修正 |
-| 校准状态 | `runtime/mod.rs` | 每次响应后用 `input_tokens` 更新 `factor` |
-| `active_messages()` 简化/移除 | `runtime/mod.rs` | 压缩时已重建消息，请求侧不再需要切片 |
-| 摘要模板 | `runtime/mod.rs`（构造压缩指令处） | XML 标签结构 |
-| 压缩指令文案 | `src/main.rs` | 删"下一步"，加"忠实保留用户指令""不得推演" |
-| 压缩重试 + 降级 | `runtime/mod.rs` | 见 5.4 |
-| `AgentEvent::CompressionFailed` | `runtime/mod.rs` | 新增事件，UI 消费 |
-| `CompressionConfig`（策略配置） | `runtime/compaction.rs` | `trigger_ratio`（默认 0.80）/ `retain_ratio`（默认 0.20）/ `template`（默认 `COMPACTION_TEMPLATE`），经 `Agent` builder 的 `compression_config` 传入 |
+| add a `token` module | `crates/shirley-agent-sdk/src/token/mod.rs` | `TokenCounter` trait + `HeuristicCounter` (with `factor`) |
+| `compact()` replaces `compress_context` | `runtime/mod.rs` | compute the cut first -> summarize only `messages[..cut]` -> rebuild `self.messages` |
+| cut-point computation `compute_cut()` | `runtime/mod.rs` | see 4.5: 20% budget + tool-pairing correction |
+| calibration state | `runtime/mod.rs` | update `factor` with `input_tokens` after each response |
+| `active_messages()` simplified/removed | `runtime/mod.rs` | messages are already rebuilt on compaction, the request side no longer needs slicing |
+| summary template | `runtime/mod.rs` (where the compaction instruction is built) | XML tag structure |
+| compaction instruction copy | `src/main.rs` | delete "next step", add "faithfully preserve the user's instructions" "do not extrapolate" |
+| compaction retry + degradation | `runtime/mod.rs` | see 5.4 |
+| `AgentEvent::CompressionFailed` | `runtime/mod.rs` | a new event, consumed by the UI |
+| `CompressionConfig` (strategy config) | `runtime/compaction.rs` | `trigger_ratio` (default 0.80) / `retain_ratio` (default 0.20) / `template` (default `COMPACTION_TEMPLATE`), passed in via the `Agent` builder's `compression_config` |
 
 ---
 
-**六之补：压缩策略配置（已落地）**
+**6 supplement: compaction strategy config (landed)**
 
-压缩的"何时压、保留多少、摘要长什么样"从硬编码变成可调项，由 SDK 的
-[`CompressionConfig`]（`runtime/compaction.rs`）承载：
+The "when to compact, how much to retain, what the summary looks like" of compaction changed from hard-coded to tunable, carried by the SDK's
+[`CompressionConfig`] (`runtime/compaction.rs`):
 
-| 字段 | 默认 | 含义 |
+| Field | Default | Meaning |
 | --- | --- | --- |
-| `trigger_ratio` | `0.80` | 本轮 `(input + output)` 达 `context_window * trigger_ratio` 时触发压缩 |
-| `retain_ratio` | `0.20` | 压缩后保留尾部（最近对话）的 token 预算比例 |
-| `template` | `COMPACTION_TEMPLATE` | 摘要输出模板，**追加**在 `compression_instruction` 之后 |
+| `trigger_ratio` | `0.80` | compaction is triggered when this round's `(input + output)` reaches `context_window * trigger_ratio` |
+| `retain_ratio` | `0.20` | the token budget ratio of the tail (recent conversation) retained after compaction |
+| `template` | `COMPACTION_TEMPLATE` | the summary output template, **appended** after `compression_instruction` |
 
-- SDK 只提供**策略参数**；领域相关的取舍（该保留哪些事实）仍在
-  `Agent` 的 `compression_instruction`（应用层传入）。
-- 应用层通过 `[compression]` 表（`src/settings.rs`）覆盖：
-  `trigger_ratio` / `retain_ratio` / `template`，缺省即沿用 SDK 默认。
-- 非法 `trigger_ratio` / `retain_ratio` 在 `CompressionSettings::to_sdk()` 里
-  被**夹回默认**（不阻断启动）：压缩是后台能力，配错不该让程序起不来。
-
----
-
-**七、验收**
-
-1. 构造一段长对话（含工具调用），触发压缩后，模型仍能回答"我最初让你做什么"。
-2. 压缩摘要中**不出现**用户未下达的"下一步"。
-3. 切点两侧不存在孤儿 tool_call（对生成的请求体断言：每个 `Tool` 消息都有前置 `Assistant.tool_calls`）。
-4. 保留段 token 估算不超过 `window * 20%`（允许配对修正导致的少量超出）。
-5. 注入"压缩返回空内容"，任务继续而非中断，UI 收到 `CompressionFailed`。
-6. 连续两轮压缩，`self.messages` 中 `ContextSummary` 数量为 1（不叠加）。
-7. 缓存命中率不明显下降（压缩后首轮允许 miss，后续轮应恢复）。
+- The SDK only provides the **strategy parameters**; the domain-related trade-offs (which facts to keep) remain in
+  the `Agent`'s `compression_instruction` (passed in by the application layer).
+- The application layer overrides via the `[compression]` table (`src/settings.rs`):
+  `trigger_ratio` / `retain_ratio` / `template`, defaulting to the SDK defaults when absent.
+- Invalid `trigger_ratio` / `retain_ratio` are **clamped back to the default** in `CompressionSettings::to_sdk()`
+  (without blocking startup): compaction is a background capability, and a misconfiguration should not prevent the program from starting.
 
 ---
 
-**八、不做的事 / 开放问题**
+**7. Acceptance**
 
-- **不做程序化 selection 策略**（论文证明 `G` 严格强于 `S`，且最优依赖查询分布）。
-- **不引入向量库 / 外部记忆存储**（与 `roadmap.md` 第五节一致）。
-- **不做 adaptive adversary 下的最优性**（论文本身是 open problem）。
-- **多次压缩的质量衰减**（论文 open problem）：我们只能做到"不叠摘要 + 分层冻结"，无法给保证。
-- **L3 精确计数不实现**：只留 `TokenCounter` trait 接口，等有明确需求（如供应商提供 `/count_tokens`）再落地。
-- **不做本地 tokenizer**：词表与具体模型绑定，依赖重且和"不为多协议提前抽象"的克制原则冲突。
+1. Construct a long conversation (with tool calls); after triggering compaction, the model can still answer "what did I originally ask you to do".
+2. The compaction summary **does not contain** a "next step" the user did not assign.
+3. There is no orphan tool_call on either side of the cut (assert on the generated request body: every `Tool` message has a preceding `Assistant.tool_calls`).
+4. The retained-segment token estimate does not exceed `window * 20%` (a small overshoot from the pairing correction is allowed).
+5. Inject "compaction returns empty content"; the task continues rather than aborting, and the UI receives `CompressionFailed`.
+6. With two consecutive compactions, the number of `ContextSummary` in `self.messages` is 1 (no stacking).
+7. The cache hit rate does not drop noticeably (the first round after compaction may miss; subsequent rounds should recover).
+
+---
+
+**8. What we are not doing / open questions**
+
+- **No programmatic selection strategy** (the paper proves `G` is strictly stronger than `S`, and the optimum depends on the query distribution).
+- **No vector store / external memory storage** (consistent with section 5 of `roadmap.md`).
+- **No optimality under an adaptive adversary** (the paper itself is an open problem).
+- **Quality decay across multiple compactions** (a paper open problem): we can only achieve "no summary stacking + layered freezing", and cannot give a guarantee.
+- **L3 precise counting is not implemented**: only the `TokenCounter` trait interface is left, to be landed when there is a clear need (e.g. a provider offering `/count_tokens`).
+- **No local tokenizer**: the vocabulary is bound to a specific model, has heavy dependencies, and conflicts with the restraint principle of "do not abstract ahead of time for multiple protocols".

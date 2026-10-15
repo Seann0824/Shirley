@@ -1,16 +1,20 @@
-// 一轮 assistant 回复按事件发生顺序切成的线性段落流（对标 TUI 的 items 数组）：
-// 正文块 / 工具组块，谁先发生谁在前。desktop 原先把整轮压成「正文 + 一个
-// 工具折叠区」，无法表达「正文 → 工具 → 正文 → 工具」这种交错。
+// The linear segment stream that one assistant reply is cut into in event order (mirroring
+// the TUI items array): content blocks / tool-group blocks, whichever happens first comes
+// first. desktop previously compressed a whole turn into "body + one tool disclosure"
+// and could not express interleaving like "body -> tools -> body -> tools".
 //
-// 思考（reasoning）**不进段落流**：用户不关心 AI 怎么想，只关心它做什么。
-// 思考过程程序内部消化，界面只保留一个「AI 还在做事」的活跃指示。
+// Reasoning does **not** enter the segment stream: the user does not care how the AI
+// thinks, only what it does. The thinking process is consumed internally by the program,
+// and the UI keeps only an active indicator that "the AI is still working".
+import type { ToolErrorKindWire } from "./wire";
+
 export type AiSegment =
   | { kind: "content"; text: string }
   | { kind: "compact"; text: string }
   | { kind: "tools"; executions: AiToolExecution[] };
 
-// 迁移自 shiwen 的 AiToolExecution，仅保留 Shirley 工具卡片实际消费的字段。
-// shiwen 定制字段（entity / space / host_repository 等）已剥离。
+// Migrated from shiwen's AiToolExecution, keeping only the fields Shirley's tool cards
+// actually consume. shiwen-specific fields (entity / space / host_repository, etc.) are stripped.
 
 export type AiToolExecution = {
   id: number | string;
@@ -23,6 +27,9 @@ export type AiToolExecution = {
   summary: string;
   result_json?: string;
   error?: string | null;
+  /// Stable error class from the SDK when this execution failed (see `ToolErrorKindWire`).
+  /// Classification reads this instead of matching the error text.
+  error_kind?: ToolErrorKindWire | null;
   created_at?: string;
   completed_at?: string | null;
   input?: Record<string, unknown>;

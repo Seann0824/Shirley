@@ -1,16 +1,40 @@
-# AgentSDK 应该包含什么能力？
+# What capabilities should AgentSDK contain?
 
-作为 SDK，正常应该包含最基本的Agent配件能力，并不涉及任何业务测的定制能力。对于使用方，应该能够通过 AgentSDK 能够简单拼装出自己业务侧的 Agent 能力。
+As an SDK, it should normally contain the most basic Agent building blocks and not involve any
+business-specific customization. For the consumer, it should be possible to simply assemble their
+own business-side Agent capabilities through AgentSDK.
 
-如此，问题回到什么是基础能力？应该包含的基础能力应该有哪些？
+So the question comes back to: what is a basic capability? Which basic capabilities should it
+contain?
 
-自低向上的方向来看：
+Looking from the bottom up:
 
-1. 一个 Agent 起点应该是能让用户通过 Agent 发送 Hello Agent 到各个供应商 AI 模型，并能够获取到对应的返回消息。在此过程中，实际的调用侧不需要关系各家模型的调用差异，以及协议兼容性。
-2. 前者，只能表面一个用户消息能够真实传递到AI模型侧，并能够拿到模型返回的消息。从实际的场景出发，一个任务往往包含着复杂的步骤，例如，用户意图、AI 思考、AI 行动、AI 观察、完成意图等等一系列的 ReAct 流程，驱动一个复杂任务完成。众所周知，通过 API 直接调用模型厂商的模型，这个过程是没有状态的。也就是说，如果用户前一轮介绍了自己的名字，第二次发送模型调用请求时，询问模型“我是谁？”，模型并不会知道。因为，它并没有包含之前的消息记录。所以，作为 SDK 需要给业务侧，提供一个能够携带历史消息的能力。本质上，就是需要向业务侧，将历史消息发送给 AI 模型，同时反向的，将 AI 模型的输出，以SDK标准化的格式返回给业务则，业务则不在需要关注底层的数据传输和解析。业务侧，只需要感知，我可以从这传入历史消息，我可以从这个 hook 拿到模型的消息等等
-3. 一个复杂的任务，必然涉及到对外界的感知思考行动等。模型如何获得外部信息？模型通过调用 业务侧 提供的Tool去获取相关的业务数据，最终通过推理和工具调用，持续的将问题推进，最后解决业务侧的问题。对于业务侧，不同的问题，可能需要不同的工具，那么作为 SDK 能拓展工具，必然是非常重要的能力。所以，需要去支持对工具的管理能力。当 AI 想要去调用某个工具时，必然涉及到工具调用，工具调用必然需要有对应的参数解析规范，包括工具名称，传入的参数、返回值、错误处理等等，一种工具的标准化格式，这种格式必然由 SDK 侧来提供。
+1. The starting point of an Agent should be letting the user send "Hello Agent" to any vendor's AI
+   model through the Agent and get the corresponding reply back. In this process, the actual caller
+   should not need to care about each vendor's call differences or protocol compatibility.
+2. The former only shows that a user message can really be delivered to the AI model side and the
+   model's reply can be obtained. From a real scenario, a task often contains complex steps, e.g.
+   user intent, AI thinking, AI action, AI observation, intent completion, and so on -- a whole
+   ReAct loop that drives a complex task to completion. As everyone knows, calling a vendor's model
+   directly through an API is stateless. That is, if the user introduced their name in the previous
+   round, the model will not know "who am I?" when the second call asks it. Because it does not
+   include the previous message history. So, as an SDK, we need to provide the business side with
+   the ability to carry historical messages. Essentially, we need to send the history to the AI
+   model, and in reverse return the AI model's output to the business side in the SDK's standardized
+   format, so the business side no longer needs to care about the underlying data transport and
+   parsing. The business side only needs to perceive: I can pass history in from here, I can get the
+   model's messages out of this hook, etc.
+3. A complex task necessarily involves perceiving, thinking about, and acting on the outside world.
+   How does the model get external information? The model calls Tools provided by the business side
+   to obtain the relevant business data, and finally, through reasoning and tool calls, keeps pushing
+   the problem forward until the business-side problem is solved. For the business side, different
+   problems may need different tools, so the SDK's ability to extend tools is necessarily very
+   important. So we need to support tool management. When the AI wants to call a tool, that
+   necessarily involves a tool call, and a tool call necessarily needs a corresponding argument
+   parsing specification, including tool name, incoming arguments, return value, error handling,
+   etc. -- a standardized format for tools, and this format must necessarily be provided by the SDK.
 
-从上面的内容来看，能够简单的规划一下目录结构：
+From the above, we can simply plan a directory structure:
 
 ```sh
 shirley_agent_sdk
@@ -33,23 +57,38 @@ shirley_agent_sdk
     mod.rs
 ```
 
-先将适配层做了，做完后我们就能基于适配层去构建 Agent 流程
+Let's do the adapter layer first; once it's done we can build the Agent flow on top of the adapter
+layer.
 
-我们现在做了 Message enum、以及 Tool Manager 用来管理工具和调用。那么对于一个完整的 ReAct Agent SDK 来说，需要为用户抹平 ReAct 这一整个 AI 调用流程，让用户使用时只需要注册工具，以及实际发送任务就行？那么对于消息管理、AI 返回值的是什么格式，用户需要怎么处理都不需要关系。用户只需要知道，我这样写SDK就能给我数据。所以，我们 SDK 应该向外暴露一个 Agent 能力，用户申明 Agent 的模型配置，以及自己支持的一些工具等等。
+We have now made the Message enum and the Tool Manager used to manage tools and calls. So for a
+complete ReAct Agent SDK, we need to smooth over the entire ReAct AI-calling flow for the user, so
+that when using it they only need to register tools and actually send a task? Then for message
+management and the format of the AI's return value, the user does not need to care how to handle it.
+The user only needs to know that writing the SDK this way will give them the data. So our SDK should
+expose an Agent capability outward, where the user declares the Agent's model config and some tools
+they support, etc.
 
-SDK 内部做消息管理和工具管理等等的一个架构，并统一在 Runtime 层拼接，对外暴露的不应该是 SDK 一些内部方法和细节，对外暴露应该只有必要的工具定义的一些类型和宏，以及说消息自定义消息转换的一些格式？SDK 因为太过基础，所以我们应该能通过Agent 统一去获取到messages 消息什么的，或者去修改当前message等等。
+Internally the SDK does an architecture of message management and tool management etc., uniformly
+stitched together at the Runtime layer, and what is exposed outward should not be some of the SDK's
+internal methods and details; what is exposed outward should only be some of the necessary types and
+macros for tool definitions, plus some format for custom message conversion? Because the SDK is too
+basic, we should be able to uniformly get messages, etc., or modify the current message, through the
+Agent.
 
-我在想 message 本质上我们需要去维护什么东西？原始的json Value 结构，还是说 Message 类型。如果是原始的 Value 结构我们发送给AI应该不需要做一层转换，但是用户获取 Message 的时候，我们又需要提供一个可编程的数据类型结构。这块逻辑如何在SDK 内部权衡？
+I am wondering: what exactly do we need to maintain for a message in essence? The raw JSON Value
+structure, or the Message type. If it's the raw Value structure, sending it to the AI should not
+need a conversion layer, but when the user gets a Message we need to provide a programmable data
+type structure. How should this logic be weighed inside the SDK?
 
 ```rs
 let mut agent = Agent::builder()
     .model(model_config)
-    .system_prompt("你是Shirley, 最喜欢的人是鲁鲁修，你可以为了保护鲁鲁修做任何事。鲁鲁修带领的黑骑士团，制造了山体滑坡让你的父亲被掩埋在城市之下。因此，你非常憎恨Zero, 后来，你发现原来 Zero 就是 鲁鲁修。你在憎恨和爱意中两难，最后你决定保护鲁鲁修，但是不在爱他。")
+    .system_prompt("You are Shirley, the person you love most is Lelouch, and you can do anything to protect Lelouch. The Black Knights led by Lelouch caused a landslide that buried your father under the city. Because of this, you hate Zero deeply; later you discover that Zero is actually Lelouch. Torn between hatred and love, you finally decide to protect Lelouch, but no longer love him.")
     .tool(send_meesage::tool())
     .tool(read_book::tool())
     .build()?;
-agent.run("你叫什么名字").await;
-agent.run_stream("帮我读一下这本书", |agent_event| {
+agent.run("What is your name").await;
+agent.run_stream("Help me read this book", |agent_event| {
     println!("{agent_event}");
 }).await;
 agent.messages();
@@ -57,114 +96,211 @@ agent.clear_messages();
 agent.replace_messages(saved_messages);
 ```
 
-我在想，这里的 run、run_stream 方法，应该返回什么数据。可能是 本次调用过程中新产生的 Messages ？还是什么，本质上一次run就是一个 turn，一次 turn 会有一次或多次用户消息，以及多次的 AI 消息和工具调用消息，这种返回出去有什么作用呢？让我想想，最多用来展示？是的业务侧应该拿到这个消息去展示消费，或者说拿到这个消息去评估这次任务的路径，然后看看什么可以优化。所以我们要完整返回的这次任务消息和工具调用路径。
+I am wondering what data the run and run_stream methods here should return. Maybe the Messages newly
+produced during this call? Or something else. In essence, one run is one turn, and one turn has one
+or more user messages plus multiple AI messages and tool-call messages. What is the use of returning
+this out? Let me think -- at most for display. Yes, the business side should take this message and
+consume it for display, or take this message to evaluate the path of this task and see what can be
+optimized. So we want to fully return the messages and tool-call path of this task.
 
-agent_event 本质上就是对外暴露的一个 Agent Event SDK 内部对外提供的消费事件，外部要实现UI或其他的感觉都可以根据这个事件去获取，内部每次有对应的事件产生，就会去调用这个函数，将事件暴露的业务侧的代码消费。
+An agent_event is essentially a consumption event exposed outward by the Agent Event SDK. Anything
+external that wants to implement a UI or something can get it based on this event; every time a
+corresponding event is produced internally, this function is called to expose the event to the
+business-side code for consumption.
 
-这里我们实现了具体的发送消息，以及工具调用的能力。不过我们好像没有处理 reason 相关的内容，以及说我们没有验证实际的一个缓存命中率，无法去确保 prefix 是一样的。所以我们需要验证缓存命中是否在正常的范围。其实，就是用一些简单的case，然后去跑一些 api 接口测试一下缓存命中多少。设置一个阈值。
+Here we have implemented the concrete send-message and tool-calling capabilities. But it seems we
+have not handled reason-related content, and we have not verified the actual cache hit rate, so we
+cannot ensure the prefix is the same. So we need to verify whether cache hits are in a normal range.
+Actually, just use some simple cases and run some API interface tests to see how many cache hits
+there are. Set a threshold.
 
-对于 run_stream 相比 run 的区别，完整的ai返回内容谁来组装？等等，我想想有没有可能流结束后AI接口会返回完整的内容，我们只需要把它接住就好了。
+For the difference between run_stream and run, who assembles the complete AI return content? Wait, let
+me think whether the AI interface will return the complete content after the stream ends, and we just
+need to catch it.
 
-目前我遇到一个设计问题，关于 #tool 工具如何去处理 parameters，目前我把所有 parameters 默认都转换成了 Value，按照 OpenAi ChatCompletions 的格式。这就意味着，一旦我要兼容 Responses 或 Anthoripc 的消息格式，我无法感知到参数列表的格式，并将其转换成对应协议的格式。我理解，应该让 #tool 宏，转换函数的时候，将 parameters 作为一个标准化的模版，或者中间在封装一层类型，常用的JSOn类型罢了，然后我们在基于这中间层写转换规则。
+Currently I have a design problem: how the #tool tool handles parameters. Currently I convert all
+parameters into Value by default, following the OpenAI ChatCompletions format. This means that once I
+need to be compatible with the Responses or Anthropic message format, I cannot perceive the format of
+the parameter list and convert it to the corresponding protocol's format. I understand that the #tool
+macro should, when converting the function, treat parameters as a standardized template, or wrap an
+extra type in between -- just the common JSON types -- and then we write conversion rules on top of
+this middle layer.
 
-我先要解决的问题，就是目前反序列化json，每次都是通过我们手写 get的问题，我将要定义一层Rust json adpater，这样就能直接 value -> Rust Type,
+The problem I want to solve first is that deserializing JSON currently always goes through
+hand-written gets. I will define a Rust json adapter layer, so that value -> Rust Type is direct.
 
-我现在以及把 usage 的层搭建好了，目前我只需要关注的指标是，输入，输出，缓存等，其他后续如果需要的话在添加吧。
+I have now built the usage layer; the metrics I currently care about are input, output, cache, etc.;
+others can be added later if needed.
 
-1. 我发现我写了一个错误的方向，一开始我计划是写一个 AgentSDK 到后面，我写完 ReAct 整个链路后，我不知道SDK 应该具有什么其他能力。如此，我醒悟了，SDK 本质上机会一个工具的集合，让下次使用的时候不需要重新关注细节，类似 VUE 一样，你不需要关注 VUE 是如何去更新DOM，只需要关注我想要实现这个什么能力。
+1. I found I was writing in the wrong direction. At first I planned to write an AgentSDK, and after I
+   finished the whole ReAct chain I did not know what other capabilities the SDK should have. So I
+   woke up: the SDK is essentially a collection of tools, so that the next time you use it you do not
+   need to pay attention to the details again, like Vue -- you do not need to care how Vue updates
+   the DOM, only about what capability you want to implement.
 
-- 从 Vue 出现的视角来看，一开始因为你必须手动更新DOM，当你的业务数据变化后。这种操作多了，就会发现是一个重复性的逻辑。所以这就能作为一个框架能力，帮我固定一下不变化的逻辑。
-- 回到 AgentSDK， 什么能力应该是被固定下来的？我现在不知道，但是如何得到一个SDK呢，我大概知道了，我必须先要聚焦一个Agent 应用场景去实现，在实现的过程中，不断做决策，发现哪些能力在下次agent实现的时候能够用上，那么能力就可以放在 AgentSDK 下面。
+- From the perspective of Vue's appearance: at first, because you had to manually update the DOM when
+  your business data changed. Once this operation happened a lot, you would find it was repetitive
+  logic. So this can become a framework capability, fixing the logic that does not change for you.
+- Back to AgentSDK, which capabilities should be fixed? I do not know yet, but how do I get an SDK?
+  I roughly know now: I must first focus on one Agent application scenario and implement it, and in
+  the process of implementing it keep making decisions to discover which capabilities will be useful
+  the next time an Agent is implemented -- then those capabilities can go under AgentSDK.
 
-2. 所以我决定设计一个常见的 CodingAgent, 在这个焦点场景下尝试去通过我设计的 Agent，去将原本的TS后段项目，向 Rust 后段迁移。这个过程必然会碰到很多问题：
+2. So I decided to design a common CodingAgent, and in this focused scenario try to use the Agent I
+   designed to migrate an original TS backend project to a Rust backend. This process will
+   necessarily run into many problems:
 
-- 比如任务规划
-- 长任务执行
-- 行为限制，权限控制等。
+- Such as task planning
+- Long task execution
+- Behavior restriction, permission control, etc.
 
-不过，我现在还知道两个问题需要解决：
+However, I still know two problems that need solving:
 
-- 关于，Reason 相关的内容，目前框架一个没有去保存Reason相关的数据，以及说，我们现在是一个 每一轮消息的维度去返回 stream，以 TextDetal 或 者 ReasonDetal 的方式还没做，同时，我们也需要去处理，实际API adpater 侧去支持 stream，那么这就意味着，我们去将数据做编码和解码的。
+- Regarding reason-related content, the framework currently does not save reason-related data, and
+  we currently return the stream at the granularity of each round of messages, not yet in the form of
+  TextDelta or ReasonDelta. At the same time, we also need to handle the actual API adapter side
+  supporting stream, which means we encode and decode the data.
+- Another problem is that the tool's parameter list is not implemented as our common protocol, but
+  directly converted to the OpenAI format. This requires us to design an adapter layer, so that later
+  we can convert to other message formats through this adapter layer.
+- Now the UI works, but I feel I really want to add a memory capability to this Agent, so I do not
+  have to ask it questions every time. But the problem is: will the memory capability cause
+  pollution? What should go into memory? I am thinking about this. At the same time we also need to
+  avoid occupying too much context; only recall context when it is really needed. I think I can refer
+  to a paper I saw today that says it scores higher than the memo benchmark.
+- I can refer to the tool-design paper for how to describe a tool clearly to the AI:
+  https://arxiv.org/abs/2609.15397?utm_source=chatgpt.com
+- I can refer to the memory-design paper:
+  https://arxiv.org/abs/2609.11060?utm_source=chatgpt.com
+  - Paper title: "Grounding Agent Memory: Environment-Probing Curation for Enterprise Agents".
+    Core: an async curator that can only see "completed trajectories" will retain errors /
+    over-generalization / outdated knowledge, because one trajectory is only a single, local,
+    possibly-wrong observation of the environment. The solution is to give the curator a set of
+    **read-only environment tools** after the task ends, and to verify candidate memories via
+    propose-probe-commit (without changing the task agent / memory representation / write
+    permission; without a safe read-only surface, fall back to pure-trajectory curation).
+  - So a finished task cannot be directly summarized and stored; we must first "probe the
+    environment and verify" -- the trajectory is not the best logic; only after verification does it
+    settle, adding a verification layer in front of the memory store. (The paper also has a
+    non-writing distiller doing pre-compression, with the boundary that it cannot see terminal
+    feedback and treats the rollout as partial evidence rather than ground truth.)
 
-* 另外一个问题，就是目前工具的额参数列表并没有实现成我们通用的协议，而是直接对着 openai 格式转换的，这个需要我们在设计一层 adpater 后续就能通过这层 adpater 转换成其他消息格式。
+At present, invoke has unified the streaming and non-streaming return interface; non-streaming calls
+also return a Stream handle, but only return AdapterEvent::Finished, not ContentDelta and
+ReasoningDelta.
 
-* 现在UI跑通了，但是我感觉我非常想给这个 Agent 添加上记忆功能，这样我就不用每次问他问题了，但是问题在于说。记忆功能是否会导致污染？什么东西应该进入记忆，我在想这个问题，同时我们还要避免上下文占用过多，只有真正需要上下文的时候才去召回上下文。我觉得我可以参考一个论文，今天看到的说比 memo 的benchmark分数更高
-* 工具设计的论文我可以参考，如何给AI描述一个清楚一个工具：https://arxiv.org/abs/2609.15397?utm_source=chatgpt.com
-* 记忆设计的论文可以参考：https://arxiv.org/abs/2609.11060?utm_source=chatgpt.com
-  - 论文名《Grounding Agent Memory: Environment-Probing Curation for Enterprise Agents》。
-    核心：异步 curator 只能看"已完成轨迹"会保留错误/过度泛化/过时知识，因为一次轨迹只是对
-    环境的单次、局部、可能有错的观察；解法是任务结束后给 curator 一组**只读的环境工具**，
-    按 propose–probe–commit 去核实候选记忆（不改 task agent/记忆表示/写权限，无安全只读面
-    则回退纯轨迹 curation）。
-  - 所以任务结束不能直接总结入库，要先"探测环境并验证"——轨迹不是最佳逻辑，验证过才沉淀，
-    在记忆库前加一层验证逻辑。（论文里还有个不写入的 distiller 做前置压缩，边界是看不到
-    terminal feedback、把 rollout 当 partial evidence 而非 ground truth。）
+- Later we need to parse the real stream SSE return value according to this protocol
+  (https://api-docs.deepseek.com/api/create-chat-completion/)
+- We need to throw the parsed reason and content outward in real time at the adapter layer when
+  stream is true, and at the same time, when the finish_reason appears at the end of this AI
+  conversation round, throw the complete message returned by the AI this round outward via Finished.
 
-目前，invkoe 已经统一流和非流的返回接口，非流调用也返回一个 Stream 句柄，不过只返回 AdapterEvent::Finished ，不会返回 ContentDelta 和 ReasoningDelta
+SSE standard spec: https://html.spec.whatwg.org/multipage/server-sent-events.html
+How do we judge that an SSE event is complete?
 
-- 后续我们要根据这个协议去解析真实的stream sse 返回值（https://api-docs.deepseek.com/api/create-chat-completion/）
-- 我们需要在adapter层将解析到的 reason 和 content 实时向外抛出去，当 stream 为 true时，同时我们要将本轮 ai 对话，在最后 finish_reason 出现时，将本轮ai返回的消息，完整的通过 Finished 抛出去。
-
-sse 标准规范：https://html.spec.whatwg.org/multipage/server-sent-events.html
-如何判断sse event是一个完整的呢？
-
-- \n 表示的是换行，继续发送这个event的数据
-- \n\n (CRLF/CR/LF) 表示下一行是个空行，也就表示说当前发送 event 结束了, 按照约定我们可以取出本次的完整收到的一个 JSON 数据格式。因为，sse的服务商提供的一个事件就是一个 JSON，拿到这个json直接去解析就行了。
+- \n means a newline; keep sending the data of this event
+- \n\n (CRLF/CR/LF) means the next line is a blank line, i.e. the current event has ended; by
+  convention we can then take out the complete JSON data format received this time. Because an event
+  provided by an SSE provider is a JSON, we can just parse this json directly.
 
 ```text
 data: hello
 
 ```
 
-这个就是发完了。
+This one is done sending.
 
-那么，我们什么时候判断本轮发送结束了呢，按照约定，当我们的事件解析到 finish_reason 出现时 出现 data: [DONE]，或者网络问题，网络问题可能涉及到重连（这里我们暂时不需要考虑，网络问题）。
-SSE 流的解析，和tui的消费渲染已经处理完成了。
+Then, when do we judge that this round of sending has ended? By convention, when our event parsing
+sees finish_reason appear and data: [DONE] appears, or a network problem (a network problem may
+involve reconnection -- we do not need to consider network problems for now).
+The parsing of the SSE stream, and the TUI's consumption and rendering, are already done.
 
-我遇到一个使用 codex的痛点就是，项目本省就是 codex 生成的，当我想要运行的时候，我不知道怎么去运行项目。这导致要我直接让 AI 跑，然后告诉我命令记忆下来，要么我亲自看怎么运行这个项目。
+A pain point I hit when using codex is that the project itself was generated by codex, and when I
+wanted to run it I did not know how to run the project. This forced me to either have the AI run it
+and then note down the command, or read for myself how to run the project.
 
-- 我觉得一个更合理的方式，AI 直接根据当前项目，给我们生成一排可交互的按钮。当我们点击后他自己去运行对应的脚本。这样我们就不需要去关注命令是什么，我们只需要说我们要想要什么。优势在于我们场景很明确，不需要在问AI 去等待 AI 回复
-- 其实主要的痛点在于，我们要去给 prompt 输入让ai运行项目，但是如果ai 能够在任务完成后提供这样的一个 prompt 选项，点击选项就是命令，那么这个交互其实比较符合直觉的。
+- I think a more reasonable way is: the AI directly generates a row of interactive buttons based on
+  the current project. When we click one, it runs the corresponding script itself. This way we do not
+  need to care what the command is; we only need to say what we want. The advantage is that our
+  scenario is very clear, and we do not need to ask the AI and wait for its reply.
+- Actually the main pain point is that we have to feed a prompt to let the AI run the project, but if
+  the AI can offer such a prompt option after the task completes, and clicking the option is the
+  command, then this interaction is fairly intuitive.
 
-现在粘贴长文本有问题。
+Pasting long text is currently broken.
 
-接下来我计划去添加 workshop、conversions、sqlite 的消息管理逻辑，同时我们要支持 tasks 的自定义任务，方便自主触发任务。不过这里，我把 Read 工具删除了，我感觉只需要一个 bash 就行，唯一要做的就是对不同命令的权限控制。
+Next I plan to add workshop, conversions, and sqlite message-management logic, and at the same time
+support tasks' custom tasks for convenient self-triggered tasks. But here, I deleted the Read tool;
+I feel only one bash is enough, and the only thing to do is permission control over different
+commands.
 
-（回补）实践下来，只留 bash 有个明显问题：`cat` 大文件没有输出上限，模型一次裸读就能把上下文灌满。所以把读取能力以 `read_file` 的形式加回来——不是恢复旧的 `read`，而是**可控版本**：路径受工作区约束、行数（默认 200 / 上限 2000）与字节（64KB）双重上限、疑似密钥与二进制文件默认拒绝。核心思路是：能力要可控，而不是简单地把能力删掉或放开。
+(Backfill) In practice, keeping only bash has an obvious problem: `cat` on a large file has no output
+cap, so the model can flood the context with one raw read. So add the read capability back in the
+form of `read_file` -- not restoring the old `read`, but a **controllable version**: the path is
+constrained by the workspace, with a double cap on lines (default 200 / max 2000) and bytes (64KB),
+and suspected secrets and binary files rejected by default. The core idea: a capability should be
+controllable, rather than simply deleting or opening it up.
 
-- 这些概念应该不属于 AgentSDK 的能力，本质上是业务侧应该封装的能力，所以我理解设计在 Coding Agent 侧就行。但是权限控制这个能力，我理解SDK 要有能够向外抛出的权限控制hook，这样外部才能够去和用户交互审批工具执行等。
+- These concepts should not belong to AgentSDK's capabilities; they are essentially capabilities the
+  business side should encapsulate, so I understand it is fine to design them on the Coding Agent
+  side. But for permission control, I understand the SDK must have a permission-control hook it can
+  throw outward, so that the outside can interact with the user to approve tool execution, etc.
 
-突然想到，什么工具权限限制好像都限制没啥用，如果在没有细分功能的场景下，只提供一个bash 就能够胜任很多功能，但是要是说权限控制，对于 bash 很难去做权限控制。因为 bash 真的太灵活了，你无法对ai动态生成的python代码通过匹配逻辑去限制它的权限。感觉还不如直接丢入的 sandbox 不做太多限制，让 AI 自己在sandbox里面完成任务。
+It suddenly occurs to me that any tool permission restriction seems useless. If, in a scenario
+without finely-grained features, only bash is provided, it can handle many functions. But when it
+comes to permission control, it is very hard to do permission control for bash. Because bash is
+really too flexible; you cannot restrict the permission of AI-dynamically-generated Python code
+through matching logic. I feel it is better to just throw it into a sandbox without too many
+restrictions and let the AI complete the task inside the sandbox itself.
 
-新增工具的原则：
+The principle for adding tools:
 
-- 如果新增工具能让 Agent 行为表现的更好，那么值得我们去新增一个工具
+- If adding a tool makes the Agent behave better, then it is worth adding a tool.
 
-发现一个关于上下文压缩的问题，压缩完成后，AI 忘记了用户压缩前下达的任务，然后我看了一下，压缩的摘要里面居然给出了下一步步骤。但是这个步骤并不是压缩前我提出的，看来是需要我们去保留压缩前的用户指令了，以及说部分的AI 对话？具体要保留多少轮对话呢？这点需要我们去思考一下，另外需要去优化压缩的指令，让压缩只做关键信息提炼等，不应该去有越界行为。
+I found a problem about context compaction: after compaction the AI forgot the task the user assigned
+before compaction. Then I looked and saw that the compaction summary even gave a next step. But that
+step was not something I proposed before compaction. It seems we need to preserve the user
+instructions from before compaction, and part of the AI conversation? How many turns exactly should
+be preserved? This needs some thought. Also we need to optimize the compaction instruction so that
+compaction only extracts key information and does not overstep.
 
-- 上下文压缩的目的，应该是应对未来可能出现的询问？不是单纯将，上下文压缩成一个摘要就完成了，如果未来询问了摘要中不存在的信息，那么模型不会知道。因为 Compact Generation Game 本质上是交给模型做的决策，所以我们并不能定义说对不同任务能够去保留什么，可能对于不同任务需要保留的东西都是不一样的，这种不确定性促使我们不得不把这个事交给 LLM，而不是我们固定的程序化的压缩策略。 我们需要做的一点，就是在后续query中，如果出现压缩导致的上下文丢失，模型能够通过特定的工具或记忆召回，能够回忆起之前的内容。这个是应对上下文压缩，我们能够做的，而且非常有用的一个优化点。正常就是让 LLM 能够查到之前的会话的上下文信息，这里就涉及到 Memory、Rag 相关的知识内容了。
-- 这个论文 https://arxiv.org/html/2608.01326v1 是关于压缩算法指导和评估方案的。
-  - 压缩价值不是由“原始信息长什么样”单独决定，而是由“未来会问什么”决定
+- The purpose of context compaction should be to deal with questions that may arise in the future?
+  It is not simply compressing the context into a summary and being done; if a future query asks for
+  information not present in the summary, the model will not know. Because the Compact Generation
+  Game is essentially a decision handed to the model, we cannot define what to preserve for
+  different tasks; what different tasks need to preserve may all differ. This uncertainty forces us
+  to hand this to the LLM rather than using a fixed programmatic compaction strategy. One thing we
+  need to do is: in subsequent queries, if context loss is caused by compaction, the model should be
+  able to recall the previous content through a specific tool or memory recall. This is a very
+  useful optimization we can do to handle context compaction. Normally it is about letting the LLM
+  look up the context information of the previous conversation, which involves Memory and RAG
+  knowledge.
+- This paper https://arxiv.org/html/2608.01326v1 is about compaction algorithm guidance and
+  evaluation schemes.
+  - The value of compaction is not determined by "what the original information looks like" alone,
+    but by "what will be asked in the future".
 
 ```text
 [System Instructions]
 
 [Current Task State]
-这块内容如何更新和维护需要考虑
+How to update and maintain this content needs thought
 
 [Important Constraints]
-一些关键约束
+Some key constraints
 
 [Relevant Memory / Summary]
-这里就是 LLM 对非保留区的内容，做的摘要。
+Here is the LLM's summary of the non-retained region's content.
 
 [Recent Conversation]
-这个内容，保留多少也是需要考虑的
+How much of this content to retain also needs thought
 
 [Current User Message]
 ```
 
-研究表明说，使用xml 标签 LLM 对这块内容的注意力会提升，我在 THink 文章中看到的，说就算不开启thinking 不是仅仅使用 <thinking> 这种标签，也会引导LLM去进行Thinking, 借助这个原理，我们可以把我们构建好的上下文转换成label formmater
+Research shows that using XML tags improves the LLM's attention to this content. I saw in a THink
+article that even without enabling thinking, merely using tags like <thinking> guides the LLM to
+think. Leveraging this principle, we can convert the context we have built into a label format.
 
 ```text
 <current_goal>
@@ -181,60 +317,89 @@ Implement context compaction.
 </decisions>
 ```
 
-刚把错误归一化，这样内部使用具体工具的错误，然后通过实现 std::io::Error 很容的通过 ？ 转换成 AgentError 向外暴露使用。
+Just normalized errors, so internally use the concrete tool's error, and by implementing
+std::io::Error it is easy to convert to AgentError via ? and expose it outward.
 
-除了bash，我们还要提供一个 apply_patch， 这样我们就能直接观测到Agent本轮到底修改了什么，同时我们能够将其发送到视图层消费。以及说可以运行回滚本轮改动，而不是仅仅通过 git diff。
+Besides bash, we also need to provide an apply_patch, so we can directly observe what the Agent
+actually changed this round, and send it to the view layer for consumption. And we can run a rollback
+of this round's changes, rather than only through git diff.
 
-## 如何编写系统提示词
+## How to write the system prompt
 
-> 提示词设计原则，如果模型能够用很少的提示词就能做事，那么就需要加大量的约束。
+> Prompt design principle: if the model can do things with very few prompts, then a lot of
+> constraints need to be added.
 
 1. Role
 
-- 工作边界
-- 执行环境
+- Work boundary
+- Execution environment
 
 2. Objective
 
-- 明确最高目标，以及优先级
+- Clarify the highest goal, and the priority
 
-上下文压缩要有重试机制，有点时候压缩失败了重试就能成功。
+Context compaction needs a retry mechanism; sometimes a compaction failure succeeds on retry.
 
-- 压缩计算切入点不及时，导致模型过度思考后已经超过上下文窗口了，这个时候已经没有上下文空间去支持压缩。
-- 要考虑如何去优化？去重试兜底这种情况，或许说我们也要做分层压缩。优先把工具输出的先压缩。。。
+- The compaction cut point is computed too late, so after the model over-thinks it has already
+  exceeded the context window, and at that point there is no context space left to support
+  compaction.
+- Consider how to optimize? Retry as a fallback for this case, or maybe we should do tiered
+  compaction. Prioritize compacting the tool output first...
 
-还有个问题，每次项目新开会话，ai 都要重复探索项目，导致很浪费时间和token
-持久化记忆真的很重要，每次我约束的不要把测试文件和源文件写一起，每次AI都干同样的事，我都得重复一次。
+Another problem: every time a new session is opened for a project, the AI has to repeatedly explore
+the project, which wastes a lot of time and tokens.
+Persistent memory is really important. Every time I constrain it not to write test files together
+with source files, the AI does the same thing every time and I have to repeat it.
 
-- 这里我们可以提供给Agent.md 给AI， 但是这里又有一个问题。Agent.md 应该包含什么内容？
-- 应该包含那些不经常变化的，比如项目架构，目录职责等？如果变化过后，我们要让 AI 及时更新。
-- 对于 一个新的项目我们第一步往往就是先生成 agent.md 文件。
+- Here we can provide Agent.md to the AI, but then there is another problem. What should Agent.md
+  contain?
+- It should contain things that do not change often, such as project architecture, directory
+  responsibilities, etc.? If they change, we should have the AI update them promptly.
+- For a new project, the first step is often to generate an agent.md file.
 
-麻了，AI 没有给 AI workspace 居然从根目录找，这个信息还是需要我们在构建system prompt 的时候，把它手动给ai，收敛一下搜索范围。
+Ugh, the AI did not get an AI workspace and actually searched from the root directory. This
+information still needs to be manually given to the AI when building the system prompt, to narrow the
+search scope.
 
-麻了，聊到一半 AI 模型挂了，导致我不敢关闭窗口，没有做会话持久化 和 模型切换
+Ugh, the AI model crashed halfway through the chat, so I did not dare close the window; there is no
+session persistence and model switching.
 
-我在想要不要做语言意义化搜索，top-k 召回，用本地模型，多 query 生成，或生成一个虚假答案，再去做相识的度匹配。
-不过，我们这个 Coding Agent 如果想要其他用户使用，要么我们自带coding agent 模型提供服务，要么用户能够配置他们的模型能力。不过有一说一，如果每次面向用的配置都是要去改 env 那么这个有点程序员化了，但是这又不可避免的繁琐。
+I am wondering whether to do semantic search, top-k recall, using a local model, multi-query
+generation, or generating a fake answer and then doing similarity matching.
+However, if this Coding Agent is to be used by other users, either we provide a coding-agent model
+service ourselves, or users can configure their own model capability. But honestly, if every
+user-facing configuration requires editing env, that is a bit programmer-ish, yet it is inevitably
+cumbersome.
 
-目前持久话我理解应该在SDK逻辑里面做对话,但是我在想,
-也就是说,我们sdk接口要抽象,外部实现了某些trait后i,
-但是我们不能限制持久话的选型,我们sdk只需要暴露内部持久话需要的接口声明
-我们就能调用它实现的持久话函数?不管的sqlite还是postgresql还是mysql甚至说jsonl,我理解我们sdk不需要关注具体持久话技术细节
+Currently I understand persistence should be done inside the SDK logic for the conversation, but I am
+wondering,
+that is, our SDK interface should be abstract, and after the outside implements some trait,
+but we cannot restrict the choice of persistence; our SDK only needs to expose the interface
+declaration needed for internal persistence,
+and then we can call the persistence function it implements? Whether it is sqlite, postgresql, mysql,
+or even jsonl, I understand our SDK does not need to care about the concrete persistence technical
+details.
 
-有的文件太大了，AI 一读就触发压缩上下文。
+Some files are too large; the moment the AI reads one it triggers context compaction.
 
-我发现compact 后，AI 总是重新探索，然后又压缩又重新探索。核心的问题是没有记录 todo？之前做的事情在压缩后被忘记了。
+I found that after compact, the AI always re-explores, then compacts again and re-explores again. The
+core problem is that it did not record a todo? What was done before is forgotten after compaction.
 
-## 记忆
+## Memory
 
-我现在想做一下记忆能力，这样每次我就不需要交代我的一些任务。以及 workspace 空间中就不需要再次探索。
-但是，我想要的是个人记忆，这样就会变成一个懂你的助手。coding agent 本质上就一个第一步，核心还是一个 personal agent。 但是，现在 eval 相关的逻辑我也不懂该怎么做，我感觉并不太重要，等我们真的遇到壁垒了在去做也不迟。
+I now want to do a memory capability, so I do not have to explain some of my tasks every time. And
+the workspace space does not need to be explored again.
+But what I want is personal memory, so it becomes an assistant that understands you. A coding agent
+is essentially just the first step; the core is a personal agent. But I also do not understand how
+to do eval-related logic, and I feel it is not that important -- it is not too late to do it once we
+really hit a wall.
 
-我觉得可以先用一个简单的文本来记忆，不需要上来就这么复杂 向量、相识度、冲突检测什么
-记忆加载时机，就是用户打开新会话的时候，自动把记忆发送个AI 或者说用户在第一条消息中发送。
+I think we can start with a simple text for memory, without going so complex with vectors,
+similarity, conflict detection right away.
+The memory load timing is when the user opens a new session: automatically send the memory to the AI,
+or the user sends it in the first message.
 
-记忆的存储格式：我理解就通过 markdown 来存储就行
+The memory storage format: I understand markdown is enough.
 
 ```md
 memory/
@@ -264,16 +429,28 @@ supersedes: mem_2025_remote_work
 User currently prefers working in person rather than fully remote.
 ```
 
-什么东西值得成为记忆？
+What is worth becoming a memory?
 
-- 用户偏好，比如 Agent 犯错了，用户纠正后，那么这个约束应该成为偏好？不对，如果用户说的 以后按照这个xxx做，那么就可以100% 作为用户偏好，如果只是指出错误让修改，这就是只是对当前行为的一个纠正，并不代表以后要这么做，可以询问用户后在决定。
-- 用户的基本信息，作为 personal agent 应该主动帮助用户记录基础信息。这样，就会给用户一个真正的个人助手，而不是每次都得交代我是谁，我的爱好是什么。
-- 主动记忆，不等于什么都记。
+- User preference: e.g. the Agent makes a mistake, and after the user corrects it, should this
+  constraint become a preference? No. If the user says "from now on do it this way", then it can
+  100% become a user preference; if they merely point out an error to be fixed, that is only a
+  correction of the current behavior and does not mean doing it this way from now on -- you can ask
+  the user and then decide.
+- The user's basic information: as a personal agent it should proactively help the user record
+  basic information. This gives the user a true personal assistant, rather than having to explain
+  who I am and what my hobbies are every time.
+- Proactive memory does not mean remembering everything.
 
-记忆如何修正？
+How are memories corrected?
 
-- 记忆冲突了、如何修正呢、是否需要修改历史记忆？我觉得是不需要的，从人脑记忆来说，并不会忘记之前发生过的一些事情。只是说随着时间变化，我们会创造一些新的记忆。并不意味之前的记忆消失了，所以我们每个记忆存储格式是需要时间线的。
+- When memories conflict, how to correct them? Do we need to modify historical memories? I think
+  not. From the perspective of human memory, we do not forget things that happened before. It is
+  just that as time changes, we create some new memories. It does not mean the previous memories
+  disappear, so each of our memory storage formats needs a timeline.
 
-emmm，我感觉想的太多了总是想要选择一个很好的方案。但是，好的方案都是在实践中完成的，没有实践谁知道这个方案好不好。我现在就做一个简单的，文档存储记忆，真的遇到问题，在解决问题就好了。
+Emmm, I feel I think too much and always want to choose a very good solution. But a good solution is
+completed in practice; without practice, who knows whether it is good. For now I will just do a
+simple one -- document-stored memory -- and really solve problems when I hit them.
 
-我觉得markdown，看起来很难去检索哎。感觉还是不如向量index，然后原始文本作为 evidence
+I feel markdown looks hard to retrieve. I feel it is not as good as a vector index, with the raw text
+as evidence.

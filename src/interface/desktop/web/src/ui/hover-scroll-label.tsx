@@ -2,11 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { cn } from "./utils";
 
 /**
- * 单行文本：宽度不够时截断，**鼠标悬停时横向滚动**把全文带出来（跑马灯）。
+ * Single-line text: truncates when too narrow, and **scrolls horizontally on hover** to
+ * reveal the full text (marquee).
  *
- * 为什么不用原生 `title`：原生 tooltip 有 ~1s 延迟、样式不可控、且与右键菜单
- * 抢注意力。这里就地滚动，零延迟、零额外 UI。仅在真正溢出时才滚动——没溢出
- * 时静止不动，避免无意义抖动。`prefers-reduced-motion` 下退化为不滚动。
+ * Why not the native `title`: the native tooltip has ~1s of delay, uncontrollable styling,
+ * and competes for attention with the context menu. Scrolling in place is zero-delay and
+ * adds no extra UI. It scrolls only when there is real overflow — static when there is
+ * none, avoiding pointless jitter. Degrades to no scrolling under `prefers-reduced-motion`.
  */
 export function HoverScrollLabel({
   text,

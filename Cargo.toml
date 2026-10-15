@@ -32,7 +32,7 @@ tauri-plugin-dialog = { version = "2.7.1", optional = true }
 
 [features]
 default = []
-# 桌面界面（Tauri 2 壳）。默认关闭，避免 TUI-only 构建被迫拉入 webview 依赖。
+# Desktop interface (Tauri 2 shell). Off by default, to avoid forcing a TUI-only build to pull in webview deps.
 desktop = ["dep:tauri", "dep:tauri-plugin-dialog"]
 
 [build-dependencies]

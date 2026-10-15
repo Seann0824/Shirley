@@ -1,35 +1,37 @@
-# 请求重试、打断保留与压缩标签
+# docs/runtime-recovery.md (lines 1-35)
 
-模型调用在 `adapter::invoke` 内最多自动重试 **5 次**，加上首次请求共最多 6 次。
-仅依赖 `SdkError::is_retryable()`：连接/响应体传输错误、HTTP 429、5xx 可重试；
-其他 4xx、编码和解码错误立即返回。退避为 0.5、1、2、4、8 秒。
-首次向调用方发出增量或完成事件后不再重试，避免重复输出。
+# Request retry, interruption retention, and compaction labels
 
-TUI Esc、desktop 停止都保留本轮用户输入、已完成消息和半截助手回复。
-驱动方 drop 流后调用 `Agent::finish_interrupted_turn()`，将返回的新增消息追加到会话日志。
-未返回结果的工具调用补齐中断结果，避免下一轮请求带有孤立 tool_call；
-该结果只表明等待被中断，不能据此断言工具没有产生副作用。
-TUI 在运行中退出时也等待取消收尾。输入框内的新草稿保留，原始输入不退回。
-只有显式 `/rewind` 仍会回退消息和截尾日志。
+A model call is automatically retried up to **5 times** inside `adapter::invoke`, so with the initial request there are at most 6 attempts.
+It relies only on `SdkError::is_retryable()`: connection/response-body transport errors, HTTP 429, and 5xx are retryable;
+other 4xx, and encoding and decoding errors, return immediately. The backoff is 0.5, 1, 2, 4, 8 seconds.
+Once an increment or a completion event has been emitted to the caller, it is no longer retried, to avoid duplicate output.
 
-共享 Session 投影将 ContextSummary 转为独立 Compact 条目，desktop 的实时事件和
-历史快照均使用 compact 类型。两端默认只显示「已压缩上下文」，展开后才显示摘要。
-TUI 可点击标签单独切换，或用 Ctrl+S 切换最近一条；desktop 点击标签切换。
-重新加载会话后默认收起。
+TUI Esc and desktop stop both preserve this round's user input, already-completed messages, and the half-finished assistant reply.
+After the driver drops the stream it calls `Agent::finish_interrupted_turn()`, which appends the returned new messages to the session log.
+Tool calls that have not returned a result are filled in with an interruption result, so the next request does not carry an orphaned tool_call;
+that result only indicates that the wait was interrupted, and it must not be used to assert that the tool had no side effects.
+The TUI also waits for the cancellation to settle when it exits while running. A new draft in the input box is preserved; the original input is not restored.
+Only an explicit `/rewind` still rolls back messages and truncates the log.
 
-## 手动验证（由用户执行，当前未验证 UI 效果）
+The shared Session projection turns a ContextSummary into a standalone Compact item; the desktop's live events and
+history snapshot both use the compact type. By default both ends show only "context compacted", and reveal the summary only after expanding.
+The TUI can click a label to toggle it individually, or use Ctrl+S to toggle the most recent one; the desktop clicks a label to toggle.
+After reloading a session it is collapsed by default.
 
-1. 两端分别发送一条长回复请求，出字后按 TUI Esc / desktop 停止。
-   预期：用户消息和半截回复保留，停止等待；继续输入并发送下一轮，不删除上一轮内容。
-2. 回复期间在输入框写入新草稿再打断。
-   预期：草稿保留；上一轮原始输入不自动填回输入框。
-3. 打断后切换会话再切回，并重启后加载该会话。
-   预期：已保留的用户消息、半截助手回复仍在；下一轮能参考这些内容。
-4. 在较小上下文窗口下触发自动压缩。
-   预期：压缩期间显示进度，结束后只显示「已压缩上下文」标签，不直接铺开摘要正文。
-5. 点击标签展开、再次点击收起；TUI 同时检查 Ctrl+S。触发多次压缩后分别点击各标签。
-   预期：每条标签可单独展开；Ctrl+S 只切换最近一条；普通回复与摘要按时间顺序保留。
-6. 压缩后切换会话、重启加载，再缩窄窗口并滚动。
-   预期：历史摘要仍默认折叠，标签可操作，正文换行和滚动位置无异常。
+## Manual verification (performed by the user; the UI effect has not been verified yet)
 
-后端契约覆盖见 `crates/shirley-agent-sdk/tests/runtime_recovery.rs`，不新增 UI 单元测试。
+1. On both ends, send a request that produces a long reply, then press TUI Esc / desktop stop after output starts.
+   Expected: the user message and the half-finished reply are preserved, and stopping waits; keep typing and send the next round without deleting the previous round's content.
+2. While a reply is in progress, type a new draft in the input box and then interrupt.
+   Expected: the draft is preserved; the previous round's original input is not automatically filled back into the input box.
+3. After interrupting, switch sessions and switch back, then restart and load that session.
+   Expected: the preserved user message and half-finished assistant reply are still there; the next round can refer to them.
+4. Trigger automatic compaction under a smaller context window.
+   Expected: progress is shown during compaction; when it finishes only the "context compacted" label is shown, without laying out the summary body directly.
+5. Click a label to expand, click again to collapse; on the TUI also check Ctrl+S. After triggering compaction multiple times, click each label separately.
+   Expected: each label can be expanded individually; Ctrl+S toggles only the most recent one; ordinary replies and summaries are preserved in chronological order.
+6. After compaction, switch sessions, restart and load, then narrow the window and scroll.
+   Expected: history summaries are still collapsed by default, the labels are operable, and the body's line wrapping and scroll position are normal.
+
+The backend contract coverage is in `crates/shirley-agent-sdk/tests/runtime_recovery.rs`; no new UI unit tests are added.

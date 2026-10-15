@@ -1,14 +1,16 @@
-//! 记忆系统（**应用层能力**，不是 SDK 基础能力）。
+//! Memory system (**an application-layer capability**, not an SDK primitive).
 //!
-//! 设计见 `docs/memory.md`。V1 范围：
-//! - `core.md` 常驻注入 + `index.md` 关键词检索注入（经 SDK 的 `ContextProvider`
-//!   接缝，每轮请求末尾追加一条 system，与任务账本同款）；
-//! - 会话结束后的增量 curator（同模型抽取 + 确定性自检）；
-//! - 时间化冲突字段（`supersedes` / `valid_from`，冲突不删历史）。
+//! See `docs/memory.md`. V1 scope:
+//! - `core.md` always-on injection + `index.md` keyword-retrieval injection (through the SDK's
+//!   `ContextProvider` seam, appending one system message at the end of each request — same as
+//!   the task ledger);
+//! - an incremental curator after a session ends (same-model extraction + deterministic
+//!   self-check);
+//! - temporal conflict fields (`supersedes` / `valid_from`; conflicts don't delete history).
 //!
-//! 归应用层的原因与 `todo.rs` 一致：记什么、怎么检索、注入什么文案是"coding
-//! agent 这个产品"的取舍。SDK 只提供通用接缝 `ContextProvider`，本模块不新增
-//! SDK 对外类型。
+//! It lives in the app layer for the same reason as `todo.rs`: what to record, how to retrieve,
+//! and what text to inject are trade-offs of "the coding-agent product". The SDK provides only
+//! the generic `ContextProvider` seam; this module adds no new SDK public types.
 
 mod curator;
 mod embed;
@@ -19,12 +21,13 @@ mod store;
 mod tool;
 mod vector;
 
-// 只 re-export **模块外**真正消费的类型（保持门面小）：
-//   - `bootstrap.rs`：`curate` / `CurateOutcome` / `CuratorError` /
+// Re-export only the types actually consumed **outside** the module (keep the facade small):
+//   - `bootstrap.rs`: `curate` / `CurateOutcome` / `CuratorError` /
 //     `MemoryContextProvider` / `MemoryRuntime` / `MemoryStore`
-//   - `interface/session.rs`：`MemoryRuntime`
-// 其余（`Entry` / `EntryType` / `search` / `write_index` / `Candidate` …）是模块内部
-// 构件，跨子模块用 `super::` 直接引用，不必抬到 `crate::memory::`。
+//   - `interface/session.rs`: `MemoryRuntime`
+// Everything else (`Entry` / `EntryType` / `search` / `write_index` / `Candidate` ...) is an
+// internal building block referenced across submodules via `super::`, so it doesn't need to be
+// hoisted to `crate::memory::`.
 pub use curator::{ConsolidateOutcome, CurateOutcome, CuratorError, consolidate, curate};
 pub use embed::{Embedder, EmbeddingConfig};
 pub use provider::{MemoryContextProvider, MemoryRuntime};

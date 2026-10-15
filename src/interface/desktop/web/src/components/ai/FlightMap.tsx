@@ -12,23 +12,26 @@ import chinaGeo from "@/assets/geo/china.json";
 import { mapPoints, parseSpec, routeName, type MapSpec } from "./flightMapData";
 import { layoutMapLabels, pointData, routeData } from "./flightMapLabels";
 
-// 航线地图：由正文里的 ```flightmap 围栏代码块触发（streamdown 自定义 language
-// renderer，见 AiMarkdown 的 plugins.renderers 注册）。中国省级边界底图 +
-// 机场标记 + 航线；支持缩放、平移、展开大图和点击地点查看信息。
+// Flight map: triggered by a ```flightmap fenced code block in the body (a streamdown
+// custom language renderer, see the plugins.renderers registration in AiMarkdown).
+// China province-border basemap + airport markers + routes; supports zoom, pan,
+// expanding to a large view, and clicking a place to see its info.
 //
-// 底图数据本地打包（@/assets/geo/china.json，阿里 DataV 省级边界），**离线、不请求
-// 网络、不需要任何地图瓦片服务**。ECharts 按需引入，只带 geo/lines/scatter。
+// The basemap data is bundled locally (@/assets/geo/china.json, Alibaba DataV province
+// borders), **offline, no network requests, no map tile service needed**. ECharts is
+// imported on demand, bringing in only geo/lines/scatter.
 //
-// 数据契约（JSON，写在 ```flightmap 代码块里）：
+// Data contract (JSON, written inside the ```flightmap code block):
 //   {
-//     "title": "北京出发随心飞可达城市",            // 可选
-//     "origin": { "name": "北京", "code": "PEK", "lat": 40.08, "lon": 116.58 },
+//     "title": "Cities reachable by Go-anywhere from Beijing",   // optional
+//     "origin": { "name": "Beijing", "code": "PEK", "lat": 40.08, "lon": 116.58 },
 //     "points": [
-//       { "name": "三亚", "code": "SYX", "lat": 18.25, "lon": 109.51, "label": "HU7079 08:00" }
+//       { "name": "Sanya", "code": "SYX", "lat": 18.25, "lon": 109.51, "label": "HU7079 08:00" }
 //     ]
 //   }
-// 行程使用 path 按 code/name 顺序连接；closed: true 自动补上末点到首点。
-// 逐段备注使用 routes: [{from, to, label?}]，不能从地点备注猜测真实航段。
+// The itinerary uses path to connect points in code/name order; closed: true auto-adds
+// the last point back to the first. Per-leg notes use routes: [{from, to, label?}]; a real
+// leg cannot be guessed from a place note.
 
 // Importing extensions does not install them in echarts/core. Geo must be
 // installed before registerMap, and Canvas before creating a chart.
@@ -362,7 +365,7 @@ function FlightMapView({ spec, expanded, onExpand, onClose }: {
     });
     ro.observe(host);
 
-    // 跟随明暗主题：data-theme 变化时重画。
+    // Follow the light/dark theme: redraw when data-theme changes.
     mo = new MutationObserver(() => {
       try {
         if (chart && !chart.isDisposed()) {
@@ -384,8 +387,8 @@ function FlightMapView({ spec, expanded, onExpand, onClose }: {
   if (failedSpec === spec) {
     return (
       <div className="my-2 rounded-lg border border-line bg-sidebar px-3 py-2 text-body-sm text-muted" role="status">
-        航线地图渲染失败，其他聊天内容仍可查看。
-        {onClose && <Button variant="ghost" size="sm" onClick={onClose}>关闭大图</Button>}
+        Flight map failed to render; the rest of the chat remains viewable.
+        {onClose && <Button variant="ghost" size="sm" onClick={onClose}>Close</Button>}
       </div>
     );
   }
@@ -393,36 +396,36 @@ function FlightMapView({ spec, expanded, onExpand, onClose }: {
   return (
     <div className={cn("flex min-h-0 flex-col", expanded && "h-full")}>
       <div className="flex flex-wrap items-center justify-between gap-2 border-b border-line px-3 py-2">
-        <span className="text-body-sm font-medium text-ink">{spec.title ?? "航线地图"}</span>
-        <div className="flex items-center gap-1" role="group" aria-label="地图操作">
-          <Button variant="ghost" size="icon-sm" title="缩小" aria-label="缩小地图" onClick={() => zoom(1 / 1.4)}><Minus /></Button>
-          <Button variant="ghost" size="icon-sm" title="放大" aria-label="放大地图" onClick={() => zoom(1.4)}><Plus /></Button>
-          <Button variant="ghost" size="icon-sm" title="显示全部航线" aria-label="复位地图，显示全部航线" onClick={() => {
+        <span className="text-body-sm font-medium text-ink">{spec.title ?? "Flight map"}</span>
+        <div className="flex items-center gap-1" role="group" aria-label="Map controls">
+          <Button variant="ghost" size="icon-sm" title="Zoom out" aria-label="Zoom out map" onClick={() => zoom(1 / 1.4)}><Minus /></Button>
+          <Button variant="ghost" size="icon-sm" title="Zoom in" aria-label="Zoom in map" onClick={() => zoom(1.4)}><Plus /></Button>
+          <Button variant="ghost" size="icon-sm" title="Show all routes" aria-label="Reset map, show all routes" onClick={() => {
             setSelectedRoute(null);
             operate((chart) => { chart.setOption(buildOption(spec, readTheme()), true); relayoutRef.current(); });
           }}><RotateCcw /></Button>
-          {onExpand && <Button variant="ghost" size="sm" onClick={onExpand}><Maximize2 />展开大图</Button>}
-          {onClose && <Button variant="ghost" size="icon-sm" autoFocus aria-label="关闭地图大图" onClick={onClose}><X /></Button>}
+          {onExpand && <Button variant="ghost" size="sm" onClick={onExpand}><Maximize2 />Expand</Button>}
+          {onClose && <Button variant="ghost" size="icon-sm" autoFocus aria-label="Close map overlay" onClick={onClose}><X /></Button>}
         </div>
       </div>
-      <p className="px-3 pt-2 text-xs text-muted">滚轮缩放 · 拖动平移 · 点击机场或航线查看信息 · 放大显示更多标注</p>
-      <div ref={hostRef} className={cn("w-full touch-none overscroll-contain", expanded ? "min-h-0 flex-1" : "h-[420px]")} role="group" aria-label={`${spec.title ?? "航线地图"}，可缩放和平移`} />
+      <p className="px-3 pt-2 text-xs text-muted">Scroll to zoom · drag to pan · click an airport or route for info · zoom in to show more labels</p>
+      <div ref={hostRef} className={cn("w-full touch-none overscroll-contain", expanded ? "min-h-0 flex-1" : "h-[420px]")} role="group" aria-label={`${spec.title ?? "Flight map"}, zoomable and pannable`} />
       <div className="shrink-0 space-y-2 border-t border-line px-3 py-3 text-body-sm">
         <div className="flex flex-wrap gap-3 text-xs text-muted">
-          {spec.origin && <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full border border-ink bg-accent" />出发地</span>}
-          <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-ink" />{spec.origin ? "目的地" : "地点"} · {spec.points.length} 个</span>
-          {spec.routes.length > 0 && <span>→ 飞行方向 · {spec.routes.length} 段{spec.closed ? " · 首尾闭环" : ""}</span>}
+          {spec.origin && <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full border border-ink bg-accent" />Origin</span>}
+          <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-ink" />{spec.origin ? "Destination" : "Place"} · {spec.points.length} total</span>
+          {spec.routes.length > 0 && <span>→ Flight direction · {spec.routes.length} legs{spec.closed ? " · closed loop" : ""}</span>}
         </div>
         <div className="max-h-24 overflow-y-auto">
-          <div className="flex flex-wrap gap-1.5" role="group" aria-label="地图地点">
+          <div className="flex flex-wrap gap-1.5" role="group" aria-label="Map places">
             {all.map((point, index) => (
               <Button key={index} variant={selected === point ? "secondary" : "ghost"} size="sm" className="min-h-8 px-2" aria-pressed={selected === point} onClick={() => selectPoint(index)}>
-                {spec.origin && index === 0 ? "出发 · " : ""}{point.name}{point.code ? ` (${point.code})` : ""}
+                {spec.origin && index === 0 ? "Origin · " : ""}{point.name}{point.code ? ` (${point.code})` : ""}
               </Button>
             ))}
           </div>
         </div>
-        {spec.routes.length > 0 && <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto" role="group" aria-label="航段顺序">
+        {spec.routes.length > 0 && <div className="flex max-h-24 flex-wrap gap-1 overflow-y-auto" role="group" aria-label="Leg order">
           {spec.routes.map((route, index) => (
             <Button key={index} variant={selectedRoute === index ? "secondary" : "ghost"} size="sm" className="min-h-8 px-2" aria-pressed={selectedRoute === index} onClick={() => selectRoute(index)}>{routeName(spec, route, index)}</Button>
           ))}
@@ -434,7 +437,7 @@ function FlightMapView({ spec, expanded, onExpand, onClose }: {
           </> : <>
             <span className="font-medium">{selected.name}{selected.code ? ` · ${selected.code}` : ""}</span>
             {selected.label && <p className="mt-1 whitespace-pre-wrap break-words">{selected.label}</p>}
-            <p className="mt-1 text-xs text-muted">经度 {selected.lon.toFixed(4)} · 纬度 {selected.lat.toFixed(4)}</p>
+            <p className="mt-1 text-xs text-muted">Longitude {selected.lon.toFixed(4)} · Latitude {selected.lat.toFixed(4)}</p>
           </>}
         </div>
       </div>
@@ -462,13 +465,13 @@ export function FlightMap({ code, isIncomplete }: CustomRendererProps) {
     if (isIncomplete) {
       return (
         <div className="my-2 rounded-lg border border-line bg-sidebar px-3 py-2 text-body-sm text-muted">
-          正在生成航线地图…
+          Generating flight map...
         </div>
       );
     }
     return (
       <div className="my-2 rounded-lg border border-line bg-sidebar px-3 py-2 text-body-sm text-muted">
-        航线地图数据无法解析：请检查地点经纬度，以及 path/routes 引用的机场代码或名称。
+        Flight map data could not be parsed: check the place coordinates and the airport codes or names referenced by path/routes.
       </div>
     );
   }
@@ -479,7 +482,7 @@ export function FlightMap({ code, isIncomplete }: CustomRendererProps) {
         <FlightMapView spec={spec} onExpand={() => setExpanded(true)} />
       </figure>
       {expanded && createPortal(
-        <dialog ref={dialogRef} aria-label={`${spec.title ?? "航线地图"}大图`} className="fixed inset-0 m-auto h-[calc(100dvh-2rem)] max-h-none w-[calc(100vw-2rem)] max-w-none overflow-hidden rounded-xl border border-line bg-surface p-0 text-ink shadow-xl backdrop:bg-black/50" onCancel={() => setExpanded(false)} onClick={(event) => { if (event.target === event.currentTarget) setExpanded(false); }}>
+        <dialog ref={dialogRef} aria-label={`${spec.title ?? "Flight map"} overlay`} className="fixed inset-0 m-auto h-[calc(100dvh-2rem)] max-h-none w-[calc(100vw-2rem)] max-w-none overflow-hidden rounded-xl border border-line bg-surface p-0 text-ink shadow-xl backdrop:bg-black/50" onCancel={() => setExpanded(false)} onClick={(event) => { if (event.target === event.currentTarget) setExpanded(false); }}>
           <FlightMapView spec={spec} expanded onClose={() => setExpanded(false)} />
         </dialog>,
         document.body,

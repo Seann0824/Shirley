@@ -46,6 +46,9 @@ pub enum AgentEvent {
         ok: bool,
         /// What the tool returned; on failure it is the error text (matching the stored tool message).
         output: String,
+        /// Stable error class on failure (`None` on success). Lets consumers classify a
+        /// failure structurally instead of matching the display text — see `error.rs`.
+        error_kind: Option<crate::ErrorKind>,
         /// Execution time in milliseconds, for the UI to show.
         elapsed_ms: u64,
     },

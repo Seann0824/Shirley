@@ -27,13 +27,13 @@ import type { SkillEntry } from "@/lib/bridge";
 
 export type MentionEditorHandle = {
   focus: () => void;
-  /** 把某个文件/目录作为 chip 插入光标处（供外部「+」按钮调用）。 */
+  /** Insert a file/directory as a chip at the caret (called by the external "+" button). */
   insertReference: (reference: FileReference) => void;
-  /** 把 `/` 技能候选替换成一个技能 chip（供 `SkillSlashPopover` 点击项调用）。 */
+  /** Replace the `/` skill candidate with a skill chip (called by clicking an item in `SkillSlashPopover`). */
   insertSkill: (skill: SkillEntry) => void;
 };
 
-/** 光标前最近的 `/` 起点（其间无空白）；找不到返回 -1。 */
+/** Nearest `/` start before the caret (no whitespace in between); returns -1 if none. */
 function slashQueryStart(text: string, caret: number): number {
   for (let i = caret - 1; i >= 0; i -= 1) {
     const ch = text[i];
@@ -43,7 +43,7 @@ function slashQueryStart(text: string, caret: number): number {
   return -1;
 }
 
-/** 只保留正文里实际出现的占位符数量对应的引用（防御外部传入不一致）。 */
+/** Keep only as many references as there are placeholders actually present in the body (guards against inconsistent external input). */
 function deriveReferences(text: string, references: FileReference[]): FileReference[] {
   const count = countTokens(text);
   if (references.length === count) return references;
@@ -51,12 +51,15 @@ function deriveReferences(text: string, references: FileReference[]): FileRefere
 }
 
 /**
- * `@` 引用富输入框（contenteditable）。引用 chip 是**内联节点**，与文字同行混排；
- * 正文序列化成「文本 + U+FFFC 占位符」的一条有序字符串，占位符顺序 ↔ references 顺序。
+ * `@`-reference rich input (contenteditable). A reference chip is an **inline node** that
+ * flows with the text on the same line; the body is serialized into a single ordered
+ * string of "text + U+FFFC placeholders", where placeholder order <-> references order.
  *
- * 关键约束：**编辑期间不重渲染编辑区 DOM**（否则光标会丢）。React 只渲染根 `<div>`，
- * 内部内容完全由本组件命令式维护；仅在「外部重置 / 插入 / 删除 chip」时整体重建，
- * 并用 `pendingCaret` 恢复光标。普通输入靠浏览器原生编辑，`onInput` 只做序列化上报。
+ * Key constraint: **do not re-render the editor-area DOM while editing** (otherwise the
+ * caret is lost). React only renders the root `<div>`; the inner content is maintained
+ * entirely imperatively by this component, and is fully rebuilt only on "external reset /
+ * insert / delete chip", restoring the caret with `pendingCaret`. Ordinary typing relies on
+ * the browser's native editing; `onInput` only serializes and reports.
  */
 export const MentionEditor = forwardRef<
   MentionEditorHandle,
@@ -70,7 +73,7 @@ export const MentionEditor = forwardRef<
     autoFocus?: boolean;
     className?: string;
     search: FileMentionSearchState;
-    /** `/` 技能候选控制器（与 `@` 同款，浮层由调用方渲染）。 */
+    /** `/` skill-candidate controller (same as `@`; the popover is rendered by the caller). */
     slash: SkillSlashState;
     onChange: (value: string, references: FileReference[]) => void;
     onSubmit: () => void;
@@ -82,10 +85,10 @@ export const MentionEditor = forwardRef<
   const rootRef = useRef<HTMLDivElement>(null);
   const refsRef = useRef<FileReference[]>(references);
   const lastCommittedRef = useRef<string | null>(null);
-  // 当前正在编辑的 `@` 引用：queryStart = 文本里 `@` 的偏移（-1 表示来自「+」按钮的选文件）。
+  // The `@` reference currently being edited: queryStart = offset of `@` in the text (-1 means it came from the "+" button file picker).
   const mentionRef = useRef<{ queryStart: number } | null>(null);
   const pendingCaretRef = useRef<number | null>(null);
-  // 最新一版编辑命令（供挂载期一次性注册的原生 `beforeinput` 监听调用，避免闭包过期）。
+  // Latest edit command (called by the native `beforeinput` listener registered once at mount, to avoid stale closures).
   const inputRef = useRef<() => void>(() => {});
   const [empty, setEmpty] = useState(value.length === 0);
 
@@ -112,7 +115,7 @@ export const MentionEditor = forwardRef<
     [],
   );
 
-  // 外部值变化（清空 / 回溯恢复）时重建。我们自己的输入已同步、直接跳过，避免重渲染丢光标。
+  // Rebuild when the external value changes (clear / rewind restore). Our own input is already synced, so skip it to avoid losing the caret on re-render.
   useEffect(() => {
     if (value === lastCommittedRef.current) return;
     const root = rootRef.current;
@@ -153,7 +156,7 @@ export const MentionEditor = forwardRef<
     const text = serializeEditor(root);
     let refs = refsRef.current;
 
-    // 键盘删掉了 chip（浏览器把 contenteditable=false 节点当整体删）→ 对账引用。
+    // A chip was deleted via the keyboard (the browser deletes a contenteditable=false node as a whole) -> reconcile the references.
     const chipCount = countTokens(text);
     if (chipCount !== refs.length) {
       if (chipCount < refs.length) {
@@ -197,9 +200,10 @@ export const MentionEditor = forwardRef<
     [rebuild, emit, search],
   );
 
-  // 确认一个技能候选：把当前的 `/query` 片段替换成一个**技能 chip**（与 `@` 文件
-  // 同款内联节点）。chip 后可直接输入参数（`/skill` 的 args），按 Enter 提交时由
-  // `App::send` 依据 chip 判定「激活哪个技能」。
+  // Confirm a skill candidate: replace the current `/query` fragment with a **skill chip**
+  // (the same kind of inline node as an `@` file). Arguments (the `/skill` args) can be
+  // typed directly after the chip; on Enter submit, `App::send` uses the chip to decide
+  // "which skill to activate".
   const handleSkillSelect = useCallback(
     (skill: SkillEntry) => {
       const root = rootRef.current;
@@ -255,7 +259,7 @@ export const MentionEditor = forwardRef<
     return true;
   }, [rebuild, emit]);
 
-  // 向前删除（Delete）：光标正好落在某个 chip 占位符**之前**时整块删除。
+  // Delete forward: when the caret sits exactly **before** a chip placeholder, delete the whole chip.
   const handleDeleteForward = useCallback((): boolean => {
     const root = rootRef.current;
     if (!root) return false;
@@ -272,8 +276,9 @@ export const MentionEditor = forwardRef<
     return true;
   }, [rebuild, emit]);
 
-  // 左右方向键跨 chip：contenteditable=false 的 chip 是浏览器光标「跨不过去」的死角，
-  // 光标贴着它时方向键往往原地不动。这里只在**跨越 chip 边界**时接管，普通文字仍走原生。
+  // Left/right arrow keys across chips: a contenteditable=false chip is a spot the browser
+  // caret "cannot cross", so the arrow keys often stay put when the caret is next to it.
+  // Here we take over only when **crossing a chip boundary**; ordinary text stays native.
   const moveCaret = useCallback((delta: -1 | 1): boolean => {
     const root = rootRef.current;
     if (!root) return false;
@@ -347,7 +352,7 @@ export const MentionEditor = forwardRef<
             handleSkillSelect(result);
             return;
           }
-          // 没有可确认的候选：Tab 吞掉（避免焦点跳走），Enter 交回正常提交。
+          // No candidate to confirm: swallow Tab (to avoid focus jumping away), hand Enter back to normal submit.
           if (event.key === "Tab") {
             event.preventDefault();
             return;
@@ -366,10 +371,12 @@ export const MentionEditor = forwardRef<
           return;
         }
       }
-      // 退格 / 删除：chip 是 `contenteditable=false` 的原子节点，浏览器默认要
-      // 「先把整个 chip 选中、再删」——于是第一下只把光标移到 chip 边界、第二下才真删。
-      // 在 keydown（早于浏览器默认行为）里直接接管：光标紧邻 chip 时手动删并阻止默认，
-      // 其余情况返回 false，交回浏览器原生删除。
+      // Backspace / Delete: a chip is an atomic `contenteditable=false` node, and the
+      // browser's default is to "select the whole chip first, then delete" — so the first
+      // press only moves the caret to the chip boundary and the second actually deletes.
+      // Take over directly in keydown (before the browser's default behavior): when the
+      // caret is adjacent to a chip, delete manually and prevent default; otherwise return
+      // false and hand back to the browser's native deletion.
       if (event.key === "Backspace" && !event.altKey && !event.metaKey && !event.ctrlKey) {
         if (handleBackspace()) {
           event.preventDefault();
@@ -390,9 +397,10 @@ export const MentionEditor = forwardRef<
     [search, slash, handleSelect, handleSkillSelect, handleBackspace, handleDeleteForward, onSubmit, moveCaret],
   );
 
-  // 原生 `beforeinput`：React 的 `onBeforeInput` 是 textInput/keypress 合成的旧接口，
-  // `nativeEvent.inputType` 恒为 undefined，删除 / 换行分支根本不会触发（曾经的 bug）。
-  // 因此直接监听原生事件——它才是能拿到 inputType、且 preventDefault 能阻止默认编辑的接口。
+  // Native `beforeinput`: React's `onBeforeInput` is an old interface synthesized from
+  // textInput/keypress, where `nativeEvent.inputType` is always undefined, so the delete /
+  // line-break branches never fire (a former bug). So listen to the native event directly —
+  // it is the interface that can read inputType and whose preventDefault stops default editing.
   useEffect(() => {
     const root = rootRef.current;
     if (!root) return;
@@ -407,8 +415,9 @@ export const MentionEditor = forwardRef<
     return () => root.removeEventListener("beforeinput", onBeforeInput);
   }, []);
 
-  // 点击 chip：chip 是 contenteditable=false 节点，浏览器不会把光标放进「chip 与相邻文字
-  // 之间」。按点击落在 chip 的左/右半区，手动把光标吸附到 chip 前 / 后。
+  // Click a chip: a chip is a contenteditable=false node, and the browser will not place
+  // the caret "between the chip and adjacent text". Depending on whether the click lands on
+  // the chip's left/right half, manually snap the caret before/after the chip.
   const handleMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {
     const root = rootRef.current;
     if (!root) return;
@@ -436,7 +445,7 @@ export const MentionEditor = forwardRef<
     [handleInput],
   );
 
-  // 让挂载期注册的原生监听始终调用到最新实现。
+  // Keep the native listener registered at mount always calling the latest implementation.
   inputRef.current = handleInput;
 
   return (

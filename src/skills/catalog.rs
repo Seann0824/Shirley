@@ -1,74 +1,74 @@
-//! skill 目录：持有发现结果，并把它渲染成 Tier1 披露文本。
+//! skill directory: holds the discovery result and renders it into Tier1 disclosure text.
 //!
-//! 渐进式披露的第一层（`docs/skills.md` 2.2）：只把每个 skill 的 `name` +
-//! `description`（+ 位置）列进请求，代价极小——装 N 个 skill 也只占 N 行。正文
-//! 与资源留到激活时按需读（P1）。
+//! The first layer of progressive disclosure (`docs/skills.md` 2.2): list only each skill's `name` +
+//! `description` (+ location) in the request, at minimal cost -- N skills installed still cost only N lines. The body
+//! and resources are read on demand at activation time (P1).
 //!
-//! `SkillCatalog` 在装配时扫一次、会话间共享（目录只读、不变）；它是
-//! [`SkillContextProvider`](super::provider::SkillContextProvider) 的数据源。
+//! `SkillCatalog` is scanned once at assembly time and shared across sessions (the directory is read-only and unchanging); it is
+//! the data source of [`SkillContextProvider`](super::provider::SkillContextProvider).
 
 use std::path::Path;
 
 use super::discovery::discover;
 use super::parse::{body, SkillMeta};
 
-/// 目录注入文本里，单个 skill 的 description 再截一次，防止目录整体过长。
+/// Within the directory injection text, a single skill's description is clipped once more to keep the whole directory from being too long.
 const MAX_DIRECTORY_CHARS: usize = 8000;
 
-/// 单个已激活 skill 正文块的字符上限。skill 是外部数据，防一块正文撑爆上下文
-/// （`docs/skills.md` 六）。
+/// Character limit for a single activated skill body block. A skill is external data; this keeps one body block from blowing up the
+/// context (`docs/skills.md` section 6).
 const MAX_ACTIVE_CHARS: usize = 20_000;
 
-/// 资源清单里最多列出的条目数（防一个 skill 目录里有成千上万个文件）。
+/// Maximum number of entries listed in the resource manifest (keeps a skill directory from having tens of thousands of files).
 const MAX_RESOURCES: usize = 200;
 
-/// 已发现的 skill 集合（按发现顺序，去重后）。
+/// The set of discovered skills (in discovery order, deduplicated).
 #[derive(Debug, Default, Clone)]
 pub struct SkillCatalog {
     skills: Vec<SkillMeta>,
 }
 
 impl SkillCatalog {
-    /// 用一份已发现的 skill 列表构造。
+    /// Construct from a list of already-discovered skills.
     pub fn new(skills: Vec<SkillMeta>) -> Self {
         Self { skills }
     }
 
-    /// 从「项目根 + 用户 home」发现并构造。
+    /// Discover and construct from "project root + user home".
     ///
-    /// `home` 为 `None`（拿不到用户目录）时只扫项目级。
+    /// When `home` is `None` (user directory unavailable), only scan project level.
     pub fn discover(project_root: &Path, home: Option<&Path>) -> Self {
         Self::new(discover(project_root, home).skills)
     }
 
-    /// 已发现的 skill（按发现顺序）。
-    #[allow(dead_code)] // P1：激活 / 诊断用
+    /// Discovered skills (in discovery order).
+    #[allow(dead_code)] // P1: for activation / diagnostics
     pub fn skills(&self) -> &[SkillMeta] {
         &self.skills
     }
 
-    /// 是否没有任何 skill。
-    #[allow(dead_code)] // P1：激活 / 诊断用
+    /// Whether there are no skills at all.
+    #[allow(dead_code)] // P1: for activation / diagnostics
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
     }
 
-    /// 按名字取 skill（供 P1 的激活 / 资源读取做枚举校验）。
-    #[allow(dead_code)] // P1：激活 / 资源读取做枚举校验用
+    /// Get a skill by name (used by P1's activation / resource reading for enum validation).
+    #[allow(dead_code)] // P1: used for enum validation in activation / resource reading
     pub fn get(&self, name: &str) -> Option<&SkillMeta> {
         self.skills.iter().find(|skill| skill.name == name)
     }
 
-    /// 目录里的全部 skill 名（供 `activate_skill` / `read_skill_file` 的 schema `enum`）。
+    /// All skill names in the directory (for the schema `enum` of `activate_skill` / `read_skill_file`).
     pub fn skill_names(&self) -> Vec<String> {
         self.skills.iter().map(|skill| skill.name.clone()).collect()
     }
 
-    /// 渲染一个 skill 的**已激活正文块**（Tier2）：读 `SKILL.md`、剥 frontmatter、
-    /// 附带资源清单，包进 `<skill_content>` 标签。
+    /// Render a skill's **activated body block** (Tier2): read `SKILL.md`, strip the frontmatter,
+    /// attach a resource manifest, and wrap it in `<skill_content>` tags.
     ///
-    /// 读失败（文件缺失 / IO 错）返回 `Err(原因)`——调用方据此报执行错误。
-    /// 这是「专用工具激活」相对「文件读取激活」的价值所在（`docs/skills.md` 决策 3）。
+    /// A read failure (missing file / IO error) returns `Err(reason)` -- the caller reports an execution error based on this.
+    /// This is the value of "dedicated tool activation" over "file-reading activation" (`docs/skills.md` decision 3).
     pub fn render_active(&self, name: &str) -> Result<String, String> {
         let skill = self
             .get(name)
@@ -105,10 +105,10 @@ impl SkillCatalog {
         Ok(out)
     }
 
-    /// 渲染 Tier1 披露文本：`<available_skills>` 块，每 skill 一行。
+    /// Render the Tier1 disclosure text: the `<available_skills>` block, one line per skill.
     ///
-    /// 空目录返回 `None`（不注入空内容）。description / 名字里的 `<` `&` 会被转义，
-    /// 防止破坏标签结构（skill 是外部数据，见 `docs/skills.md` 决策 5）。
+    /// An empty directory returns `None` (do not inject empty content). `<` `&` in the description / name are escaped,
+    /// to prevent breaking the tag structure (a skill is external data, see `docs/skills.md` decision 5).
     pub fn render_directory(&self) -> Option<String> {
         if self.skills.is_empty() {
             return None;
@@ -139,15 +139,15 @@ impl SkillCatalog {
     }
 }
 
-/// 目录块的开头说明：告诉模型这是什么、怎么用（Tier1 → Tier2）。
+/// Header of the directory block: tells the model what this is and how to use it (Tier1 -> Tier2).
 ///
-/// P1 起引导模型用 `activate_skill` 加载指令（用户级 skill 在工作区外，`read_file`
-/// 够不到）；`location` 仍列出，供人排查。见 `docs/skills.md` 5.3 / 九。
+/// From P1 on, guide the model to load instructions with `activate_skill` (user-level skills live outside the workspace, and `read_file`
+/// cannot reach them); `location` is still listed for human troubleshooting. See `docs/skills.md` 5.3 / section 9.
 pub const SKILLS_HEADER: &str = include_str!("../../prompts/skills_header.md");
 
-/// 列出 skill 目录下约定资源子目录（`scripts` / `references` / `assets`）里的文件，
-/// 路径相对 skill 根。按子目录顺序稳定排序——**顺序稳定**是 KV 缓存友好的前提
-/// （同一 skill 每次渲染出同样的清单）。
+/// List the files under a skill directory's conventional resource subdirectories (`scripts` / `references` / `assets`),
+/// with paths relative to the skill root. Stably sorted by subdirectory order -- **stable order** is the prerequisite for KV-cache
+/// friendliness (the same skill renders the same manifest every time).
 fn list_resources(root: &Path) -> Vec<String> {
     const DIRS: [&str; 3] = ["scripts", "references", "assets"];
     let mut resources = Vec::new();
@@ -171,7 +171,7 @@ fn list_resources(root: &Path) -> Vec<String> {
     resources
 }
 
-/// XML 文本转义：防止外部数据里的 `<` / `&` 破坏标签结构。
+/// XML text escaping: keeps `<` / `&` in external data from breaking the tag structure.
 fn escape(input: &str) -> String {
     input
         .replace('&', "&amp;")

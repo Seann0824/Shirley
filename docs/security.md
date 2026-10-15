@@ -1,38 +1,38 @@
-**Shirley 技术方案 · 安全与权限（P0）**
+**Shirley technical design · Security and permissions (P0)**
 
-**一、问题定性**
+**1. Problem statement**
 
-当前 `bash` 工具等价于"把 shell 交给模型"。黑名单是装饰性的：
+The current `bash` tool is equivalent to "handing the shell to the model". The blacklist is decorative:
 
 ```rust
-// src/tools/bash.rs 现状
+// src/tools/bash.rs current
 let args: Vec<&str> = command.split_whitespace().collect();
 let is_blacklisted = args.iter().any(|arg| BLACKLIST.contains(arg));
 // ...
 cmd.arg("-c").arg(&command);
 ```
 
-`split_whitespace` 的结果只用于检查，真正执行的是 `bash -c <原字符串>`。因此以下全部能绕过：
+The result of `split_whitespace` is only used for checking; what actually runs is `bash -c <original string>`. So all of the following bypass it:
 
-- `/bin/rm -rf /`（`rm` 不是独立 token）
-- `sh -c "rm -rf /"`（`rm` 在引号内被拆分后才出现，但检查针对的是 `sh`、`-c`）
+- `/bin/rm -rf /` (`rm` is not a standalone token)
+- `sh -c "rm -rf /"` (`rm` only appears after the quoted string is split, but the check is against `sh`, `-c`)
 - `echo cm0gLXJm | base64 -d | bash`
-- `r''m -rf /`（shell 会拼接，字符串匹配看不到 `rm`）
+- `r''m -rf /` (the shell concatenates it, and string matching does not see `rm`)
 
-同时当时的 `read` 没有任何路径限制，可以读 `~/.ssh/id_rsa`，也可以读 `.env` 把 API key 读进上下文再发给模型。
-（注：`read` 曾被移除，现以 `read_file` 重新引入并**已落地本节约束**——工作区边界校验 + 疑似密钥文件拒绝，见下。）
+At the same time, the `read` tool at that time had no path restriction at all; it could read `~/.ssh/id_rsa`, and it could read `.env` to pull the API key into context and send it to the model.
+(Note: `read` was once removed; it has now been reintroduced as `read_file` with **this section's constraints landed** -- workspace boundary validation + suspected-secret file rejection, see below.)
 
-**二、设计目标**
+**2. Design goals**
 
-1. 默认拒绝，显式放行。
-2. 边界在"工作区根目录"这一层，而不是在命令字符串里做模式匹配。
-3. 权限策略是 SDK 能力，不是应用层硬编码。
-4. 工具调用可审计：谁调了什么、是否被拦、拦的原因。
+1. Deny by default, allow explicitly.
+2. The boundary is at the "workspace root directory" layer, not pattern matching inside the command string.
+3. The permission policy is an SDK capability, not application-layer hard-coding.
+4. Tool calls are auditable: who called what, whether it was blocked, and why it was blocked.
 
-**三、密钥处理（立即执行，不需要写代码）**
+**3. Secret handling (do immediately; no code needed)**
 
-1. 轮换 `LOCAL_API_KEY` 与 `DEEPSEEK_API_KEY`（`.env` 中曾以明文存在，`Agent.md` 也记录了泄露历史）。
-2. 新增 `.env.example`，只留键名与占位符：
+1. Rotate `LOCAL_API_KEY` and `DEEPSEEK_API_KEY` (they once existed in cleartext in `.env`, and `Agent.md` also records the leak history).
+2. Add `.env.example`, keeping only key names and placeholders:
 
 ```ini
 LOCAL_API_KEY=your-key-here
@@ -40,26 +40,26 @@ LOCAL_BASE_URL=http://127.0.0.1:8788/v1/chat/completions
 LOCAL_CONTEXT_WINDOW_TOKENS=104858
 ```
 
-3. 在 `read_file` 工具侧增加默认脱敏：命中 `.env`、`*.pem`、`id_rsa*`、`*.key` 等模式时拒绝（**已实现**，见 `src/tools/read.rs::is_secret_file`）。
-4. 长期：密钥不落盘，改为启动时从环境或系统钥匙串注入。
+3. Add default redaction on the `read_file` tool side: reject when it matches patterns such as `.env`, `*.pem`, `id_rsa*`, `*.key` (**implemented**, see `src/tools/read.rs::is_secret_file`).
+4. Long term: do not persist secrets to disk; inject them at startup from the environment or the system keychain.
 
-**四、工作区隔离**
+**4. Workspace isolation**
 
-在 SDK 侧引入工作区概念，所有文件类工具与 `bash` 的 cwd 都受其约束：
+Introduce the workspace concept on the SDK side; all file-type tools and the cwd of `bash` are constrained by it:
 
 ```rust
-// crates/shirley-agent-sdk/src/workspace.rs（新增）
+// crates/shirley-agent-sdk/src/workspace.rs (new)
 pub struct Workspace {
-    root: PathBuf,          // 规范化后的绝对路径
+    root: PathBuf,          // canonicalized absolute path
 }
 
 impl Workspace {
     pub fn new(root: impl Into<PathBuf>) -> std::io::Result<Self> { /* canonicalize */ }
 
-    // 解析并校验路径，越界即 Err
+    // resolve and validate the path; out of bounds is Err
     pub fn resolve(&self, input: &str) -> Result<PathBuf, WorkspaceError> {
         let joined = self.root.join(input);
-        let canonical = canonicalize_allow_missing(&joined)?; // 处理不存在的文件
+        let canonical = canonicalize_allow_missing(&joined)?; // handle non-existent files
         if !canonical.starts_with(&self.root) {
             return Err(WorkspaceError::OutsideRoot { requested: input.into() });
         }
@@ -68,22 +68,22 @@ impl Workspace {
 }
 ```
 
-要点：
+Key points:
 
-- 用 `canonicalize` 解析 `..` 与符号链接后再比较，不能靠字符串前缀。
-- 对"目标文件尚不存在"的写场景，`canonicalize` 会失败，需要先规范化其父目录。
-- 拒绝路径时返回结构化错误，让模型知道"被拒绝"而不是"文件不存在"。
+- Use `canonicalize` to resolve `..` and symlinks before comparing; do not rely on a string prefix.
+- For a write scenario where "the target file does not exist yet", `canonicalize` will fail, so canonicalize its parent directory first.
+- When a path is rejected, return a structured error so the model knows it was "rejected" rather than "the file does not exist".
 
-**五、权限层**
+**5. Permission layer**
 
-把硬编码黑名单升级为 SDK 内的策略对象：
+Upgrade the hard-coded blacklist into a policy object inside the SDK:
 
 ```rust
-// crates/shirley-agent-sdk/src/permission.rs（新增）
+// crates/shirley-agent-sdk/src/permission.rs (new)
 pub enum Decision {
     Allow,
     Deny { reason: String },
-    Ask { reason: String },   // 预留：交给上层交互确认
+    Ask { reason: String },   // reserved: hand off to the upper layer for interactive confirmation
 }
 
 pub trait PermissionPolicy: Send + Sync {
@@ -96,16 +96,16 @@ pub struct PermissionRequest<'a> {
 }
 ```
 
-内置实现 `WorkspacePolicy`：
+Built-in implementation `WorkspacePolicy`:
 
-- 文件类工具：`workspace.resolve(path)` 通过则 Allow，否则 Deny。
-- `bash`：先做静态拒绝（危险命令、重定向到工作区外、`sudo`），其余 Allow 并记录审计。
+- File-type tools: if `workspace.resolve(path)` passes, Allow; otherwise Deny.
+- `bash`: do a static denial first (dangerous commands, redirection outside the workspace, `sudo`), and Allow the rest with an audit record.
 
-**六、`bash` 工具改造**
+**6. Rework of the `bash` tool**
 
-**6.1 返回 stderr 与退出码**
+**6.1 Return stderr and the exit code**
 
-现状只返回 `stdout`，编译失败时模型看到空字符串，会陷入重试同一个错误命令的循环。改为：
+Currently only `stdout` is returned; when a build fails the model sees an empty string and gets stuck retrying the same failing command. Change it to:
 
 ```rust
 #[derive(serde::Serialize)]
@@ -117,24 +117,24 @@ pub struct BashOutput {
 }
 ```
 
-模型需要看到失败信息才能自我纠正，这是能力问题，不只是体验问题。
+The model needs to see the failure information to self-correct; this is a capability issue, not just an experience issue.
 
-**6.2 执行方式**
+**6.2 Execution method**
 
-保留 `bash -c`（否则会破坏管道、重定向等正常用法），但边界靠两层补：
+Keep `bash -c` (otherwise normal usage such as pipes and redirection would break), but shore up the boundary with two layers:
 
-- **静态拒绝**：在 `-c` 之前，用解析后的 token 判断危险模式；对无法静态判断的（如 `base64 | bash`），进入 `Ask` 或直接 Deny。
-- **运行时约束**：cwd 锁定工作区；可选 `ulimit`；后续可接入 OS 级沙箱（macOS `sandbox-exec` / Linux `bubblewrap`）。
+- **Static denial**: before `-c`, use the parsed tokens to judge dangerous patterns; for things that cannot be judged statically (such as `base64 | bash`), go to `Ask` or Deny directly.
+- **Runtime constraints**: lock the cwd to the workspace; optional `ulimit`; later an OS-level sandbox can be hooked in (macOS `sandbox-exec` / Linux `bubblewrap`).
 
-  其中"OS 级沙箱"已单独成层并落地骨架，详见 `sandbox.md`。
+  The "OS-level sandbox" has already become its own layer with a landed skeleton; see `sandbox.md`.
 
-**6.3 审计**
+**6.3 Audit**
 
-每次工具调用记录 `(timestamp, tool, arguments, decision, exit_code)` 到 `~/.shirley/audit.log`。长任务出问题时这是唯一的复盘依据。
+Record `(timestamp, tool, arguments, decision, exit_code)` for each tool call to `~/.shirley/audit.log`. When a long task goes wrong, this is the only basis for retrospective analysis.
 
-**七、验收**
+**7. Acceptance**
 
-1. `/bin/rm -rf /`、`echo ... | base64 -d | bash` 被 Deny 且有原因。
-2. `read ~/.ssh/id_rsa`、`read ../../etc/passwd` 被 Deny。
-3. `cargo build` 失败时模型能收到 stderr 与退出码。
-4. 审计日志包含上述全部被拦截记录。
+1. `/bin/rm -rf /`, `echo ... | base64 -d | bash` are Denied with a reason.
+2. `read ~/.ssh/id_rsa`, `read ../../etc/passwd` are Denied.
+3. When `cargo build` fails, the model receives stderr and the exit code.
+4. The audit log contains all of the above blocked records.

@@ -1,57 +1,59 @@
-**Shirley 技术方案索引**
+# docs/README.md (lines 1-57)
 
-这组文档是对当前仓库（`Agent.md` 描述的 v0.1 状态）的技术设计提案。目标不是重写，而是在现有三层结构（应用层 / SDK / 宏）上补齐"能不能放心用"的缺口，并把 `plan.md` 里已经写下方向、但还没落地的能力排出可执行的顺序。
+**Shirley technical design index**
 
-**文档清单**
+This set of documents is a technical design proposal for the current repository (the v0.1 state described by `Agent.md`). The goal is not a rewrite, but to close the "can I use it with confidence" gaps on top of the existing three-layer structure (application layer / SDK / macro), and to put the capabilities that `plan.md` has already sketched a direction for, but that have not yet landed, into an executable order.
 
-| 文档 | 解决什么 | 优先级 |
+**Document list**
+
+| Document | What it solves | Priority |
 | --- | --- | --- |
-| `architecture.md` | 架构图 + 每个功能落在哪些节点 | 先读这个 |
-| `roadmap.md` | 总路线图：分期、依赖关系、验收口径 | 其次 |
-| `security.md` | 权限层、bash 边界、密钥、工作区隔离 | P0 |
-| `sandbox.md` | 进程沙盒：spec / 后端 / degraded / 超时 / 执行策略归属 | P0 |
-| `runtime-hardening.md` | max_steps、重试、超时、取消、压缩健壮性 | P0 |
-| `compaction.md` | 上下文压缩优化：切点压缩 + 分层保留 | P0 |
-| `todo.md` | 任务账本 `todo`：模型自维护、跨压缩存活的任务状态 / 每轮末尾注入（**已实现**，账本在应用层 `src/todo.rs`，SDK 只留通用接缝 `ContextProvider`） | P0 |
-| `session.md` | 会话持久化与恢复：应用层 SessionStore 契约 / rewind 语义 / 事件驱动落库 | P0 |
-| `multi-session.md` | 多会话并行：多个 Agent 各跑各的 / 事件按会话隔离（通道归 Session 自持）/ 每会话 spawn + 上限 / 移除 `switch_session`（编排归应用层）/ 同会话多驱动不支持（**P1 已落地**：SessionManager + AgentFactory + SDK 移除 switch_session；P2/P3 未落地） | P1 |
-| `streaming.md` | 流式输出与 reasoning 流式 | P1 |
-| `adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 | P1 |
-| `responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件 / 落地方式 | P1 |
-| `anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / thinking 回传 / usage 语义（**已实现**） | P1 |
-| `sdk-gaps.md` | SDK 能力缺口修复：工具上下文注入（已落地）/ 请求体留口（已落地）/ 工具顺序保序（不做） | P0 |
-| `tool-lifecycle.md` | 工具生命周期：`ToolContext` 归 `ToolManager` / `on_register`（created）/ `on_unregister`（destroy）/ `unregister`（**已实现**） | P0 |
-| `tool-macro.md` | 工具宏表达力：函数宏扩展可选伴生钩子（`on_register` / `on_unregister`），lifecycle 由宏接线（**已实现**） | P1 |
-| `testing.md` | SDK 单测策略、缓存命中率基准 | P1 |
-| `plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 | P0 |
-| `web-search.md` | 联网搜索工具 `web_search`：Anthropic-compatible Messages API / 归一化 / 配置（**已实现**） | P1 |
-| `desktop-interface.md` | 桌面界面：Tauri 2 + React 迁移 shiwen 聊天 UI / 共享 LCA / 剥离 shiwen 定制逻辑（**M0–M2 已落地**） | P1 |
-| `memory.md` | 记忆系统：纯 markdown + 双层结构（常驻概览自动注入 / 按需细节检索）/ 后台 curator 异步整理 / 冲突靠时间线表达（**方案，未落地**） | P1 |
-| `skills.md` | 技能（skills）：拥抱 Agent Skills 开放标准（`SKILL.md` 目录）/ 渐进式披露（目录常驻 + 按需激活 + 资源按需读）/ `SkillContextProvider` 每轮末尾追加注入（目录 + 已激活正文，跨压缩存活、KV 友好）/ 应用层实现，SDK 零改动（**P0+P1 已落地**：发现 + 解析 + 目录 + `activate_skill` / `SkillRuntime` 激活 + `read_skill_file` 资源读取；`/skill-name` slash 等 P2） | P1 |
-| `tool-calling.md` | Content 工具调用协议：为不支持原生 tool calling 的模型声明「文本工具格式 + 解析方法」/ 正交于 `ModelProtocol` 的传输模式（`ToolCallingMode::{Native,Tagged}`）/ 内置声明式 XML 协议 / 适配层包装、runtime 零改动（**已落地**；集成测试 `tests/tool_calling_content.rs`） | P1 |
-| `tool-calling-refactor.md` | Content 工具调用协议**收口**：对外只暴露 `ToolCallingMode` / 工具说明挪进 adapter（回退 `agent.rs`）/ 模型配置一次下发 / 请求编码与解析容错修正（**Step 1–7 全部落地**） | P1 |
+| `architecture.md` | Architecture diagram + which node each feature lands on | Read this first |
+| `roadmap.md` | Overall roadmap: phases, dependencies, acceptance criteria | Second |
+| `security.md` | Permission layer, bash boundary, secrets, workspace isolation | P0 |
+| `sandbox.md` | Process sandbox: spec / backend / degraded / timeout / ownership of the execution strategy | P0 |
+| `runtime-hardening.md` | max_steps, retry, timeout, cancellation, compaction robustness | P0 |
+| `compaction.md` | Context compaction optimization: cut-point compaction + layered retention | P0 |
+| `todo.md` | Task ledger `todo`: model self-maintained, task state that survives compaction / injected at the end of each round (**implemented**; the ledger lives in the application layer `src/todo.rs`, the SDK only keeps the generic seam `ContextProvider`) | P0 |
+| `session.md` | Session persistence and restore: application-layer SessionStore contract / rewind semantics / event-driven persistence | P0 |
+| `multi-session.md` | Multi-session parallelism: multiple Agents each running their own / events isolated per session (the channel is held by each Session) / per-session spawn + limit / remove `switch_session` (orchestration goes to the application layer) / same-session multiple drivers not supported (**P1 landed**: SessionManager + AgentFactory + SDK removal of switch_session; P2/P3 not landed) | P1 |
+| `streaming.md` | Streaming output and reasoning streaming | P1 |
+| `adapter-layer.md` | Protocol adapter middle layer, tool-argument normalization, multi-protocol | P1 |
+| `responses-api.md` | Responses protocol adapter: request item expansion / response decoding / streaming events / how it lands | P1 |
+| `anthropic-messages-api.md` | Anthropic Messages protocol adapter: content block / thinking echo / usage semantics (**implemented**) | P1 |
+| `sdk-gaps.md` | SDK capability gap fixes: tool-context injection (landed) / request-body escape hatch (landed) / tool-order preservation (not doing) | P0 |
+| `tool-lifecycle.md` | Tool lifecycle: `ToolContext` belongs to `ToolManager` / `on_register` (created) / `on_unregister` (destroy) / `unregister` (**implemented**) | P0 |
+| `tool-macro.md` | Tool macro expressiveness: function macro extended with optional companion hooks (`on_register` / `on_unregister`), lifecycle wired by the macro (**implemented**) | P1 |
+| `testing.md` | SDK unit-test strategy, cache hit-rate benchmarks | P1 |
+| `plan.md` | Error-handling unification: completed state + follow-up task list | P0 |
+| `web-search.md` | Web search tool `web_search`: Anthropic-compatible Messages API / normalization / configuration (**implemented**) | P1 |
+| `desktop-interface.md` | Desktop interface: Tauri 2 + React migration of the shiwen chat UI / shared LCA / stripping shiwen custom logic (**M0-M2 landed**) | P1 |
+| `memory.md` | Memory system: pure markdown + two-layer structure (always-resident overview auto-injected / on-demand detail retrieval) / background curator async curation / conflicts expressed via a timeline (**proposal, not landed**) | P1 |
+| `skills.md` | Skills: embracing the Agent Skills open standard (`SKILL.md` directory) / progressive disclosure (catalog always resident + activate on demand + read resources on demand) / `SkillContextProvider` appended injection at the end of each round (catalog + activated body, survives compaction, KV-friendly) / application-layer implementation, zero SDK change (**P0+P1 landed**: discovery + parsing + catalog + `activate_skill` / `SkillRuntime` activation + `read_skill_file` resource reading; `/skill-name` slash etc. are P2) | P1 |
+| `tool-calling.md` | Content tool-calling protocol: declare a "text tool format + parsing method" for models that do not support native tool calling / a transport mode orthogonal to `ModelProtocol` (`ToolCallingMode::{Native,Tagged}`) / built-in declarative XML protocol / adapter-layer wrapping, zero runtime change (**landed**; integration test `tests/tool_calling_content.rs`) | P1 |
+| `tool-calling-refactor.md` | Content tool-calling protocol **convergence**: expose only `ToolCallingMode` externally / move the tool description into the adapter (revert `agent.rs`) / deliver the model config once / fix request encoding and parsing fault tolerance (**Steps 1-7 all landed**) | P1 |
 
 
 ---
 
-**贯穿全局的设计原则**
+**Design principles that run through everything**
 
-1. **边界不渗漏**。应用层与 SDK 的边界要清：`encode_messages` 这种"内部 Message → 协议格式"的映射属于 message 侧，不属于适配层；`AgentUpdate` 这种手写重复翻译要么去掉、要么明确它只做展示裁剪。
-2. **失败要可分类**。`ModelError = String` 把 HTTP 状态码、是否可重试、是不是限流全丢了。任何"要不要重试 / 要不要中断"的决策都需要结构化错误，这是运行时健壮性的前置条件。
-3. **默认安全**。当前 `bash` 用 `bash -c` 执行、黑名单靠 `split_whitespace` 字符串匹配，等于没有边界。工具是 Agent 的手，手没有边界，其他所有设计都是空的。
+1. **Boundaries must not leak**. The boundary between the application layer and the SDK must be clean: a mapping like `encode_messages` ("internal Message -> protocol format") belongs on the message side, not the adapter layer; a hand-written duplicate translation like `AgentUpdate` must either be removed or be clearly limited to display trimming.
+2. **Failures must be classifiable**. `ModelError = String` throws away the HTTP status code, whether it is retryable, and whether it is rate-limited. Any decision of "should I retry / should I abort" needs structured errors; this is a precondition for runtime robustness.
+3. **Secure by default**. Currently `bash` executes with `bash -c`, and the blacklist relies on `split_whitespace` string matching, which is as good as no boundary. Tools are the Agent's hands; if the hands have no boundary, every other design is empty.
 
-4. **图用对工具**。文档里的图按表达对象选载体，不要为了统一而强转：目录 / 文件布局这种**层级结构用 ASCII tree**（`├──` / `└──`），mermaid 没有原生树语法，硬转成 `graph TD` 反而啰嗦且失真；**流程、依赖、数据流、时序**这类关系用 **mermaid**（架构图统一在 `architecture.md` 开头放一份图例，说明方框 / 实线 / 虚线 / 菱形 / `subgraph` 的语义）。判断标准：读者是要"看结构"还是要"看流向"——前者 ASCII，后者 mermaid。
+4. **Use the right tool for the diagram**. Diagrams in the docs choose their carrier by what they express; do not force everything into one form for the sake of uniformity: **hierarchical structures** like directory / file layout use an **ASCII tree** (`├──` / `└──`) -- mermaid has no native tree syntax, and forcing it into `graph TD` is verbose and distorted; relationships like **flows, dependencies, data flow, sequences** use **mermaid** (the architecture diagram keeps a single legend at the top of `architecture.md`, explaining the semantics of boxes / solid lines / dashed lines / diamonds / `subgraph`). The criterion: is the reader trying to "see the structure" or "see the flow" -- the former is ASCII, the latter is mermaid.
 
-沙盒层的落地设计见 `sandbox.md`：它把"默认安全"从"静态拒绝危险命令"推进到"物理上跑不出假世界"，是 `bash` 边界的下半场。
+The sandbox-layer landing design is in `sandbox.md`: it advances "secure by default" from "statically reject dangerous commands" to "physically unable to run outside a fake world", and is the second half of the `bash` boundary.
 
 ---
 
-**当前状态基线（核对代码后的实测）**
+**Current state baseline (measured after checking the code)**
 
-- 代码量：`src` + `crates` 共 2809 行
-- 测试：3 个（全部在 `read` 工具），SDK 侧 0 个
-- clippy：36 条警告（`shirley-agent-sdk` 32 条 + 应用层 4 条）
-- 已知 panic 点：**已清除**。`codec` / `invoke` 的未实现协议改为返回 `Err(UnsupportedProtocol)`（见 `docs/runtime-hardening.md`）
-- 未接线配置：**已接线**。`temperature` / `max_output_tokens` / `tool_choice` 进入请求体，并新增 `extra_body` 逃生口（见 `docs/sdk-gaps.md` gap-4；`request_timeout` 字段已移除）
-- 未使用的 `StopReason`：`MaxStepsReached`、`Cancelled`（`Completed` 是当前唯一会被产生的值）
-- 已落地（写方案时尚未做）：流式输出（`stream` 配置 + `ContentDelta` / `ReasoningDelta` 事件 + SSE 增量解析）、TUI 直接消费 `AgentEvent`
+- Code size: `src` + `crates` total 2809 lines
+- Tests: 3 (all in the `read` tool), 0 on the SDK side
+- clippy: 36 warnings (`shirley-agent-sdk` 32 + application layer 4)
+- Known panic points: **cleared**. The unimplemented protocols in `codec` / `invoke` now return `Err(UnsupportedProtocol)` (see `docs/runtime-hardening.md`)
+- Unwired configuration: **wired**. `temperature` / `max_output_tokens` / `tool_choice` go into the request body, and a new `extra_body` escape hatch is added (see `docs/sdk-gaps.md` gap-4; the `request_timeout` field has been removed)
+- Unused `StopReason`: `MaxStepsReached`, `Cancelled` (`Completed` is currently the only value that is ever produced)
+- Already landed (not yet done when the proposal was written): streaming output (`stream` config + `ContentDelta` / `ReasoningDelta` events + SSE incremental parsing), the TUI consuming `AgentEvent` directly

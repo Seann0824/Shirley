@@ -19,11 +19,12 @@ type AiChatComposerProps = Omit<ComponentPropsWithoutRef<"form">, "children" | "
   textareaClassName?: string;
   textareaOnKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => boolean | void;
   leadingAction?: ReactNode;
-  /** 放在发送按钮左侧、与之同一行的操作（如模型切换选择器）。 */
+  /** An action placed to the left of the send button, on the same row (e.g. the model switcher). */
   trailingAction?: ReactNode;
   /**
-   * 自定义输入控件，替换内置 `<textarea>`（如带内联 `@` 引用 chip 的富输入）。
-   * 传入时 `value` / `textareaRef` / `textareaOnKeyDown` 等 textarea 专属 props 由调用方自理。
+   * A custom input control replacing the built-in `<textarea>` (e.g. a rich input with
+   * inline `@` reference chips). When provided, textarea-specific props like `value` /
+   * `textareaRef` / `textareaOnKeyDown` are the caller's responsibility.
    */
   inputSlot?: ReactNode;
   children?: ReactNode;
@@ -51,13 +52,13 @@ export function AiChatComposer({
   trailingAction,
   inputSlot,
   children,
-  sendLabel = "发送消息",
+  sendLabel = "Send message",
   onValueChange,
   onSend,
   onStop,
   ...props
 }: AiChatComposerProps) {
-  // 单个按钮自适应：输入框有内容 = 发送（运行中则排队）；输入框为空且正在生成 = 暂停/停止。
+  // A single adaptive button: non-empty input = send (queued if running); empty input while generating = pause/stop.
   const hasText = value.trim().length > 0;
   const showStop = !hasText && busy && Boolean(onStop);
   return (
@@ -70,10 +71,10 @@ export function AiChatComposer({
       {...props}
       onSubmit={(event) => {
         event.preventDefault();
-        // busy 时也允许提交：调用方会把它排进 pending 队列，等上一轮结束自动发送。
+        // Allow submit even while busy: the caller queues it as pending and auto-sends after the previous turn ends.
         if (disabled || !value.trim()) return;
         onSend();
-        // 发送后把焦点还给输入控件（内置 textarea 或 inputSlot 里的富输入）。
+        // Return focus to the input control after sending (built-in textarea or the rich input in inputSlot).
         event.currentTarget
           .querySelector<HTMLElement>("textarea, [contenteditable='true'], input")
           ?.focus({ preventScroll: true });
@@ -121,7 +122,7 @@ export function AiChatComposer({
               type="button"
               variant="secondary"
               size="icon-sm"
-              aria-label="停止生成"
+              aria-label="Stop generating"
               disabled={disabled}
               onClick={(event) => {
                 event.preventDefault();
@@ -135,7 +136,7 @@ export function AiChatComposer({
               type="submit"
               variant="primary"
               size="icon-sm"
-              aria-label={busy ? "加入队列，待上一轮结束后发送" : sendLabel}
+              aria-label={busy ? "Add to queue, send after the previous turn finishes" : sendLabel}
               disabled={disabled || !hasText}
             >
               <ArrowUp data-icon="inline-start" />

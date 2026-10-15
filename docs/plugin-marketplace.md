@@ -1,160 +1,180 @@
-# Shirley 技术方案 · 插件与插件市场（plugin / marketplace）
+# Shirley technical design · Plugins and the plugin marketplace (plugin / marketplace)
 
-> **状态：设计探索（未落地）**。本文只做方向收敛与决策推演，不含实现承诺。
-> 目标是把「skill / MCP / skill+MCP 组合 / 兼容 Claude Code·Codex 插件 / UI 区域插拔」
-> 这几件散着提的事，收敛到一个**统一的插件模型**上，并逐条映射到仓库里**已有的接缝**。
+> **Status: design exploration (not landed).** This document only converges direction and reasons
+> through decisions; it contains no implementation commitment. The goal is to converge the scattered
+> topics "skill / MCP / skill+MCP combination / Claude Code·Codex plugin compatibility / UI-region
+> pluggability" onto one **unified plugin model**, and map each item to the **existing seams** in the
+> repository.
 
 ---
 
-**一、要解决什么**
+**1. What it solves**
 
-Shirley 现在已经有三种「可插拔能力」，但它们**各自独立、各自发现、各自注入**：
+Shirley now has three kinds of "pluggable capability", but they are **each independent, each
+discovered on their own, each injected on their own**:
 
-| 已有能力 | 落点 | 发现方式 | 注入接缝 |
+| Existing capability | Landing point | Discovery | Injection seam |
 | --- | --- | --- | --- |
-| skill（`docs/skills.md`） | `src/skills/` | 扫 `.agents/skills` / `.claude/skills` | `SkillCatalog` + `SkillRuntime` + `ContextProvider` |
-| 记忆 / 账本 | `src/memory/` `src/todo.rs` | 固定 | `ContextProvider` |
-| 工具 | `src/tools/` | **编译期硬编码**（`bootstrap::assemble_tools`） | `ToolManager::register` |
+| skill (`docs/skills.md`) | `src/skills/` | scan `.agents/skills` / `.claude/skills` | `SkillCatalog` + `SkillRuntime` + `ContextProvider` |
+| memory / ledger | `src/memory/` `src/todo.rs` | fixed | `ContextProvider` |
+| tools | `src/tools/` | **hard-coded at compile time** (`bootstrap::assemble_tools`) | `ToolManager::register` |
 
-问题有三层：
+There are three layers to the problem:
 
-1. **没有「包」的概念**。一个真实能力往往需要**多个部件协同**——比如「航班」=
-   一个渲染契约（`flightmap` skill）+ 若干取数脚本（`flight-cli` / `hnair-cli` skill）
-   + 一个地图渲染器。现在它们只能靠**目录约定**散落在一起，没有 manifest、没有版本、
-   没有依赖、没有启用/停用。
-2. **工具是编译期写死的**。`bash` / `read_file` / `web_search` 之外，用户**没法**在
-   运行期给 Shirley 加工具——除非改 Rust 重编译。这是与 Claude Code / Codex 最大的
-   体验落差。
-3. **兼容是零**。生态里已经沉淀了大量 Claude Code 插件、MCP server、Codex 配置。
-   我们**没有任何入口**去吃它们。
+1. **There is no concept of a "package".** A real capability often needs **multiple parts working
+   together** -- for example "flight" = a rendering contract (the `flightmap` skill) + some
+   data-fetching scripts (the `flight-cli` / `hnair-cli` skills) + a map renderer. Today they can only
+   be scattered together by **directory convention**, with no manifest, no version, no dependencies,
+   no enable/disable.
+2. **Tools are hard-coded at compile time.** Beyond `bash` / `read_file` / `web_search`, the user
+   **cannot** add tools to Shirley at runtime -- unless they modify Rust and recompile. This is the
+   biggest experience gap compared with Claude Code / Codex.
+3. **Compatibility is zero.** The ecosystem has already accumulated a large number of Claude Code
+   plugins, MCP servers, and Codex configs. We have **no entry point** to consume them.
 
-**「插件市场」真正要做的，不是商店，是适配层 + 分发层。** 商店只是它的一个 UI。
+**What the "plugin marketplace" really needs to do is not a store, but an adapter layer + a
+distribution layer.** The store is just one UI of it.
 
 ---
 
-**二、外部生态调研（三个可对齐的形态）**
+**2. External-ecosystem survey (three forms to align with)**
 
-**2.1 Claude Code 插件**（`docs` / `plugin.json`）
+**2.1 Claude Code plugins** (`docs` / `plugin.json`)
 
-一个插件是一个目录，`plugin.json` 是 manifest（`name` 必填，`description` /
-`version` / `author` / `homepage` 强烈建议），组件**按约定目录**自动发现：
+A plugin is a directory, and `plugin.json` is the manifest (`name` required; `description` /
+`version` / `author` / `homepage` strongly recommended); components are auto-discovered **by
+convention directories**:
 
 ```
 my-plugin/
-├── .claude-plugin/plugin.json   # manifest（只有它在该目录内）
+├── .claude-plugin/plugin.json   # manifest (the only thing in this directory)
 ├── skills/*/SKILL.md            # Agent Skills
-├── commands/*.md                # slash 命令（也是 skill 的扁平形态）
-├── agents/*.md                  # 子 agent
-├── hooks/hooks.json             # 事件钩子（PostToolUse 等）
-├── .mcp.json                    # MCP server 配置
-├── output-styles/ themes/       # 2026 新增的展示层扩展
-├── monitors/ bin/               # 后台监控 / PATH 可执行
-└── package.json                 # 启用时自动装依赖
+├── commands/*.md                # slash commands (also the flat form of a skill)
+├── agents/*.md                  # sub-agents
+├── hooks/hooks.json             # event hooks (PostToolUse etc.)
+├── .mcp.json                    # MCP server config
+├── output-styles/ themes/       # presentation-layer extensions added in 2026
+├── monitors/ bin/               # background monitors / PATH executables
+└── package.json                 # auto-install dependencies when enabled
 ```
 
-分发：**marketplace.json（git 仓库索引）+ 插件目录**。`version` 缺省回退 **git SHA**。
-这三点值得抄：**约定目录 + 单文件 manifest + git 源**。
+Distribution: **marketplace.json (a git-repository index) + plugin directories**. `version` falls
+back to the **git SHA** by default. Three things are worth copying: **convention directories +
+single-file manifest + git source**.
 
-**2.2 Codex**（`config.toml` 驱动，无「插件」概念）
+**2.2 Codex** (`config.toml`-driven, no concept of a "plugin")
 
-- 配置全在 `~/.codex/config.toml`（`[mcp_servers]` / `[profiles]` / 自定义 provider）。
-- skill 在 `~/.agents/skills` 与 repo `.agents/skills`（**和 Shirley 同一标准**）。
-- slash 命令 = `~/.codex/prompts/*.md`（`/prompts:<name>`，`$1..$9` / `$ARGUMENTS`）。
-- 项目指令 = `AGENTS.md` 链。
+- All config is in `~/.codex/config.toml` (`[mcp_servers]` / `[profiles]` / custom providers).
+- Skills are in `~/.agents/skills` and repo `.agents/skills` (**the same standard as Shirley**).
+- Slash commands = `~/.codex/prompts/*.md` (`/prompts:<name>`, `$1..$9` / `$ARGUMENTS`).
+- Project instructions = the `AGENTS.md` chain.
 
-Codex 没有「插件包」，一切靠 **TOML 配置 + 标准目录**。它的价值是提醒我们：
-**插件不必是重格式，配置 + 目录约定同样能承载能力**。
+Codex has no "plugin package"; everything relies on **TOML config + standard directories**. Its value
+is to remind us: **a plugin does not have to be a heavy format; config + directory convention can
+carry capability just as well**.
 
 **2.3 MCP / MCPB / MCP Apps**
 
-- **MCP**：能力（tools / resources / prompts）的**运行期协议**，stdio 或 HTTP。工具是
-  `tools/list` 动态发现的，天然「运行期加工具」。
-- **MCPB（.mcpb）**：把本地 MCP server 打成一个**便携 bundle**（含 manifest + 依赖），
-  这是「MCP server 的分发格式」。
-- **MCP Apps（SEP-1865）**：给 MCP 工具挂**交互式 UI** 的标准（`modelcontextprotocol/ext-apps`，
-  spec `2026-01-26`）。**这正是 Sean 记忆里那条偏好的外部依据**：skill 自带自包含 UI
-  bundle、宿主通用隔离挂载。
+- **MCP**: a **runtime protocol** for capabilities (tools / resources / prompts), over stdio or HTTP.
+  Tools are dynamically discovered via `tools/list`, naturally "add a tool at runtime".
+- **MCPB (.mcpb)**: packages a local MCP server into a **portable bundle** (with manifest +
+  dependencies); this is "the distribution format of an MCP server".
+- **MCP Apps (SEP-1865)**: the standard for hanging an **interactive UI** on an MCP tool
+  (`modelcontextprotocol/ext-apps`, spec `2026-01-26`). **This is exactly the external basis for that
+  preference in Sean's memory**: a skill carries its own self-contained UI bundle, and the host mounts
+  it generically in isolation.
 
-**2.4 归一化观察（关键）**
+**2.4 Normalization observation (key)**
 
-三家都把 **skill / MCP / slash 命令** 当作**独立的能力类**，而「插件 / 市场」只是承载
-它们的**容器**。没有一家把「插件」本身当成一种能力。
+All three treat **skill / MCP / slash command** as **independent capability classes**, and
+"plugin / marketplace" is merely the **container** that carries them. None treats "plugin" itself as a
+kind of capability.
 
-> **结论：插件 = 容器，能力 = 若干 kind。** 这是本文的地基。
+> **Conclusion: plugin = container, capability = a number of kinds.** This is the foundation of this
+> document.
 
 ---
 
-**三、核心决策**
+**3. Core decisions**
 
-**决策 1：插件 = 容器，能力 = kind；Shirley 只认「归一化插件模型」。**
+**Decision 1: plugin = container, capability = kind; Shirley only recognizes the "normalized plugin
+model".**
 
-不发明「Shirley 插件运行时」。定义一个**归一化模型**，外来格式（Claude Code / Codex /
-MCPB）经**导入器（importer）**翻译成它，再由**注册器**把每个 kind 挂到**已有接缝**上。
-新能力类 = 加一个 kind + 一个注册适配器，不动核心。
+Do not invent a "Shirley plugin runtime". Define a **normalized model**, into which foreign formats
+(Claude Code / Codex / MCPB) are translated by an **importer**, and then a **registrar** hangs each
+kind onto an **existing seam**. A new capability class = add a kind + a registration adapter, without
+touching the core.
 
-| kind | 来源形态 | 落点接缝（**已有优先**） |
+| kind | Source form | Landing seam (**existing preferred**) |
 | --- | --- | --- |
-| `skill` | `SKILL.md` 目录 | `SkillCatalog` / `SkillRuntime` / `SkillContextProvider` / `activate_skill`（**已有**） |
-| `mcp` | MCP server（stdio/HTTP） | **新增** MCP client → 每个远端 tool 包成 `impl Tool` → `ToolManager::register` |
-| `command` | `.md` slash / prompts | `CommandManager` + `CommandOutcome`（**已有**，扩候选来源） |
-| `agent` | 子 agent `.md` | `docs/subagent.md` 的 subagent runtime（**已有方案，未落地**） |
-| `ui` | UI bundle / renderer | desktop 渲染器注册表 + 隔离挂载（**部分已有**，见第七节） |
-| `hook` | `hooks.json` | **新增**生命周期事件接缝（Shirley 目前**没有**） |
-| `theme` / `output-style` | JSON / md | 产品化展示层（**低优先**，可后置） |
+| `skill` | `SKILL.md` directory | `SkillCatalog` / `SkillRuntime` / `SkillContextProvider` / `activate_skill` (**existing**) |
+| `mcp` | MCP server (stdio/HTTP) | **new** MCP client -> wrap each remote tool as `impl Tool` -> `ToolManager::register` |
+| `command` | `.md` slash / prompts | `CommandManager` + `CommandOutcome` (**existing**, extend the candidate source) |
+| `agent` | sub-agent `.md` | the subagent runtime of `docs/subagent.md` (**a plan exists, not landed**) |
+| `ui` | UI bundle / renderer | the desktop renderer registry + isolated mounting (**partly existing**, see section 7) |
+| `hook` | `hooks.json` | **new** lifecycle event seam (Shirley currently has **none**) |
+| `theme` / `output-style` | JSON / md | a productized presentation layer (**low priority**, can be deferred) |
 
-**决策 2：MCP 是「运行期加工具」的唯一正道；插件不携带原生 Rust。**
+**Decision 2: MCP is the only right way to "add a tool at runtime"; plugins do not carry native
+Rust.**
 
-Claude Code 插件能带 `bin/` 与 `package.json`；Shirley 插件**不能**带任意可执行代码
-直接进进程。工具能力的两种合法来源：
+Claude Code plugins can carry `bin/` and `package.json`; a Shirley plugin **cannot** carry arbitrary
+executable code directly into the process. There are two legitimate sources of tool capability:
 
-- **MCP server**（子进程 / HTTP）——运行期、可隔离、跨客户端通用。**首选**。
-- **skill 里的脚本**——不自动执行，模型显式经 `bash` 走**沙盒**（`docs/sandbox.md`）。
-  **已有**语义（`docs/skills.md` 决策 5）。
+- **MCP server** (subprocess / HTTP) -- runtime, isolatable, cross-client universal. **Preferred.**
+- **Scripts inside a skill** -- not executed automatically; the model explicitly goes through `bash`
+  into the **sandbox** (`docs/sandbox.md`). **Existing** semantics (`docs/skills.md` decision 5).
 
-> 「插件能编译进 Rust」不在设计内。那等于把供应链攻击面塞进二进制。
+> "A plugin can compile into Rust" is not in the design. That is equivalent to stuffing the supply-
+> chain attack surface into the binary.
 
-**决策 3：兼容靠「导入器」，不靠「改我们的格式去迁就」。**
+**Decision 3: compatibility relies on an "importer", not on "changing our format to accommodate
+others".**
 
-兼容 Claude Code / Codex 的路径是**读它们的 manifest/配置 → 翻译成归一化模型**，
-而不是让 Shirley 的插件格式长得像某一家。理由：格式会分叉，导入器可以各自独立演进，
-核心模型保持干净。这也正是用户说的「做适配层去抹平差异」。
+The path to compatibility with Claude Code / Codex is **reading their manifest/config -> translating
+into the normalized model**, not making Shirley's plugin format look like one of them. Reason: formats
+fork, and importers can evolve independently, keeping the core model clean. This is exactly what the
+user called "making an adapter layer to smooth over differences".
 
-**决策 4：分发抄 Claude Code 的「git 源 + 索引文件」，不自建后端。**
+**Decision 4: distribution copies Claude Code's "git source + index file", without building a
+backend.**
 
-`marketplace.json` 放在 git 仓库里，`plugin` 指向仓库子目录 / git URL / 本地路径。
-零后端即可分发；将来要中心化 registry 时，只是**再加一种 source 类型**。
+`marketplace.json` lives in a git repository, and `plugin` points to a repository subdirectory / git
+URL / local path. Zero backend is enough to distribute; when a centralized registry is wanted in the
+future, it is just **adding one more source type**.
 
-**决策 5：信任分级 + 隔离挂载，是 UI 扩展的前置条件（不是可选项）。**
+**Decision 5: trust tiers + isolated mounting are a precondition for UI extensions (not optional).**
 
-外来 UI bundle 是**不可信代码**。绝不能内联进 React 树 / 同源——同源即可调 Tauri
-`invoke()`、读会话状态。**必须** sandbox iframe + 独立 origin + postMessage。这条
-在宿主侧目前**完全没有设施**（`csp=null`、无 iframe 先例，见第七节）。
+A foreign UI bundle is **untrusted code**. It must never be inlined into the React tree / same origin
+-- same origin means it can call Tauri `invoke()` and read session state. It **must** be a sandbox
+iframe + a separate origin + postMessage. On the host side there is currently **no infrastructure at
+all** for this (`csp=null`, no iframe precedent, see section 7).
 
 ---
 
-**四、归一化插件模型（草案）**
+**4. Normalized plugin model (draft)**
 
-**4.1 磁盘形态**
+**4.1 On-disk form**
 
 ```
 my-plugin/
-├── shirley-plugin.json      # 归一化 manifest（唯一必需）
-├── skills/                  # kind=skill（沿用 Agent Skills 标准目录）
+├── shirley-plugin.json      # normalized manifest (the only required file)
+├── skills/                  # kind=skill (following the Agent Skills standard directory)
 ├── commands/                # kind=command
 ├── agents/                  # kind=agent
-├── ui/                      # kind=ui（bundle 或 renderer 声明）
-├── mcp.json                 # kind=mcp（MCP server 声明）
-├── hooks.json               # kind=hook（若实现）
+├── ui/                      # kind=ui (bundle or renderer declaration)
+├── mcp.json                 # kind=mcp (MCP server declaration)
+├── hooks.json               # kind=hook (if implemented)
 └── README.md / LICENSE
 ```
 
-**4.2 manifest（草案）**
+**4.2 manifest (draft)**
 
 ```json
 {
   "name": "flight",
   "version": "1.0.0",
-  "description": "航班查询 + 航线地图（平台独家）",
+  "description": "flight search + route map (platform-exclusive)",
   "author": { "name": "Shirley" },
   "capabilities": {
     "skills": ["skills/"],
@@ -167,224 +187,255 @@ my-plugin/
 }
 ```
 
-设计要点：
+Design points:
 
-- `capabilities` **显式声明**各 kind（也可**约定目录**自动发现，与 Claude Code 一致）。
-  显式声明优先，缺省回退约定——**宽容**是兼容的前提。
-- `requires.permissions` 是**声明**（与 `allowed-tools` 一样，第一期只记录不强制，
-  `docs/security.md` 的 `PermissionPolicy` 未落地前它**不是**安全边界）。
-- `version` 语义化；缺省回退 **git SHA**（抄 Claude Code，利于开发期）。
+- `capabilities` **explicitly declares** each kind (convention-directory auto-discovery is also
+  possible, consistent with Claude Code). Explicit declaration wins; absent falls back to convention
+  -- **leniency** is the precondition for compatibility.
+- `requires.permissions` is a **declaration** (like `allowed-tools`, phase one only records it and
+  does not enforce it; before `docs/security.md`'s `PermissionPolicy` lands it is **not** a security
+  boundary).
+- `version` is semantic; absent falls back to the **git SHA** (copying Claude Code, helpful during
+  development).
 
-**4.3 运行时数据流**
+**4.3 Runtime data flow**
 
 ```mermaid
 flowchart TD
-    Src["源：本地目录 / git 仓库 / 归档"] --> Imp["导入器<br/>ClaudeCodeImporter / CodexImporter / McpImporter / NativeImporter"]
-    Imp --> Norm["归一化 Plugin 模型<br/>（manifest + 各 kind 的清单）"]
-    Norm --> Reg["注册器<br/>按 kind 分发"]
+    Src["source: local directory / git repository / archive"] --> Imp["importer<br/>ClaudeCodeImporter / CodexImporter / McpImporter / NativeImporter"]
+    Imp --> Norm["normalized Plugin model<br/>(manifest + each kind's manifest)"]
+    Norm --> Reg["registrar<br/>dispatch by kind"]
     Reg -->|skill| SK["SkillCatalog / SkillRuntime"]
-    Reg -->|mcp| MC["MCP client → ToolManager.register"]
-    Reg -->|command| CM["CommandManager 候选来源"]
-    Reg -->|ui| UI["desktop 渲染器注册表 / 隔离挂载"]
-    Reg -->|agent| SA["subagent runtime（docs/subagent.md）"]
+    Reg -->|mcp| MC["MCP client -> ToolManager.register"]
+    Reg -->|command| CM["CommandManager candidate source"]
+    Reg -->|ui| UI["desktop renderer registry / isolated mounting"]
+    Reg -->|agent| SA["subagent runtime (docs/subagent.md)"]
     SK --> Agent["Agent::run_stream"]
     MC --> Agent
-    CM --> TUI["TUI / desktop 交互层"]
+    CM --> TUI["TUI / desktop interaction layer"]
     UI --> TUI
 ```
 
-**唯一装配点仍是 `bootstrap::AgentFactory`**（`assemble` 扫目录、`build_agent` 注册工具 /
-接 provider）。插件注册器是**它前面的新一层**，把「插件目录」翻译成「已发现的 skill 列表 +
-待注册的工具 + 命令候选 + 渲染器声明」，再喂给既有装配流程。**SDK 零改动**（与
-skills / todo / memory 同款理由）。
+**The single assembly point is still `bootstrap::AgentFactory`** (`assemble` scans directories,
+`build_agent` registers tools / wires the provider). The plugin registrar is **a new layer in front of
+it**, translating "the plugin directory" into "the list of discovered skills + tools to register +
+command candidates + renderer declarations", then feeding it to the existing assembly flow. **Zero SDK
+changes** (the same reason as skills / todo / memory).
 
 ---
 
-**五、适配层（「抹平差异」的具体形态）**
+**5. Adapter layer (the concrete form of "smoothing over differences")**
 
-**5.1 导入器接口**
+**5.1 Importer interface**
 
 ```rust
 trait PluginImporter {
-    /// 能否处理这个源（目录里有 .claude-plugin/plugin.json？有 config.toml？…）
+    /// can it handle this source (is there a .claude-plugin/plugin.json in the directory? a config.toml? ...)
     fn can_import(&self, source: &Path) -> bool;
-    /// 翻译成归一化模型（只做映射，不注册、不执行）
+    /// translate into the normalized model (only mapping, no registration, no execution)
     fn import(&self, source: &Path) -> Result<NormalizedPlugin, ImportError>;
 }
 ```
 
-**5.2 三张映射表（差异在哪）**
+**5.2 Three mapping tables (where the differences are)**
 
-| 归一化 kind | Claude Code | Codex | MCP |
+| normalized kind | Claude Code | Codex | MCP |
 | --- | --- | --- | --- |
-| `skill` | `skills/*/SKILL.md` | `.agents/skills` | — |
+| `skill` | `skills/*/SKILL.md` | `.agents/skills` | -- |
 | `command` | `commands/*.md` | `~/.codex/prompts/*.md` | MCP `prompts` |
-| `mcp` | `.mcp.json` | `config.toml` `[mcp_servers]` | 原生 |
-| `agent` | `agents/*.md` | — | — |
-| `hook` | `hooks/hooks.json` | — | — |
-| `ui` | `output-styles/` `themes/`（仅样式） | — | MCP Apps（SEP-1865） |
+| `mcp` | `.mcp.json` | `config.toml` `[mcp_servers]` | native |
+| `agent` | `agents/*.md` | -- | -- |
+| `hook` | `hooks/hooks.json` | -- | -- |
+| `ui` | `output-styles/` `themes/` (styling only) | -- | MCP Apps (SEP-1865) |
 
-**差异主要在**：① 容器布局（`.claude-plugin/` vs 散在根 vs `config.toml`）；② 命令语法
-（Claude 无参 vs Codex `$1..$9`/`$ARGUMENTS`）；③ UI 能力（Claude 只有样式，MCP Apps 才有
-交互组件）。**核心能力（skill / tool）三家高度一致**——所以适配层是**薄**的。
+**The differences are mainly**: (1) container layout (`.claude-plugin/` vs scattered in the root vs
+`config.toml`); (2) command syntax (Claude no-arg vs Codex `$1..$9`/`$ARGUMENTS`); (3) UI capability
+(Claude has only styling; only MCP Apps has interactive components). **The core capabilities (skill /
+tool) are highly consistent across all three** -- so the adapter layer is **thin**.
 
-**5.3 不做的映射（诚实边界）**
+**5.3 Mappings not done (honest boundary)**
 
-- Claude Code 私有字段（`context:fork` / `hooks` 的具体事件名 / `user-invocable` 等）：
-  **只读不实现**，记 warn。理由同 `docs/skills.md` 第九节。
-- 插件的 `bin/` + `package.json` 自动装依赖：**不做**（决策 2）。
-- Claude 的 `hooks`（`PostToolUse` 等）：需要 Shirley 先有生命周期事件接缝，**后置**。
-
----
-
-**六、分发与市场**
-
-**6.1 三层，从轻到重**
-
-1. **本地目录**（P0）：`<root>/.shirley/plugins/<name>/` 或 `~/.shirley/plugins/`。零网络。
-2. **git 源**（P1）：`marketplace.json` 索引一个 git 仓库里的多个插件；`/plugin add <url>`。
-   抄 Claude Code：`name` / `source` / `description` / `version`。
-3. **中心化 registry**（后置）：只是一个**新的 source 类型**（HTTP 拉 manifest + 归档）。
-   接口不变，故可推迟到真有需求再建。**先不做后端**。
-
-**6.2 启用状态与锁定**
-
-- 启用/停用状态落 `<config_dir>/shirley/plugins.json`（与 `projects.json` 同族）。
-- `version` + `source` + **内容哈希**落一个 lock（防同一版本号内容漂移）。
-- 与 skill 的差别：skill 是「扫到即用」，插件是「**显式启用**才生效」——因为插件可能
-  带 MCP server（起进程）与 UI bundle（跑代码），默认全自动会放大攻击面。
-
-**6.3 `/plugin` 交互（TUI + desktop 共用编排）**
-
-`/plugin list` / `add <src>` / `enable|disable <name>` / `remove`。与 `/session` / `/model`
-同款模态选择器（`CommandOutcome` 增一个分支）。**编排归应用层**，与 `SessionManager` 平级。
+- Claude Code private fields (`context:fork` / the specific event names of `hooks` / `user-invocable`
+  etc.): **read only, do not implement**, log a warn. The reason is the same as `docs/skills.md`
+  section 9.
+- A plugin's `bin/` + `package.json` auto-installing dependencies: **not done** (decision 2).
+- Claude's `hooks` (`PostToolUse` etc.): requires Shirley to have a lifecycle event seam first;
+  **deferred**.
 
 ---
 
-**七、UI 区域插拔（两条渲染路线，别混）**
+**6. Distribution and marketplace**
 
-这是最需要先想清楚的部分，因为它决定安全模型。**分两层**：
+**6.1 Three tiers, from light to heavy**
 
-**路线 A：宿主原生渲染器（可信，编译期）——flightmap 现状**
+1. **Local directory** (P0): `<root>/.shirley/plugins/<name>/` or `~/.shirley/plugins/`. Zero network.
+2. **git source** (P1): `marketplace.json` indexes multiple plugins in a git repository; `/plugin add <url>`.
+   Copying Claude Code: `name` / `source` / `description` / `version`.
+3. **Centralized registry** (deferred): just a **new source type** (HTTP fetch manifest + archive).
+   The interface is unchanged, so it can be deferred until there is real demand. **Do not build a
+   backend yet.**
 
-现状：`AiMarkdown.tsx` 用 streamdown 的 `renderers` 注册
-`{ language: "flightmap", component: FlightMapRenderer }`。渲染器**编译进 web app**，
-lazy 加载。**这是可信代码**，能碰 React 树、能调 `invoke()`。
+**6.2 Enable state and locking**
 
-- 用途：**平台独家**能力（flight 就属这条）。渲染契约（`flightmap` 语言）+ 数据来源
-  （flight skill）+ 渲染器，三者一起构成「平台独家」。
-- 插件化含义：插件可以**声明**「我产出语言 `flightmap`」，但**渲染器本身仍要进主包**
-  （编译期）。所以路线 A 的插件扩展点是「**注册一个已内置的 renderer 的触发条件**」，
-  不是「上传代码」。这也解释了为什么 flight 是独家——渲染器在宿主里。
+- Enable/disable state lands in `<config_dir>/shirley/plugins.json` (the same family as
+  `projects.json`).
+- `version` + `source` + a **content hash** land in a lock (to prevent content drift under the same
+  version number).
+- Difference from skills: a skill is "use as soon as it is scanned", whereas a plugin takes effect
+  only when **explicitly enabled** -- because a plugin may carry an MCP server (starts a process) and
+  a UI bundle (runs code), and defaulting to fully automatic would enlarge the attack surface.
 
-**路线 B：隔离挂载（不可信，运行期）——MCP Apps / iframe**
+**6.3 `/plugin` interaction (TUI + desktop share the orchestration)**
 
-外来 UI bundle 走 `<iframe sandbox="allow-scripts">`（**不含** `allow-same-origin`）+
-独立 origin + postMessage 桥。宿主只做**通用挂载点**，拿到内容就渲染——即
-「内容即能力」，新增组件**宿主零改动**。
+`/plugin list` / `add <src>` / `enable|disable <name>` / `remove`. The same modal picker as `/session`
+/ `/model` (`CommandOutcome` gains one branch). **Orchestration belongs to the application layer**,
+on par with `SessionManager`.
 
-- 这是 Sean 记忆里明确偏好的方向。
-- **前置设施全缺**（已核实）：`tauri.conf.json` `csp=null`、单 webview、无 iframe 先例、
-  capabilities 仅 `core:default`+`dialog:default`。要落地必须先补 **CSP + 挂载点 + 消息桥**。
+---
 
-**7.1 「界面区域」的插拔语义（slot 模型）**
+**7. UI-region pluggability (two rendering routes, do not mix them)**
 
-把 UI 拆成**具名插槽（slot）**，插件声明往哪个 slot 贡献什么：
+This is the part that most needs to be thought through first, because it decides the security model.
+**Split into two layers**:
 
-| slot | 例子 | 渲染路线 |
+**Route A: host-native renderer (trusted, compile-time) -- the current state of flightmap**
+
+Status quo: `AiMarkdown.tsx` registers `{ language: "flightmap", component: FlightMapRenderer }` via
+streamdown's `renderers`. The renderer is **compiled into the web app** and lazy-loaded. **This is
+trusted code**; it can touch the React tree and call `invoke()`.
+
+- Use: **platform-exclusive** capability (flight is on this route). The rendering contract (the
+  `flightmap` language) + the data source (the flight skill) + the renderer together constitute
+  "platform-exclusive".
+- Plugin implication: a plugin can **declare** "I produce language `flightmap`", but **the renderer
+  itself still has to go into the main bundle** (compile-time). So route A's plugin extension point is
+  "**registering the trigger condition of an already-built-in renderer**", not "uploading code". This
+  also explains why flight is exclusive -- the renderer is inside the host.
+
+**Route B: isolated mounting (untrusted, runtime) -- MCP Apps / iframe**
+
+A foreign UI bundle goes through `<iframe sandbox="allow-scripts">` (**without**
+`allow-same-origin`) + a separate origin + a postMessage bridge. The host only does a **generic mount
+point**, rendering whatever content it gets -- i.e. "content as capability", and adding a new
+component requires **zero host changes**.
+
+- This is the direction explicitly preferred in Sean's memory.
+- **All the prerequisite infrastructure is missing** (verified): `tauri.conf.json` `csp=null`, a
+  single webview, no iframe precedent, and capabilities only `core:default`+`dialog:default`. To land
+  it, we must first add **CSP + a mount point + a message bridge**.
+
+**7.1 The pluggability semantics of "interface regions" (slot model)**
+
+Split the UI into **named slots**, and a plugin declares which slot it contributes what to:
+
+| slot | Example | Rendering route |
 | --- | --- | --- |
-| `message.fence:<lang>` | flightmap 代码块 | A（可信）或 B（隔离） |
-| `composer.trailing` | 发送框右侧动作（模型选择器同款槽位） | A |
-| `sidebar.panel` | 左栏附加面板 | A / B |
-| `tool.card:<name>` | 某工具的专属结果卡 | A / B |
+| `message.fence:<lang>` | a flightmap code block | A (trusted) or B (isolated) |
+| `composer.trailing` | the action on the right of the send box (the same slot as the model selector) | A |
+| `sidebar.panel` | an extra panel in the left column | A / B |
+| `tool.card:<name>` | a dedicated result card for a tool | A / B |
 
-**先做 `message.fence`**——它已经有 flightmap 先例、收益最直接（让第三方也能定义围栏语言）。
+**Do `message.fence` first** -- it already has the flightmap precedent and gives the most direct
+benefit (letting third parties define fence languages too).
 
-**7.2 与 TUI 的关系**
+**7.2 Relationship to the TUI**
 
-TUI 的 `markdown.rs` **不认** flightmap（已知缺口：`SkillContextProvider` 不感知界面，
-TUI 里会被建议输出 `flightmap` 却退化成裸 JSON）。UI 插拔**天然是 desktop 专属能力**；
-TUI 侧只能降级为「未知围栏按代码块显示」。**这点必须在插件声明里区分界面能力**——
-否则又是「skill 契约与客户端渲染能力脱钩」的老问题。
+The TUI's `markdown.rs` **does not recognize** flightmap (a known gap: `SkillContextProvider` is
+unaware of the interface, so in the TUI the model is advised to output `flightmap` but it degrades to
+raw JSON). UI pluggability is **naturally a desktop-only capability**; the TUI side can only degrade
+to "an unknown fence is displayed as a code block". **This must be distinguished in the plugin
+declaration as an interface capability** -- otherwise it is again the old problem of "the skill
+contract being decoupled from the client's rendering capability".
 
 ---
 
-**八、安全与信任**
+**8. Security and trust**
 
-| 风险 | 处置 |
+| Risk | Handling |
 | --- | --- |
-| 插件带任意代码进进程 | **禁止**；工具只能来自 MCP 或 skill 脚本（走沙盒） |
-| MCP server 越权（文件/网络） | 走 `SandboxSpec`（网络策略 / cwd / 读写路径）；stdio 子进程受沙盒约束 |
-| 外来 UI bundle 同源攻击 | 路线 B 强制 sandbox iframe + 独立 origin + postMessage；**绝不内联** |
-| 供应链（git 源被篡改） | lock 记**内容哈希**；启用是**显式**动作；首次启用可要确认（UX 待定） |
-| 声明被当授权 | `requires.permissions` / `allowed-tools` **只记录不强制**，文档明说 |
-| 插件撑爆上下文 | 沿用 skills 的字符上限；MCP 工具描述注入也设上限 |
-| 插件互抢名字 | 归一化时保留 `plugin::name` 命名空间；冲突记 warn |
+| A plugin brings arbitrary code into the process | **Forbidden**; tools can only come from MCP or skill scripts (through the sandbox) |
+| An MCP server overreaching (files/network) | Go through `SandboxSpec` (network policy / cwd / read-write paths); the stdio subprocess is constrained by the sandbox |
+| A foreign UI bundle same-origin attack | Route B forces a sandbox iframe + a separate origin + postMessage; **never inline** |
+| Supply chain (a git source being tampered with) | The lock records a **content hash**; enabling is an **explicit** action; the first enable can require confirmation (UX TBD) |
+| A declaration treated as authorization | `requires.permissions` / `allowed-tools` are **recorded but not enforced**, stated clearly in the docs |
+| A plugin blowing up the context | Follow skills' character cap; the injection of MCP tool descriptions is also capped |
+| Plugins competing for names | Keep a `plugin::name` namespace during normalization; conflicts are logged as a warn |
 
-> **不做的**：不自动信任、不自动执行、不做插件级进程隔离（那是 `PermissionPolicy`
-> 与真沙盒后端 `sandbox-exec`/`bwrap` 该管的，属独立前置工作）。
-
----
-
-**九、与 flight 的关系（把「平台独家」讲清）**
-
-「flight 是平台独家」不是指代码保密，而是指**它依赖宿主内的渲染器**：
-
-- `flight-map` skill 的**契约**是「输出 `flightmap` 围栏」——**只有认识该围栏的客户端**
-  才渲染得出地图。
-- 渲染器（`FlightMapRenderer`）**编译在 Shirley 里**（路线 A）。
-- 取数在 `flight-cli` / `hnair-cli` skill（脚本 + 沙盒）。
-
-所以一个「flight 插件」= 1 个 UI 契约 + 1 个内置渲染器 + N 个取数 skill。别的客户端
-拿到同样的 skill，**没有渲染器就退化成代码块**——这就是「独家」的技术定义。
-
-**推论**：如果路线 B（隔离挂载）落地，flight 可以**从路线 A 迁到路线 B**——渲染器不再
-需要编译进宿主，变成插件自带的 bundle。**这是两条路线的关系**：A 是现在，B 是目标。
+> **What is not done**: no auto-trust, no auto-execution, no plugin-level process isolation (that is
+> what `PermissionPolicy` and the real sandbox backends `sandbox-exec`/`bwrap` should handle, an
+> independent prerequisite).
 
 ---
 
-**十、分期（建议）**
+**9. Relationship to flight (making "platform-exclusive" clear)**
 
-| 期 | 内容 | 依赖 | 风险 |
+"flight is platform-exclusive" does not mean the code is secret, but that **it depends on a renderer
+inside the host**:
+
+- The **contract** of the `flight-map` skill is "output a `flightmap` fence" -- only a **client that
+  recognizes that fence** can render a map.
+- The renderer (`FlightMapRenderer`) is **compiled into Shirley** (route A).
+- Data fetching is in the `flight-cli` / `hnair-cli` skills (scripts + sandbox).
+
+So a "flight plugin" = 1 UI contract + 1 built-in renderer + N data-fetching skills. Another client
+given the same skill, **without the renderer, degrades to a code block** -- this is the technical
+definition of "exclusive".
+
+**Corollary**: if route B (isolated mounting) lands, flight can **migrate from route A to route B** --
+the renderer no longer needs to be compiled into the host, and becomes a bundle carried by the plugin.
+**This is the relationship between the two routes**: A is the present, B is the goal.
+
+---
+
+**10. Phasing (recommended)**
+
+| Phase | Content | Dependency | Risk |
 | --- | --- | --- | --- |
-| **P0** | 归一化 manifest + 本地目录发现 + `skill`/`command` kind 注册（复用现有接缝）+ `/plugin list·enable·disable` | 无 | 低 |
-| **P1** | `mcp` kind：MCP client（stdio/HTTP）→ 包装成 `Tool` → `ToolManager`；`mcp.json` 导入器 | MCP 协议实现 | 中（协议 + 进程管理） |
-| **P2** | 导入器：Claude Code `plugin.json` + Codex `config.toml`（抹平差异） | P0/P1 | 中（格式漂移） |
-| **P3** | git 源 + `marketplace.json` 索引 + lock | P0 | 低 |
-| **P4** | `ui` kind 路线 B：CSP + 隔离挂载 + slot 模型（先做 `message.fence`） | 宿主安全设施 | **高** |
-| **后置** | `hook` 事件接缝、中心化 registry、`theme`/`output-style` | — | — |
+| **P0** | normalized manifest + local-directory discovery + `skill`/`command` kind registration (reusing existing seams) + `/plugin list·enable·disable` | none | low |
+| **P1** | `mcp` kind: MCP client (stdio/HTTP) -> wrap as `Tool` -> `ToolManager`; the `mcp.json` importer | MCP protocol implementation | medium (protocol + process management) |
+| **P2** | importers: Claude Code `plugin.json` + Codex `config.toml` (smoothing over differences) | P0/P1 | medium (format drift) |
+| **P3** | git source + `marketplace.json` index + lock | P0 | low |
+| **P4** | `ui` kind route B: CSP + isolated mounting + slot model (do `message.fence` first) | host security infrastructure | **high** |
+| **Deferred** | `hook` event seam, centralized registry, `theme`/`output-style` | -- | -- |
 
-**最小可验证切片 = P0 + P1 的一条竖切**：一个本地插件，声明一个 skill + 一个 stdio MCP
-server，能被 `/plugin add` 启用、skill 进目录、MCP tool 出现在工具表、模型能调用。
-**这条打通了，市场只是它的 UI。**
-
----
-
-**十一、开放问题（待决策）**
-
-1. **MCP 的进程/HTTP 生命周期归谁**：每个会话起一份？全局共享一份？崩溃重启策略？
-   （影响 `build_agent` 与沙盒接线）
-2. **MCP tool 命名冲突**：前缀 `mcp__<server>__<tool>`（Claude 风格）还是 `plugin::name`？
-3. **插件的「启用」粒度**：整包启用，还是可按 kind 单独启停（比如只启 skill 不启 MCP）？
-4. **UI 路线 A 的插件扩展点到底能不能有**：若渲染器必须编译期进主包，那「第三方定义
-   围栏语言」就只能走路线 B；路线 A 退化为「平台独家能力清单」。需拍板 A 是否开放。
-5. **TUI 的能力声明**：插件如何声明「我这段 UI 只有 desktop 支持」？TUI 侧怎么优雅降级？
-6. **`agents`（subagent）kind 的依赖**：`docs/subagent.md` 未落地，插件里的 agent 只能先
-   当 skill 处理还是等？
-7. **兼容的验收口径**：拿一个真实 Claude Code 插件（如某个社区插件）跑通，算不算 P2 的
-   Done？需要一个具体样本。
-8. **与 skill 发现的关系**：插件里的 `skills/` 与 `.agents/skills/` 重名时谁赢？
-   （建议：显式启用的插件 > 项目级 > 用户级）
+**The minimal verifiable slice = a vertical slice of P0 + P1**: a local plugin declaring one skill +
+one stdio MCP server, which can be enabled via `/plugin add`, with the skill entering the catalog, the
+MCP tool appearing in the tool table, and the model able to call it. **Once this is through, the
+marketplace is just its UI.**
 
 ---
 
-**附：与既有文档的关系**
+**11. Open questions (to be decided)**
 
-- 复用接缝：`docs/skills.md`（skill kind）、`runtime/context.rs` 的 `ContextProvider`、
-  `ToolManager`（`docs/tool-lifecycle.md`）。
-- 同族能力：`docs/subagent.md`（agent kind）、`docs/memory.md` / `docs/todo.md`（provider 范式）。
-- 边界归属：`docs/security.md`（权限层，`requires.permissions` 的挂靠点）、
-  `docs/sandbox.md`（MCP 子进程 / skill 脚本的边界）、`docs/desktop-interface.md`（UI slot）。
-- 上游标准：Claude Code plugins（`plugin.json` + `marketplace.json`）、
-  OpenAI Codex（`config.toml` + `AGENTS.md` + `.agents/skills`）、MCP / MCPB / MCP Apps（SEP-1865）、
-  Agent Skills 开放标准（`agentskills.io`）。
+1. **Who owns the MCP process/HTTP lifecycle**: one per session? one shared globally? crash-restart
+   policy? (Affects `build_agent` and the sandbox wiring.)
+2. **MCP tool name conflicts**: the prefix `mcp__<server>__<tool>` (Claude style) or `plugin::name`?
+3. **The "enable" granularity of a plugin**: enable the whole package, or enable/disable individually
+   by kind (e.g. enable only the skill and not the MCP)?
+4. **Whether route A's plugin extension point can exist at all**: if the renderer must be compiled
+   into the main bundle at compile time, then "a third party defining a fence language" can only go
+   through route B; route A degrades to "a list of platform-exclusive capabilities". A decision is
+   needed on whether A is open.
+5. **TUI capability declaration**: how does a plugin declare "this UI of mine is only supported by
+   desktop"? How does the TUI side degrade gracefully?
+6. **The dependency of the `agents` (subagent) kind**: `docs/subagent.md` is not landed; can an agent
+   in a plugin only be treated as a skill for now, or should we wait?
+7. **The acceptance criterion for compatibility**: is getting a real Claude Code plugin (e.g. some
+   community plugin) working counted as P2 Done? A concrete sample is needed.
+8. **Relationship to skill discovery**: when a plugin's `skills/` and `.agents/skills/` share a name,
+   who wins? (Suggested: explicitly enabled plugin > project level > user level.)
+
+---
+
+**Appendix: relationship to existing documents**
+
+- Reused seams: `docs/skills.md` (skill kind), `ContextProvider` in `runtime/context.rs`,
+  `ToolManager` (`docs/tool-lifecycle.md`).
+- Same-family capabilities: `docs/subagent.md` (agent kind), `docs/memory.md` / `docs/todo.md` (the
+  provider pattern).
+- Boundary ownership: `docs/security.md` (the permission layer, the attachment point for
+  `requires.permissions`), `docs/sandbox.md` (the boundary for MCP subprocesses / skill scripts),
+  `docs/desktop-interface.md` (UI slot).
+- Upstream standards: Claude Code plugins (`plugin.json` + `marketplace.json`), OpenAI Codex
+  (`config.toml` + `AGENTS.md` + `.agents/skills`), MCP / MCPB / MCP Apps (SEP-1865), the Agent Skills
+  open standard (`agentskills.io`).

@@ -1,259 +1,285 @@
-**Shirley 技术方案 · 多会话并行**
+**Shirley technical design · Multi-session parallelism**
 
-这份文档承接 `session.md`。`session.md` 第八节解决的是"**拥有并切换**多份会话"——
-同一时刻只有一个会话在跑，切换即把 `Agent` 从旧会话挪到新会话（串行）。
-本文档把这一步推进到"**多个会话同时进行**"：多个 `Agent` 各自 `run_stream`、
-互不阻塞，前台只看一个、后台继续跑。
+This document continues from `session.md`. Section 8 of `session.md` solves "**owning and switching**
+multiple sessions" -- at any moment only one session runs, and switching moves the `Agent` from the old
+session to the new one (serially). This document advances that to "**multiple sessions running at the
+same time**": multiple `Agent`s each `run_stream`, without blocking each other, with only one shown in
+the foreground and the background ones continuing to run.
 
-**范围声明**：本轮只定"多会话并行"的架构与接缝，不改 `Message` / `AgentEvent`
-的语义（事件**字段追加**允许，变体语义不变）。持久化层只在"同一份会话被多个
-驱动同时写"时才需要新锁；**不同会话并行不需要动持久化**。
+**Scope statement**: this round only fixes the architecture and seams of "multi-session parallelism";
+it does not change the semantics of `Message` / `AgentEvent` (appending event **fields** is allowed,
+variant semantics are unchanged). The persistence layer only needs a new lock when "the same session is
+written by multiple drivers at the same time"; **parallelism across different sessions needs no change
+to persistence**.
 
 ---
 
-**一、先把"多 session 同时进行"拆成三档（先定调）**
+**1. First split "multiple sessions running at the same time" into three tiers (setting the tone
+first)**
 
-这个词有歧义，不同解释的改动量差一个数量级。先定边界，避免把三件事混成一件：
+The phrase is ambiguous, and different interpretations differ by an order of magnitude in change
+volume. Fix the boundary first, to avoid mixing three things into one:
 
-| 档 | 含义 | 是否本文档范围 |
+| Tier | Meaning | In scope of this document |
 | --- | --- | --- |
-| **A. 多会话并行跑** | 同一时刻多个 `Agent` 各自 `run_stream`，互不阻塞 | **本文档主体** |
-| **B. 同会话多驱动** | 同一份会话日志被多个驱动同时读写 | 本文档给出边界，**不实现** |
-| **C. 后台挂起 + 前台切换** | 只有前台会话在跑，其它挂起 | 现状已接近，本文档顺带收编 |
+| **A. Multiple sessions running in parallel** | Multiple `Agent`s each `run_stream` at the same moment, without blocking each other | **the main body of this document** |
+| **B. Multiple drivers on the same session** | The same session log read and written by multiple drivers at once | this document gives the boundary, **does not implement** |
+| **C. Background suspension + foreground switching** | Only the foreground session runs; the others are suspended | the status quo is close; this document absorbs it along the way |
 
-**当前状态是 C 的雏形**：`/session` 能切换，但同一时刻只能有一个 `Agent` 在跑
-（TUI 用 `take_agent` 把 `Agent` 移出，切换时会话操作直接报"agent 正在运行中"）。
-本文档按 **A** 展开。
+**The current state is a prototype of C**: `/session` can switch, but only one `Agent` can run at a
+time (the TUI uses `take_agent` to move the `Agent` out, and a session operation during switching
+directly reports "agent is running"). This document develops **A**.
 
-> **落地状态（本仓库当前代码）**：**P1 + P2 事件通道部分已落地**（决策 4 / 5 / 9，
-> 以及决策 2 的"每会话一条通道"）。
-> 应用层 `src/interface/session.rs` 已有 `SessionManager` + `Session`（每会话自持
-> 独立 `Agent`）；`src/bootstrap.rs` 已从 `Bootstrap`（产单个 `Agent`）改为
-> `AgentFactory`（`build_agent(messages)` 工厂）；SDK 侧 `Agent::switch_session` 已移除，
-> TUI 与 desktop 均改为经 `SessionManager.active` 指针切换。
-> **每会话一条通道已落地**：`Session` 自持 `events: broadcast::Sender<Result<AgentEvent, String>>`
-> （决策 2 路线甲，用 `broadcast` 而非 `mpsc`——desktop 允许"重连订阅"，
-> `broadcast` 天然支持多订阅者 + `Lagged` 后靠重发快照对齐）；累加逻辑收敛到
-> `Session::apply_event`，**TUI 与 desktop 共享同一条事件处理路径**；`SessionManager`
-> 提供按会话名的 `begin_turn` / `restore_agent` / `apply_event` / `subscribe` /
-> `snapshot`，desktop 的 `agent_send(session)` 按名驱动、`agent_subscribe` 同锁内
-> `subscribe` + `snapshot`（不丢不重）。**仍未落地**：决策 3 的 SDK 取消接缝、
-> 决策 7/8 的最大并行上限与排队、决策 6 的 B 档持久化锁。
+> **Landing status (current code in this repository)**: **the P1 + P2 event-channel part is landed**
+> (decisions 4 / 5 / 9, and decision 2's "one channel per session").
+> The application layer `src/interface/session.rs` already has `SessionManager` + `Session` (each
+> session holds its own independent `Agent`); `src/bootstrap.rs` has changed from `Bootstrap`
+> (producing a single `Agent`) to `AgentFactory` (a `build_agent(messages)` factory); on the SDK side
+> `Agent::switch_session` has been removed, and both the TUI and desktop now switch through the
+> `SessionManager.active` pointer.
+> **One channel per session is landed**: `Session` holds its own
+> `events: broadcast::Sender<Result<AgentEvent, String>>` (decision 2 route A, using `broadcast`
+> rather than `mpsc` -- desktop allows "reconnect subscription", and `broadcast` naturally supports
+> multiple subscribers + realigning by resending a snapshot after `Lagged`); the accumulation logic
+> converges into `Session::apply_event`, and **the TUI and desktop share the same event-handling
+> path**; `SessionManager` provides `begin_turn` / `restore_agent` / `apply_event` / `subscribe` /
+> `snapshot` by session name, the desktop's `agent_send(session)` drives by name, and
+> `agent_subscribe` does `subscribe` + `snapshot` under the same lock (no loss, no duplication).
+> **Not yet landed**: decision 3's SDK cancellation seam, decisions 7/8's maximum parallelism limit
+> and queueing, and decision 6's tier-B persistence lock.
 
-**决策 1：多会话 = 多个独立 `Agent`，不是"一个 Agent 分时"。**
+**Decision 1: multi-session = multiple independent `Agent`s, not "one Agent time-sharing".**
 
-理由在 SDK 的类型里已经写死：
+The reason is already hard-wired into the SDK's types:
 
-- `Agent::run_stream(&'a mut self, ...) -> Stream + Send + 'a` **借用** `self`，
-  单个 `Agent` 在类型层面就无法被并发驱动（借用检查器强制）。
-- `todo` 在 `Agent::new` 内部 `Arc::new(...)`，**每个 `Agent` 各一份**——
-  多 `Agent` 并行时任务账本天然隔离，不会串会话。
-- 全仓无全局可变状态（`static` / `OnceLock` / `thread_local` 只命中测试锁）。
+- `Agent::run_stream(&'a mut self, ...) -> Stream + Send + 'a` **borrows** `self`, so a single `Agent`
+  cannot be driven concurrently at the type level (enforced by the borrow checker).
+- `todo` does `Arc::new(...)` inside `Agent::new`, **one per `Agent`** -- when multiple `Agent`s run in
+  parallel, the task ledgers are naturally isolated and do not cross sessions.
+- There is no global mutable state in the whole repository (`static` / `OnceLock` / `thread_local`
+  only hit test locks).
 
-所以"多会话并行"的正确形态是**每会话一个 `Agent`**，而不是克隆或分时复用。
-这也意味着 `Agent::switch_session`（SDK 侧那个串行切换接缝）**不该存在**：
-"哪个会话活跃"是应用层编排，SDK 不该有"当前会话"这个概念（见第七节决策 9）。
+So the correct form of "multi-session parallelism" is **one `Agent` per session**, not cloning or
+time-sharing. This also means `Agent::switch_session` (that serial-switching seam on the SDK side)
+**should not exist**: "which session is active" is application-layer orchestration, and the SDK should
+not have the concept of a "current session" (see decision 9 in section 7).
 
 ---
 
-**二、SDK 现状：基本就绪，只缺两处**
+**2. SDK status: basically ready, missing only two things**
 
-实地核对后的结论：**SDK 层几乎不用改**。
+The conclusion after an on-the-ground check: **the SDK layer hardly needs to change**.
 
-**已经就绪的**：
+**Already ready**:
 
-- `Agent` 可独立构造、无全局态、`Send`；
-- `todo` 按实例隔离（`Agent::new` 内 `Arc::new`），并行不串；
-- `trait SessionStore: Send + Sync`（**现已归应用层 `src/session.rs`**），
-  `JsonlSessionStore` 内部 `Mutex<File>`，单实例 `append` / `load` / `truncate` 互斥；
-- `ToolManager` / `ToolContext` 随 `Agent` 构造，`ToolContext` 是
-  `Arc<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>`，`Tool: Send + Sync`。
+- `Agent` can be constructed independently, has no global state, and is `Send`;
+- `todo` is isolated per instance (`Arc::new` inside `Agent::new`), no crossing under parallelism;
+- `trait SessionStore: Send + Sync` (**now owned by the application layer `src/session.rs`**),
+  `JsonlSessionStore` internally `Mutex<File>`, so a single instance's `append` / `load` / `truncate`
+  are mutually exclusive;
+- `ToolManager` / `ToolContext` are constructed with the `Agent`; `ToolContext` is
+  `Arc<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>`, and `Tool: Send + Sync`.
 
-**唯一的两个缺口**：
+**The only two gaps**:
 
-| 缺口 | 位置 | 影响 |
+| Gap | Location | Impact |
 | --- | --- | --- |
-| **事件无来源标识** | `runtime/event.rs` 的 `AgentEvent` 每个变体都不带 session / run id | 多会话并行时，消费方无法区分"这个 `ContentDelta` 属于哪个会话" |
-| **无取消接缝** | `run_stream` 没有 abort；`StopReason::Cancelled` 定义了但不产生 | 无法单独取消某一个会话；现在的"打断"靠调用方 drop 流，且只能作用于"当前跑的那个" |
+| **Events have no source identifier** | no variant of `AgentEvent` in `runtime/event.rs` carries a session / run id | under multi-session parallelism, the consumer cannot tell "which session this `ContentDelta` belongs to" |
+| **No cancellation seam** | `run_stream` has no abort; `StopReason::Cancelled` is defined but never produced | cannot cancel a single session; the current "interrupt" relies on the caller dropping the stream, and can only act on "the one currently running" |
 
-**决策 2：事件来源标识由"每会话一条通道"解决——通道归 `Session` 自己持有，
-不改 `AgentEvent` 变体。**
+**Decision 2: the event source identifier is solved by "one channel per session" -- the channel is
+held by `Session` itself, without changing the `AgentEvent` variants.**
 
-两条路线：
+Two routes:
 
-- **路线甲（采用）**：每个 `Session` 自持一条独立 `mpsc` 通道，`run_stream`
-  的事件天然按通道隔离；消费方（TUI / desktop 主循环）从各 `Session` 的
-  `rx` 收事件，无需在事件里塞来源标识。
-- **路线乙（弃用）**：给 `run_stream` 传一个 `run_id`，每个事件携带它。
+- **Route A (adopted)**: each `Session` holds its own independent `mpsc` channel, so `run_stream`'s
+  events are naturally isolated by channel; the consumer (the TUI / desktop main loop) receives events
+  from each `Session`'s `rx`, with no need to stuff a source identifier into the events.
+- **Route B (discarded)**: pass a `run_id` to `run_stream`, and have each event carry it.
 
-选甲的理由：`AgentEvent` 是对外契约（`docs/README.md` 原则 4：契约要保持小），
-来源标识是**调用方的编排信息**，不是 SDK 的基础能力；用通道隔离还能顺带把
-"谁在跑"的调度权留在应用层。只有当**同一个 `Agent` 需要被多路消费**时才需要乙，
-而决策 1 已排除这种形态。
+Why choose A: `AgentEvent` is an external contract (`docs/README.md` principle 4: keep the contract
+small), and a source identifier is **the caller's orchestration information**, not a fundamental SDK
+capability; channel isolation also conveniently keeps the scheduling right of "who is running" in the
+application layer. Route B is needed only when **the same `Agent` must be consumed by multiple
+paths**, and decision 1 already rules out that form.
 
-**通道归属（原待决 1，已定）：`Session` 自持 `tx`，`SessionManager` 不持有通道。**
-理由：与"每个 `Session` 自己持有 `Agent`"对称——事件通道是会话的私有管道，
-不该外泄给编排层；`SessionManager` 只存 `JoinHandle`（回收 / 取消用）。
-"用一个 `select!` 同时收所有会话事件"的诉求，由主循环轮询各 `Session.rx`
-（或 `FuturesUnordered`）满足，不必把通道上交。**路线乙不落地。**
+**Channel ownership (formerly open question 1, now decided): `Session` holds its own `tx`, and
+`SessionManager` does not hold a channel.** Reason: symmetric with "each `Session` holds its own
+`Agent`" -- the event channel is the session's private pipe and should not leak to the orchestration
+layer; `SessionManager` only stores the `JoinHandle` (for recycling / cancellation). The demand of
+"receive all sessions' events at once with one `select!`" is satisfied by the main loop polling each
+`Session.rx` (or `FuturesUnordered`), without handing the channel upward. **Route B is not landed.**
 
-**决策 3：取消接缝做成"`run_stream` 的一个可选取消信号"。**
+**Decision 3: make the cancellation seam "an optional cancellation signal for `run_stream`".**
 
-现有 `StopReason::Cancelled` 是死代码，多会话并行几乎必然要用它（后台会话要能
-被单独叫停）。最小侵入：给 `run_stream` 增一个重载 / 新方法，接受一个
-`tokio_util::sync::CancellationToken`（或 `oneshot::Receiver<()>`），
-在流的 `select!` 里响应取消、`drop` 掉内部请求、以 `Cancelled` 结束本轮。
+The existing `StopReason::Cancelled` is dead code, and multi-session parallelism will almost certainly
+need it (a background session must be able to be stopped individually). Minimal intrusion: add an
+overload / new method to `run_stream` that accepts a `tokio_util::sync::CancellationToken` (or
+`oneshot::Receiver<()>`), responds to cancellation in the stream's `select!`, `drop`s the internal
+request, and ends this round with `Cancelled`.
 
-- 这与 TUI 现状（`run_agent` 里 `select! { _ = &mut cancel => break }` + `drop(stream)`）
-  **同一手法**，只是把它从"应用层的手工包装"提升为"SDK 的正式接缝"，使其可寻址。
-- 不引入新变体：取消后 `Finished(RunResult { stop_reason: Cancelled, .. })`，
-  现有消费方已能处理（`StopReason` 早就有这个值）。
+- This is **the same technique** as the TUI's current state (`select! { _ = &mut cancel => break }` +
+  `drop(stream)` in `run_agent`), only promoted from "manual wrapping in the application layer" to "a
+  formal SDK seam", so that it becomes addressable.
+- No new variant is introduced: after cancellation, `Finished(RunResult { stop_reason: Cancelled, .. })`,
+  which existing consumers can already handle (`StopReason` has had this value for a while).
 
-> 若第一步只想做 MVP，可先不碰 SDK：应用层继续用"drop 流"取消，代价是
-> **无法精确寻址到某个后台会话**。取消接缝作为第二步补。
+> If only an MVP is wanted at first, the SDK can be left untouched: the application layer continues to
+> cancel with "drop the stream", at the cost of **being unable to precisely address a particular
+> background session**. The cancellation seam is added as a second step.
 
 ---
 
-**三、应用层现状：单例状态模型是真正的阻塞点**
+**3. Application-layer status: the singleton state model is the real blocker**
 
-两个界面都把"单个 `Agent` + 单份 UI 状态"写死了：
+Both interfaces hard-wire "a single `Agent` + a single copy of UI state":
 
-**TUI**（`src/interface/app.rs` 的 `App`）：
+**TUI** (`App` in `src/interface/app.rs`):
 
 ```
-agent: Option<Agent>              // 单个 Agent
-items: Vec<Item>                  // 单份消息列表
-scroll / auto_scroll / max_scroll // 单份滚动状态
-last_usage / total_usage          // 单份用量统计
-context_usage: Option<(u64,u64)>  // 单份上下文占用
-current_session: Option<String>   // 单个当前会话名
-ui_turn_start / turn_prompt       // 单份"本轮"状态
+agent: Option<Agent>              // a single Agent
+items: Vec<Item>                  // a single message list
+scroll / auto_scroll / max_scroll // a single scroll state
+last_usage / total_usage          // a single usage statistic
+context_usage: Option<(u64,u64)>  // a single context occupancy
+current_session: Option<String>   // a single current session name
+ui_turn_start / turn_prompt       // a single "this round" state
 ```
 
-`tui.rs` 主循环用 `take_agent()` → `tokio::spawn(run_agent(...))` → `restore_agent()`
-的**串行**手法，`run_agent` 结果经**单条** `mpsc` 回传。
+The `tui.rs` main loop uses the **serial** technique of `take_agent()` -> `tokio::spawn(run_agent(...))`
+-> `restore_agent()`, and the `run_agent` result is sent back via a **single** `mpsc`.
 
-**Desktop**（`src/interface/desktop/shell.rs` 的 `DesktopState`）：
+**Desktop** (`DesktopState` in `src/interface/desktop/shell.rs`):
 
 ```
 agent: Arc<Mutex<Option<Agent>>>
 current_session: Arc<Mutex<Option<String>>>
 ```
 
-`agent_send` 里 `slot.lock().await.take().ok_or("agent 正在运行中")?`——
-**第二次并发调用直接拒绝**。事件走**单一全局** `EVENT_NAME = "agent://event"`，
-前端无法区分来源。
+In `agent_send`, `slot.lock().await.take().ok_or("agent is running")?` -- **a second concurrent call is
+rejected outright**. Events go through a **single global** `EVENT_NAME = "agent://event"`, and the
+frontend cannot tell the source.
 
-**决策 4：应用层引入 `SessionManager`（全局唯一）+ `Session`（每会话一个），
-每个 `Session` 自己持有 `Agent`。**
+**Decision 4: the application layer introduces `SessionManager` (globally unique) + `Session` (one per
+session), with each `Session` holding its own `Agent`.**
 
-`SessionManager` 是应用层新增的**唯一编排入口**——它把"会话从哪来"
-（`SessionCatalog`）、"每个会话跑到哪了"（`Session`）、"前台是谁"（`active`）
-三件事收在一处：
+`SessionManager` is the **single orchestration entry** newly added at the application layer -- it
+collects three things in one place: "where sessions come from" (`SessionCatalog`), "how far each
+session has gotten" (`Session`), and "who is in the foreground" (`active`):
 
 ```
-SessionManager                          // 应用层，全局唯一
+SessionManager                          // application layer, globally unique
 ├── sessions: HashMap<SessionId, Session>
-├── active: SessionId                   // 前台是谁（纯 UI 指针，不重建 Agent）
-├── catalog: Arc<dyn SessionCatalog>    // 会话从哪来（已存在）
-├── build_agent: fn(Vec<Message>) -> Agent   // 工厂（决策 5；先 load 再建 Agent）
-└── max_parallel / 待运行队列            // 调度（决策 7 / 8）
+├── active: SessionId                   // who is in the foreground (a pure UI pointer, does not rebuild the Agent)
+├── catalog: Arc<dyn SessionCatalog>    // where sessions come from (already exists)
+├── build_agent: fn(Vec<Message>) -> Agent   // factory (decision 5; load first, then build the Agent)
+└── max_parallel / pending queue         // scheduling (decisions 7 / 8)
 
-Session                                 // 一个会话 = 一个运行时容器
-├── id: SessionId                       // 稳定标识（复用 SessionEntry.name）
-├── agent: Agent                        // **该会话独占**，别的会话碰不到
-├── items: Vec<Item>                    // 该会话的消息条目
-├── usage / context_usage               // 该会话的用量
+Session                                 // one session = one runtime container
+├── id: SessionId                       // stable identifier (reusing SessionEntry.name)
+├── agent: Agent                        // **exclusive to this session**; other sessions cannot touch it
+├── items: Vec<Item>                    // this session's message entries
+├── usage / context_usage               // this session's usage
 ├── scroll / ui_turn_start / turn_prompt
 ├── state: RuntimeState                 // Idle | Running
-└── events: broadcast::Sender<...>      // 事件回传通道（决策 2 路线甲，实为 broadcast）
+└── events: broadcast::Sender<...>      // event send-back channel (decision 2 route A, actually broadcast)
 ```
 
-**为什么身份住在 `Session` 外层、`Agent` 保持匿名**：若 `Agent` 也持有一个 id，
-就出现"`Agent` 里一个、`Session` 里一个"两个真相源。工厂 `build_agent` 造出
-**匿名** `Agent`，塞进 `Session` 时贴一次 `id`——身份在容器上，不在里面。
+**Why identity lives outside `Session` while `Agent` stays anonymous**: if `Agent` also held an id,
+there would be two sources of truth, "one in `Agent` and one in `Session`". The factory `build_agent`
+produces an **anonymous** `Agent`, and attaches an `id` once when stuffing it into `Session` --
+identity is on the container, not inside it.
 
-`App` 的职责从"单份状态"上移为 **`SessionManager`**（`App` 退化为"当前 `Session` 的视图"）；所有现有方法
-（`append_streaming_delta` / `record_usage` / `scroll_lines` / `take_agent` …）
-要么带 `SessionId` 参数，要么改为"在 `manager.active` 会话上操作"。
+`App`'s responsibility moves up from "a single copy of state" to **`SessionManager`** (`App` degrades
+to "the view of the current `Session`"); all existing methods (`append_streaming_delta` /
+`record_usage` / `scroll_lines` / `take_agent` ...) either take a `SessionId` parameter or become "act
+on the `manager.active` session".
 
-> **落地做法（与原设计的偏差，均为实现细节）**：
-> - `App` 保留 `sessions: SessionManager` 字段，并 `impl Deref/DerefMut<Target = Session>`，
->   把 `self.items` / `self.agent` / `self.waiting` … 透明解析到 `sessions.active()`——
->   于是既有的几十个方法**零改动**，语义正是"在 `manager.active` 会话上操作"。
->   真正的 per-session 字段（含 `name`）住在 `Session` 上。
-> - **通道归属已按决策 2 落地**：`Session` 自持 `events: broadcast::Sender<...>`，
->   `SessionManager` 不持有通道。通道元素是 `Result<AgentEvent, String>`——把
->   `AgentError` 也当一条事件（`Err`）发出去，累加方（`apply_event`）据此置错。
->   容量 `EVENT_CHANNEL_CAPACITY = 256`；订阅者落后会 `Lagged`，订阅方（desktop
->   pump）跳过、靠重发快照重对齐。
-> - `App` 的累加方法（`append_streaming_delta` / `record_usage` / `start_compression` …）
->   已**下移到 `Session`**，`App` 只留薄包装（`App::apply_event` 转发到
->   `sessions.active_mut().apply_event` 并失效 `message_cache`）。`message_cache`
->   是纯渲染缓存、留在 `App`（不进 `Session`）。
-> - **`Agent` 的 take / restore 已改为按会话名**（`begin_turn(name, user_message)` /
->   `restore_agent(name, agent)`）：desktop 的 `agent_send(session)` 按名取，修复了
->   "后台会话运行时前台已切走、事件/Agent 错记到别的会话"的串会话 bug。
-> - **`begin_turn` 同时乐观记入用户消息**（= 取 `Agent` + `push_message(Role::User)`，
->   原子）：`Session::apply_event` **有意忽略** `MessageAdded(User)`——用户消息由**驱动方**
->   记录（TUI 在 `App::submit` 里记，desktop 在 `agent_send` 里记），而非事件流。此前
->   desktop 漏记，`Session.items` 永不含用户消息，切走再切回按快照重建时就"消失"了；
->   回归测试 `session::tests::begin_turn_records_user_message_into_snapshot` 覆盖此点。
-> - 仍未引入 `RuntimeState` 枚举——运行态用 `Session.running: bool` 表达（`is_running(name)`），
->   够用即可；`Idle↔Running` 的完整状态机留待决策 7/8 的并行调度一起做。
+> **Landing approach (deviations from the original design, all implementation details)**:
+> - `App` keeps a `sessions: SessionManager` field and `impl Deref/DerefMut<Target = Session>`,
+>   transparently resolving `self.items` / `self.agent` / `self.waiting` ... to `sessions.active()` --
+>   so the existing dozens of methods need **zero changes**, and the semantics is exactly "act on the
+>   `manager.active` session". The truly per-session fields (including `name`) live on `Session`.
+> - **Channel ownership is landed per decision 2**: `Session` holds its own
+>   `events: broadcast::Sender<...>`, and `SessionManager` does not hold a channel. The channel element
+>   is `Result<AgentEvent, String>` -- `AgentError` is also sent out as an event (`Err`), and the
+>   accumulator (`apply_event`) sets the error accordingly. Capacity
+>   `EVENT_CHANNEL_CAPACITY = 256`; a lagging subscriber gets `Lagged`, and the subscriber (the desktop
+>   pump) skips and realigns by resending a snapshot.
+> - `App`'s accumulation methods (`append_streaming_delta` / `record_usage` / `start_compression` ...)
+>   have **moved down into `Session`**, and `App` keeps only a thin wrapper (`App::apply_event`
+>   forwards to `sessions.active_mut().apply_event` and invalidates `message_cache`). `message_cache`
+>   is a pure render cache and stays in `App` (does not go into `Session`).
+> - **The `Agent`'s take / restore is now by session name** (`begin_turn(name, user_message)` /
+>   `restore_agent(name, agent)`): the desktop's `agent_send(session)` takes by name, fixing the
+>   cross-session bug where "while a background session runs, the foreground has switched away, and
+>   events / the Agent are misrecorded into another session".
+> - **`begin_turn` also optimistically records the user message** (= take the `Agent` +
+>   `push_message(Role::User)`, atomic): `Session::apply_event` **deliberately ignores**
+>   `MessageAdded(User)` -- the user message is recorded by the **driver side** (the TUI records it in
+>   `App::submit`, the desktop in `agent_send`), not by the event stream. Previously the desktop
+>   missed it, so `Session.items` never contained the user message, and it "disappeared" when
+>   switching away and back and rebuilding from a snapshot; the regression test
+>   `session::tests::begin_turn_records_user_message_into_snapshot` covers this point.
+> - A `RuntimeState` enum is still not introduced -- the run state is expressed with
+>   `Session.running: bool` (`is_running(name)`), which suffices; the full `Idle<->Running` state
+>   machine is left to be done together with the parallel scheduling of decisions 7/8.
 
-**这个形状顺手消掉两处现状 hack**：
+**This shape conveniently eliminates two current hacks**:
 
-- TUI 的 `take_agent` / `restore_agent` 串行手法 → 变成 `Session.state` 的
-  `Idle ↔ Running` 转移，且**每个会话各 take / 各 restore**；
-- Desktop 的 `Arc<Mutex<Option<Agent>>>` 全局单槽 → 每个 `Session` 一个槽，
-  "agent 正在运行中"从**全局拒绝**变成**仅该会话拒绝**。
+- The TUI's `take_agent` / `restore_agent` serial technique -> becomes the `Idle <-> Running`
+  transition of `Session.state`, with **each session taking / restoring its own**;
+- The desktop's `Arc<Mutex<Option<Agent>>>` global single slot -> one slot per `Session`, and "agent is
+  running" changes from a **global rejection** to a **rejection only for that session**.
 
-**决策 5：`Bootstrap` 从"产一个 Agent"改为"产一个 Agent 工厂"。**（**已落地**）
+**Decision 5: `Bootstrap` changes from "produce one Agent" to "produce an Agent factory".**
+(**landed**)
 
-原 `Bootstrap::assemble` 只产单个 `Agent`（`src/bootstrap.rs`）；现已改名
-`AgentFactory::assemble`，产物是**工厂 + 共享 `session_catalog`**，多会话
-**按会话造多个 `Agent`**。`build_agent(messages) -> Agent` 工厂
-复用同一份 `ModelConfig` / 工具注册 / 系统提示词 / 工作目录 / 压缩指令：
+The original `Bootstrap::assemble` produced only a single `Agent` (`src/bootstrap.rs`); it is now
+renamed `AgentFactory::assemble`, and its product is **a factory + a shared `session_catalog`**, with
+multiple sessions **creating multiple `Agent`s per session**. The `build_agent(messages) -> Agent`
+factory reuses the same `ModelConfig` / tool registration / system prompt / working directory /
+compression instruction:
 
-- `assemble` 返回 **工厂 + 共享的 `session_catalog`**（现在 `session_catalog` 已是
-  `Arc` 共享，TUI / desktop 读同一份 `<root>/.shirley/sessions`）。
-- 工厂必须**每次新建 `ToolManager` 并重新注册工具**（`ToolManager` 非 `Clone`），
-  但 `on_register` 钩子（如 `web_search` 的凭据注入）会各自执行一次——可接受，
-  因为状态本就按工具实例隔离。
-- 注意 `reqwest::Client`：现在每次 `run_stream` 内部 `Client::new()`，
-  多会话并行 = 多份连接池。可在工厂里共享一个 `Client`（属于后续优化，
-  非阻塞项）。
+- `assemble` returns **the factory + the shared `session_catalog`** (now `session_catalog` is already
+  `Arc`-shared, with TUI / desktop reading the same `<root>/.shirley/sessions`).
+- The factory must **create a new `ToolManager` and re-register tools each time** (`ToolManager` is not
+  `Clone`), but the `on_register` hooks (such as `web_search`'s credential injection) run once each --
+  acceptable, because state is isolated per tool instance anyway.
+- Note `reqwest::Client`: currently `Client::new()` is called inside each `run_stream`, so
+  multi-session parallelism = multiple connection pools. A `Client` could be shared in the factory (a
+  follow-up optimization, non-blocking).
 
 ---
 
-**四、持久化：A 档零改动，B 档要加锁**
+**4. Persistence: tier A needs zero changes, tier B needs a lock**
 
-**A（不同会话并行）**：不同会话写**不同文件**，`JsonlSessionStore` 各自的
-`Mutex<File>` 足够，**零改动**。
+**A (different sessions in parallel)**: different sessions write **different files**, and each
+`JsonlSessionStore`'s own `Mutex<File>` is enough, **zero changes**.
 
-**B（同会话多驱动）**：两个 `JsonlSessionStore` 实例指向同一文件时，
-**各自持有独立的 `File` 句柄和独立 `Mutex`，无跨实例互斥** → 交错写风险；
-且 `truncate` 的"写 tmp → rename → 重开追加句柄"在并发下会互相覆盖
-（`src/session.rs` 的 `rewrite_locked`）。
+**B (multiple drivers on the same session)**: when two `JsonlSessionStore` instances point at the same
+file, **each holds an independent `File` handle and an independent `Mutex`, with no cross-instance
+mutual exclusion** -> risk of interleaved writes; and `truncate`'s "write tmp -> rename -> reopen the
+append handle" will overwrite each other under concurrency (`src/session.rs`'s `rewrite_locked`).
 
-**决策 6：本期只保证 A 档安全；B 档记为后续，需要时给 `FileSessionCatalog`
-加"按会话名的进程内锁表"（`Arc<Mutex<HashMap<name, Arc<Mutex<()>>>>>`），
-必要时再加跨进程文件锁。**
+**Decision 6: this round only guarantees tier A safety; tier B is recorded as a follow-up, and when
+needed, add a "per-session-name in-process lock table" to `FileSessionCatalog`
+(`Arc<Mutex<HashMap<name, Arc<Mutex<()>>>>>`), plus a cross-process file lock if necessary.**
 
-理由：B 档（同一份会话被多个驱动同时写）在单机单进程的 TUI / desktop 里
-**不是真实场景**——一个会话在同一时刻本就只该有一个活动 `Agent`（决策 1）。
-真正要防的是"两个窗口打开同一份会话"，那是**多进程**问题，锁表也解决不了，
-得上文件锁。所以现在不为 B 设计，只**明确声明不支持**。
+Reason: tier B (the same session written by multiple drivers at once) is **not a real scenario** in a
+single-machine, single-process TUI / desktop -- a session should only have one active `Agent` at any
+moment (decision 1). What really needs to be guarded against is "two windows opening the same session",
+which is a **multi-process** problem that a lock table cannot solve either, requiring a file lock. So
+do not design for B now, only **explicitly declare it unsupported**.
 
 ---
 
-**五、数据流（A 档）**
+**5. Data flow (tier A)**
 
 ```
-SessionCatalog.list()  ──►  [SessionEntry...]  （目录扫描，同步）
+SessionCatalog.list()  -->  [SessionEntry...]  (directory scan, synchronous)
         │
-        ├─ 新建 / 打开 ──►  Arc<dyn SessionStore>
+        ├─ new / open ──►  Arc<dyn SessionStore>
         │                        │
         │                        ▼
         │            store.load() ──► Bootstrap::build_agent(messages) ──►  Agent
@@ -261,124 +287,141 @@ SessionCatalog.list()  ──►  [SessionEntry...]  （目录扫描，同步）
         │                        ▼
         │            Session { id, agent, items, ... }  ──►  sessions: HashMap
         │
-        └─ 切换活动指针 ──►  SessionManager.active = id  （纯 UI 操作，不重建 Agent）
+        └─ switch the active pointer ──►  SessionManager.active = id  (a pure UI operation, does not rebuild the Agent)
 
-用户提交 ──►  active 会话的 Agent::run_stream(task)
+user submits ──►  the active session's Agent::run_stream(task)
                 │
                 ▼
-        每会话一条 mpsc 通道（路线甲）
+        one mpsc channel per session (route A)
                 │
                 ▼
-        SessionManager 按 session_id 把事件写回对应 Session
+        SessionManager writes events back to the corresponding Session by session_id
                 │
                 ▼
-        渲染只画 active 会话；后台会话照常推进（进度可显示在标签上）
+        rendering draws only the active session; background sessions advance as usual (progress can be shown on the tab)
 ```
 
 ---
 
-**六、并行调度**
+**6. Parallel scheduling**
 
-**决策 7：每会话一个 `tokio::spawn` 任务，`JoinHandle` / 回收按会话存。**
+**Decision 7: one `tokio::spawn` task per session; `JoinHandle` / recycling stored per session.**
 
-把现在的 `take_agent` / `restore_agent` 串行模式，改为每个 `Session`
-各自 spawn / 回收：
+Change the current serial `take_agent` / `restore_agent` mode to each `Session` spawning / recycling on
+its own:
 
-- 提交时把该会话的 `Agent` 移入后台任务（`RuntimeState::Running`），
-  任务结束把 `Agent` 放回（`RuntimeState::Idle`）；
-- 与现状一致：一轮运行期间该会话的 `Agent` 不在 `Session` 里（被移入后台任务），**同一会话不会并发驱动**；
-- 不同会话的 `Agent` 互不共享，可真正并行。
+- On submit, move the session's `Agent` into a background task (`RuntimeState::Running`), and put the
+  `Agent` back when the task ends (`RuntimeState::Idle`);
+- Consistent with the status quo: during a round, that session's `Agent` is not in the `Session` (it
+  has been moved into the background task), so **the same session is not driven concurrently**;
+- Different sessions' `Agent`s are not shared, and can truly run in parallel.
 
-**决策 8：必须有"最大并行会话数"上限。**
+**Decision 8: there must be a "maximum number of parallel sessions" limit.**
 
-多会话并行 = 多份 `reqwest::Client`（多连接池）+ 多份并发工具执行（`bash`
-会真起子进程）。不加限制会打爆连接数 / 进程数 / 上游限流。建议：
+Multi-session parallelism = multiple `reqwest::Client`s (multiple connection pools) + multiple
+concurrent tool executions (`bash` really starts subprocesses). Without a limit, it will blow up the
+connection count / process count / upstream rate limiting. Suggested:
 
-- 默认上限（如 4）可配置；
-- 超限时**排队**而非拒绝：新提交的会话进入待运行队列，有空位再跑；
-- 对 `ErrorKind::RateLimited`（429）保持既有重试语义（`SdkError::is_retryable`）。
-
----
-
-**七、与既有接缝的关系**
-
-**决策 9（移除 `switch_session`）：`Agent::switch_session` 从 SDK 删除；
-"哪个会话活跃"是应用层编排，SDK 不该有"当前会话"这个概念。**
-
-**为什么当初会有它**：它是单会话时代的产物——那时一个 `Agent` 只服务一个会话，
-`/session` 要"换会话"最省事的做法就是给 `Agent` 换一份日志源（清空 `messages` /
-`todo` → 从新日志恢复 → system 置顶）。它把"应用层的编排动作"
-（切换）错放进了 SDK，因为当时没有 `SessionManager` 承载编排。
-
-**边界要划清（避免误伤）**：
-
-- **当时保留在 SDK**：`SessionStore` 契约、`Agent.session: Option<Arc<dyn SessionStore>>`
-  字段、以及"从日志恢复工作集"的恢复逻辑——当时判断"持久化是合法的 SDK 能力"。
-  **后续（`docs/session.md` 决策 2 的进一步演进）**：这一层也被移出 SDK——
-  会话持久化整体归应用层，`Agent` 不再持有 `session` 字段，只 `yield MessageAdded`；
-  恢复改由应用层 `store.load()` 后 `build_agent(log)` 完成，落库由应用层事件驱动。
-- **移出 SDK**：`switch_session` 方法 + 本轮进一步移出的 `SessionStore` 契约 /
-  `session` 字段 / 恢复 / 落库 / 截尾。`switch_session` 表达的是"**换掉当前会话**"，
-  而"当前会话"在 SDK 里根本不存在——每个 `Agent` 对应一份固定日志源，
-  切换由 `SessionManager.active` 指针完成（见决策 4）。
-
-**迁移面**：
-
-- SDK 侧：删 `runtime/agent.rs` 的 `switch_session` 方法及其文档注释、
-  删对应单测（`agent.rs` 的 `switch_session_clears_ledger`、
-  `tests/session_contract.rs` 的两个 `switch_session_*`）；
-- 应用层：TUI 的 `/session`（`app.rs`）与 desktop 的 `agent_switch_session`
-  改为**由 `SessionManager` 切 `active` 指针**——每个 `Session` 已持有各自就绪的
-  `Agent`，切换**不重建 `Agent`**（重建会丢失该会话正在后台跑的上下文，
-  也违背"多 `Agent` 隔离"）；
-- 恢复语义（**应用层 `store.load()` → `build_agent(log)`** + `system_message` 置顶）
-  **原样复用**——它现在是 `build_agent` 工厂调用方的事，不再是"切换"的动作。
+- The default limit (e.g. 4) is configurable;
+- When over the limit, **queue** rather than reject: a newly submitted session enters the pending
+  queue and runs when a slot frees up;
+- Keep the existing retry semantics for `ErrorKind::RateLimited` (429) (`SdkError::is_retryable`).
 
 ---
 
-**八、边界与不变量**
+**7. Relationship to existing seams**
 
-- **同一会话同一时刻只有一个活动 `Agent`**（决策 1）。这是并行安全的前提：
-  `todo` / 会话日志都按会话隔离，不存在跨会话共享的可变状态。
-- **`AgentEvent` 变体语义不变**。多会话不需要给事件加来源标识（决策 2 用
-  `Session` 自持通道解决）；将来若确需追加字段，遵守"字段追加、旧消费方
-  用 `..` 忽略"的既有约定（`ToolStarted` / `ToolFinished` 当初就是这么加的）。
-- **前缀缓存不受影响**：多会话各自维护自己的前缀，互不干扰；但并发请求共享
-  上游限流，注意 429。
-- **`RunResult.messages` 的 `start_index`** 由每个 `Agent` 各自维护，只要不共享
-  `Agent` 就安全（`docs/README.md` 原则 3 提到的切片越界前提是"重建底层容器"，
-  多 `Agent` 不触发）。
-- **持久化只保证 A 档**；B 档（同会话多驱动 / 多进程）**明确不支持**。
+**Decision 9 (remove `switch_session`): `Agent::switch_session` is deleted from the SDK; "which
+session is active" is application-layer orchestration, and the SDK should not have the concept of a
+"current session".**
+
+**Why it existed in the first place**: it was a product of the single-session era -- back then an
+`Agent` served only one session, and the easiest way for `/session` to "change sessions" was to give
+the `Agent` a different log source (clear `messages` / `todo` -> recover from the new log -> pin the
+system on top). It misplaced "an application-layer orchestration action" (switching) into the SDK,
+because at the time there was no `SessionManager` to carry the orchestration.
+
+**Draw the boundary clearly (to avoid collateral damage)**:
+
+- **Kept in the SDK at the time**: the `SessionStore` contract, the
+  `Agent.session: Option<Arc<dyn SessionStore>>` field, and the recovery logic of "recover the working
+  set from the log" -- the judgment then was "persistence is a legitimate SDK capability".
+  **Later (a further evolution of `docs/session.md` decision 2)**: this layer was also moved out of the
+  SDK -- session persistence is entirely owned by the application layer, the `Agent` no longer holds a
+  `session` field and only `yield MessageAdded`; recovery is changed to the application layer's
+  `store.load()` then `build_agent(log)`, and persistence is application-layer event-driven.
+- **Moved out of the SDK**: the `switch_session` method + this round's further removal of the
+  `SessionStore` contract / `session` field / recovery / persistence / tail truncation.
+  `switch_session` expresses "**replace the current session**", whereas a "current session" does not
+  exist in the SDK at all -- each `Agent` corresponds to a fixed log source, and switching is done by
+  the `SessionManager.active` pointer (see decision 4).
+
+**Migration surface**:
+
+- SDK side: delete the `switch_session` method and its doc comment in `runtime/agent.rs`, and delete
+  the corresponding unit tests (`agent.rs`'s `switch_session_clears_ledger`, and the two
+  `switch_session_*` in `tests/session_contract.rs`);
+- Application layer: the TUI's `/session` (`app.rs`) and the desktop's `agent_switch_session` are
+  changed to **switching the `active` pointer via `SessionManager`** -- each `Session` already holds
+  its own ready `Agent`, so switching **does not rebuild the `Agent`** (rebuilding would lose the
+  context of that session running in the background, and also violate "multi-`Agent` isolation");
+- Recovery semantics (**application layer `store.load()` -> `build_agent(log)`** + `system_message`
+  pinned on top) are **reused as-is** -- it is now the business of the `build_agent` factory's caller,
+  not a "switch" action.
 
 ---
 
-**九、落地顺序**
+**8. Boundaries and invariants**
 
-1. **P1 · 应用层状态模型重构**（工作量主体）：`SessionManager`（`Session` +
-   `HashMap` + `active` 指针）；**每个 `Session` 自持一条事件通道**（决策 2）。
-2. **P1 · `AgentFactory::build_agent` 工厂**（决策 5）——让多 `Agent` 可被造出来；
-   会话恢复由调用方先 `store.load()` 再 `build_agent(log)`。
-3. **P2 · 并行调度 + 上限**（决策 7 / 8）：每会话 spawn、排队、运行态展示。
-4. **P2 · SDK 取消接缝**（决策 3）——做 P2 时几乎必然需要。
-5. **P3 · 从 SDK 移除 `switch_session`**（决策 9）：删方法 + 单测，应用层
-   改由 `SessionManager` 切 `active`。
-6. **P3 · 持久化锁**（决策 6，B 档）——A 档不需要，留到最后。
-
-**MVP 路径**：不动 SDK 事件类型 → "每会话一条 mpsc + 每会话一个 `Agent` +
-`SessionManager`"，即可实现 A 档的"多会话并行跑"；
-取消接缝作为第二步补。
+- **The same session has only one active `Agent` at any moment** (decision 1). This is the
+  precondition of parallelism safety: `todo` / the session log are isolated per session, and there is
+  no mutable state shared across sessions.
+- **`AgentEvent` variant semantics are unchanged**. Multi-session does not need to add a source
+  identifier to events (decision 2 solves it with `Session`'s own channel); if fields really need to be
+  appended in the future, follow the existing convention of "append fields, old consumers ignore with
+  `..`" (this is how `ToolStarted` / `ToolFinished` were added back then).
+- **The prefix cache is unaffected**: multiple sessions each maintain their own prefix, without
+  interfering; but concurrent requests share the upstream rate limit, so watch out for 429.
+- **`RunResult.messages`'s `start_index`** is maintained by each `Agent` separately, and is safe as
+  long as `Agent`s are not shared (`docs/README.md` principle 3 mentions that the slicing out-of-range
+  precondition is "rebuilding the underlying container", which multiple `Agent`s do not trigger).
+- **Persistence only guarantees tier A**; tier B (multiple drivers on the same session / multiple
+  processes) is **explicitly unsupported**.
 
 ---
 
-**十、验收口径**
+**9. Landing order**
 
-- 同时向两个不同会话提交任务，两者都能推进，事件互不串台（各写回自己的
-  `Session`）；
-- 后台会话完成时，其 `items` / `usage` 正确落库，切换过去即可看到完整对话；
-- 同一会话在运行中再次提交被拒绝（不并发驱动同一 `Agent`），错误文案与现状一致；
-- 关闭某个后台会话 / 切换活动指针，不影响其它会话的运行；
-- 超过最大并行数时新任务排队而非失败；
-- 不同会话并行时，各自的任务账本 / 会话日志**互不污染**；
-- （若做决策 3）取消能精确作用于指定会话，其余会话不受影响，
-  `StopReason::Cancelled` 被真实产生。
+1. **P1 · Application-layer state-model refactor** (the main body of work): `SessionManager`
+   (`Session` + `HashMap` + the `active` pointer); **each `Session` holds its own event channel**
+   (decision 2).
+2. **P1 · `AgentFactory::build_agent` factory** (decision 5) -- making multiple `Agent`s constructible;
+   session recovery is done by the caller first `store.load()` then `build_agent(log)`.
+3. **P2 · Parallel scheduling + limit** (decisions 7 / 8): per-session spawn, queueing, run-state
+   display.
+4. **P2 · SDK cancellation seam** (decision 3) -- almost certainly needed when doing P2.
+5. **P3 · Remove `switch_session` from the SDK** (decision 9): delete the method + unit tests, and
+   change the application layer to switching `active` via `SessionManager`.
+6. **P3 · Persistence lock** (decision 6, tier B) -- tier A does not need it; leave it for last.
 
+**MVP path**: do not touch the SDK event types -> "one mpsc per session + one `Agent` per session +
+`SessionManager`" achieves tier A's "multiple sessions running in parallel"; the cancellation seam is
+added as a second step.
+
+---
+
+**10. Acceptance criteria**
+
+- Submitting tasks to two different sessions at the same time, both can advance, with events not
+  crossing (each written back to its own `Session`);
+- When a background session completes, its `items` / `usage` are persisted correctly, and switching to
+  it shows the full conversation;
+- Submitting again to a session that is running is rejected (the same `Agent` is not driven
+  concurrently), with the error message consistent with the status quo;
+- Closing a background session / switching the active pointer does not affect the running of other
+  sessions;
+- When the maximum parallelism is exceeded, new tasks queue rather than fail;
+- When different sessions run in parallel, their task ledgers / session logs **do not pollute each
+  other**;
+- (If decision 3 is done) cancellation can act precisely on a specified session, without affecting the
+  others, and `StopReason::Cancelled` is really produced.

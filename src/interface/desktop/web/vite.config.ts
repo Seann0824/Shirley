@@ -3,7 +3,7 @@ import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
 
-// Tauri 期望前端产物落在固定目录，且 dev 端口固定。
+// Tauri expects the frontend build output in a fixed directory, with a fixed dev port.
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: { alias: { "@": path.resolve(__dirname, "./src") } },

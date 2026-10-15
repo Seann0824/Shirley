@@ -15,15 +15,17 @@ use crate::bootstrap::AgentFactory;
 
 use self::session::SessionManager;
 
-/// 启动 ratatui TUI。
+/// Start the ratatui TUI.
 ///
-/// 装配产物是 [`AgentFactory`]（多会话工厂，`docs/multi-session.md` 决策 5）：
-/// 这里先按「启动即开一份空会话」的既有 UX 造出首个 `Agent`，连同工厂一起塞进
-/// [`SessionManager`]，之后每个会话各自 `build_agent`。
+/// The assembly product is [`AgentFactory`] (the multi-session factory, `docs/multi-session.md`
+/// decision 5): here we build the first `Agent` under the existing "open an empty session on
+/// launch" UX, put it into [`SessionManager`] along with the factory, and each session builds
+/// its own agent afterwards.
 pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
-    // 启动时惰性开一份空会话（此刻只定名、不落盘，发首条消息才建文件）。
-    // 会话持久化在应用层：这里 load 得空工作集交给工厂起 `Agent`，store 一并交给
-    // `SessionManager`——落库由其事件驱动路径完成。
+    // Lazily open an empty session at startup (only names it here; nothing hits disk until the
+    // first message). Session persistence lives in the app layer: we load an empty working set,
+    // hand it to the factory to build the `Agent`, and pass the store along to `SessionManager` —
+    // persistence happens through its event-driven path.
     let session_catalog = factory.session_catalog.clone();
     let (entry, store) = session_catalog
         .create_lazy(None)

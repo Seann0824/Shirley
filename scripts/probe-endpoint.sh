@@ -1,33 +1,33 @@
 #!/usr/bin/env bash
 #
-# probe-endpoint.sh —— 探测一个「OpenAI / Anthropic 兼容」模型端点的能力边界。
+# probe-endpoint.sh -- probe the capability boundary of an "OpenAI / Anthropic compatible" model endpoint.
 #
-# 用法:
+# Usage:
 #   scripts/probe-endpoint.sh <base_url> [api_key] [model...]
 #
-# 示例:
-#   # 有鉴权，自动从 /v1/models 取前 6 个模型探测
+# Examples:
+#   # With auth, auto-fetch the first 6 models from /v1/models and probe them
 #   scripts/probe-endpoint.sh https://api.example.com "$MY_KEY"
 #
-#   # 指定要探测的模型
+#   # Probe the specified models
 #   scripts/probe-endpoint.sh https://anyrouter.top "$MY_KEY" \
 #       claude-haiku-4-5-20251001 claude-sonnet-4-5-20250929
 #
-#   # 本地无鉴权端点
+#   # Local endpoint without auth
 #   scripts/probe-endpoint.sh http://127.0.0.1:11434/v1
 #
-# 为什么这么测（方法论）:
-#   1. 「端点活着吗」和「模型能用吗」是两件事 —— 先 GET /v1/models 拿清单，
-#      但清单里的模型名**未必真能用**（中转站常见：列表很全，实际只有少数几个可用）。
-#   2. 「哪个协议能用」必须用**同一个模型**分别打两种协议才能对比出来。
-#      只打一个协议，无法区分「协议不支持」和「模型不支持」。
-#   3. **状态码是主要信息，错误体是次要信息**。404 / 400 / 429 / 500 含义完全不同：
-#        404 → 该协议不认这个模型（换协议或换模型）
-#        400 → 参数缺东西（如 Anthropic 的 1M beta 头、thinking 的 budget_tokens）
-#        429/503 → 要么参数非法、要么上游抖动 —— 用「A/B 对照 + 重试」区分
-#        500 → 上游挂了（重试 / 换模型）
-#   4. 最后一步才是「Shirley 实际会发的报文能过吗」—— 复制适配器的真实 body
-#      （stream + thinking + tools），因为 curl 最小报文能过 ≠ 应用能跑。
+# Why test this way (methodology):
+#   1. "Is the endpoint alive" and "is the model usable" are two different things -- first GET /v1/models to get the list,
+#      but a model name in the list is **not necessarily actually usable** (common with relays: the list is complete, but only a few actually work).
+#   2. "Which protocol works" must be compared by hitting both protocols with the **same model**.
+#      Hitting only one protocol cannot distinguish "protocol unsupported" from "model unsupported".
+#   3. **The status code is the primary information, the error body is secondary**. 404 / 400 / 429 / 500 mean completely different things:
+#        404 -> this protocol does not recognize this model (switch protocol or model)
+#        400 -> a parameter is missing (e.g. Anthropic's 1M beta header, thinking's budget_tokens)
+#        429/503 -> either the parameters are invalid, or upstream is flaky -- distinguish with "A/B comparison + retry"
+#        500 -> upstream is down (retry / switch model)
+#   4. Only the last step is "does the actual payload Shirley sends get through" -- copy the adapter's real body
+#      (stream + thinking + tools), because a minimal curl payload getting through != the app being able to run.
 
 set -uo pipefail
 
@@ -41,8 +41,8 @@ if [[ -z "$BASE" ]]; then
 fi
 BASE="${BASE%/}"
 
-# 本地端点绕开代理（否则 127.0.0.1 的探测会被 http_proxy 劫持成 502）；
-# 远端端点走代理（沙箱环境常常必须）。bash 3.2 下避免用空数组展开。
+# Local endpoints bypass the proxy (otherwise probing 127.0.0.1 gets hijacked by http_proxy into a 502);
+# remote endpoints go through the proxy (often required in sandboxed environments). Under bash 3.2 avoid expanding empty arrays.
 USE_NOPROXY=0
 case "$BASE" in
   *127.0.0.1*|*localhost*|*0.0.0.0*) USE_NOPROXY=1 ;;
@@ -50,7 +50,7 @@ esac
 
 PY="${PYTHON:-python3}"
 
-# do_curl <curl 参数...> —— 统一的 curl 入口（含代理策略）
+# do_curl <curl args...> -- unified curl entry point (with proxy policy)
 do_curl() {
   if [[ "$USE_NOPROXY" -eq 1 ]]; then
     curl -s --noproxy '*' "$@"
@@ -59,7 +59,7 @@ do_curl() {
   fi
 }
 
-# probe <标签> <curl 参数...>
+# probe <label> <curl args...>
 probe() {
   local label="$1"; shift
   local body code
@@ -69,7 +69,7 @@ probe() {
   rm -f "$body"
 }
 
-echo "=== 1. 端点存活 & 模型清单  GET $BASE/v1/models ==="
+echo "=== 1. Endpoint alive & model list  GET $BASE/v1/models ==="
 if [[ -n "$KEY" ]]; then
   probe "GET /v1/models" "$BASE/v1/models" -H "Authorization: Bearer $KEY"
 else
@@ -79,7 +79,7 @@ fi
 MODELS=("$@")
 if [[ ${#MODELS[@]} -eq 0 ]]; then
   echo
-  echo "(未指定模型，自动从 /v1/models 取前 6 个)"
+  echo "(no model specified, auto-fetching the first 6 from /v1/models)"
   if [[ -n "$KEY" ]]; then
     LIST=$(do_curl -m 60 "$BASE/v1/models" -H "Authorization: Bearer $KEY")
   else
@@ -100,12 +100,12 @@ for i in ids[:6]:
 fi
 
 if [[ ${#MODELS[@]} -eq 0 ]]; then
-  echo "拿不到模型清单，无法继续。可手动传入模型名。"
+  echo "Could not fetch the model list, cannot continue. You can pass model names manually."
   exit 1
 fi
 
 echo
-echo "=== 2. 协议 × 模型 交叉探测 ==="
+echo "=== 2. Protocol x model cross probe ==="
 for m in "${MODELS[@]}"; do
   probe "  $m | chat_completions" "$BASE/v1/chat/completions" \
     -H "Authorization: Bearer $KEY" -H 'Content-Type: application/json' \
@@ -117,12 +117,12 @@ for m in "${MODELS[@]}"; do
 done
 
 echo
-echo "=== 3. 读法 ==="
+echo "=== 3. How to read ==="
 cat <<'TIPS'
-  200            该组合可用
-  404 「不支持所选模型」  该协议不认这个模型 → 换协议或换模型
-  400 「请启用 1m 上下文」模型可用，但缺 anthropic-beta 头 → 需要能加自定义 header 的客户端
-  429 / 503      先排除参数问题（A/B 对照），再重试 2~3 次判断是不是上游抖动
-  500            上游异常 → 重试或换模型
-  401 / 403      鉴权方式不对：chat 用 Authorization: Bearer，anthropic 用 x-api-key
+  200            this combination works
+  404 "model not supported"  this protocol does not recognize this model -> switch protocol or model
+  400 "please enable 1m context"  model works, but the anthropic-beta header is missing -> needs a client that can add custom headers
+  429 / 503      first rule out parameter issues (A/B comparison), then retry 2-3 times to tell whether upstream is flaky
+  500            upstream error -> retry or switch model
+  401 / 403      wrong auth method: chat uses Authorization: Bearer, anthropic uses x-api-key
 TIPS

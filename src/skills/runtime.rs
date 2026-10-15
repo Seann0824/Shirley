@@ -1,37 +1,37 @@
-//! 技能运行时：记录本会话**已激活**的 skill，并渲染成每轮末尾追加注入的文本。
+//! Skill runtime: records the skills **activated** in this session and renders them into text appended at the end of each round.
 //!
-//! 这是渐进式披露的 Tier2 状态（`docs/skills.md` 5.3）。与任务账本
-//! [`TodoStore`](crate::todo::TodoStore) 完全同构：
+//! This is the Tier2 state of progressive disclosure (`docs/skills.md` 5.3). It is fully isomorphic to the task ledger
+//! [`TodoStore`](crate::todo::TodoStore):
 //!
-//! - 状态由**应用层**持有（`Arc<Mutex<..>>`），`provider` 与 `activate_skill`
-//!   工具共享同一份；
-//! - **不进 `self.messages`**，由 `SkillContextProvider` 每轮组装请求时追加在
-//!   **末尾**的一条 system 消息里——压缩碰不到它，天然跨压缩存活。
+//! - The state is held by the **application layer** (`Arc<Mutex<..>>`), and `provider` and the `activate_skill`
+//!   tool share the same copy;
+//! - it **does not enter `self.messages`**; `SkillContextProvider` appends it in a system message at the
+//!   **end** when assembling the request each round -- compaction cannot touch it, so it survives compaction naturally.
 //!
-//! **KV 前缀缓存的关键约束（别改）**：`render()` 的输出必须对「旧输出」保持
-//! **逐字节前缀**关系——已激活块**只追加、不重排、不重格式化、不在中间插入**。
-//! 这样旧部分（目录 + 早先激活的块）在新一轮里逐字节不变，前缀缓存照常命中；
-//! 新激活的 skill 只是把字符串往后接一段。代价与 todo 一样：新激活会让「末尾
-//! 那条 system 之后」的前缀失效，用「只注入已激活的 + 每块设字符上限」压到最小。
+//! **Key constraint for KV prefix caching (do not change)**: the output of `render()` must maintain a
+//! **byte-for-byte prefix** relationship with the "old output" -- activated blocks **are only appended, never reordered, reformatted, or inserted in the middle**.
+//! This way the old part (directory + earlier activated blocks) stays byte-for-byte identical in the new round, and prefix caching hits as usual;
+//! a newly activated skill just appends a segment to the string. The cost is the same as todo: a new activation invalidates the prefix
+//! after "the last system message", minimized by "inject only activated ones + cap each block's characters".
 
 use std::sync::{Arc, Mutex};
 
 use super::catalog::SkillCatalog;
 
-/// 激活一个 skill 时可能出的错，供工具层区分「模型写错名」与「读文件失败」。
+/// Errors that can occur when activating a skill, so the tool layer can distinguish "the model wrote a wrong name" from "failed to read the file".
 #[derive(Debug)]
 pub enum ActivateError {
-    /// 目录里没有这个 skill（模型的请求问题：换个合法名字即可）。
+    /// No such skill in the directory (a request problem by the model: use a valid name instead).
     UnknownSkill(String),
-    /// 读 `SKILL.md` / 列资源失败（执行问题）。
+    /// Failed to read `SKILL.md` / list resources (an execution problem).
     ReadFailed(String),
 }
 
-/// 一个已激活 skill 的渲染块（按激活顺序保存）。
+/// A rendered block of an activated skill (stored in activation order).
 struct ActivatedBlock {
     name: String,
-    /// 激活那一刻渲染好的完整块（`<skill_content>..</skill_content>`）。
-    /// **一经写入不再改动**——这是追加式注入的前提。
+    /// The complete block rendered at the moment of activation (`<skill_content>..</skill_content>`).
+    /// **Once written, it never changes** -- this is the premise of append-only injection.
     block: String,
 }
 
@@ -40,7 +40,7 @@ struct RuntimeState {
     activated: Vec<ActivatedBlock>,
 }
 
-/// 技能运行时：目录（只读、跨会话共享）+ 本会话已激活集合。
+/// Skill runtime: the directory (read-only, shared across sessions) + this session's activated set.
 pub struct SkillRuntime {
     catalog: Arc<SkillCatalog>,
     inner: Mutex<RuntimeState>,
@@ -54,15 +54,15 @@ impl SkillRuntime {
         }
     }
 
-    /// 目录里的全部 skill 名（供工具 schema 的 `enum` 用）。
+    /// All skill names in the directory (for the tool schema's `enum`).
     pub fn skill_names(&self) -> Vec<String> {
         self.catalog.skill_names()
     }
 
-    /// 目录里的 `(name, description)` 列表（供 desktop `/` 候选浮层展示）。
+    /// The `(name, description)` list in the directory (for the desktop `/` suggestion popover).
     ///
-    /// 与 [`SkillRuntime::skill_names`] 同源，只是多带一条 description——
-    /// 前端候选需要它做副标题。
+    /// Same source as [`SkillRuntime::skill_names`], just carrying an extra description --
+    /// the frontend suggestions need it for the subtitle.
     pub fn entries(&self) -> Vec<(String, String)> {
         self.catalog
             .skills()
@@ -71,7 +71,7 @@ impl SkillRuntime {
             .collect()
     }
 
-    /// 是否已激活该 skill（诊断 / 测试用）。
+    /// Whether the skill is already activated (for diagnostics / tests).
     #[cfg(test)]
     pub fn is_active(&self, name: &str) -> bool {
         self.inner
@@ -82,9 +82,9 @@ impl SkillRuntime {
             .any(|block| block.name == name)
     }
 
-    /// 渲染本轮要追加注入的文本：**Tier1 目录 + 已激活正文块**（只追加）。
+    /// Render the text to append-inject this round: **Tier1 directory + activated body blocks** (append-only).
     ///
-    /// 目录为空且无激活 → `None`（不注入空内容）。
+    /// Empty directory and no activation -> `None` (do not inject empty content).
     pub fn render(&self) -> Option<String> {
         let mut out = String::new();
         if let Some(directory) = self.catalog.render_directory() {
@@ -100,10 +100,10 @@ impl SkillRuntime {
         (!out.is_empty()).then_some(out)
     }
 
-    /// 激活一个 skill：读正文块并**追加**到已激活列表（幂等）。
+    /// Activate a skill: read the body block and **append** it to the activated list (idempotent).
     ///
-    /// 返回渲染好的正文块——工具把它作为结果返回，模型本轮即可看到指令。
-    /// 重复激活同一 skill 不重复追加（保持输出稳定，避免无谓地破坏缓存）。
+    /// Returns the rendered body block -- the tool returns it as the result, so the model sees the instruction this round.
+    /// Re-activating the same skill does not append again (keeps the output stable and avoids needlessly breaking the cache).
     pub fn activate(&self, name: &str) -> Result<String, ActivateError> {
         if self.catalog.get(name).is_none() {
             return Err(ActivateError::UnknownSkill(name.to_string()));
@@ -157,7 +157,7 @@ mod tests {
         assert!(runtime.render().is_none());
     }
 
-    /// 建一个临时 skill 目录，写入 `SKILL.md`，返回 `(SkillMeta, 根目录)`。
+    /// Create a temporary skill directory, write a `SKILL.md`, and return `(SkillMeta, root dir)`.
     fn real_skill(tag: &str, name: &str, body: &str) -> (SkillMeta, PathBuf) {
         let dir = std::env::temp_dir().join(format!(
             "shirley_skill_runtime_{tag}_{}_{:?}",
@@ -184,8 +184,8 @@ mod tests {
 
     #[test]
     fn activation_is_append_only_kv_friendly() {
-        // KV-cache 回归：激活第二个 skill 后，新输出必须以上一个输出为**逐字节前缀**
-        // ——旧部分（目录 + 第一个块）一字不改，新内容只往后接。
+        // KV-cache regression: after activating a second skill, the new output must have the previous output as a **byte-for-byte prefix**
+        // -- the old part (directory + first block) is unchanged, and new content is only appended.
         let (alpha, dir_a) = real_skill("alpha", "alpha", "ALPHA-INSTRUCTION");
         let (beta, dir_b) = real_skill("beta", "beta", "BETA-INSTRUCTION");
         let runtime = SkillRuntime::new(Arc::new(SkillCatalog::new(vec![alpha, beta])));
@@ -198,11 +198,11 @@ mod tests {
 
         assert!(
             after_alpha.starts_with(&baseline),
-            "激活 alpha 后应以上一输出为前缀"
+            "after activating alpha, the previous output should be a prefix"
         );
         assert!(
             after_beta.starts_with(&after_alpha),
-            "激活 beta 后应以上一输出为前缀（追加式，KV 友好）"
+            "after activating beta, the previous output should be a prefix (append-only, KV friendly)"
         );
         assert!(after_beta.contains("ALPHA-INSTRUCTION"));
         assert!(after_beta.contains("BETA-INSTRUCTION"));
@@ -219,7 +219,7 @@ mod tests {
         let once = runtime.render().unwrap();
         runtime.activate("alpha").unwrap();
         let twice = runtime.render().unwrap();
-        assert_eq!(once, twice, "重复激活不应改变输出（保持缓存稳定）");
+        assert_eq!(once, twice, "re-activation should not change the output (keep the cache stable)");
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -232,7 +232,7 @@ mod tests {
         let block = runtime.activate("alpha").unwrap();
         assert!(block.contains("<skill_content name=\"alpha\">"));
         assert!(block.contains("BODY-INSTRUCTION"));
-        assert!(!block.contains("name: alpha"), "frontmatter 应被剥离");
+        assert!(!block.contains("name: alpha"), "frontmatter should be stripped");
         assert!(block.contains("<file>scripts/run.py</file>"));
         std::fs::remove_dir_all(&dir).ok();
     }

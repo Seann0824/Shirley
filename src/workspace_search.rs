@@ -1,17 +1,17 @@
-//! 工作区文件检索——供桌面界面的 `@` 引用使用。
+//! Workspace file search — used by the desktop interface's `@` references.
 //!
-//! 刻意放在应用层、**不碰 SDK**：这只是"列出工作区里有哪些文件、按关键词排个序"，
-//! 与 Agent 运行时无关。SDK 没有为它新增任何对外能力（这正是"做 desktop 不必改
-//! SDK"的一个注脚——能用应用层解决的，就别往 SDK 里塞）。
+//! Deliberately in the app layer, **not touching the SDK**: this is just "list what files
+//! exist in the workspace and rank them by keyword", unrelated to the agent runtime. The SDK
+//! gained no public capability for it (a footnote to "building the desktop doesn't require changing the SDK" — if the app layer can solve it, don't stuff it into the SDK).
 //!
-//! 边界与 `read_file` 工具一致：只在工作区根目录下遍历，跳过依赖/产物/版本控制
-//! 目录，并对遍历规模设上限，避免在大仓库里把 UI 卡住。
+//! Its boundary matches the `read_file` tool: it only walks under the workspace root, skips
+//! dependency / build / VCS directories, and caps the traversal size so a big repo can't freeze the UI.
 
 #![cfg_attr(not(feature = "desktop"), allow(dead_code))]
 
 use std::path::Path;
 
-/// 遍历时跳过的目录名（依赖、产物、VCS、Shirley 自身状态）。
+/// Directory names skipped during traversal (dependencies, build output, VCS, Shirley's own state).
 const SKIP_DIRS: &[&str] = &[
     ".git",
     ".hg",
@@ -27,9 +27,9 @@ const SKIP_DIRS: &[&str] = &[
     "__pycache__",
 ];
 
-/// 单次遍历访问的条目上限（防大仓库卡 UI）。
+/// Max entries visited per traversal (prevents freezing the UI on a big repo).
 const MAX_VISITED: usize = 20_000;
-/// 返回结果上限。
+/// Max results returned.
 const DEFAULT_LIMIT: usize = 50;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,20 +40,20 @@ pub enum FileKind {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FileEntry {
-    /// 相对工作区根的路径，统一用 `/` 分隔（跨平台一致，便于前端展示与插入）。
+    /// Path relative to the workspace root, always `/`-separated (consistent across platforms, easy for the frontend to show and insert).
     pub path: String,
-    /// 末段名字（用于 chip 展示）。
+    /// Last path segment (used for chip display).
     pub name: String,
     pub kind: FileKind,
 }
 
-/// 在工作区根目录下按 `query` 检索文件/目录。
+/// Search files/directories under the workspace root by `query`.
 ///
-/// - `query` 为空：返回广度优先的前 `limit` 个条目（近似"最近/顶层优先"）。
-/// - `query` 非空：大小写不敏感匹配，按匹配质量排序（前缀 > 名字子串 > 路径子串 >
-///   子序列），命中越多、路径越短越靠前。
+/// - Empty `query`: returns the first `limit` entries in breadth-first order (approximating "nearest / top-level first").
+/// - Non-empty `query`: case-insensitive match, ranked by match quality (prefix > name substring > path substring >
+///   subsequence); more matches and shorter paths rank higher.
 ///
-/// 只做只读遍历，出错（权限等）静默跳过，尽力而为。
+/// Read-only traversal only; errors (permissions, etc.) are silently skipped, best-effort.
 pub fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<FileEntry> {
     let limit = limit.unwrap_or(DEFAULT_LIMIT).max(1);
     let query = query.trim().to_lowercase();
@@ -61,7 +61,7 @@ pub fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<FileE
     let mut entries: Vec<FileEntry> = Vec::new();
     let mut visited = 0usize;
 
-    // 广度优先：用 VecDeque 保证顶层/浅层优先。
+    // Breadth-first: use a VecDeque to favor top-level / shallow entries.
     let mut queue: std::collections::VecDeque<(std::path::PathBuf, String)> =
         std::collections::VecDeque::new();
     queue.push_back((root.to_path_buf(), String::new()));
@@ -83,7 +83,7 @@ pub fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<FileE
             }
             let name = entry.file_name().to_string_lossy().to_string();
             if name.starts_with('.') && rel.is_empty() {
-                // 工作区根目录下的隐藏条目（.git / .env 等）不参与引用。
+                // Hidden entries at the workspace root (.git / .env, etc.) don't participate in references.
                 continue;
             }
             let file_type = match entry.file_type() {
@@ -102,7 +102,7 @@ pub fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<FileE
             children.push((entry.path(), child_rel, is_dir));
         }
 
-        // 目录与文件混排时按名字排序，保证结果稳定（也利于缓存/可预期）。
+        // Sort by name when mixing dirs and files, for stable results (also helps caching / predictability).
         children.sort_by(|a, b| a.1.cmp(&b.1));
 
         for (child_abs, child_rel, is_dir) in children {
@@ -146,7 +146,7 @@ pub fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<FileE
     scored.into_iter().take(limit).map(|(_, _, entry)| entry).collect()
 }
 
-/// `needle` 是否为 `haystack` 的子序列（大小写已归一）。
+/// Whether `needle` is a subsequence of `haystack` (case already normalized).
 fn is_subsequence(needle: &str, haystack: &str) -> bool {
     let mut chars = haystack.chars();
     needle.chars().all(|n| chars.any(|h| h == n))

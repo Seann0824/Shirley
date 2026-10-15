@@ -1,45 +1,45 @@
-//! 记忆的持久化层：Markdown 目录的读写（`docs/memory.md` §3.1）。
+//! Memory persistence layer: reading and writing a Markdown directory (`docs/memory.md` 3.1).
 //!
-//! 布局（两级：全局个人记忆 + 工作区项目记忆）：
+//! Layout (two levels: global personal memory + workspace project memory):
 //!
 //! ```text
-//! <config_dir>/shirley/memory/   # 全局（跨项目）
-//! ├── core.md                    # 常驻层：画像 + 明确偏好 + 活跃项目
-//! ├── index.md                   # 程序维护的索引页（见 index.rs）
-//! ├── episodic/                  # 情景记忆（事件）
-//! ├── preferences/               # 偏好 / 习惯
-//! ├── procedures/                # 程序记忆（行为流程）
-//! └── facts/                     # 事实
-//! <root>/.shirley/memory/        # 工作区级（随仓库走）
+//! <config_dir>/shirley/memory/   # global (cross-project)
+//! |-- core.md                    # resident layer: profile + explicit preferences + active projects
+//! |-- index.md                   # program-maintained index page (see index.rs)
+//! |-- episodic/                  # episodic memory (events)
+//! |-- preferences/               # preferences / habits
+//! |-- procedures/                # procedural memory (behavior flows)
+//! |-- facts/                     # facts
+//! <root>/.shirley/memory/        # workspace level (travels with the repo)
 //! ```
 //!
-//! **写只落主根**（`roots[0]`，通常是全局）；**读合并所有根**，同名 `id` 后出现的
-//! 覆盖先出现的（工作区覆盖全局）。用同步 `std::fs`：记忆目录很小，且
-//! `ContextProvider::context()` 是同步接口，读必须同步。
+//! **Writes only land in the primary root** (`roots[0]`, usually global); **reads merge all roots**, and for the same `id` a later one
+//! overrides an earlier one (workspace overrides global). Uses synchronous `std::fs`: the memory directory is small, and
+//! `ContextProvider::context()` is a synchronous interface, so reads must be synchronous.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use super::format::{Domain, Entry, EntryType, MemoryError};
 
-/// 常驻概览文件名。
+/// Resident overview file name.
 pub const CORE_FILE: &str = "core.md";
-/// 索引页文件名。
+/// Index page file name.
 pub const INDEX_FILE: &str = "index.md";
 
-/// 条目子目录（`type` → 目录，见 [`dir_for`]）。
+/// Entry subdirectories (`type` -> directory, see [`dir_for`]).
 pub const ENTRY_DIRS: [&str; 4] = ["episodic", "preferences", "procedures", "facts"];
 
-/// 记忆存储：持有若干根目录（第一个为写入主根）。
+/// Memory store: holds several root directories (the first is the write primary root).
 pub struct MemoryStore {
     roots: Vec<PathBuf>,
 }
 
 impl MemoryStore {
-    /// 单根存储（测试 / 工作区级）。
+    /// Single-root store (tests / workspace level).
     ///
-    /// V1 生产路径统一走 [`MemoryStore::with_roots`]（全局 + 工作区双根），
-    /// 本构造仅测试与未来"单根工作区"场景使用。
+    /// The V1 production path uniformly uses [`MemoryStore::with_roots`] (global + workspace dual roots);
+    /// this constructor is used only by tests and a future "single-root workspace" scenario.
     #[allow(dead_code)]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
@@ -47,31 +47,31 @@ impl MemoryStore {
         }
     }
 
-    /// 多根存储（全局 + 工作区）。`roots[0]` 为写入主根。
+    /// Multi-root store (global + workspace). `roots[0]` is the write primary root.
     pub fn with_roots(roots: Vec<PathBuf>) -> Self {
         assert!(!roots.is_empty(), "memory store needs at least one root");
         Self { roots }
     }
 
-    /// 写入主根。
+    /// The write primary root.
     pub fn primary_root(&self) -> &Path {
         &self.roots[0]
     }
 
-    /// 全部根目录（读合并顺序：全局 → 工作区）。向量 sidecar 按根查找 / 落主根。
+    /// All root directories (read merge order: global -> workspace). Vector sidecars are looked up per root / written to the primary root.
     pub fn roots(&self) -> &[PathBuf] {
         &self.roots
     }
 
-    /// 建好全部条目子目录（幂等）。`core.md` / `index.md` 由写入方按需创建。
+    /// Create all entry subdirectories (idempotent). `core.md` / `index.md` are created by the writer on demand.
     ///
-    /// 写入路径已改用 [`Self::ensure_layout_at`]（按域选根），本方法保留为公开契约 / 测试用。
+    /// The write path now uses [`Self::ensure_layout_at`] (selecting a root by domain); this method is kept as a public contract / for tests.
     #[allow(dead_code)]
     pub fn ensure_layout(&self) -> Result<(), MemoryError> {
         Self::ensure_layout_at(self.primary_root())
     }
 
-    /// 在指定根建好条目子目录（幂等）。
+    /// Create entry subdirectories under the given root (idempotent).
     pub fn ensure_layout_at(root: &Path) -> Result<(), MemoryError> {
         std::fs::create_dir_all(root)?;
         for dir in ENTRY_DIRS {
@@ -80,8 +80,8 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// 按**归属域**选存储根：`Personal` → 全局根（`roots[0]`），`Project` → 工作区根
-    /// （`roots[1]`，即 `<root>/.shirley/memory`）。单根存储（测试）时 `Project` 回退主根。
+    /// Select the storage root by **owning domain**: `Personal` -> global root (`roots[0]`), `Project` -> workspace root
+    /// (`roots[1]`, i.e. `<root>/.shirley/memory`). With a single-root store (tests), `Project` falls back to the primary root.
     pub fn root_for_domain(&self, domain: Domain) -> &Path {
         match domain {
             Domain::Personal => self.primary_root(),
@@ -93,7 +93,7 @@ impl MemoryStore {
         }
     }
 
-    /// 读常驻概览 `core.md`（多根合并：工作区内容追加在全局之后）。空 / 缺失返回 `None`。
+    /// Read the resident overview `core.md` (multi-root merge: workspace content is appended after global). Empty / missing returns `None`.
     pub fn read_core(&self) -> Option<String> {
         let mut parts = Vec::new();
         for root in &self.roots {
@@ -107,30 +107,30 @@ impl MemoryStore {
         (!parts.is_empty()).then(|| parts.join("\n\n"))
     }
 
-    /// 写常驻概览 `core.md`（落主根）。
+    /// Write the resident overview `core.md` (lands in the primary root).
     ///
-    /// V1 的 `core.md` 由用户 / 应用显式维护，curator 不写它；本方法供测试与
-    /// 未来"自动维护 core"使用。
+    /// V1's `core.md` is maintained explicitly by the user / app, and the curator does not write it; this method is for tests and
+    /// a future "auto-maintain core" use.
     #[allow(dead_code)]
     pub fn write_core(&self, text: &str) -> Result<(), MemoryError> {
         self.write_core_at(self.primary_root(), text)
     }
 
-    /// 写常驻概览到**指定根**（分根重建用）。
+    /// Write the resident overview to a **specified root** (for per-root rebuilds).
     pub fn write_core_at(&self, root: &Path, text: &str) -> Result<(), MemoryError> {
         Self::ensure_layout_at(root)?;
         std::fs::write(root.join(CORE_FILE), text)?;
         Ok(())
     }
 
-    /// 一条条目应落的绝对路径：`<root_for_domain>/<dir>/<id>.md`。
+    /// The absolute path an entry should land at: `<root_for_domain>/<dir>/<id>.md`.
     pub fn entry_path(&self, entry: &Entry) -> PathBuf {
         self.root_for_domain(entry.domain)
             .join(dir_for(entry.entry_type))
             .join(format!("{}.md", entry.id))
     }
 
-    /// 写入一条条目（**按 `entry.domain` 选根**，`id` 决定文件名）。返回写入路径。
+    /// Write one entry (**selecting the root by `entry.domain`**; `id` determines the file name). Returns the written path.
     pub fn write_entry(&self, entry: &Entry) -> Result<PathBuf, MemoryError> {
         let root = self.root_for_domain(entry.domain);
         Self::ensure_layout_at(root)?;
@@ -139,17 +139,17 @@ impl MemoryStore {
         Ok(path)
     }
 
-    /// 读一条条目。
+    /// Read one entry.
     #[allow(dead_code)]
     pub fn read_entry(&self, path: &Path) -> Result<Entry, MemoryError> {
         let text = std::fs::read_to_string(path)?;
         Entry::parse(&text)
     }
 
-    /// 遍历所有根、所有条目目录，解析出全部条目，按 `id` 升序返回。
+    /// Traverse all roots and all entry directories, parse out all entries, and return them sorted ascending by `id`.
     ///
-    /// 同名 `id` 后出现者覆盖先出现者（工作区覆盖全局）。解析失败的条目**跳过**
-    /// （不让一条坏文件拖垮整库），返回 `(路径, 条目)`。
+    /// For the same `id`, a later one overrides an earlier one (workspace overrides global). Entries that fail to parse are **skipped**
+    /// (do not let one bad file bring down the whole store), returning `(path, entry)`.
     pub fn list_entries(&self) -> Result<Vec<(PathBuf, Entry)>, MemoryError> {
         let mut by_id: BTreeMap<String, (PathBuf, Entry)> = BTreeMap::new();
         for root in &self.roots {
@@ -178,10 +178,10 @@ impl MemoryStore {
         Ok(by_id.into_values().collect())
     }
 
-    /// 只遍历**单个根**的条目（按根重建 `core.md` / `index.md` 用）。按 `id` 升序。
+    /// Traverse entries of a **single root** (for per-root rebuilds of `core.md` / `index.md`). Sorted ascending by `id`.
     ///
-    /// 与 [`Self::list_entries`]（跨根合并、同名覆盖）不同：这里只看给定根，天然把
-    /// 全局（个人）与工作区（项目）分开——分根重建时各投影各的，互不串味。
+    /// Unlike [`Self::list_entries`] (cross-root merge, same-name override): here only the given root is considered, which naturally separates
+    /// global (personal) from workspace (project) -- per-root rebuilds each project their own, without bleeding into each other.
     pub fn list_entries_in(&self, root: &Path) -> Result<Vec<(PathBuf, Entry)>, MemoryError> {
         let mut by_id: BTreeMap<String, (PathBuf, Entry)> = BTreeMap::new();
         for dir in ENTRY_DIRS {
@@ -208,7 +208,7 @@ impl MemoryStore {
         Ok(by_id.into_values().collect())
     }
 
-    /// 把绝对路径表达成相对某个根的展示路径（索引页用）。
+    /// Express an absolute path as a display path relative to some root (for the index page).
     pub fn relative_path(&self, path: &Path) -> String {
         for root in &self.roots {
             if let Ok(rel) = path.strip_prefix(root) {
@@ -220,11 +220,11 @@ impl MemoryStore {
             .unwrap_or_default()
     }
 
-    /// 删一条条目（按 `id` 在所有根里找，找到即删）。返回是否删到。
+    /// Delete one entry (find by `id` across all roots, delete on find). Returns whether anything was deleted.
     ///
-    /// `delete` 是 curator 的动作之一（候选被环境探测证伪时）。
+    /// `delete` is one of the curator's actions (when a candidate is falsified by environment probing).
     ///
-    /// V1 curator 只做 upsert + supersede，暂不接线删除；保留为 store 契约。
+    /// The V1 curator only does upsert + supersede and does not yet wire deletion; kept as a store contract.
     #[allow(dead_code)]
     pub fn delete_entry(&self, id: &str) -> Result<bool, MemoryError> {
         let mut removed = false;
@@ -242,7 +242,7 @@ impl MemoryStore {
     }
 }
 
-/// `type` → 条目子目录。
+/// `type` -> entry subdirectory.
 fn dir_for(entry_type: EntryType) -> &'static str {
     match entry_type {
         EntryType::Event => "episodic",
@@ -261,7 +261,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!(
             "shirley_mem_store_{tag}_{}_{}",
             std::process::id(),
-            // 让同一进程内多次调用拿到不同目录。
+            // Make multiple calls within the same process get different directories.
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .unwrap()
@@ -304,7 +304,7 @@ mod tests {
     fn entry_round_trips_via_disk() {
         let root = tmp("roundtrip");
         let store = MemoryStore::new(&root);
-        let original = entry("pref-a", EntryType::Preference, "偏好 A。");
+        let original = entry("pref-a", EntryType::Preference, "Preference A.");
         let path = store.write_entry(&original).unwrap();
         assert!(path.ends_with("preferences/pref-a.md"));
 
@@ -318,8 +318,8 @@ mod tests {
         let root = tmp("core");
         let store = MemoryStore::new(&root);
         assert!(store.read_core().is_none());
-        store.write_core("用户是 Sean。").unwrap();
-        assert_eq!(store.read_core().as_deref(), Some("用户是 Sean。"));
+        store.write_core("The user is Sean.").unwrap();
+        assert_eq!(store.read_core().as_deref(), Some("The user is Sean."));
     }
 
     #[test]
@@ -328,28 +328,28 @@ mod tests {
         let workspace = tmp("workspace");
         let g = MemoryStore::new(&global);
         let w = MemoryStore::new(&workspace);
-        g.write_entry(&entry("fact-db", EntryType::Fact, "全局：用 MySQL。"))
+        g.write_entry(&entry("fact-db", EntryType::Fact, "Global: uses MySQL."))
             .unwrap();
-        w.write_entry(&entry("fact-db", EntryType::Fact, "工作区：用 Postgres。"))
+        w.write_entry(&entry("fact-db", EntryType::Fact, "Workspace: uses Postgres."))
             .unwrap();
 
-        // roots[0]=全局（写），roots[1]=工作区（读时覆盖）。
+        // roots[0]=global (write), roots[1]=workspace (overrides on read).
         let merged = MemoryStore::with_roots(vec![global.clone(), workspace.clone()]);
         let listed = merged.list_entries().unwrap();
         assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].1.body, "工作区：用 Postgres。");
+        assert_eq!(listed[0].1.body, "Workspace: uses Postgres.");
     }
 
     #[test]
     fn core_merges_global_then_workspace() {
         let global = tmp("core_g");
         let workspace = tmp("core_w");
-        MemoryStore::new(&global).write_core("全局：用户是 Sean。").unwrap();
-        MemoryStore::new(&workspace).write_core("工作区：正在迁移。").unwrap();
+        MemoryStore::new(&global).write_core("Global: the user is Sean.").unwrap();
+        MemoryStore::new(&workspace).write_core("Workspace: migrating.").unwrap();
         let merged = MemoryStore::with_roots(vec![global, workspace]);
         assert_eq!(
             merged.read_core().as_deref(),
-            Some("全局：用户是 Sean。\n\n工作区：正在迁移。")
+            Some("Global: the user is Sean.\n\nWorkspace: migrating.")
         );
     }
 
@@ -360,7 +360,7 @@ mod tests {
         store.ensure_layout().unwrap();
         std::fs::write(root.join("facts/broken.md"), "not a valid entry").unwrap();
         store
-            .write_entry(&entry("fact-ok", EntryType::Fact, "好的。"))
+            .write_entry(&entry("fact-ok", EntryType::Fact, "Fine."))
             .unwrap();
         let listed = store.list_entries().unwrap();
         assert_eq!(listed.len(), 1);
@@ -372,7 +372,7 @@ mod tests {
         let root = tmp("delete");
         let store = MemoryStore::new(&root);
         store
-            .write_entry(&entry("fact-gone", EntryType::Fact, "删我。"))
+            .write_entry(&entry("fact-gone", EntryType::Fact, "Delete me."))
             .unwrap();
         assert!(store.delete_entry("fact-gone").unwrap());
         assert!(store.list_entries().unwrap().is_empty());

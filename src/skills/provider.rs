@@ -1,13 +1,17 @@
-//! 每轮请求末尾注入 skill 上下文的提供者（渐进式披露的 Tier1 + Tier2）。
+//! Provider that injects skill context at the end of each request (progressive disclosure
+//! Tier1 + Tier2).
 //!
-//! 复用 SDK 的 [`ContextProvider`] 接缝，与任务账本 / 记忆同款：注入位置是**本轮
-//! 请求末尾的一条 system 消息**——不进 `self.messages`、压缩碰不到、不动前缀缓存。
+//! It reuses the SDK's [`ContextProvider`] seam, same as the task ledger / memory: the
+//! injection point is **a system message at the end of this turn's request** — it doesn't enter
+//! `self.messages`, compaction can't touch it, and it doesn't disturb the prefix cache.
 //!
-//! **渲染 = Tier1 目录 + 已激活正文块**，且严格**追加式**：目录是稳定前缀，已激活
-//! 块按激活顺序拼接在它之后，旧内容逐字节不变。这样前缀缓存命中，新激活只是把
-//! 字符串往后接一段（见 [`SkillRuntime::render`](super::runtime::SkillRuntime::render)）。
+//! **Render = Tier1 directory + activated body blocks**, and strictly **append-only**: the
+//! directory is a stable prefix, activated blocks are concatenated after it in activation order,
+//! and old content stays byte-for-byte unchanged. This keeps the prefix cache hitting, and a new
+//! activation just appends another segment to the string (see
+//! [`SkillRuntime::render`](super::runtime::SkillRuntime::render)).
 //!
-//! 目录为空且无激活 → 返回 `None`（不注入空内容）。
+//! Empty directory and no activation -> returns `None` (injects nothing).
 
 use std::sync::Arc;
 
@@ -15,7 +19,7 @@ use shirley_agent_sdk::ContextProvider;
 
 use super::runtime::SkillRuntime;
 
-/// 每轮末尾注入「可用 skill 目录 + 已激活正文」的提供者。
+/// Provider that injects the "available skills directory + activated bodies" each turn.
 pub struct SkillContextProvider {
     runtime: Arc<SkillRuntime>,
 }
@@ -67,7 +71,7 @@ mod tests {
 
     #[test]
     fn activated_content_is_injected() {
-        // 用真实临时目录，验证激活后正文经 provider 注入。
+        // Use a real temp dir to verify the activated body is injected through the provider.
         let dir = std::env::temp_dir().join(format!(
             "shirley_skill_provider_{}_{:?}",
             std::process::id(),

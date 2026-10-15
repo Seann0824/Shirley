@@ -1,17 +1,17 @@
-//! 应用层多会话运行时容器（`docs/multi-session.md` 决策 4）。
+//! Application-layer multi-session runtime container (`docs/multi-session.md` decision 4).
 //!
-//! 这是应用层的**唯一编排入口**：把「会话从哪来」（`SessionCatalog`）、
-//! 「每个会话跑到哪了」（[`Session`]）、「前台是谁」（`SessionManager::active`）
-//! 三件事收在一处。
+//! This is the application layer's **single orchestration entry point**: it gathers three things in one place:
+//! "where sessions come from" (`SessionCatalog`), "how far each session has run" ([`Session`]),
+//! and "who is in the foreground" (`SessionManager::active`).
 //!
-//! 与 [`crate::session`]（存储 / 目录层）不同：那一层只管"日志文件怎么读写、
-//! 会话怎么列出来"；本模块管"每个会话在内存里长什么样、谁在前台"。一个
-//! [`Session`] 自持一个独立 [`Agent`]（决策 1：多会话 = 多个独立 `Agent`，
-//! 不是"一个 Agent 分时"），因此不同会话的召回库 / 任务账本 / 会话日志天然隔离。
+//! Unlike [`crate::session`] (the storage / catalog layer): that layer only cares about "how the log files are read/written and
+//! how sessions are listed"; this module cares about "what each session looks like in memory and who is in the foreground". A
+//! [`Session`] holds its own independent [`Agent`] (decision 1: multiple sessions = multiple independent `Agent`s,
+//! not "one Agent time-shared"), so different sessions' recall stores / task ledgers / session logs are naturally isolated.
 //!
-//! 身份住在容器上、`Agent` 保持匿名（决策 4）：工厂 `build_agent` 造出匿名
-//! `Agent`，塞进 `Session` 时贴一次 `name`——避免"`Agent` 里一个 id、`Session`
-//! 里一个 id"两个真相源。
+//! Identity lives on the container, `Agent` stays anonymous (decision 4): the factory `build_agent` creates an anonymous
+//! `Agent`, and a `name` is stuck on it once when it is put into a `Session` -- avoiding "one id in `Agent`, one id in
+//! `Session`" as two sources of truth.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -29,8 +29,8 @@ use crate::session::{SessionCatalog, SessionStore};
 use crate::skills::SkillRuntime;
 use crate::todo::{TaskView, TodoStore};
 
-/// 事件扇出通道容量。运行中订阅者若落后超过此数会 `Lagged`，由订阅方（desktop
-/// pump）跳过、靠重发快照重对齐（见 `docs/multi-session.md`）。
+/// Event fan-out channel capacity. A running subscriber that falls more than this far behind gets `Lagged`, and the subscriber (desktop
+/// pump) skips and realigns by resending a snapshot (see `docs/multi-session.md`).
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 fn proxy_session_id(workspace: &Path, name: Option<&str>) -> Option<String> {
@@ -39,27 +39,27 @@ fn proxy_session_id(workspace: &Path, name: Option<&str>) -> Option<String> {
     Some(Uuid::new_v5(&Uuid::NAMESPACE_URL, identity.as_bytes()).to_string())
 }
 
-/// 一个会话 = 一个运行时容器。
+/// One session = one runtime container.
 ///
-/// 它持有该会话**独占**的 `Agent` 与全部"随会话走"的界面状态（消息条目 /
-/// 滚动位置 / 用量 / 本轮状态……）。前台切换只是把 [`SessionManager::active`]
-/// 指针挪到它身上——**不重建 `Agent`**（重建会丢后台上下文）。
+/// It holds the `Agent` **exclusively** owned by that session and all "session-scoped" UI state (message items /
+/// scroll position / usage / this-turn state ...). Switching the foreground only moves the [`SessionManager::active`]
+/// pointer onto it -- **without rebuilding the `Agent`** (rebuilding would lose background context).
 pub struct Session {
-    /// 会话名（复用 [`crate::session::SessionEntry::name`]）；`None` 表示尚未落盘的
-    /// 内存会话（惰性新建、物化前）。
+    /// Session name (reuses [`crate::session::SessionEntry::name`]); `None` means an in-memory session not yet persisted
+    /// (lazy new, before materialization).
     pub name: Option<String>,
-    /// 该会话独占的 `Agent`。一轮运行期间被 `take` 出去移入后台任务，结束后放回
-    /// （与旧 `take_agent` / `restore_agent` 同款手法，但**每个会话各一份**）。
+    /// The `Agent` exclusively owned by this session. It is `take`n out into a background task during a run, then put back
+    /// afterward (same technique as the old `take_agent` / `restore_agent`, but **one per session**).
     pub agent: Option<Agent>,
-    /// 本会话当前模型名的**镜像**。
+    /// A **mirror** of this session's current model name.
     ///
-    /// `Agent` 运行期被 `take` 走后，`agent.model_config()` 就查不到了（desktop
-    /// 切到别的会话再切回来时，运行中的会话正处于此状态）。模型选择器 / 状态行
-    /// 需要**任何时刻**都能回答"本会话用什么模型"，故在会话上留一份。写入点：
-    /// [`Session::new`] 初始化、[`Session::begin_turn`] / [`Session::restore_agent`]
-    /// 与 agent 同步、切换/新建会话后由 [`Session::remember_model`] 刷新。
+    /// After the `Agent` is `take`n away during a run, `agent.model_config()` is no longer queryable (when desktop
+    /// switches to another session and back, the running session is in exactly this state). The model picker / status line
+    /// need to answer "what model does this session use" at **any** moment, so a copy is kept on the session. Write points:
+    /// initialization in [`Session::new`], [`Session::begin_turn`] / [`Session::restore_agent`]
+    /// syncing with the agent, and refreshed by [`Session::remember_model`] after switching/creating a session.
     model: Option<String>,
-    /// 该会话的消息条目（渲染视图）。
+    /// This session's message items (the render view).
     pub items: Vec<Item>,
     pub waiting: bool,
     pub waiting_since: Option<Instant>,
@@ -70,49 +70,49 @@ pub struct Session {
     pub total_usage: Usage,
     pub compressing: bool,
     pub context_usage: Option<(u64, u64)>,
-    /// 本轮流式回复起始的 `items` 下标（收尾时据此截断半截流式内容）。
+    /// The `items` index where this turn's streaming reply starts (used at wrap-up to truncate a half-finished streaming reply).
     pub streaming_delta_start: Option<usize>,
-    /// 用户按 Esc 请求打断当前回复（由主循环读取后触发取消）。
+    /// The user pressed Esc to request interrupting the current reply (read by the main loop to trigger cancellation).
     pub interrupt_requested: bool,
-    /// 该会话的事件扇出通道（多会话：UI 切到会话 → 订阅，切走 → 退订）。
+    /// This session's event fan-out channel (multi-session: UI switches to a session -> subscribe, switches away -> unsubscribe).
     ///
-    /// 通道归 `Session` 自己持有（与"每个 `Session` 自持 `Agent`"对称，见
-    /// `docs/multi-session.md` 决策 2）：`SessionManager` 只负责把每个
-    /// `AgentEvent` 喂给对应会话，不持有通道。
+    /// The channel is owned by the `Session` itself (symmetric with "each `Session` holds its own `Agent`", see
+    /// `docs/multi-session.md` decision 2): `SessionManager` only feeds each
+    /// `AgentEvent` to the corresponding session, it does not hold channels.
     events: broadcast::Sender<Result<AgentEvent, String>>,
-    /// 该会话是否正在跑一轮（`Agent` 被移入后台任务）。与 `agent.is_none()` 同义，
-    /// 单独记一份是为了让状态转移显式。
+    /// Whether this session is running a turn (its `Agent` moved into a background task). Synonymous with `agent.is_none()`,
+    /// kept separately to make the state transition explicit.
     pub running: bool,
-    /// 该会话的持久化存储（`None` = 不落盘，供测试）。
+    /// This session's persistent store (`None` = no persistence, for tests).
     ///
-    /// 落库由 [`Session::apply_event`] 事件驱动：收到 SDK 的 `MessageAdded` 即
-    /// `append`。会话持久化完全在应用层，SDK 不再持有会话日志。
+    /// Persistence is event-driven via [`Session::apply_event`]: on receiving the SDK's `MessageAdded` it
+    /// `append`s. Session persistence is entirely in the application layer; the SDK no longer holds session logs.
     store: Option<Arc<dyn SessionStore>>,
-    /// 该会话的记忆运行时（`None` = 无记忆，供测试 / 无配置场景）。
+    /// This session's memory runtime (`None` = no memory, for tests / no-config scenarios).
     ///
-    /// 每会话一份（`docs/memory.md` §4.2）：query 槽独立，多会话并发互不干扰。
-    /// 驱动方在发起一轮前 `set_query`（按本轮用户输入做相关检索），会话结束
-    /// 交给 curator。
+    /// One per session (`docs/memory.md` section 4.2): the query slot is independent, so concurrent multi-session runs do not interfere.
+    /// The driver calls `set_query` before starting a turn (relevant retrieval based on this turn's user input); when the session ends
+    /// it is handed to the curator.
     pub memory: Option<Arc<MemoryRuntime>>,
-    /// 该会话的技能运行时（`None` = 无技能，供测试 / 无目录场景）。
+    /// This session's skill runtime (`None` = no skills, for tests / no-catalog scenarios).
     ///
-    /// 每会话一份（与 `memory` 对称）：已激活集合随会话隔离。TUI 的
-    /// `/<skill-name>` slash 入口经此句柄直接激活（`docs/skills.md` 5.6），
-    /// 复用 P1 的 `SkillContextProvider` 注入接缝——不新增注入路径。
+    /// One per session (symmetric with `memory`): the activated set is isolated per session. The TUI's
+    /// `/<skill-name>` slash entry activates directly through this handle (`docs/skills.md` 5.6),
+    /// reusing the P1 `SkillContextProvider` injection seam -- no new injection path is added.
     pub skills: Option<Arc<SkillRuntime>>,
-    /// 该会话的任务账本（`None` = 无账本，供测试 / 无配置场景）。
+    /// This session's task ledger (`None` = no ledger, for tests / no-config scenarios).
     ///
-    /// 与 `todo` 工具 / `TodoContextProvider` **共享同一 `Arc`**（由 `build_agent`
-    /// 造出并回传），界面据此实时读取任务进度（[`TodoStore::view`]）——TUI 在每帧
-    /// `draw` 时直接读，desktop 在 pump 收到 `todo` 工具完成事件时读。
+    /// **Shares the same `Arc`** with the `todo` tool / `TodoContextProvider` (created and returned by `build_agent`),
+    /// so the UI can read task progress in real time ([`TodoStore::view`]) -- the TUI reads it directly every frame in
+    /// `draw`, and desktop reads it when the pump receives a `todo` tool completion event.
     pub todo: Option<Arc<TodoStore>>,
 }
 
 impl Session {
-    /// 用现成的 `Agent` 起一个会话。
+    /// Start a session with an existing `Agent`.
     ///
-    /// `store` 是该会话的持久化存储（`None` = 不落盘）；落库走
-    /// [`Session::apply_event`] 的事件驱动路径。
+    /// `store` is this session's persistent store (`None` = no persistence); persistence goes through
+    /// [`Session::apply_event`]'s event-driven path.
     pub fn new(
         mut agent: Agent,
         name: Option<String>,
@@ -149,16 +149,16 @@ impl Session {
         }
     }
 
-    /// 本会话任务账本的结构化视图（供 UI 渲染任务进度）；无账本 / 空账本返回 `None`。
+    /// Structured view of this session's task ledger (for the UI to render task progress); returns `None` for a missing / empty ledger.
     pub fn todo_view(&self) -> Option<TaskView> {
         self.todo.as_ref().and_then(|store| store.view())
     }
 
-    /// 本会话当前的模型名。
+    /// This session's current model name.
     ///
-    /// **活 `Agent` 优先、镜像回退**：`Agent` 在（空闲）时以它为准（唯一真相源），
-    /// 运行期 `Agent` 被 `take` 走后回退到 [`Session::model`] 镜像——这样切到别的
-    /// 会话再切回来时，模型选择器 / 状态行仍能显示本会话的模型，而不是空白。
+    /// **Live `Agent` first, mirror fallback**: while the `Agent` is present (idle) it is authoritative (single source of truth);
+    /// during a run, after the `Agent` is `take`n away it falls back to the [`Session::model`] mirror -- so when switching to another
+    /// session and back, the model picker / status line can still show this session's model instead of blank.
     pub fn model_name(&self) -> Option<&str> {
         self.agent
             .as_ref()
@@ -166,34 +166,34 @@ impl Session {
             .or(self.model.as_deref())
     }
 
-    /// 刷新模型名镜像（在 `Agent` 上改过模型后调用，或从外部拿到 `Agent` 时同步）。
+    /// Refresh the model-name mirror (called after changing the model on the `Agent`, or to sync when obtaining an `Agent` from outside).
     pub fn remember_model(&mut self) {
         if let Some(agent) = self.agent.as_ref() {
             self.model = Some(agent.model_config().model.clone());
         }
     }
 
-    /// 订阅本会话的事件流（多会话：UI 切到该会话时订阅，切走时丢弃句柄退订）。
+    /// Subscribe to this session's event stream (multi-session: the UI subscribes when switching to this session, and drops the handle to unsubscribe when switching away).
     pub fn subscribe(&self) -> broadcast::Receiver<Result<AgentEvent, String>> {
         self.events.subscribe()
     }
 
-    /// 发布一条事件给所有订阅者（无订阅者时静默丢弃——会话照常累加）。
+    /// Publish one event to all subscribers (silently dropped when there are none -- the session still accumulates).
     pub fn publish(&self, event: Result<AgentEvent, String>) {
         let _ = self.events.send(event);
     }
 
-    /// 把一条 `AgentEvent` 累加到本会话的视图（消息条目 / 用量 / 压缩态 / 上下文）。
+    /// Accumulate one `AgentEvent` into this session's view (message items / usage / compression state / context).
     ///
-    /// 这是 TUI 与 desktop **共享**的累加入口：谁驱动 `run_stream`，就把事件喂给
-    /// 这里，界面只读结果。`Err` 分支是运行期错误文案（渲染成错误条目）。
+    /// This is the accumulation entry **shared** by the TUI and desktop: whoever drives `run_stream` feeds the events
+    /// here, and the UI only reads results. The `Err` branch is a runtime error message (rendered as an error item).
     pub fn apply_event(&mut self, event: Result<AgentEvent, String>) {
         match event {
             Ok(AgentEvent::MessageAdded(message)) => {
-                // 事件驱动落库：SDK 只发事件，落盘由应用层负责（system 不入日志）。
+                // Event-driven persistence: the SDK only emits events; persistence is the application layer's job (system does not go into the log).
                 self.persist_message(&message);
-                // 用户消息的视图条目由驱动方在发起一轮时记入（见 `begin_turn`），
-                // 这里只补 assistant / tool / summary 的视图。
+                // The user message's view item is recorded by the driver when starting a turn (see `begin_turn`),
+                // so here only the assistant / tool / summary views are added.
                 if !matches!(&message, Message::User { .. }) {
                     if matches!(&message, Message::Assistant { .. }) {
                         self.finish_streaming_deltas();
@@ -202,7 +202,7 @@ impl Session {
                 }
             }
             Ok(AgentEvent::ContentDelta(delta)) => self.append_streaming_delta(delta),
-            // 思考（reasoning）不展示：程序内部消化，用户只关心行为与结果。
+            // Thinking (reasoning) is not displayed: digested internally, the user only cares about behavior and results.
             Ok(AgentEvent::ReasoningDelta(_)) => {}
             Ok(AgentEvent::Usage(usage)) => self.record_usage(usage),
             Ok(AgentEvent::CompressionStarted) => self.start_compression(),
@@ -212,17 +212,17 @@ impl Session {
                 limit_tokens,
             }) => self.record_context_usage(used_tokens, limit_tokens),
             Err(error) => self.add_error(error),
-            // Tool / run-finished 事件不产生额外条目（工具组由 MessageAdded 落库时建立）。
+            // Tool / run-finished events do not produce extra items (the tool group is created when MessageAdded is persisted).
             Ok(AgentEvent::ToolStarted { .. }) | Ok(AgentEvent::ToolFinished { .. }) => {}
             Ok(AgentEvent::Finished(_)) => {
                 self.streaming_delta_start = None;
                 self.compressing = false;
-                // 等驱动方归还 Agent 后才解除 waiting，避免提前接受下一轮。
+                // waiting is only released after the driver returns the Agent, to avoid accepting the next turn early.
             }
         }
     }
 
-    /// 正常、取消、失败均解除流式起点，避免下一轮完成时截掉上一轮和新用户输入。
+    /// Normal completion, cancellation, and failure all clear the streaming start point, so the next turn's completion does not truncate the previous turn and new user input.
     pub fn finish_turn(&mut self) {
         self.streaming_delta_start = None;
         self.compressing = false;
@@ -230,18 +230,18 @@ impl Session {
         self.waiting_since = None;
     }
 
-    /// 当前视图快照：按 UI 条目顺序导出可重建的纯数据（`Item` → [`ItemWire`]）。
+    /// Current view snapshot: exports rebuildable plain data in UI item order (`Item` -> [`ItemWire`]).
     ///
-    /// UI 订阅一个**已在运行 / 已积累历史**的会话时，先拿快照重建视图，再叠加
-    /// 之后的事件——避免"切回来看到空白、只有新增量"。
+    /// When the UI subscribes to a session that is **already running / has accumulated history**, it first takes a snapshot to rebuild the view, then overlays
+    /// subsequent events -- avoiding "switching back shows a blank with only the increment".
     pub fn snapshot(&self) -> Vec<ItemWire> {
         self.items.iter().map(ItemWire::from_item).collect()
     }
 
-    /// 从当前 `Agent` 的消息表重建视图条目（会话从磁盘加载后调用）。
+    /// Rebuild view items from the current `Agent`'s message list (called after a session is loaded from disk).
     ///
-    /// 视图条目是 Agent 消息的展示投影；从磁盘恢复的会话其 `Agent` 已带全量历史，
-    /// 但 `items` 还是空的——重建一次，快照 / 渲染才有内容。
+    /// View items are a display projection of Agent messages; a session restored from disk already has its `Agent` carrying the full history,
+    /// but `items` is still empty -- rebuild once so the snapshot / render has content.
     pub fn rebuild_items_from_agent(&mut self) {
         let items = self
             .agent
@@ -252,7 +252,7 @@ impl Session {
         self.streaming_delta_start = None;
     }
 
-    /// 从一条落库消息重建视图条目（运行中订阅已结束会话 / 切换会话时用）。
+    /// Rebuild view items from a persisted message (used when subscribing to a finished session mid-run / switching sessions).
     pub fn items_from_messages(messages: &[Message]) -> Vec<Item> {
         let mut items = Vec::new();
         for message in messages {
@@ -266,7 +266,7 @@ impl Session {
                     tool_calls,
                     ..
                 } => {
-                    // 思考（reasoning_content）不投影成视图条目——UI 不展示思考。
+                    // Thinking (reasoning_content) is not projected into a view item -- the UI does not display thinking.
                     if let Some(content) = content.as_ref().filter(|text| !text.is_empty()) {
                         items.push(Item::Message(ChatMessage {
                             role: Role::Assistant,
@@ -340,7 +340,7 @@ impl Session {
                 tool_calls,
                 ..
             } => {
-                // 思考（reasoning_content）不落成视图条目——UI 不展示思考。
+                // Thinking (reasoning_content) does not become a view item -- the UI does not display thinking.
                 if let Some(content) = content.filter(|c| !c.is_empty()) {
                     self.push_message(Role::Assistant, content);
                 }
@@ -369,25 +369,25 @@ impl Session {
         self.push_message(Role::Error, error);
     }
 
-    /// 把一条消息追加到会话日志（事件驱动落库）。
+    /// Append a message to the session log (event-driven persistence).
     ///
-    /// 落盘失败记入错误条目但不阻断本轮：`docs/session.md` 二.2 把持久化失败
-    /// 当作错误暴露，但 UI 不该因此中断整轮对话。
+    /// A persistence failure is recorded as an error item but does not abort this turn: `docs/session.md` section 2.2 exposes persistence failure
+    /// as an error, but the UI should not interrupt the whole turn because of it.
     fn persist_message(&mut self, message: &Message) {
         let Some(store) = self.store.clone() else {
             return;
         };
         if let Err(error) = store.append(message) {
-            self.add_error(format!("会话落盘失败：{error}"));
+            self.add_error(format!("failed to persist session: {error}"));
         }
     }
 
-    /// 回退最后一条用户消息：内存（`Agent`）与磁盘日志一起回退。
+    /// Rewind the last user message: roll back both memory (`Agent`) and the disk log together.
     ///
-    /// "回退最后一轮"是**会话 / UI 业务语义**（谁定义"一轮"、是否连带丢弃其后的
-    /// assistant / tool 链），故判定放在应用层；SDK 只提供原子能力
-    /// [`Agent::truncate_messages`]（尾截断 + 维护不变量）。日志不含 system，
-    /// 故换算长度时减去置顶的那条。
+    /// "Rewind the last turn" is a **session / UI business semantic** (who defines "a turn", whether the assistant / tool chain after it is
+    /// dropped along with it), so the decision lives in the application layer; the SDK only provides the atomic capability
+    /// [`Agent::truncate_messages`] (tail truncation + invariant maintenance). The log does not contain system,
+    /// so the top one is subtracted when converting the length.
     pub fn rewind_last_user_turn(&mut self) -> Option<String> {
         let agent = self.agent.as_mut()?;
         let index = agent
@@ -398,7 +398,7 @@ impl Session {
             Message::User { content } => content.clone(),
             _ => unreachable!("rposition guarantees a User message"),
         };
-        // 截到该用户消息之前（丢弃这一轮 user 及其后的 assistant / tool 链）。
+        // Truncate to before that user message (dropping this turn's user and the assistant / tool chain after it).
         let new_len = agent.truncate_messages(index);
         let has_system = matches!(agent.messages().first(), Some(Message::System { .. }));
         let log_len = new_len.saturating_sub(usize::from(has_system));
@@ -406,7 +406,7 @@ impl Session {
         if let Some(store) = store
             && let Err(error) = store.truncate(log_len)
         {
-            self.add_error(format!("会话日志截尾失败：{error}"));
+            self.add_error(format!("failed to truncate session log: {error}"));
         }
         Some(content)
     }
@@ -430,12 +430,12 @@ impl Session {
     }
 }
 
-/// UI 条目的中性线格式（`docs/multi-session.md` 决策 4）：由 [`Item`] 映射而来，
-/// 供 UI 订阅已积累历史的会话时重建视图。TUI 不消费它（直接读 [`Item`]）；
-/// desktop 侧再转成前端 DTO（`desktop::wire::ItemWire`）。
+/// Neutral wire format for UI items (`docs/multi-session.md` decision 4): mapped from [`Item`],
+/// for the UI to rebuild the view when subscribing to a session that has accumulated history. The TUI does not consume it (it reads [`Item`] directly);
+/// the desktop side converts it into a frontend DTO (`desktop::wire::ItemWire`).
 #[derive(Debug, Clone)]
 pub enum ItemWire {
-    /// 一条消息条目（角色 / 正文）。
+    /// One message item (role / body).
     Message {
         role: Role,
         content: String,
@@ -443,13 +443,13 @@ pub enum ItemWire {
     Compact {
         content: String,
     },
-    /// 一组工具调用。
+    /// A group of tool calls.
     Tools {
         calls: Vec<ToolCallWire>,
     },
 }
 
-/// [`ItemWire::Tools`] 里的单次工具调用。
+/// A single tool call inside [`ItemWire::Tools`].
 #[derive(Debug, Clone)]
 pub struct ToolCallWire {
     pub id: String,
@@ -458,7 +458,7 @@ pub struct ToolCallWire {
 }
 
 impl ItemWire {
-    /// 从 UI 条目映射（`Item` → 线格式）。
+    /// Map from a UI item (`Item` -> wire format).
     pub fn from_item(item: &Item) -> Self {
         match item {
             Item::Compact { content, .. } => ItemWire::Compact {
@@ -483,12 +483,12 @@ impl ItemWire {
     }
 }
 
-/// 全局唯一的会话编排器：持有全部 [`Session`]、前台指针，以及"造 `Agent` 的工厂"
-/// 与"会话从哪来"的目录。
+/// The globally unique session orchestrator: holds all [`Session`]s, the foreground pointer, plus the "factory that creates `Agent`s"
+/// and the catalog of "where sessions come from".
 ///
-/// `factory` / `catalog` 为 `None` 时退化为"单会话、不可新建/切换"——供不关心
-/// 多会话的测试使用（如 `App::new`）。
-/// 一次 curation 的全部输入（`spawn_curation` 与 `finish` 共用）。
+/// When `factory` / `catalog` are `None` it degrades to "single session, no create/switch" -- for tests that do not care about
+/// multi-session (such as `App::new`).
+/// All inputs for one curation (shared by `spawn_curation` and `finish`).
 struct CurationInputs {
     factory: Arc<AgentFactory>,
     memory: Arc<MemoryRuntime>,
@@ -498,7 +498,7 @@ struct CurationInputs {
 
 pub struct SessionManager {
     sessions: HashMap<u64, Session>,
-    /// 前台会话的 key。
+    /// Key of the foreground session.
     active: u64,
     next_id: u64,
     catalog: Arc<dyn SessionCatalog>,
@@ -506,7 +506,7 @@ pub struct SessionManager {
 }
 
 impl SessionManager {
-    /// 用一份现成 `Agent` 起一个只含单会话的 manager（无工厂，不能新建/切换）。
+    /// Start a manager containing only a single session with an existing `Agent` (no factory, cannot create/switch).
     pub fn single(
         agent: Agent,
         name: Option<String>,
@@ -530,7 +530,7 @@ impl SessionManager {
         }
     }
 
-    /// 可造 `Agent` 的 manager：交给它工厂与会话目录，支持新建 / 切换。
+    /// A manager that can create `Agent`s: given a factory and session catalog, supports create / switch.
     #[allow(clippy::too_many_arguments)]
     pub fn with_factory(
         agent: Agent,
@@ -557,40 +557,40 @@ impl SessionManager {
         }
     }
 
-    /// 前台会话（只读）。
+    /// Foreground session (read-only).
     pub fn active(&self) -> &Session {
         self.sessions
             .get(&self.active)
             .expect("active session must exist")
     }
 
-    /// 前台会话（可变）。
+    /// Foreground session (mutable).
     pub fn active_mut(&mut self) -> &mut Session {
         self.sessions
             .get_mut(&self.active)
             .expect("active session must exist")
     }
 
-    /// 前台会话名。
+    /// Foreground session name.
     pub fn active_name(&self) -> Option<&str> {
         self.active().name.as_deref()
     }
 
-    /// 会话目录句柄（供主循环加载列表 / 新建切换）。
+    /// Session catalog handle (for the main loop to load the list / create-switch).
     pub fn catalog(&self) -> Arc<dyn SessionCatalog> {
         Arc::clone(&self.catalog)
     }
 
-    /// 造 `Agent` 的工厂（只读句柄）。无工厂（单会话退化）时返回 `None`。
+    /// The factory that creates `Agent`s (read-only handle). Returns `None` when there is no factory (single-session fallback).
     ///
-    /// 界面用它把「选中的模型条目」换算成一份完整 `ModelConfig`
-    /// （[`AgentFactory::model_config_for`]），再一次性下发给 `Agent`
-    /// （`docs/tool-calling-refactor.md` Step 3）。
+    /// The UI uses it to convert the "selected model entry" into a full `ModelConfig`
+    /// ([`AgentFactory::model_config_for`]), then issues it to the `Agent` in one shot
+    /// (`docs/tool-calling-refactor.md` Step 3).
     pub fn factory(&self) -> Option<Arc<AgentFactory>> {
         self.factory.clone()
     }
 
-    /// 已加载会话里是否已有该名字（用于切换时复用现成 `Agent`，不重建）。
+    /// Whether a loaded session already has this name (used to reuse the existing `Agent` when switching, without rebuilding).
     fn id_of_name(&self, name: &str) -> Option<u64> {
         self.sessions
             .iter()
@@ -598,7 +598,7 @@ impl SessionManager {
             .map(|(id, _)| *id)
     }
 
-    /// 插入一个现成 `Agent` 的会话，返回其 key（不改变前台指针）。
+    /// Insert a session with an existing `Agent`, returning its key (does not change the foreground pointer).
     fn insert(
         &mut self,
         agent: Agent,
@@ -621,17 +621,17 @@ impl SessionManager {
         id
     }
 
-    /// 切换到指定会话（决策 4 / 决策 9）。
+    /// Switch to the specified session (decision 4 / decision 9).
     ///
-    /// 已加载 → **只挪前台指针**（不重建 `Agent`，保住后台上下文）；未加载 →
-    /// 从目录 `open` 日志、经工厂 `build_agent` 恢复工作集后插入再切前台。
-    /// 返回该会话名。
+    /// Already loaded -> **only move the foreground pointer** (do not rebuild the `Agent`, preserving background context); not loaded ->
+    /// `open` the log from the catalog, restore the working set via the factory's `build_agent`, then insert and switch to the foreground.
+    /// Returns the session name.
     pub fn switch_to(&mut self, name: &str) -> Result<String, String> {
-        // 离开前台即视为该会话"本轮结束"——切走后触发一次增量 curation
-        // （`docs/memory.md` §5.1；旧会话仍留在内存，其 `Agent` 消息可读）。
+        // Leaving the foreground counts as this session's "turn ended" -- switching away triggers one incremental curation
+        // (`docs/memory.md` section 5.1; the old session stays in memory and its `Agent` messages remain readable).
         let previous = self.active().name.clone();
-        // 用会话级查询（活 Agent 优先、镜像回退）——离开的会话若正在运行，其 `Agent`
-        // 已被 `take` 走，直接读 `agent` 会拿不到模型。
+        // Use the session-level query (live Agent first, mirror fallback) -- if the departing session is running, its `Agent`
+        // has already been `take`n away, so reading `agent` directly would not get the model.
         let selected_model = self.active().model_name().map(str::to_owned);
         if let Some(id) = self.id_of_name(name) {
             self.active = id;
@@ -643,9 +643,9 @@ impl SessionManager {
         let factory = self
             .factory
             .as_ref()
-            .ok_or_else(|| "当前会话目录不支持切换".to_owned())?;
+            .ok_or_else(|| "the current session catalog does not support switching".to_owned())?;
         let store = self.catalog.open(name).map_err(|error| error.to_string())?;
-        // 会话持久化在应用层：先 load 日志，再交给工厂起 `Agent`（system 现生成置顶）。
+        // Session persistence is in the application layer: load the log first, then hand it to the factory to create the `Agent` (system regenerated and placed on top).
         let log = store.load().map_err(|error| error.to_string())?;
         let mut built = factory
             .build_agent(log)
@@ -661,7 +661,7 @@ impl SessionManager {
             Some(built.skills),
             Some(built.todo),
         );
-        // 从磁盘恢复的会话：用其历史重建视图条目，快照 / 渲染才有内容。
+        // A session restored from disk: rebuild view items from its history so the snapshot / render has content.
         if let Some(session) = self.sessions.get_mut(&id) {
             session.rebuild_items_from_agent();
         }
@@ -672,23 +672,23 @@ impl SessionManager {
         Ok(name.to_owned())
     }
 
-    /// 新建（惰性）会话并切过去，返回新会话名。`title` 为空 = 匿名。
+    /// Create a (lazy) new session and switch to it, returning the new session name. An empty `title` = anonymous.
     ///
-    /// 惰性：此刻只定名、不落盘，发首条消息才真正建文件（`create_lazy`）。
+    /// Lazy: only names it now, does not persist; the file is actually created on the first message (`create_lazy`).
     pub fn create_new(&mut self, title: Option<&str>) -> Result<String, String> {
-        // 与 `switch_to` 同理：新建并切走 = 旧会话本轮结束，触发一次 curation。
+        // Same as `switch_to`: creating and switching away = the old session's turn ended, triggering one curation.
         let previous = self.active().name.clone();
-        // 与 `switch_to` 同理：会话级查询，运行期也能拿到模型。
+        // Same as `switch_to`: session-level query, so the model is available even during a run.
         let selected_model = self.active().model_name().map(str::to_owned);
         let factory = self
             .factory
             .as_ref()
-            .ok_or_else(|| "当前会话目录不支持新建".to_owned())?;
+            .ok_or_else(|| "the current session catalog does not support creating".to_owned())?;
         let (entry, store) = self
             .catalog
             .create_lazy(title)
             .map_err(|error| error.to_string())?;
-        // 惰性会话此刻为空：load 得空工作集，首条消息落盘时才物化文件。
+        // The lazy session is empty now: load yields an empty working set; the file is materialized only when the first message is persisted.
         let log = store.load().map_err(|error| error.to_string())?;
         let mut built = factory
             .build_agent(log)
@@ -711,19 +711,35 @@ impl SessionManager {
         Ok(entry.name)
     }
 
-    /// 删除一个会话（内存侧）。运行中拒绝（避免删掉正在写入的日志）。
+    /// Delete a session (in-memory side). Refused while running (to avoid deleting a log being written).
     ///
-    /// **磁盘删除由调用方负责**（`SessionCatalog::delete`）——本方法只负责内存编排：
-    /// 从 `sessions` 移除该会话；若删掉的正是前台会话，则**新建一份惰性空会话并切过去**
-    /// （与启动时同一 UX：此刻只定名、不落盘，发首条消息才建文件）。这样删掉当前会话后
-    /// 前台指针不会悬空，`active_name()` 也不会再返回已删的名字。
+    /// **Disk deletion is the caller's responsibility** (`SessionCatalog::delete`) -- this method only handles in-memory orchestration:
+    /// remove the session from `sessions`; if the one deleted is exactly the foreground session, **create a lazy empty session and switch to it**
+    /// (same UX as at startup: only names it now, does not persist; the file is created on the first message). This way, after deleting the current session
+    /// the foreground pointer is not left dangling, and `active_name()` no longer returns the deleted name.
     ///
-    /// **未加载的会话直接放行**：侧栏 / 列表列的是目录扫描出的**全部**会话，但只有被
-    /// 打开过的才在内存里。对未加载的会话没有内存编排可做，磁盘删除由调用方负责——若
-    /// 这里仍报「会话不存在」，就会表现为「必须先点开（选中）才能删」。名字是否真实
-    /// 存在于磁盘，交由调用方的 `SessionCatalog::delete` 判定。
+    /// **An unloaded session is allowed through directly**: the sidebar / list shows **all** sessions scanned from the catalog, but only those
+    /// that have been opened are in memory. There is no in-memory orchestration to do for an unloaded session, and disk deletion is the caller's responsibility -- if
+    /// this still reported "session does not exist", it would manifest as "you must open (select) it before deleting". Whether the name actually
+    /// exists on disk is decided by the caller's `SessionCatalog::delete`.
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn delete_session(&mut self, name: &str) -> Result<(), String> {
+        // Refused while running (to avoid deleting a log being written) -- `forget_session` includes this check.
+        self.forget_session(name)
+    }
+
+    /// Make the manager **forget** the session named `name` (memory only, does not touch disk).
+    ///
+    /// Used for "delete session" (disk deletion is the caller's responsibility via [`SessionCatalog::delete`]) and
+    /// "move session to another project" (disk migration is the caller's responsibility via [`SessionCatalog::move_to`]):
+    /// both first remove the session from memory. Refused while running (to avoid removing a session being written).
+    ///
+    /// If the one removed is the **foreground session**, first create a lazy empty session and switch to it (same UX as at startup: only
+    /// names it now, does not persist), so the foreground pointer is not dangling and `active_name()` no longer returns the removed name.
+    /// **An unloaded session is allowed through directly** -- the list shows all sessions scanned from the catalog, and only those opened are
+    /// in memory; there is no in-memory orchestration to do for an unloaded session.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    pub fn forget_session(&mut self, name: &str) -> Result<(), String> {
         let Some(id) = self.id_of_name(name) else {
             return Ok(());
         };
@@ -733,62 +749,62 @@ impl SessionManager {
             .map(|session| session.running)
             .unwrap_or(false)
         {
-            return Err("agent 正在运行中".to_owned());
+            return Err("agent is currently running".to_owned());
         }
         let was_active = id == self.active;
         if was_active {
-            // 删的是前台会话：**先**补一份空会话并切过去（`create_new` 会把 `active`
-            // 挪到新会话），再移除旧的——顺序反了的话，一旦 `create_new` 失败就会
-            // 留下悬空的 `active`（后续 `active()` 直接 panic）。
+            // The one removed is the foreground session: **first** add an empty session and switch to it (`create_new` moves `active`
+            // to the new session), then remove the old one -- if the order were reversed, once `create_new` failed it would
+            // leave a dangling `active` (a later `active()` would panic directly).
             self.create_new(None)?;
         }
         self.sessions.remove(&id);
         Ok(())
     }
 
-    // ---- 按会话名的运行时访问（desktop 的 Tauri command 驱动；TUI 走 Deref 访问 active）----
+    // ---- Runtime access by session name (driven by desktop's Tauri commands; the TUI uses Deref to access active) ----
     //
-    // 关键点：全部**按会话名**取，不依赖 `active` 指针——后台会话运行时前台可能已经
-    // 切走，按 `active` 取会把事件 / Agent 错记到别的会话（串会话 bug 的根因）。
+    // Key point: everything is fetched **by session name**, not depending on the `active` pointer -- when a background session is running the foreground may already
+    // have switched away, and fetching by `active` would misattribute events / Agents to another session (the root cause of cross-session bugs).
 
-    /// 名为 `name` 的会话（只读）。
+    /// The session named `name` (read-only).
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn session(&self, name: &str) -> Option<&Session> {
         self.id_of_name(name).and_then(|id| self.sessions.get(&id))
     }
 
-    /// 名为 `name` 的会话（可变）。
+    /// The session named `name` (mutable).
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn session_mut(&mut self, name: &str) -> Option<&mut Session> {
         self.id_of_name(name)
             .and_then(|id| self.sessions.get_mut(&id))
     }
 
-    /// 订阅名为 `name` 会话的事件流。会话不存在返回 `None`。
+    /// Subscribe to the event stream of the session named `name`. Returns `None` if the session does not exist.
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn subscribe(&self, name: &str) -> Option<broadcast::Receiver<Result<AgentEvent, String>>> {
         self.session(name).map(Session::subscribe)
     }
 
-    /// 名为 `name` 会话的视图快照（会话不存在返回 `None`）。
+    /// View snapshot of the session named `name` (returns `None` if the session does not exist).
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn snapshot(&self, name: &str) -> Option<Vec<ItemWire>> {
         self.session(name).map(Session::snapshot)
     }
 
-    /// 发起一轮：把名为 `name` 会话的 `Agent` 移出，并把**用户消息**乐观记入该会话的
-    /// 视图条目（与 TUI 的 `App::submit` 对称）。
+    /// Start a turn: move out the `Agent` of the session named `name`, and optimistically record the **user message** into that session's
+    /// view items (symmetric with the TUI's `App::submit`).
     ///
-    /// 为什么要在这里记：`Session::apply_event` **有意忽略** `MessageAdded(User)`
-    /// （见其注释）——用户消息由**驱动方**记录，而非事件流。TUI 在 `submit` 里记了，
-    /// desktop 的 `agent_send` 之前漏了，导致 `Session.items` 永不含用户消息，
-    /// 切走再切回时按快照重建就丢了用户消息（本函数的回归测试覆盖此点）。
+    /// Why record it here: `Session::apply_event` **intentionally ignores** `MessageAdded(User)`
+    /// (see its comment) -- the user message is recorded by the **driver**, not the event stream. The TUI records it in `submit`,
+    /// desktop's `agent_send` previously missed it, so `Session.items` never contained the user message, and
+    /// when switching away and back the snapshot rebuild lost the user message (this function's regression test covers this).
     ///
-    /// 会话不存在、或正在运行返回 `None`。
+    /// Returns `None` if the session does not exist or is running.
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn begin_turn(&mut self, name: &str, user_message: String) -> Option<Agent> {
         let session = self.session_mut(name)?;
-        // 先把当前模型名同步进镜像，再 `take` 走 `Agent`——运行期镜像仍可回答本会话模型。
+        // Sync the current model name into the mirror first, then `take` the `Agent` away -- the mirror can still answer this session's model during the run.
         session.remember_model();
         let agent = session.agent.take()?;
         session.running = true;
@@ -796,7 +812,7 @@ impl SessionManager {
         Some(agent)
     }
 
-    /// 把 `Agent` 放回名为 `name` 的会话。
+    /// Put the `Agent` back into the session named `name`.
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn restore_agent(&mut self, name: &str, agent: Agent) {
         if let Some(session) = self.session_mut(name) {
@@ -807,9 +823,9 @@ impl SessionManager {
         }
     }
 
-    /// 把一条事件累加进名为 `name` 的会话，并扇出给其订阅者。
+    /// Accumulate one event into the session named `name`, and fan it out to its subscribers.
     ///
-    /// 运行期由驱动 `run_stream` 的任务调用（`SessionManager` 作为任务执行者）。
+    /// Called during a run by the task driving `run_stream` (`SessionManager` acts as the task executor).
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn apply_event(&mut self, name: &str, event: Result<AgentEvent, String>) {
         if let Some(session) = self.session_mut(name) {
@@ -818,15 +834,15 @@ impl SessionManager {
         }
     }
 
-    /// 会话"结束"时触发一次增量 curation（`docs/memory.md` §5.1）。
+    /// Trigger one incremental curation when a session "ends" (`docs/memory.md` section 5.1).
     ///
-    /// V1 的"结束"判定：**离开前台**（切换到别的会话 / 新建会话 / 删掉前台会话）。
-    /// 这是一个**近似**——用户可能只是临时切走又切回（记为已知缺口，docs/memory.md
-    /// §11.4：退出 / 空闲超时等更精确的判定留待后续）。触发是 best-effort：没有
-    /// 记忆、没有消息、不在 tokio 运行时（单测）时静默跳过。
+    /// V1's "ended" determination: **leaving the foreground** (switching to another session / creating a session / deleting the foreground session).
+    /// This is an **approximation** -- the user may have only temporarily switched away and back (recorded as a known gap, docs/memory.md
+    /// section 11.4: more precise determinations such as exit / idle timeout are left for later). Triggering is best-effort: no
+    /// memory, no messages, not in a tokio runtime (unit tests) -> silently skipped.
     ///
-    /// 用 `Handle::try_current()` 守卫：curation 是后台任务，**绝不阻塞**会话切换
-    /// 这条同步路径。失败只记一条 stderr 日志，不影响主流程。
+    /// Guarded by `Handle::try_current()`: curation is a background task and **never blocks** the synchronous
+    /// session-switch path. Failures only log one stderr line and do not affect the main flow.
     fn spawn_curation(&self, name: &str) {
         let Some(inputs) = self.curation_inputs(name) else {
             return;
@@ -837,13 +853,13 @@ impl SessionManager {
         handle.spawn(Self::run_curation(inputs));
     }
 
-    /// 退出程序前对**前台会话**跑一次 curation 并**等待完成**。
+    /// Before exiting the program, run one curation for the **foreground session** and **wait for completion**.
     ///
-    /// 与 [`Self::spawn_curation`]（会话切换时后台触发）互补：单会话聊到底、直接退出
-    /// 时，切换路径永远不会发生，curation 也就永远不触发（`docs/memory.md` §5.1 已知
-    /// 缺口）。退出是「本轮结束」最确切的判定点，故在此补一次。用 `await` 而非
-    /// `spawn`：主循环退出后 tokio 运行时随即关闭，`spawn` 出去的任务可能来不及跑完
-    /// 就被丢弃——退出路径上必须同步等它落地。
+    /// Complementary to [`Self::spawn_curation`] (triggered in the background on session switch): when a single session is chatted to the end and the program
+    /// exits directly, the switch path never happens, so curation never triggers (`docs/memory.md` section 5.1 known
+    /// gap). Exit is the most definite "turn ended" point, so one is added here. Uses `await` rather than
+    /// `spawn`: after the main loop exits the tokio runtime shuts down immediately, and a `spawn`ed task may be discarded
+    /// before it can finish -- on the exit path it must be awaited synchronously.
     pub async fn finish(&self) {
         if let Some(name) = self.active().name.clone()
             && let Some(inputs) = self.curation_inputs(&name)
@@ -852,13 +868,13 @@ impl SessionManager {
         }
     }
 
-    /// 收集一次 curation 所需的全部输入；不满足条件（无工厂 / 无记忆 / 无消息）返回
-    /// `None`。抽出来是为了让 [`Self::spawn_curation`] 与 [`Self::finish`] 共用同一份
-    /// 前置判定与快照逻辑。
+    /// Collect all inputs needed for one curation; returns `None` if the conditions are not met (no factory / no memory / no messages).
+    /// Extracted so that [`Self::spawn_curation`] and [`Self::finish`] share the same
+    /// pre-check and snapshot logic.
     fn curation_inputs(&self, name: &str) -> Option<CurationInputs> {
         let factory = self.factory.clone()?;
         let session = self.session(name)?;
-        // 只沉淀"有内容"的会话（用户 + 助手轮次）；空 / 单条不做无谓的模型调用。
+        // Only distill sessions "with content" (user + assistant turns); empty / single-message ones do not warrant a pointless model call.
         let messages: Vec<Message> = session
             .agent
             .as_ref()
@@ -869,17 +885,17 @@ impl SessionManager {
         }
         Some(CurationInputs {
             factory,
-            // 无记忆配置的会话不沉淀（无 store 可写）。
+            // A session without a memory config is not distilled (no store to write to).
             memory: session.memory.clone()?,
             messages,
             session_ref: format!("{name}.jsonl"),
         })
     }
 
-    /// 一次 curation 的完整流水线：增量抽取 → 命中计数回写 → 定期整理 → 向量刷新。
+    /// The full pipeline for one curation: incremental extraction -> hit-count write-back -> periodic consolidation -> vector refresh.
     ///
-    /// 全程 best-effort：失败只记一条 stderr，绝不向上传播（curation 是后台副业，
-    /// 不该影响会话本身）。
+    /// Best-effort throughout: failures only log one stderr line and are never propagated upward (curation is a background side job
+    /// that should not affect the session itself).
     async fn run_curation(inputs: CurationInputs) {
         let CurationInputs {
             factory,
@@ -899,13 +915,13 @@ impl SessionManager {
             Ok(_) => {}
             Err(error) => eprintln!("[memory] curation for `{session_ref}` failed: {error}"),
         }
-        // V2-D：把本轮会话攒下的检索命中次数写回条目（usage_count / utility）。
+        // V2-D: write this session's accumulated retrieval hit counts back to the entries (usage_count / utility).
         match memory.flush_usage() {
             Ok(0) => {}
             Ok(n) => eprintln!("[memory] flushed usage for {n} entr(y/ies)"),
             Err(error) => eprintln!("[memory] usage flush failed: {error}"),
         }
-        // V2-B/C：增量 curation 之后再按阈值触发定期整理（睡眠学习）。
+        // V2-B/C: after incremental curation, trigger periodic consolidation by threshold (sleep learning).
         if factory.should_consolidate() {
             match factory.consolidate().await {
                 Ok(outcome) if !outcome.empty => eprintln!(
@@ -919,8 +935,8 @@ impl SessionManager {
                 Err(error) => eprintln!("[memory] consolidation failed: {error}"),
             }
         }
-        // V2.5：增量 / 整理都落盘后，把新条目嵌入、清理孤儿向量，让下一轮混合检索
-        // 的语义腿立刻用得上（未配置 embedding 时空操作）。
+        // V2.5: after both incremental / consolidation are persisted, embed new entries and clean orphan vectors, so the next hybrid retrieval
+        // semantic leg is immediately usable (a no-op when embedding is not configured).
         match memory.refresh_vectors().await {
             Ok(0) => {}
             Ok(n) => eprintln!("[memory] embedded {n} entr(y/ies) into the vector index"),
@@ -928,7 +944,7 @@ impl SessionManager {
         }
     }
 
-    /// 名为 `name` 的**已加载**会话是否正在运行（`Agent` 被移入后台任务）。
+    /// Whether the **loaded** session named `name` is running (its `Agent` moved into a background task).
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn is_running(&self, name: &str) -> bool {
         self.session(name)
@@ -936,14 +952,14 @@ impl SessionManager {
             .unwrap_or(false)
     }
 
-    /// 前台会话的 `Agent`（只读）。运行中（被移入后台任务）返回 `None`。
+    /// The foreground session's `Agent` (read-only). Returns `None` while running (moved into a background task).
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn active_agent(&self) -> Option<&Agent> {
         self.active().agent.as_ref()
     }
 
-    /// 前台会话当前的模型名。**运行期也可用**——经 [`Session::model_name`] 的镜像回退，
-    /// 不依赖 `Agent` 是否在场（desktop 切走再切回时前台会话可能正在运行）。
+    /// The foreground session's current model name. **Also usable during a run** -- via [`Session::model_name`]'s mirror fallback,
+    /// it does not depend on whether the `Agent` is present (the foreground session may be running when desktop switches away and back).
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn active_model_name(&self) -> Option<&str> {
         self.active().model_name()
@@ -985,47 +1001,47 @@ mod tests {
         )
     }
 
-    /// 回归：desktop 切换会话后切回来，用户消息不能丢。
+    /// Regression: after desktop switches a session away and back, the user message must not be lost.
     ///
-    /// 快照（切回时前端据此重建 transcript）来自 `Session.items`；`apply_event`
-    /// 有意忽略 `MessageAdded(User)`，故用户消息必须由驱动方在发起一轮时记入——
-    /// `begin_turn` 就是干这个的。此前 desktop 的 `agent_send` 没记，快照里没有
-    /// 用户消息，切换回来就"消失"了。
+    /// The snapshot (from which the frontend rebuilds the transcript on switch-back) comes from `Session.items`; `apply_event`
+    /// intentionally ignores `MessageAdded(User)`, so the user message must be recorded by the driver when starting a turn --
+    /// `begin_turn` is exactly for this. Previously desktop's `agent_send` did not record it, the snapshot had no
+    /// user message, and it "disappeared" on switch-back.
     #[test]
     fn begin_turn_records_user_message_into_snapshot() {
         let mut manager = manager();
         let agent = manager.begin_turn("s", "hello".into());
-        assert!(agent.is_some(), "首轮应能取到 Agent");
-        assert!(manager.is_running("s"), "取走 Agent 后会话应标记为运行中");
+        assert!(agent.is_some(), "the first turn should be able to take the Agent");
+        assert!(manager.is_running("s"), "the session should be marked running after the Agent is taken");
 
         let snapshot = manager.snapshot("s").unwrap();
-        assert_eq!(snapshot.len(), 1, "快照应含刚记入的用户消息");
+        assert_eq!(snapshot.len(), 1, "the snapshot should contain the just-recorded user message");
         match &snapshot[0] {
             ItemWire::Message { role, content, .. } => {
                 assert_eq!(*role, Role::User);
                 assert_eq!(content, "hello");
             }
-            other => panic!("期望 Message 条目，实得 {other:?}"),
+            other => panic!("expected a Message item, got {other:?}"),
         }
 
-        // 同一会话运行中不得再次发起（不并发驱动同一 Agent）。
+        // The same session must not start again while running (do not concurrently drive the same Agent).
         assert!(manager.begin_turn("s", "again".into()).is_none());
     }
 
-    /// 回归：会话运行中（`Agent` 被 `take` 走）仍能查到本会话的模型名。
+    /// Regression: while a session is running (its `Agent` has been `take`n away) its model name can still be queried.
     ///
-    /// desktop 切到别的会话再切回来时，前台会话可能正在运行——此时其 `Agent`
-    /// 不在 `Session` 里，`active_agent()` 返回 `None`。此前 `agent_model_name`
-    /// 走 `active_agent().map(...).unwrap_or_default()`，于是前端拿到空串、模型
-    /// 选择器被清空（「切走再切回模型不恢复」）。镜像字段 `Session::model` 必须
-    /// 在 `Agent` 不在场时兜住这个查询。
+    /// When desktop switches to another session and back, the foreground session may be running -- at that point its `Agent`
+    /// is not in the `Session`, and `active_agent()` returns `None`. Previously `agent_model_name`
+    /// went through `active_agent().map(...).unwrap_or_default()`, so the frontend got an empty string and the model
+    /// picker was cleared ("the model does not recover on switch-away and switch-back"). The mirror field `Session::model` must
+    /// cover this query when the `Agent` is absent.
     #[test]
     fn model_name_survives_running_turn() {
         let mut manager = manager();
         assert_eq!(
             manager.active_model_name(),
             Some("test"),
-            "空闲时读活 Agent"
+            "reads the live Agent when idle"
         );
 
         let _agent = manager.begin_turn("s", "hi".into()).unwrap();
@@ -1033,11 +1049,11 @@ mod tests {
         assert_eq!(
             manager.active_model_name(),
             Some("test"),
-            "运行期 Agent 被 take 走，镜像仍应回答本会话模型"
+            "the Agent is taken away during the run, the mirror should still answer this session's model"
         );
     }
 
-    /// 回归：热切换模型后镜像同步，切走再切回仍显示新模型。
+    /// Regression: after a hot model switch the mirror syncs, and switching away and back still shows the new model.
     #[test]
     fn remember_model_tracks_hot_switch() {
         let mut manager = manager();
@@ -1051,18 +1067,18 @@ mod tests {
         assert_eq!(manager.active_model_name(), Some("other"));
     }
 
-    /// 回归：删除**未加载**（仅存在于磁盘、从未被打开）的会话必须放行。
+    /// Regression: deleting an **unloaded** session (one that only exists on disk and was never opened) must be allowed through.
     ///
-    /// 侧栏 / 列表列的是目录扫描出的全部会话，只有被打开过的才在内存里。此前
-    /// `delete_session` 对未加载的会话直接报「会话不存在」，于是必须先点开（选中）
-    /// 才能删——这正是「desktop 必须选中后删除」的根因。磁盘是否真实存在交由调用方
-    /// 的 `SessionCatalog::delete` 判定，内存侧不该拦。
+    /// The sidebar / list shows all sessions scanned from the catalog, and only those opened are in memory. Previously
+    /// `delete_session` reported "session does not exist" directly for an unloaded session, so it had to be opened (selected)
+    /// before it could be deleted -- this is exactly the root cause of "desktop must select before deleting". Whether it actually exists on disk is decided by the caller's
+    /// `SessionCatalog::delete`; the in-memory side should not block it.
     #[test]
     fn delete_session_allows_unloaded_name() {
         let mut manager = manager();
         assert!(
             manager.delete_session("never-opened").is_ok(),
-            "未加载的会话应放行，交由调用方的磁盘删除判定"
+            "an unloaded session should be allowed through, left to the caller's disk-deletion decision"
         );
     }
 }

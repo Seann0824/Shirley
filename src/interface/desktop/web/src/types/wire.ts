@@ -1,16 +1,17 @@
-// AgentEvent / 会话快照的线格式 DTO。Rust 侧 `desktop/wire.rs` 负责映射；
-// 这里固化契约，前端只依赖这份类型。多项目多会话下每个事件都带来源 `project` +
-// `session`（`null` = 未打标），前端据此把事件路由到对应会话的视图。
+// Wire-format DTOs for AgentEvent / session snapshots. The Rust side (`desktop/wire.rs`)
+// does the mapping; the contract is pinned here and the frontend depends only on these
+// types. With multiple projects and sessions, every event carries its source `project` +
+// `session` (`null` = untagged), and the frontend routes events to the matching session view.
 
 export type StopReason = "completed" | "max_steps_reached" | "cancelled";
 
-/** 任务账本一步的状态（与 Rust `TodoStatus` 序列化对齐）。 */
+/** Status of one task-ledger step (aligned with Rust `TodoStatus` serialization). */
 export type TodoStatus = "pending" | "in_progress" | "completed";
 
-/** 任务账本一步（与 Rust 侧 `TaskStepWire` 对齐）。 */
+/** One task-ledger step (aligned with the Rust `TaskStepWire`). */
 export type TaskStepWire = { text: string; status: TodoStatus };
 
-/** 任务账本结构化视图（与 Rust 侧 `TaskViewWire` 对齐）。 */
+/** Structured task-ledger view (aligned with the Rust `TaskViewWire`). */
 export type TaskViewWire = {
   goal: string | null;
   steps: TaskStepWire[];
@@ -19,6 +20,17 @@ export type TaskViewWire = {
   current: string | null;
 };
 
+/// Stable error class emitted by the SDK on tool failure (mirrors the SDK's `ErrorKind`).
+/// The frontend classifies failures by switching on this, not by matching error text.
+export type ToolErrorKindWire =
+  | "transport"
+  | "rate_limited"
+  | "server_error"
+  | "bad_request"
+  | "unsupported"
+  | "tool_failure"
+  | "internal";
+
 export type UsageWire = {
   input_tokens: number;
   output_tokens: number;
@@ -26,7 +38,7 @@ export type UsageWire = {
   cache_reported_input_tokens: number | null;
 };
 
-/** 事件来源项目 id + 会话名；`null` = 未打标（旧 Rust 侧 / 测试）。 */
+/** Event source project id + session name; `null` = untagged (older Rust side / tests). */
 type SessionTag = { project: string | null; session: string | null };
 
 export type AgentEventWire =
@@ -40,6 +52,7 @@ export type AgentEventWire =
       name: string;
       ok: boolean;
       output: string;
+      error_kind: ToolErrorKindWire | null;
       elapsed_ms: number;
     } & SessionTag)
   | ({ type: "usage"; usage: UsageWire } & SessionTag)
@@ -50,18 +63,18 @@ export type AgentEventWire =
   | ({ type: "error"; message: string } & SessionTag)
   | ({ type: "finished"; stop_reason: StopReason } & SessionTag);
 
-/** 快照里一条 UI 条目（与 Rust 侧 `desktop/wire.rs` 的 `ItemWire` 对齐）。 */
+/** One UI item in a snapshot (aligned with `ItemWire` in the Rust `desktop/wire.rs`). */
 export type ItemWire =
   | { kind: "message"; role: string; content: string }
   | { kind: "compact"; content: string }
   | { kind: "tools"; calls: { id: string; name: string; arguments: string }[] };
 
-/** 订阅某会话时下发的完整视图快照（与 Rust 侧 `SessionSnapshotWire` 对齐）。 */
+/** Full view snapshot delivered when subscribing to a session (aligned with the Rust `SessionSnapshotWire`). */
 export type SessionSnapshot = {
   session: string;
   items: ItemWire[];
-  /** 该会话当前是否在跑一轮（决定前端 busy 门）。 */
+  /** Whether this session is currently running a turn (drives the frontend busy gate). */
   running: boolean;
-  /** 该会话当前的任务账本快照（`null` = 空账本 / 无账本）。 */
+  /** Current task-ledger snapshot for this session (`null` = empty / no ledger). */
   todo: TaskViewWire | null;
 };

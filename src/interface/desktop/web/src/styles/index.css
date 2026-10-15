@@ -1,15 +1,15 @@
 @import "tailwindcss";
 @import "./tokens.css";
 
-/* 让 Tailwind 扫描 streamdown 打包后的 JS，把 markdown 各块级元素用到的
-   utility 类（`mt-6` / `text-2xl` / `border-border` / `bg-sidebar` /
-   `text-muted-foreground` / `divide-y` …）编进产物 CSS。
-   Tailwind 4 默认不扫描 node_modules；漏掉这行，markdown 会以「无样式」渲染，
-   与 shiwen 不一致（shiwen 的 index.css 有对应的 @source）。 */
+/* Make Tailwind scan streamdown's bundled JS so the utility classes used by markdown's
+   block-level elements (`mt-6` / `text-2xl` / `border-border` / `bg-sidebar` /
+   `text-muted-foreground` / `divide-y` ...) are compiled into the output CSS.
+   Tailwind 4 does not scan node_modules by default; without this line, markdown renders
+   "unstyled", inconsistent with shiwen (shiwen's index.css has the matching @source). */
 @source "../../node_modules/streamdown/dist/*.js";
 
-/* Shirley 桌面界面：只保留对话渲染需要的基础样式，
-   已剥离 shiwen 的 article-body / 批注 / space 等定制层。 */
+/* Shirley desktop UI: keeps only the base styles needed for conversation rendering,
+   with shiwen's article-body / annotation / space customization layers stripped. */
 
 @layer base {
   :root {
@@ -46,14 +46,14 @@
   }
 }
 
-/* @ 引用富输入框：空时用 data-placeholder 显示占位文案（contenteditable 无原生 placeholder） */
+/* @-reference rich input: shows placeholder text via data-placeholder when empty (contenteditable has no native placeholder) */
 [data-mention-editor][data-empty="true"]::before {
   content: attr(data-placeholder);
   color: var(--color-muted);
   pointer-events: none;
 }
 
-/* Streamdown 代码块滚动条：与 ScrollArea 保持一致 */
+/* Streamdown code-block scrollbar: kept consistent with ScrollArea */
 [data-ai-markdown] [data-streamdown="code-block-body"] {
   overscroll-behavior-x: contain;
   scrollbar-color: color-mix(in srgb, var(--color-ink) 22%, transparent) transparent;
@@ -76,16 +76,17 @@
 }
 
 /* ------------------------------------------------------------------ */
-/* Markdown 渲染：对标 TUI（src/interface/markdown.rs）的排版与配色。
-   目标不是「还原 shiwen」，而是让 desktop 的 markdown 像 TUI 一样：
-   层级分明、间距紧凑、代码/引用/表格有清晰边界，且颜色克制。
-   streamdown 默认类（text-3xl 标题、bg-muted 行内代码、my-4/space-y-4
-   的大间距）偏「营销页」气质，这里统一收敛。
-   说明：所有规则都限定在 [data-ai-markdown] 之内，不影响应用其它 UI。 */
+/* Markdown rendering: mirrors the TUI's (src/interface/markdown.rs) typography and colors.
+   The goal is not to "reproduce shiwen" but to make desktop markdown like the TUI:
+   clear hierarchy, tight spacing, crisp boundaries for code/quotes/tables, and restrained
+   color. streamdown's default classes (text-3xl headings, bg-muted inline code, the large
+   my-4/space-y-4 spacing) lean "marketing page", so they are tightened uniformly here.
+   Note: all rules are scoped inside [data-ai-markdown] and do not affect other app UI. */
 
-/* 顶层块间距：streamdown 在内容外再套一层 `.space-y-4` 容器（块是其
-   直接子元素，即 [data-ai-markdown] 的孙元素），且各块自带 my-4 / mt-6。
-   TUI 的块间距约一行，这里统一压到 0.75rem，长回复更接近终端的紧凑感。 */
+/* Top-level block spacing: streamdown wraps content in another `.space-y-4` container
+   (blocks are its direct children, i.e. grandchildren of [data-ai-markdown]), and each
+   block also carries my-4 / mt-6. The TUI's block spacing is about one line; here it is
+   tightened uniformly to 0.75rem, giving long replies a more terminal-like compactness. */
 [data-ai-markdown] > * > * {
   margin-top: 0;
   margin-bottom: 0;
@@ -97,8 +98,8 @@
   margin-block-start: 0.75rem;
 }
 
-/* 标题：TUI 用「彩色 + 加粗 + 逐级缩小」。这里改为中性墨色 + 字重 +
-   逐级字号，避免 streamdown 的 text-3xl / text-2xl 过大。 */
+/* Headings: the TUI uses "color + bold + decreasing size". Here it becomes neutral ink +
+   weight + decreasing size, avoiding streamdown's oversized text-3xl / text-2xl. */
 [data-ai-markdown] [data-streamdown^="heading-"] {
   margin: 0;
   color: var(--color-ink);
@@ -114,16 +115,17 @@
   font-size: 0.8125rem;
   color: var(--color-muted);
 }
-/* 首个块不额外上边距（去掉 streamdown 的 mt-6）。 */
+/* No extra top margin on the first block (remove streamdown's mt-6). */
 [data-ai-markdown] > :first-child [data-streamdown^="heading-"] { margin-top: 0; }
 
-/* 段落：与正文同号，行高放宽以利阅读。 */
+/* Paragraphs: same size as body, with looser line height for readability. */
 [data-ai-markdown] p {
   margin: 0;
 }
 
-/* 行内代码：streamdown 用 bg-muted（Shirley 的 muted 是深灰文字色），
-   会变成「深灰底 + 深色字」。改用浅色 inset 底 + 细边框，对比度正常。 */
+/* Inline code: streamdown uses bg-muted (Shirley's muted is a dark-gray text color),
+   which would yield "dark-gray background + dark text". Switch to a light inset
+   background + thin border for normal contrast. */
 [data-ai-markdown] [data-streamdown="inline-code"] {
   padding: 0.1em 0.35em;
   border: 1px solid var(--color-line);
@@ -133,7 +135,7 @@
   font-size: 0.85em;
 }
 
-/* 列表：TUI 用悬挂缩进、行距紧凑。 */
+/* Lists: the TUI uses hanging indent and tight line spacing. */
 [data-ai-markdown] [data-streamdown="unordered-list"],
 [data-ai-markdown] [data-streamdown="ordered-list"] {
   padding-left: 1.25rem;
@@ -143,8 +145,9 @@
   padding-bottom: 0.125rem;
 }
 
-/* 引用块：TUI 是「竖线 + 斜体 + 暗色」。streamdown 的左边框用
-   border-muted-foreground/30，这里换成更强的 line-strong 保证可见。 */
+/* Blockquote: the TUI is "vertical bar + italic + dark". streamdown's left border uses
+   border-muted-foreground/30; here it becomes the stronger line-strong to ensure
+   visibility. */
 [data-ai-markdown] [data-streamdown="blockquote"] {
   margin: 0.75rem 0;
   padding-left: 0.875rem;
@@ -156,21 +159,21 @@
   margin: 0;
 }
 
-/* 分割线：与 line token 对齐，去掉过大的上下间距。 */
+/* Horizontal rule: aligned with the line token, removing the excessive vertical spacing. */
 [data-ai-markdown] [data-streamdown="horizontal-rule"] {
   margin: 0.75rem 0;
   border-color: var(--color-line);
 }
 
-/* 链接：TUI 用蓝色下划线。streamdown 默认 text-primary（近黑），
-   改回 link 色，保留下划线。 */
+/* Links: the TUI uses a blue underline. streamdown defaults to text-primary (near
+   black); restore the link color while keeping the underline. */
 [data-ai-markdown] [data-streamdown="link"] {
   color: var(--color-link);
   text-decoration: underline;
   text-underline-offset: 2px;
 }
 
-/* 表格：表头用浅底，单元格边框用 line token，和 TUI 的表格网格一致。 */
+/* Tables: light background for the header, line token for cell borders, matching the TUI's table grid. */
 [data-ai-markdown] [data-streamdown="table-header"] {
   background: var(--color-inset);
 }
@@ -179,8 +182,9 @@
   border-color: var(--color-line);
 }
 
-/* 代码块：外层容器（含语言标签 / 复制按钮）用 sidebar 底 + 边框，
-   现已定义 --color-sidebar，确保底色与边框都出来。 */
+/* Code block: the outer container (with language label / copy button) uses a sidebar
+   background + border; --color-sidebar is now defined, ensuring both background and
+   border show. */
 [data-ai-markdown] [data-streamdown="code-block"] {
   background: var(--color-sidebar);
   border-color: var(--color-line);

@@ -1,6 +1,9 @@
 import {
   Archive,
+  ChevronDown,
+  ChevronRight,
   Folder,
+  FolderInput,
   FolderOpen,
   FolderPlus,
   Loader2,
@@ -21,29 +24,42 @@ import { cn } from "@/ui/utils";
 import type { ProjectEntry, SessionEntry } from "@/lib/bridge";
 
 /**
- * 左侧 sidebar：多项目 + 会话导航。
+ * Left sidebar: multi-project + session navigation.
  *
- * 结构（自上而下）：
- * 1. **NewChat**：唯一常驻可见的按钮——「新建会话」（作用于当前项目）。
- * 2. **Pinned**：手动置顶的会话（仅本地 `localStorage`，不跨端 / 不落库）。
- * 3. **Projects**：已关联的工作区目录——**每个项目是一个可折叠分组**，展开后是它的
- *    会话。
+ * Structure (top to bottom):
+ * 1. **NewChat**: the only always-visible button — "new session" (acting on the current
+ *    context: a project session or a Chat session).
+ * 2. **Recent**: recently aggregated sessions across projects (including Chat sessions) —
+ *    chat and project sessions share one column, with the owning project noted in small
+ *    text inline (Chat sessions have no label).
+ * 3. **Pinned**: manually pinned sessions (local `localStorage` only; not synced /
+ *    persisted).
+ * 4. **Projects**: associated workspace directories — **each project is a collapsible
+ *    group**, expanding to its sessions.
  *
- * **交互**：会话行把常用操作提到行内图标（默认隐藏、悬停 / 聚焦才现），其余仍走右键菜单：
- * - 会话行悬停：`pin` 图标（置顶 / 取消置顶，已置顶时常驻）、`more`（⋯）图标（打开与右键同款菜单）。
- * - 会话行右键：置顶 / 取消置顶、重命名、删除（菜单内二次确认）。
- * - 项目行右键：重命名、归档（菜单内二次确认）；「项目」分组标题行有常驻 `+`（新建项目）。
+ * **Interaction**: session rows surface common actions as inline icons (hidden by default,
+ * shown on hover / focus); everything else still goes through the context menu:
+ * - Session row hover: a `pin` icon (pin / unpin, always shown when pinned) and a `more`
+ *   (...) icon (opens the same menu as right-click).
+ * - Session row right-click: pin / unpin, rename, delete (with in-menu confirmation).
+ * - Project row right-click: rename, archive (with in-menu confirmation); the "Projects"
+ *   group header row has an always-visible `+` (new project).
  *
- * 数据与操作全来自 Rust 侧 `ProjectRegistry` / `SessionCatalog` / `SessionManager`
- * （与 TUI 共用同一份 `<root>/.shirley/sessions`），前端不持有会话状态；「置顶」与
- * 「折叠」是纯前端的位置标注（localStorage）。
+ * All data and actions come from the Rust side's `ProjectRegistry` / `SessionCatalog` /
+ * `SessionManager` (sharing the same `<root>/.shirley/sessions` as the TUI); the frontend
+ * holds no session state; "pin" and "collapse" are purely frontend position markers
+ * (localStorage).
  *
- * 「移除项目」= **归档**：不删磁盘数据，只置标志；归档项目不在 sidebar 展示。
+ * "Remove project" = **archive**: no disk data deleted, only a flag set; archived
+ * projects are not shown in the sidebar.
  */
 
 const PINNED_STORAGE_KEY = "shirley.desktop.pinned-sessions";
-/** 折叠状态（按项目 id 存，仅本地）。 */
+/** Collapse state (stored per project id, local only). */
 const COLLAPSED_STORAGE_KEY = "shirley.desktop.collapsed-projects";
+/** Collapse state of group headers (the "Recent" / "Projects" groups, local only). */
+const COLLAPSED_RECENT_KEY = "shirley.desktop.collapsed-recent";
+const COLLAPSED_PROJECTS_KEY = "shirley.desktop.collapsed-projects-group";
 
 function readStringArray(key: string): string[] {
   try {
@@ -60,11 +76,27 @@ function writeStringArray(key: string, values: string[]) {
   try {
     window.localStorage.setItem(key, JSON.stringify(values));
   } catch {
-    // localStorage 不可用（隐私模式等）时静默降级：状态仅当次会话有效。
+    // Silently degrade when localStorage is unavailable (private mode, etc.): state is valid for this session only.
   }
 }
 
-/** 一个项目分组：项目元数据 + 其会话（由 App 传入的当前项目决定是否拉取）。 */
+function readBool(key: string): boolean {
+  try {
+    return window.localStorage.getItem(key) === "1";
+  } catch {
+    return false;
+  }
+}
+
+function writeBool(key: string, value: boolean) {
+  try {
+    window.localStorage.setItem(key, value ? "1" : "0");
+  } catch {
+    // Silently degrade when localStorage is unavailable (private mode, etc.): state is valid for this session only.
+  }
+}
+
+/** A project group: project metadata + its sessions (the current project passed from App decides whether to fetch). */
 type ProjectGroup = {
   entry: ProjectEntry;
   sessions: SessionEntry[];
@@ -81,57 +113,70 @@ export function SessionSidebar({
   onNew,
   onRename,
   onDelete,
+  onMove,
   collapsed = false,
+  chatProjectId,
   onCurrentTitleChange,
   className,
 }: {
-  /** 活跃项目（非归档），按最近打开降序。 */
+  /** Active projects (non-archived), most recently opened first. */
   projects: ProjectEntry[];
-  /** 当前前台项目 id（无则 null）。 */
+  /** Current foreground project id (null if none). */
   activeProject: string | null;
-  /** 当前会话名（无则 null）。 */
+  /** Current session name (null if none). */
   current: string | null;
   onAddProject: () => void;
   onRenameProject: (id: string, name: string) => void;
   onArchiveProject: (id: string) => void;
-  /** 选中会话：会话名只在项目内唯一，故带 `project`。 */
+  /** Select a session: session names are unique only within a project, so `project` is included. */
   onSelect: (project: string, name: string) => void;
   onNew: (project: string) => void;
-  /** 重命名会话（按项目 + 名定位）。 */
+  /** Rename a session (located by project + name). */
   onRename: (project: string, name: string, title: string) => void;
-  /** 删除会话（按项目 + 名定位）。 */
+  /** Delete a session (located by project + name). */
   onDelete: (project: string, name: string) => void;
-  /** 折叠态：整体隐藏（宽度归零），通过顶部工具栏展开。 */
+  /** Move a session to another project (located by project + name). */
+  onMove: (project: string, name: string, targetProject: string) => void;
+  /** Collapsed: hidden entirely (width zero), expanded via the top toolbar. */
   collapsed?: boolean;
+  /** Pseudo project id hosting the "no associated project" Chat session (aligned with Rust `CHAT_PROJECT_ID`). */
+  chatProjectId?: string;
   onCurrentTitleChange: (title: string) => void;
   className?: string;
 }) {
-  // 每个项目的会话列表（按项目 id 缓存，App 不持有）。所有已加载项目共享同一轮询。
+  // Session list per project (cached by project id; App does not hold it). All loaded projects share one poll.
   const [sessionsByProject, setSessionsByProject] = useState<Record<string, SessionEntry[]>>({});
   const aliveRef = useRef(true);
   const [pinned, setPinned] = useState<string[]>(() => readStringArray(PINNED_STORAGE_KEY));
-  // 折叠的项目 id（默认全部展开）。
+  // Collapsed project ids (all expanded by default).
   const [collapsedProjects, setCollapsedProjects] = useState<string[]>(() => readStringArray(COLLAPSED_STORAGE_KEY));
-  // 正在重命名的目标（项目 id 或会话名）与草稿值。
+  // Collapse state of group headers (expanded by default).
+  const [recentCollapsed, setRecentCollapsed] = useState(() => readBool(COLLAPSED_RECENT_KEY));
+  const [projectsCollapsed, setProjectsCollapsed] = useState(() => readBool(COLLAPSED_PROJECTS_KEY));
+  // Rename target (project id or session name) and draft value.
   const [editingProject, setEditingProject] = useState<string | null>(null);
   const [editingSession, setEditingSession] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
-  // 待确认删除的会话名（菜单内二次确认，避免误删）。
+  // Session name awaiting delete confirmation (in-menu confirmation to avoid accidental deletion).
   const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
-  // 待确认归档的项目 id（菜单内二次确认）。
+  // Key of the session whose "move to project" submenu is open (`project::name`).
+  const [movingSession, setMovingSession] = useState<string | null>(null);
+  // Project id awaiting archive confirmation (in-menu confirmation).
   const [confirmingArchive, setConfirmingArchive] = useState<string | null>(null);
 
-  // 每个项目展示自己的会话（会话名只在项目内唯一）。
+  // Each project shows its own sessions (session names are unique only within a project).
   const groups: ProjectGroup[] = projects.map((entry) => ({
     entry,
     sessions: sessionsByProject[entry.id] ?? [],
   }));
-  const currentTitle = (sessionsByProject[activeProject ?? ""] ?? []).find((entry) => entry.name === current)?.label ?? "";
+  const currentTitle =
+    (sessionsByProject[activeProject ?? ""] ?? []).find((entry) => entry.name === current)?.label ?? "";
   useEffect(() => onCurrentTitleChange(currentTitle), [currentTitle, onCurrentTitleChange]);
 
-  // 拉取「每个项目」的会话；轮询刷新各项目后台会话的 `running`。这样每个项目都能
-  // 独立展开并看到自己的会话，而不是只有当前激活项目才有内容。
-  const projectIdsKey = projects.map((entry) => entry.id).join("\n");
+  // Unified list: chat pseudo project + all projects (sessions all go into "Recent"; project groups also need their own lists).
+  const projectIdsKey = [chatProjectId, ...projects.map((entry) => entry.id)]
+    .filter((id): id is string => Boolean(id))
+    .join("\n");
   useEffect(() => {
     aliveRef.current = true;
     const ids = projectIdsKey ? projectIdsKey.split("\n") : [];
@@ -154,7 +199,7 @@ export function SessionSidebar({
           return next;
         });
       } catch {
-        // 静默轮询失败时保留上一次结果，别把列表清空。
+        // Keep the previous result when a silent poll fails; don't clear the list.
       }
     };
     void load();
@@ -183,6 +228,20 @@ export function SessionSidebar({
     });
   };
 
+  const toggleRecentCollapsed = () => {
+    setRecentCollapsed((prev) => {
+      writeBool(COLLAPSED_RECENT_KEY, !prev);
+      return !prev;
+    });
+  };
+
+  const toggleProjectsCollapsed = () => {
+    setProjectsCollapsed((prev) => {
+      writeBool(COLLAPSED_PROJECTS_KEY, !prev);
+      return !prev;
+    });
+  };
+
   const submitSessionRename = (project: string, name: string) => {
     const title = editValue.trim();
     if (title) onRename(project, name, title);
@@ -200,14 +259,42 @@ export function SessionSidebar({
     setConfirmingDelete(null);
   };
 
-  // 置顶只对当前项目的会话有意义（会话名只在项目内唯一）。
+  const moveEntry = (project: string, name: string, targetProject: string) => {
+    onMove(project, name, targetProject);
+    setMovingSession(null);
+    setConfirmingDelete(null);
+  };
+
+  // Pinning is only meaningful for the current project's sessions (session names are unique only within a project).
   const pinnedEntries = (sessionsByProject[activeProject ?? ""] ?? []).filter((entry) =>
     pinned.includes(entry.name),
   );
+  // "Recent": aggregated across projects (including Chat sessions), most recently
+  // modified first. Chat and project sessions share one column, with the owning project
+  // name noted inline in small text; Chat sessions (pseudo project) have no label.
+  const projectNameById: Record<string, string> = Object.fromEntries(
+    projects.map((entry) => [entry.id, entry.name]),
+  );
+  const recent = [
+    ...(chatProjectId
+      ? (sessionsByProject[chatProjectId] ?? []).map((entry) => ({ project: chatProjectId, entry }))
+      : []),
+    ...projects.flatMap((project) =>
+      (sessionsByProject[project.id] ?? []).map((entry) => ({ project: project.id, entry })),
+    ),
+  ]
+    .sort((a, b) => b.entry.modified_ms - a.entry.modified_ms)
+    .slice(0, 30);
 
-  /** 会话行的右键菜单：置顶 / 重命名 / 删除（二次确认）。 */
-  const sessionMenu = (entry: SessionEntry, group: "pinned" | "project", project: string) => {
-    // 编辑态 / 删除确认按 `project::name` 定位——会话名只在项目内唯一。
+  // Candidates for "move to project": the Chat pseudo project + all projects (excluding the source project).
+  const moveTargets = [
+    ...(chatProjectId ? [{ id: chatProjectId, name: "Chat" }] : []),
+    ...projects.map((entry) => ({ id: entry.id, name: entry.name })),
+  ];
+
+  /** Session row context menu: pin / rename / move to project / delete (with confirmation). */
+  const sessionMenu = (entry: SessionEntry, group: "pinned" | "project" | "recent", project: string) => {
+    // Edit state / delete confirmation are located by `project::name` — session names are unique only within a project.
     const key = `${project}::${entry.name}`;
     const isPinned = pinned.includes(entry.name);
     const isConfirming = confirmingDelete === key;
@@ -217,7 +304,7 @@ export function SessionSidebar({
           icon={isPinned || group === "pinned" ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
           onSelect={() => togglePin(entry.name)}
         >
-          {isPinned || group === "pinned" ? "取消置顶" : "置顶"}
+          {isPinned || group === "pinned" ? "Unpin" : "Pin"}
         </ContextMenuItem>
         <ContextMenuItem
           icon={<Pencil className="size-3.5" />}
@@ -226,8 +313,31 @@ export function SessionSidebar({
             setEditValue(entry.label);
           }}
         >
-          重命名
+          Rename
         </ContextMenuItem>
+        {moveTargets.some((target) => target.id !== project) && (
+          <>
+            <ContextMenuItem
+              icon={<FolderInput className="size-3.5" />}
+              closeOnSelect={false}
+              onSelect={() => setMovingSession(movingSession === key ? null : key)}
+            >
+              Move to project…
+            </ContextMenuItem>
+            {movingSession === key &&
+              moveTargets
+                .filter((target) => target.id !== project)
+                .map((target) => (
+                  <ContextMenuItem
+                    key={target.id}
+                    icon={<Folder className="size-3.5" />}
+                    onSelect={() => moveEntry(project, entry.name, target.id)}
+                  >
+                    {target.name}
+                  </ContextMenuItem>
+                ))}
+          </>
+        )}
         <ContextMenuSeparator />
         {isConfirming ? (
           <ContextMenuItem
@@ -235,7 +345,7 @@ export function SessionSidebar({
             tone="danger"
             onSelect={() => removeEntry(project, entry.name)}
           >
-            确认删除？
+            Confirm delete?
           </ContextMenuItem>
         ) : (
           <ContextMenuItem
@@ -244,26 +354,32 @@ export function SessionSidebar({
             closeOnSelect={false}
             onSelect={() => setConfirmingDelete(key)}
           >
-            删除
+            Delete
           </ContextMenuItem>
         )}
       </>
     );
   };
 
-  const renderRow = (entry: SessionEntry, group: "pinned" | "project", project: string) => {
-    // 选中态必须同项目同会话名——会话名只在项目内唯一。
+  const renderRow = (
+    entry: SessionEntry,
+    group: "pinned" | "project" | "recent",
+    project: string,
+    projectName?: string,
+  ) => {
+    // The active state requires the same project and session name — session names are unique only within a project.
     const active = project === activeProject && entry.name === current;
     const isEditing = editingSession === `${project}::${entry.name}`;
     const isPinned = group === "pinned" || pinned.includes(entry.name);
-    // 行内操作：pin（置顶/取消置顶）与 more（右键菜单同款，收起重命名/删除）。
-    // 默认隐藏、悬停或聚焦时显示；已置顶的 pin 常驻可见以指示状态。
+    // Inline actions: pin (pin/unpin) and more (same menu as right-click, housing
+    // rename/delete). Hidden by default, shown on hover or focus; a pinned pin stays
+    // visible to indicate the state.
     const actions = (open: (event: React.MouseEvent) => void) => (
       <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
         <button
           type="button"
-          aria-label="更多操作"
-          title="更多操作"
+          aria-label="More actions"
+          title="More actions"
           className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
           onClick={(event) => {
             event.stopPropagation();
@@ -274,22 +390,22 @@ export function SessionSidebar({
         </button>
         <button
           type="button"
-          aria-label={isPinned ? "取消置顶" : "置顶"}
-          title={isPinned ? "取消置顶" : "置顶"}
+          aria-label={isPinned ? "Unpin" : "Pin"}
+          title={isPinned ? "Unpin" : "Pin"}
           className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
           onClick={(event) => {
             event.stopPropagation();
             togglePin(entry.name);
           }}
         >
-          {/* 置顶态用实心 Pin（同一位置），未置顶用 PinOff 提示可置顶。 */}
+          {/* Pinned uses the solid Pin (same position); unpinned uses PinOff to hint that pinning is available. */}
           {isPinned ? <Pin className="size-3.5" /> : <PinOff className="size-3.5" />}
         </button>
       </div>
     );
     return (
       <ContextMenu
-        key={entry.name}
+        key={`${project}::${entry.name}`}
         menu={sessionMenu(entry, group, project)}
         className={cn(
           "group flex h-8 items-center gap-1.5 rounded-control pr-2 pl-[26px] transition-colors",
@@ -328,8 +444,13 @@ export function SessionSidebar({
                     text={entry.label}
                     className={cn("flex-1 text-body-sm text-ink", active && "font-medium")}
                   />
+                  {projectName && (
+                    <span className="max-w-[72px] shrink-0 truncate text-caption text-muted">
+                      {projectName}
+                    </span>
+                  )}
                   {entry.running && (
-                    <Loader2 className="size-3.5 shrink-0 animate-spin text-muted" aria-label="运行中" />
+                    <Loader2 className="size-3.5 shrink-0 animate-spin text-muted" aria-label="Running" />
                   )}
                 </button>
                 {actions(open)}
@@ -354,166 +475,201 @@ export function SessionSidebar({
         Shirley
       </div>
       <ScrollArea type="scroll" className="min-h-0 flex-1" viewportClassName="px-2 pb-3">
-        <button type="button" className="mb-4 flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm hover:bg-selected" onClick={() => activeProject ? onNew(activeProject) : onAddProject()}>
-          <MessageSquarePlus className="size-4 text-muted" />新建会话
+        <button
+          type="button"
+          className="mb-4 flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm hover:bg-selected"
+          onClick={() => {
+            // New Chat = Codex-style empty session: create a lazy empty session in the current context (project or Chat).
+            if (activeProject) onNew(activeProject);
+            else if (chatProjectId) onNew(chatProjectId);
+            else onAddProject();
+          }}
+        >
+          <MessageSquarePlus className="size-4 text-muted" />New session
         </button>
-        {/* Pinned：手动置顶（仅本地）。无置顶时不显示该分组。 */}
-        {pinnedEntries.length > 0 && (
+        {/* Projects: associated directories (placed before "Recent"). **Group header collapsible**, and each project is collapsible too. */}
+        <section className="mb-3">
+          <Collapsible open={!projectsCollapsed} onOpenChange={toggleProjectsCollapsed}>
+            <ContextMenu
+              menu={
+                <ContextMenuItem
+                  icon={<FolderPlus className="size-3.5" />}
+                  onSelect={onAddProject}
+                >
+                  New project
+                </ContextMenuItem>
+              }
+            >
+              <div className="group flex h-8 items-center gap-1 px-2">
+                <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1 text-left">
+                  <span className="min-w-0 truncate text-[0.875rem] font-medium text-muted">
+                    Projects
+                  </span>
+                  {projectsCollapsed ? (
+                    <ChevronRight className="size-3.5 shrink-0 text-muted" />
+                  ) : (
+                    <ChevronDown className="size-3.5 shrink-0 text-muted" />
+                  )}
+                </CollapsibleTrigger>
+                <button
+                  type="button"
+                  aria-label="New project"
+                  title="New project"
+                  className="hidden size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors group-hover:flex group-focus-within:flex hover:bg-selected hover:text-ink"
+                  onClick={onAddProject}
+                >
+                  <Plus className="size-3.5" />
+                </button>
+              </div>
+            </ContextMenu>
+            <CollapsibleContent>
+              <div className="flex flex-col gap-1">
+                {groups.length === 0 && (
+                  <p className="px-2 py-1.5 text-caption text-muted">No projects yet. Right-click "Projects" to create one.</p>
+                )}
+                {groups.map(({ entry, sessions: projectSessions }) => {
+                  const isCollapsed = collapsedProjects.includes(entry.id);
+                  const isEditing = editingProject === entry.id;
+                  const isConfirming = confirmingArchive === entry.id;
+                  const projectMenu = (
+                    <>
+                      <ContextMenuItem
+                        icon={<Pencil className="size-3.5" />}
+                        onSelect={() => {
+                          setEditingProject(entry.id);
+                          setEditValue(entry.name);
+                        }}
+                      >
+                        Rename
+                      </ContextMenuItem>
+                      <ContextMenuSeparator />
+                      {isConfirming ? (
+                        <ContextMenuItem
+                          icon={<Archive className="size-3.5" />}
+                          tone="danger"
+                          onSelect={() => {
+                            onArchiveProject(entry.id);
+                            setConfirmingArchive(null);
+                          }}
+                        >
+                          Confirm archive?
+                        </ContextMenuItem>
+                      ) : (
+                        <ContextMenuItem
+                          icon={<Archive className="size-3.5" />}
+                          tone="danger"
+                          closeOnSelect={false}
+                          onSelect={() => setConfirmingArchive(entry.id)}
+                        >
+                          Archive
+                        </ContextMenuItem>
+                      )}
+                    </>
+                  );
+                  return (
+                    <Collapsible
+                      key={entry.id}
+                      open={!isCollapsed}
+                      onOpenChange={() => toggleCollapsed(entry.id)}
+                    >
+                      <ContextMenu menu={projectMenu}>
+                        <div className="group flex h-8 items-center gap-1 rounded-control px-2 transition-colors hover:bg-quiet">
+                          {isEditing ? (
+                            <input
+                              autoFocus
+                              value={editValue}
+                              className="min-w-0 flex-1 rounded-control bg-inset px-2 py-1 text-body-sm text-ink outline-none"
+                              onChange={(event) => setEditValue(event.target.value)}
+                              onKeyDown={(event) => {
+                                if (event.key === "Enter") submitProjectRename(entry.id);
+                                if (event.key === "Escape") {
+                                  event.stopPropagation();
+                                  setEditingProject(null);
+                                }
+                              }}
+                              onBlur={() => setEditingProject(null)}
+                            />
+                          ) : (
+                            <CollapsibleTrigger
+                              className="flex min-w-0 flex-1 items-center gap-1 text-left"
+                              title={entry.path}
+                            >
+                              {/* Expand/collapse share the same folder icon position, switching with state (no arrow). */}
+                              {isCollapsed ? (
+                                <Folder className="size-3.5 shrink-0 text-muted" />
+                              ) : (
+                                <FolderOpen className="size-3.5 shrink-0 text-muted" />
+                              )}
+                              <span className="min-w-0 flex-1 truncate text-body-sm text-ink">
+                                {entry.name}
+                              </span>
+                              <span className="shrink-0 text-caption text-muted">
+                                {projectSessions.length}
+                              </span>
+                            </CollapsibleTrigger>
+                          )}
+                          {!isEditing && (
+                            <button
+                              type="button"
+                              aria-label={`New session in "${entry.name}"`}
+                              title="New session"
+                              className="hidden size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors group-hover:flex hover:bg-selected hover:text-ink"
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                onNew(entry.id);
+                              }}
+                            >
+                              <Plus className="size-3.5" />
+                            </button>
+                          )}
+                        </div>
+                      </ContextMenu>
+                      <CollapsibleContent>
+                        <div
+                          role="listbox"
+                          aria-label={`Sessions of ${entry.name}`}
+                          className="mt-0.5 flex flex-col gap-0.5"
+                        >
+                          {projectSessions.length === 0 ? (
+                            <p className="px-2 py-1.5 text-caption text-muted">No sessions yet.</p>
+                          ) : (
+                            projectSessions.map((session) => renderRow(session, "project", entry.id))
+                          )}
+                        </div>
+                      </CollapsibleContent>
+                    </Collapsible>
+                  );
+                })}
+              </div>
+            </CollapsibleContent>
+          </Collapsible>
+        </section>
+
+        {/* Recent: aggregated across projects (including Chat sessions), placed after "Projects". **Group header collapsible**.
+            Chat and project sessions share a column, with the owning project noted inline in small text (Chat sessions have no label). */}
+        {recent.length > 0 && (
           <section className="mb-3">
-            <h2 className="px-2 py-1 text-caption font-medium tracking-wide text-muted uppercase">
-              置顶
-            </h2>
-            <div role="listbox" aria-label="置顶会话" className="flex flex-col gap-0.5">
-              {activeProject &&
-                pinnedEntries.map((entry) => renderRow(entry, "pinned", activeProject))}
-            </div>
+            <Collapsible open={!recentCollapsed} onOpenChange={toggleRecentCollapsed}>
+              <CollapsibleTrigger className="flex h-8 w-full items-center gap-1 px-2 text-left">
+                <span className="min-w-0 truncate text-[0.875rem] font-medium text-muted">
+                  Recent
+                </span>
+                {recentCollapsed ? (
+                  <ChevronRight className="size-3.5 shrink-0 text-muted" />
+                ) : (
+                  <ChevronDown className="size-3.5 shrink-0 text-muted" />
+                )}
+              </CollapsibleTrigger>
+              <CollapsibleContent>
+                <div role="listbox" aria-label="Recent sessions" className="flex flex-col gap-0.5">
+                  {recent.map(({ project, entry }) =>
+                    renderRow(entry, "recent", project, project === chatProjectId ? undefined : projectNameById[project]),
+                  )}
+                </div>
+              </CollapsibleContent>
+            </Collapsible>
           </section>
         )}
-
-        {/* Projects：已关联目录列表，每个项目可折叠；操作全在右键菜单里。 */}
-        <section>
-          <ContextMenu
-            menu={
-              <ContextMenuItem
-                icon={<FolderPlus className="size-3.5" />}
-                onSelect={onAddProject}
-              >
-                新建项目
-              </ContextMenuItem>
-            }
-          >
-            <div className="group flex items-center justify-between gap-1 px-2 py-1">
-              <h2 className="text-caption font-medium tracking-wide text-muted uppercase">项目</h2>
-              <button
-                type="button"
-                aria-label="新建项目"
-                title="新建项目"
-                className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
-                onClick={onAddProject}
-              >
-                <FolderPlus className="size-3.5" />
-              </button>
-            </div>
-          </ContextMenu>
-          <div className="flex flex-col gap-1">
-            {groups.length === 0 && (
-              <p className="px-2 py-1.5 text-caption text-muted">还没有项目，右键「项目」新建。</p>
-            )}
-            {groups.map(({ entry, sessions: projectSessions }) => {
-              const isCollapsed = collapsedProjects.includes(entry.id);
-              const isEditing = editingProject === entry.id;
-              const isConfirming = confirmingArchive === entry.id;
-              const projectMenu = (
-                <>
-                  <ContextMenuItem
-                    icon={<Pencil className="size-3.5" />}
-                    onSelect={() => {
-                      setEditingProject(entry.id);
-                      setEditValue(entry.name);
-                    }}
-                  >
-                    重命名
-                  </ContextMenuItem>
-                  <ContextMenuSeparator />
-                  {isConfirming ? (
-                    <ContextMenuItem
-                      icon={<Archive className="size-3.5" />}
-                      tone="danger"
-                      onSelect={() => {
-                        onArchiveProject(entry.id);
-                        setConfirmingArchive(null);
-                      }}
-                    >
-                      确认归档？
-                    </ContextMenuItem>
-                  ) : (
-                    <ContextMenuItem
-                      icon={<Archive className="size-3.5" />}
-                      tone="danger"
-                      closeOnSelect={false}
-                      onSelect={() => setConfirmingArchive(entry.id)}
-                    >
-                      归档
-                    </ContextMenuItem>
-                  )}
-                </>
-              );
-              return (
-                <Collapsible
-                  key={entry.id}
-                  open={!isCollapsed}
-                  onOpenChange={() => toggleCollapsed(entry.id)}
-                >
-                  <ContextMenu menu={projectMenu}>
-                    <div className="group flex h-8 items-center gap-1 rounded-control px-2 transition-colors hover:bg-quiet">
-                      {isEditing ? (
-                        <input
-                          autoFocus
-                          value={editValue}
-                          className="min-w-0 flex-1 rounded-control bg-inset px-2 py-1 text-body-sm text-ink outline-none"
-                          onChange={(event) => setEditValue(event.target.value)}
-                          onKeyDown={(event) => {
-                            if (event.key === "Enter") submitProjectRename(entry.id);
-                            if (event.key === "Escape") {
-                              event.stopPropagation();
-                              setEditingProject(null);
-                            }
-                          }}
-                          onBlur={() => setEditingProject(null)}
-                        />
-                      ) : (
-                        <CollapsibleTrigger
-                          className="flex min-w-0 flex-1 items-center gap-1 text-left"
-                          title={entry.path}
-                        >
-                          {/* 展开/折叠共用同一位置的文件夹图标，随状态切换（不用箭头）。 */}
-                          {isCollapsed ? (
-                            <Folder className="size-3.5 shrink-0 text-muted" />
-                          ) : (
-                            <FolderOpen className="size-3.5 shrink-0 text-muted" />
-                          )}
-                          <span className="min-w-0 flex-1 truncate text-body-sm text-ink">
-                            {entry.name}
-                          </span>
-                          <span className="shrink-0 text-caption text-muted">
-                            {projectSessions.length}
-                          </span>
-                        </CollapsibleTrigger>
-                      )}
-                      {!isEditing && (
-                        <button
-                          type="button"
-                          aria-label={`在「${entry.name}」新建会话`}
-                          title="新建会话"
-                          className="hidden size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors group-hover:flex hover:bg-selected hover:text-ink"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            onNew(entry.id);
-                          }}
-                        >
-                          <Plus className="size-3.5" />
-                        </button>
-                      )}
-                    </div>
-                  </ContextMenu>
-                  <CollapsibleContent>
-                    <div
-                      role="listbox"
-                      aria-label={`${entry.name} 的会话`}
-                      className="mt-0.5 flex flex-col gap-0.5"
-                    >
-                      {projectSessions.length === 0 ? (
-                        <p className="px-2 py-1.5 text-caption text-muted">还没有会话。</p>
-                      ) : (
-                        projectSessions.map((session) => renderRow(session, "project", entry.id))
-                      )}
-                    </div>
-                  </CollapsibleContent>
-                </Collapsible>
-              );
-            })}
-          </div>
-        </section>
       </ScrollArea>
     </aside>
   );

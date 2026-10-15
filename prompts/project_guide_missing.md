@@ -1,2 +1,2 @@
-# 项目指南
-未找到 {{guide_file}}，请先自行探索项目结构再动手。
+# Project guide
+{{guide_file}} was not found; explore the project structure yourself before starting.

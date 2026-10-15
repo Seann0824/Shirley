@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Shirley 桌面窗口能力：AgentEvent 事件监听、标题栏拖动与双击缩放。",
+  "description": "Shirley desktop window capabilities: AgentEvent event listening, title-bar drag and double-click zoom.",
   "windows": ["main"],
   "permissions": ["core:default", "core:window:allow-start-dragging", "dialog:default"]
 }

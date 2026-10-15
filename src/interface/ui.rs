@@ -10,27 +10,27 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use super::app::{App, ChatMessage, Item, Role};
 use super::markdown;
 
-/// 输入框最多显示的行数，超出后内部纵向滚动，避免挤占消息区。
+/// Maximum number of lines shown for the input box; beyond that it scrolls vertically inside, to avoid squeezing the message area.
 const INPUT_MAX_LINES: usize = 10;
 
 pub(crate) struct MessageCache {
     width: usize,
     lines: Vec<Line<'static>>,
     row_offsets: Vec<usize>,
-    /// 每个 UI 条目起始行在 `lines` 里的下标（源行号）。回溯编辑态据此定位被编辑条目。
+    /// Index into `lines` where each UI item starts (source line number). Rewind-edit mode uses this to locate the edited item.
     item_line_offsets: Vec<usize>,
-    /// 视口起始屏幕行：编辑态下等于被编辑条目的屏幕行号（相当于把它当成"屏幕第一行"），
-    /// 否则为 0。头部（编辑条目之前的内容）占用的屏幕行数即此值。
+    /// Viewport start screen row: in edit mode equals the screen row of the edited item (treating it as "screen line 0"),
+    /// otherwise 0. The screen rows taken by the header (content before the edited item) equal this value.
     start_row: usize,
 }
 
 impl MessageCache {
     fn new(app: &App, width: usize) -> Self {
         let mut lines = Vec::new();
-        // 每个条目在 `lines` 里的起始行下标，稍后换算成屏幕行号。
+        // Start line index of each item in `lines`, later converted into screen rows.
         let mut item_line_offsets = Vec::with_capacity(app.items().len());
-        // 一整轮 AI 回复只在块首出一次名字，之后才是 工具调用 / 正文。
-        // 连续的 Assistant 消息与工具调用同属一轮，遇到非 AI 条目才收束。
+        // A whole AI reply prints its name once at the block start, and only then tool calls / body text.
+        // Consecutive Assistant messages and tool calls belong to the same turn; the turn closes when a non-AI item appears.
         let mut turn_open = false;
         for item in app.items() {
             item_line_offsets.push(lines.len());
@@ -39,7 +39,7 @@ impl MessageCache {
                     turn_open = false;
                     let arrow = if *expanded { "▾" } else { "▸" };
                     lines.push(Line::from(Span::styled(
-                        format!("{arrow} 已压缩上下文"),
+                        format!("{arrow} context compacted"),
                         Style::default().fg(Color::Yellow),
                     )));
                     if *expanded {
@@ -67,10 +67,10 @@ impl MessageCache {
                 }
             }
         }
-        // 屏幕行数必须与 ratatui `Paragraph` 实际渲染一致：它按**词边界**换行，
-        // 而非简单按字符数取整。早期用 `line.width().div_ceil(width)` 估算会少算
-        // 行数（例如中英混排的长行），导致 `max_scroll` 偏小、最新消息被输入框挡住。
-        // 这里直接复用 ratatui 自己的换行计数（`Paragraph::line_count`）。
+        // Screen row count must match how ratatui `Paragraph` actually renders: it wraps at **word boundaries**,
+        // not by simply rounding character counts. An earlier estimate with `line.width().div_ceil(width)` undercounted
+        // rows (e.g. long mixed CJK/English lines), making `max_scroll` too small and the newest message hidden behind the input box.
+        // Here we reuse ratatui's own wrap counting (`Paragraph::line_count`) directly.
         let mut row_offsets = Vec::with_capacity(lines.len() + 1);
         row_offsets.push(0);
         for line in &lines {
@@ -80,8 +80,8 @@ impl MessageCache {
                 .max(1);
             row_offsets.push(row_offsets.last().copied().unwrap() + rows);
         }
-        // 回溯编辑态：视口从被编辑条目开始，头部行数 = 该条目的屏幕行号
-        // （条目起始行 → 屏幕行号：row_offsets 按 lines 逐行累加，下标即行号）。
+        // Rewind-edit mode: the viewport starts at the edited item, so header rows = that item's screen row
+        // (item start line -> screen row: row_offsets accumulates per line, and the index is the row number).
         let start_row = app
             .rewind_edit_item()
             .and_then(|item| item_line_offsets.get(item).copied())
@@ -124,7 +124,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     let content_lines = input_lines.len().clamp(1, INPUT_MAX_LINES);
     let input_height = content_lines as u16 + 2;
 
-    // 回溯编辑态：输入框就地替换被选中的那条消息，而不是钉在底部。
+    // Rewind-edit mode: the input box replaces the selected message in place instead of being pinned to the bottom.
     let edit_item = app.rewind_edit_item();
     let [messages_area, input_area] = Layout::vertical([
         Constraint::Min(1),
@@ -140,7 +140,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     {
         app.message_cache = Some(MessageCache::new(app, message_width));
     }
-    // 先取出缓存里的标量（`&App`），再对 `app` 做可变操作，避免借用冲突。
+    // Read the scalars out of the cache first (`&App`), then mutate `app`, to avoid a borrow conflict.
     let total_height = *app
         .message_cache
         .as_ref()
@@ -154,8 +154,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 
     let mut cursor: Option<(u16, u16)> = None;
     if let Some(item_index) = edit_item {
-        // 编辑态：头部（该消息之前的对话）在输入框上方，尾部（该消息之后的对话）
-        // 在下方；新消息出现只会把底部挤出视野，不会挤压编辑框。
+        // Edit mode: the header (conversation before that message) sits above the input box, and the tail (conversation after it)
+        // sits below; new messages only push the bottom out of view and never squeeze the edit box.
         cursor = draw_rewind_edit(
             frame,
             app,
@@ -169,7 +169,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             item_index,
         );
     } else {
-        // 普通态：沿用原有滚动。
+        // Normal mode: reuse the existing scrolling.
         let scroll = if app.auto_scroll() {
             max_scroll
         } else {
@@ -196,7 +196,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     ratatui::layout::Rect::new(
                         messages_area.x,
                         messages_area.y + (row - scroll) as u16,
-                        messages_area.width.min("▸ 已压缩上下文".width() as u16),
+                        messages_area.width.min("▸ context compacted".width() as u16),
                         1,
                     ),
                     index,
@@ -237,21 +237,21 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
         frame.set_cursor_position((x, y));
     }
 
-    // 模糊指令候选浮层：在消息区底部贴一个列表，不挤压主布局。
+    // Fuzzy command-suggestion popup: stick a list at the bottom of the message area without squeezing the main layout.
     draw_command_suggestions(frame, app, messages_area);
 
-    // 模型选择器：模态浮层，覆盖消息区中央。
+    // Model picker: a modal overlay covering the center of the message area.
     draw_model_picker(frame, app, messages_area);
 
-    // 会话选择器：同款模态浮层。
+    // Session picker: same modal overlay.
     draw_session_picker(frame, app, messages_area);
 }
 
-/// 回溯编辑态渲染：头部 + 就地输入框 + 尾部。
+/// Rewind-edit mode rendering: header + in-place input box + tail.
 ///
-/// 头部是该消息之前的对话（滚到末尾，正好接在输入框上方），输入框替换掉原消息，
-/// 尾部是该消息之后的对话。三者按屏幕高度分配，头部优先占满剩余空间，尾部吃剩饭。
-/// 返回输入框光标坐标（供 `draw` 设置）。
+/// The header is the conversation before that message (scrolled to the end, so it sits right above the input box); the input box replaces the original message,
+/// and the tail is the conversation after it. The three split the screen height; the header fills the remaining space first and the tail takes the leftovers.
+/// Returns the input-box cursor position (for `draw` to set).
 #[allow(clippy::too_many_arguments)]
 fn draw_rewind_edit(
     frame: &mut Frame,
@@ -269,7 +269,7 @@ fn draw_rewind_edit(
     let height = area.height as usize;
     let box_height = (content_lines + 2).min(height);
     let avail = height.saturating_sub(box_height);
-    // 头部屏幕行数 = 被编辑条目的起始行号。
+    // Header screen rows = the start line number of the edited item.
     let head_rows = cache.start_row;
     let head_show = head_rows.min(avail);
     let tail_budget = avail - head_show;
@@ -281,7 +281,7 @@ fn draw_rewind_edit(
     ])
     .areas(area);
 
-    // 头部：取其末尾 head_show 行（滚到紧邻输入框）。
+    // Header: take its last head_show lines (scrolled right up against the input box).
     if head_show > 0 {
         let (lines, inner) = cache.visible_lines(head_rows - head_show, head_show);
         frame.render_widget(
@@ -292,7 +292,7 @@ fn draw_rewind_edit(
         );
     }
 
-    // 输入框：替换掉原消息的位置，用青色描边标出"正在编辑"。
+    // Input box: replaces the original message's position, outlined in cyan to mark "being edited".
     let first = cursor_line.saturating_add(1).saturating_sub(content_lines);
     let visible = input_view_lines(input_lines, first, content_lines, prompt);
     frame.render_widget(
@@ -300,7 +300,7 @@ fn draw_rewind_edit(
         box_area,
     );
 
-    // 尾部：该消息之后的对话。
+    // Tail: the conversation after that message.
     if tail_budget > 0
         && let Some(&tail_line) = cache.item_line_offsets.get(item_index + 1)
     {
@@ -314,7 +314,7 @@ fn draw_rewind_edit(
         );
     }
 
-    // 光标：输入框内第 1 列起。
+    // Cursor: starts at column 1 inside the input box.
     let cursor_row = cursor_line.saturating_sub(first);
     let cursor_x = box_area.x
         + 1
@@ -328,7 +328,7 @@ fn draw_rewind_edit(
     Some((cursor_x, cursor_y))
 }
 
-/// 把输入软换行后的可见文本转成带提示符的 `Line`（普通态与编辑态共用）。
+/// Turn the soft-wrapped visible input text into `Line`s with the prompt prefix (shared by normal and edit modes).
 fn input_view_lines(
     input_lines: &[String],
     first: usize,
@@ -358,11 +358,11 @@ fn input_view_lines(
         .collect()
 }
 
-/// 编辑态的输入框样式：青色描边 + 顶部操作提示，标出"正在就地编辑"。
+/// Edit-mode input box style: cyan outline + top action hint, marking "editing in place".
 fn edit_input_block(app: &App) -> Block<'static> {
     let hint = app
         .command_hint()
-        .unwrap_or("Enter 重新发送 · Esc 取消本次修改")
+        .unwrap_or("Enter resend · Esc cancel this edit")
         .to_owned();
     Block::bordered()
         .border_type(BorderType::Rounded)
@@ -378,7 +378,7 @@ fn edit_input_block(app: &App) -> Block<'static> {
         )
 }
 
-/// 普通态输入框的卡片样式（圆角 + 标题 + 提示 + 底部信息）。
+/// Normal-mode input box card style (rounded corners + title + hint + bottom info).
 fn input_block(app: &App) -> Block<'static> {
     let border_style = if app.is_compressing() {
         Style::default().fg(Color::Yellow)
@@ -393,10 +393,10 @@ fn input_block(app: &App) -> Block<'static> {
         .title_bottom(footer_line(app))
 }
 
-/// 渲染 `/model` 的模型选择器。
+/// Render the `/model` model picker.
 ///
-/// 居中覆盖在消息区之上：标题标出当前模型，列表高亮当前项（`●`），
-/// 底部给一行操作提示。列表来自应用层的模型目录，这里只管画。
+/// Centered over the message area: the title shows the current model, the list highlights the current entry (`●`),
+/// and the bottom gives a line of action hints. The list comes from the application-layer model catalog; here we only draw it.
 fn draw_model_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let Some(picker) = app.picker() else {
         return;
@@ -404,7 +404,7 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) 
     if area.height < 4 || area.width < 8 {
         return;
     }
-    // 面板宽度取可用宽度的一部分，并容纳最长条目。
+    // Panel width is a fraction of the available width, and must fit the longest entry.
     let longest = picker
         .entries
         .iter()
@@ -424,7 +424,7 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) 
         height,
     };
 
-    // 清除底下内容，做出模态感。
+    // Clear the content underneath for a modal feel.
     frame.render_widget(ratatui::widgets::Clear, popup_area);
 
     let current = picker.current.as_deref().unwrap_or("");
@@ -432,7 +432,7 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) 
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
         .title_top(
-            Line::from("选择模型 (↑↓ 切换 · Enter 确认 · Esc 取消)".to_owned())
+            Line::from("Select model (↑↓ switch · Enter confirm · Esc cancel)".to_owned())
                 .style(Style::default().fg(Color::Cyan)),
         );
 
@@ -445,7 +445,7 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) 
             let is_current = entry.value == current;
             let cursor = if highlighted { "▶ " } else { "  " };
             let mark = if is_current { "● " } else { "  " };
-            // 标签为主、值为辅：label 常与 value 相同，相同则只显示一次。
+            // Label primary, value secondary: label often equals value, so show it once when they match.
             let text = if entry.label == entry.value {
                 entry.label.clone()
             } else {
@@ -471,10 +471,10 @@ fn draw_model_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) 
     frame.render_widget(Paragraph::new(lines).block(block), popup_area);
 }
 
-/// 渲染 `/session` 的会话选择器（与模型选择器同款模态浮层）。
+/// Render the `/session` session picker (same modal overlay as the model picker).
 ///
-/// 首项是「＋ 新建会话」哨兵，其余为真实会话；每项第二行显示首条用户消息预览，
-/// 让用户认得出会话（只显示时间戳名字无法分辨）。当前会话打绿标。
+/// The first item is the "+ New session" sentinel, the rest are real sessions; each item's second line shows the first user-message preview,
+/// so the user can recognize the session (a timestamp-only name is indistinguishable). The current session is marked green.
 fn draw_session_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let Some(picker) = app.session_picker() else {
         return;
@@ -482,7 +482,7 @@ fn draw_session_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
     if area.height < 4 || area.width < 12 {
         return;
     }
-    // 每项占两行（名字 + 预览），哨兵项只占一行。
+    // Each item takes two lines (name + preview); the sentinel item takes only one.
     let content_rows: u16 = picker
         .entries
         .iter()
@@ -506,7 +506,7 @@ fn draw_session_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
         .title_top(
-            Line::from("选择会话 (↑↓ 切换 · Enter 确认 · Esc 取消)".to_owned())
+            Line::from("Select session (↑↓ switch · Enter confirm · Esc cancel)".to_owned())
                 .style(Style::default().fg(Color::Cyan)),
         );
 
@@ -530,7 +530,7 @@ fn draw_session_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
             format!("{cursor}{mark}{}", entry.label),
             style,
         )));
-        // 预览行：缩进对齐，弱化样式（跟随高亮底色，保证可读）。
+        // Preview line: indented to align, dimmed style (follows the highlight background so it stays readable).
         if !entry.is_empty() {
             let preview_style = if highlighted {
                 Style::default().fg(Color::Black).bg(Color::Cyan)
@@ -547,10 +547,10 @@ fn draw_session_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rect
     frame.render_widget(Paragraph::new(lines).block(block), popup_area);
 }
 
-/// 渲染 `/` 触发的模糊指令候选浮层。
+/// Render the fuzzy command-suggestion popup triggered by `/`.
 ///
-/// 直接覆盖在消息区底部若干行之上，做成一个带描边的小面板。
-/// 最多展示 5 个候选，超出截断（当前指令极少，足够）。
+/// Overlays the bottom few lines of the message area as a small outlined panel.
+/// Shows at most 5 suggestions, truncating beyond that (there are very few commands, so this is plenty).
 fn draw_command_suggestions(frame: &mut Frame, app: &App, area: ratatui::layout::Rect) {
     let suggestions = app.suggestions();
     if suggestions.is_empty() {
@@ -559,11 +559,11 @@ fn draw_command_suggestions(frame: &mut Frame, app: &App, area: ratatui::layout:
     let shown = suggestions.iter().take(5);
     let count = shown.clone().count();
     let width = area.width.clamp(1, 40);
-    let height = (count as u16) + 2; // 上下描边各 1 行
+    let height = (count as u16) + 2; // one line of border top and bottom each
     if height > area.height {
         return;
     }
-    // 贴底：从消息区底部向上对齐。
+    // Bottom-anchored: align upward from the bottom of the message area.
     let y = area.y + area.height.saturating_sub(height);
     let popup_area = ratatui::layout::Rect {
         x: area.x,
@@ -576,7 +576,7 @@ fn draw_command_suggestions(frame: &mut Frame, app: &App, area: ratatui::layout:
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .title_top(
-            Line::from("指令建议 (↑↓←→ 选择 · Tab/Enter 补全)".to_owned()).style(title_style),
+            Line::from("Command suggestions (↑↓←→ select · Tab/Enter complete)".to_owned()).style(title_style),
         );
     let selected = app.suggestion_index();
     let lines: Vec<Line> = suggestions
@@ -600,9 +600,9 @@ fn draw_command_suggestions(frame: &mut Frame, app: &App, area: ratatui::layout:
     frame.render_widget(Paragraph::new(lines).block(block), popup_area);
 }
 
-/// 把输入按显示宽度软换行，并保留硬换行（粘贴进来的 `\n`）。
-/// 返回每行的可见文本、光标所在行号与光标在该行内的显示列。
-/// 首行因为前面有提示符，可用宽度比后续行少 `prompt_width`。
+/// Soft-wrap the input by display width while preserving hard newlines (pasted `\n`).
+/// Returns each line's visible text, the cursor's line index, and the cursor's display column within that line.
+/// The first line has less usable width than subsequent lines by `prompt_width`, because of the prompt prefix.
 fn wrap_input(
     input: &str,
     cursor: usize,
@@ -624,7 +624,7 @@ fn wrap_input(
     };
     for (offset, ch) in input.char_indices() {
         if ch == '\n' {
-            // 光标位于换行符之前时，停在当前行末尾。
+            // When the cursor sits before a newline, it stays at the end of the current line.
             if !cursor_set && offset == cursor {
                 cursor_line = lines.len();
                 cursor_col = current_width;
@@ -639,7 +639,7 @@ fn wrap_input(
             lines.push(std::mem::take(&mut current));
             current_width = 0;
         }
-        // 光标在该字符之前：若字符被软换行挤到下一行，光标也随之落到新行行首。
+        // Cursor before this char: if the char was pushed to the next line by soft wrap, the cursor lands at the start of the new line too.
         if !cursor_set && offset == cursor {
             cursor_line = lines.len();
             cursor_col = current_width;
@@ -656,10 +656,10 @@ fn wrap_input(
     (lines, cursor_line, cursor_col)
 }
 
-/// 一轮 AI 回复的名字头，先于 工具调用 / 正文 出现。
+/// Name header for one AI reply, printed before tool calls / body text.
 fn assistant_name_line() -> Line<'static> {
     Line::from(Span::styled(
-        "夏莉：".to_owned(),
+        "Shirley: ".to_owned(),
         Style::default()
             .fg(Color::Magenta)
             .add_modifier(Modifier::BOLD),
@@ -667,21 +667,21 @@ fn assistant_name_line() -> Line<'static> {
 }
 
 fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
-    // Assistant 正文不再单独打名字（名字由块首统一给出）。
+    // The Assistant body no longer prints its own name (the name is given once at the block start).
     let (label, label_style, base_style): (Option<String>, Style, Style) = match message.role {
         Role::User => (
-            Some("你：".to_owned()),
+            Some("You: ".to_owned()),
             Style::default().fg(Color::Cyan),
             Style::default(),
         ),
         Role::Assistant => (None, Style::default(), Style::default()),
         Role::System => (
-            Some("指令：".to_owned()),
+            Some("Command: ".to_owned()),
             Style::default().fg(Color::Green),
             Style::default().fg(Color::Green),
         ),
         Role::Error => (
-            Some("错误：".to_owned()),
+            Some("Error: ".to_owned()),
             Style::default().fg(Color::Red),
             Style::default().fg(Color::Red),
         ),
@@ -691,15 +691,15 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
         lines.push(Line::from(Span::styled(label, label_style)));
     }
 
-    // 消息正文走 Markdown → Block → Line/Span 渲染；错误消息保持原样，避免把报错里的
-    // 反引号/星号当成语法吃掉。
+    // Message body goes through Markdown -> Block -> Line/Span rendering; error messages stay as-is, so backticks/stars
+    // in an error are not swallowed as syntax.
     if message.role == Role::Error {
         for raw in message.content.lines() {
             lines.push(Line::from(Span::styled(raw.to_owned(), base_style)));
         }
     } else {
         let mut rendered = markdown::render(&message.content, base_style, width);
-        // render 会在块之间补空行，这里去掉尾部空行，由下面统一收尾。
+        // render inserts blank lines between blocks; drop the trailing blank lines here and let the code below close uniformly.
         while rendered.last().is_some_and(|line| line.spans.is_empty()) {
             rendered.pop();
         }
@@ -720,7 +720,7 @@ fn append_tools(
     let dim = Style::default().fg(Color::DarkGray);
 
     for call in &group.calls {
-        // 默认一行：🔧 名称 + 关键参数摘要，超宽截断。
+        // Default one line: 🔧 name + key-argument summary, truncated if too wide.
         let summary = summarize_arguments(&call.arguments);
         let mut line = vec![Span::styled(format!("🔧 {}", call.name), name_style)];
         if !summary.is_empty() {
@@ -728,7 +728,7 @@ fn append_tools(
         }
         lines.push(truncate_line(Line::from(line), width));
 
-        // 展开时，逐行给出格式化后的可读参数（不改动原始 JSON）。
+        // When expanded, show formatted readable arguments line by line (without touching the raw JSON).
         if show_args {
             for param in format_arguments(&call.arguments) {
                 lines.push(param);
@@ -738,14 +738,14 @@ fn append_tools(
     lines.push(Line::default());
 }
 
-/// 把 Line 截断到 width 显示宽度，超出部分用省略号收尾。
+/// Truncate a Line to the given display width, ending with an ellipsis if it overflows.
 fn truncate_line(line: Line<'static>, width: usize) -> Line<'static> {
     if width == 0 || line.width() <= width {
         return line;
     }
     let mut spans = Vec::new();
     let mut used = 0usize;
-    // 预留 1 列给省略号
+    // Reserve 1 column for the ellipsis
     let budget = width.saturating_sub(1);
     'outer: for span in line.spans {
         let mut text = String::new();
@@ -764,14 +764,14 @@ fn truncate_line(line: Line<'static>, width: usize) -> Line<'static> {
     Line::from(spans)
 }
 
-/// 把原始 JSON 参数压成一行 KV 摘要，优先露出最关键字段。
+/// Compress the raw JSON arguments into a one-line KV summary, surfacing the most important fields first.
 fn summarize_arguments(arguments: &str) -> String {
     let arguments = arguments.trim();
     if arguments.is_empty() {
         return String::new();
     }
     let Ok(value) = serde_json::from_str::<serde_json::Value>(arguments) else {
-        // 模型偶尔会吐出非法 JSON，原样展示好过藏起来
+        // The model occasionally emits invalid JSON; showing it as-is beats hiding it
         return arguments.to_owned();
     };
     let Some(map) = value.as_object() else {
@@ -786,7 +786,7 @@ fn summarize_arguments(arguments: &str) -> String {
         .join(" ")
 }
 
-/// 单个值的紧凑可读表示：字符串去引号，标量直接显示，复合类型压成 JSON。
+/// Compact readable representation of a single value: strings unquoted, scalars shown directly, compound types compressed to JSON.
 fn compact_value(value: &serde_json::Value) -> String {
     match value {
         serde_json::Value::String(text) => text.clone(),
@@ -795,8 +795,8 @@ fn compact_value(value: &serde_json::Value) -> String {
     }
 }
 
-/// 展开时的可读参数视图：每个顶层字段一行 `key: value`，
-/// 字符串去引号，嵌套结构缩进展示，不改动原始 arguments。
+/// Readable argument view when expanded: one line `key: value` per top-level field,
+/// strings unquoted, nested structures shown indented, without touching the raw arguments.
 fn format_arguments(arguments: &str) -> Vec<Line<'static>> {
     let indent = "  ";
     let key_style = Style::default().fg(Color::Cyan);
@@ -830,7 +830,7 @@ fn format_arguments(arguments: &str) -> Vec<Line<'static>> {
                 ]));
             }
             serde_json::Value::String(text) => {
-                // 多行字符串：首行跟 key，其余行缩进对齐
+                // Multi-line string: first line follows the key, the rest are indented to align
                 let mut parts = text.lines();
                 let first = parts.next().unwrap_or("");
                 lines.push(Line::from(vec![
@@ -845,7 +845,7 @@ fn format_arguments(arguments: &str) -> Vec<Line<'static>> {
                 }
             }
             serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-                // 复合类型：key 单独一行，下面缩进给出格式化 JSON
+                // Compound type: key on its own line, with formatted JSON indented below
                 lines.push(Line::from(Span::styled(
                     format!("{indent}{key}:"),
                     key_style,
@@ -872,11 +872,11 @@ fn format_arguments(arguments: &str) -> Vec<Line<'static>> {
 
 fn input_label(app: &App) -> Line<'static> {
     let (text, color) = if app.is_compressing() {
-        (" 正在压缩上下文 ".to_owned(), Color::Yellow)
+        (" compacting context ".to_owned(), Color::Yellow)
     } else if let Some(seconds) = app.waiting_seconds() {
-        (format!(" 夏莉回复中 {seconds}s "), Color::Cyan)
+        (format!(" Shirley replying {seconds}s "), Color::Cyan)
     } else {
-        (" 输入 ".to_owned(), Color::Cyan)
+        (" input ".to_owned(), Color::Cyan)
     };
     Line::from(Span::styled(
         text,
@@ -885,20 +885,20 @@ fn input_label(app: &App) -> Line<'static> {
 }
 
 fn input_hint(app: &App) -> String {
-    // 指令打开的编辑态（模型选择 / 回溯编辑）优先展示其专属提示。
+    // A command-opened edit mode (model picker / rewind edit) shows its dedicated hint first.
     if let Some(hint) = app.command_hint() {
         return hint.to_owned();
     }
     if app.is_compressing() {
-        " Esc 打断 ".to_owned()
+        " Esc interrupt ".to_owned()
     } else if app.is_waiting() {
-        " 可继续输入 · Esc 打断 ".to_owned()
+        " Keep typing · Esc interrupt ".to_owned()
     } else {
-        " Enter 发送 · ↑↓ 历史 · Ctrl+O 参数 · Ctrl+S 压缩 · Esc 退出 ".to_owned()
+        " Enter send · ↑↓ history · Ctrl+O args · Ctrl+S compact · Esc quit ".to_owned()
     }
 }
 
-/// 按显示宽度截断（CJK 记 2 列），超出加省略号——状态行空间有限，长目标不能撑爆。
+/// Truncate by display width (CJK counts as 2 columns), adding an ellipsis if over -- the status line is tight, and a long goal must not blow it up.
 fn truncate(text: &str, max_width: usize) -> String {
     if text.width() <= max_width {
         return text.to_owned();
@@ -918,24 +918,24 @@ fn truncate(text: &str, max_width: usize) -> String {
     out
 }
 
-/// 底部信息统一右对齐，只保留 KV 形式的数字，够扫一眼即可。
+/// Bottom info is right-aligned throughout, keeping only KV-form numbers, enough for a glance.
 fn footer_line(app: &App) -> Line<'static> {
     let dim = Style::default().fg(Color::DarkGray);
     let sep = || Span::styled(" · ", dim);
     let mut spans: Vec<Span> = Vec::new();
 
-    // 当前会话名（多会话切换后让用户知道自己在哪份会话里）。
+    // Current session name (so the user knows which session they are in after multi-session switching).
     if let Some(name) = app.current_session() {
-        spans.push(Span::styled("会话 ", dim));
+        spans.push(Span::styled("session ", dim));
         spans.push(Span::styled(name.to_owned(), dim));
         spans.push(sep());
     }
 
-    // 任务进度（todo 账本）：让「任务在推进」这一最直接信号对用户可见。
-    // 显示「目标 · 3/7」，进行中一步用青色锚点。空账本不占位。
+    // Task progress (todo ledger): make the most direct "the task is advancing" signal visible to the user.
+    // Shows "goal · 3/7", with the in-progress step anchored in cyan. An empty ledger takes no space.
     if let Some(task) = app.task_view() {
         if let Some(goal) = task.goal.as_deref() {
-            spans.push(Span::styled("任务 ", dim));
+            spans.push(Span::styled("task ", dim));
             spans.push(Span::styled(truncate(goal, 24), dim));
             spans.push(sep());
         }
@@ -946,14 +946,14 @@ fn footer_line(app: &App) -> Line<'static> {
             } else {
                 Color::Cyan
             };
-            spans.push(Span::styled("进度 ", dim));
+            spans.push(Span::styled("progress ", dim));
             spans.push(Span::styled(progress, Style::default().fg(color)));
             spans.push(sep());
         }
     }
 
-    // 上下文占用率
-    spans.push(Span::styled("上下文 ", dim));
+    // Context usage
+    spans.push(Span::styled("context ", dim));
     if app.is_compressing() {
         spans.push(Span::styled("…", Style::default().fg(Color::Yellow)));
     } else if let Some((used, limit)) = app.context_usage() {
@@ -974,7 +974,7 @@ fn footer_line(app: &App) -> Line<'static> {
     }
     spans.push(sep());
 
-    // 缓存命中率：最近 / 累计
+    // Cache hit rate: recent / cumulative
     let hit_style = |rate: Option<f64>| match rate {
         None => dim,
         Some(rate) if rate >= 0.8 => Style::default().fg(Color::Green),
@@ -986,7 +986,7 @@ fn footer_line(app: &App) -> Line<'static> {
         None => "-".to_owned(),
     };
 
-    spans.push(Span::styled("缓存 ", dim));
+    spans.push(Span::styled("cache ", dim));
     match app.last_usage() {
         Some(last) => {
             let last_rate = last.cache_hit_rate();
@@ -1066,10 +1066,10 @@ mod tests {
             content: "bye".into(),
         });
 
-        // 非编辑态：视口从第 0 行开始。
+        // Non-edit mode: the viewport starts at row 0.
         assert_eq!(MessageCache::new(&app, 40).start_row, 0);
 
-        // 编辑态：视口顶到被编辑条目，头部行数即该条目的屏幕行号。
+        // Edit mode: the viewport is pinned to the edited item; header rows equal that item's screen row.
         app.add_message(shirley_agent_sdk::Message::User {
             content: "edit me".into(),
         });
@@ -1080,13 +1080,13 @@ mod tests {
             cache.start_row,
             cache.row_offsets[cache.item_line_offsets[2]]
         );
-        assert!(cache.start_row > 0, "第三个条目不从第 0 行开始");
+        assert!(cache.start_row > 0, "the third item does not start at row 0");
     }
 
     #[test]
     fn cache_row_count_matches_paragraph_word_wrap() {
-        // 回归：`row_offsets` 必须与 ratatui `Paragraph` 的换行一致（按词边界，
-        // 而非按字符数取整），否则 `max_scroll` 偏小，最新消息会被输入框遮挡。
+        // Regression: `row_offsets` must match ratatui `Paragraph`'s wrapping (by word boundary,
+        // not by rounding character count), otherwise `max_scroll` is too small and the newest message is hidden behind the input box.
         use ratatui::Terminal;
         use ratatui::backend::TestBackend;
         use ratatui::widgets::{Paragraph, Wrap};
@@ -1103,7 +1103,7 @@ mod tests {
             });
             app.add_message(Message::Assistant {
                 content: Some(format!(
-                    "这是一个很长的回复第 {i} 条，用来测试换行与遮挡问题，abcdefghijklmnopqrstuvwxyz0123456789"
+                    "This is a very long reply number {i}, used to test wrapping and occlusion, abcdefghijklmnopqrstuvwxyz0123456789"
                 )),
                 reasoning_content: None,
                 tool_calls: vec![],
@@ -1113,7 +1113,7 @@ mod tests {
         let cache = MessageCache::new(&app, width as usize);
         let computed = *cache.row_offsets.last().unwrap();
 
-        // 把同一批 lines 交给 Paragraph 真正渲染，量出实际占用的行数。
+        // Hand the same batch of lines to Paragraph to actually render, and measure the real rows occupied.
         let backend = TestBackend::new(width, 400);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
@@ -1135,7 +1135,7 @@ mod tests {
         }
         assert!(
             computed >= actual,
-            "row_offsets({computed}) 少于实际渲染行数({actual})，会导致最新消息被输入框遮挡"
+            "row_offsets({computed}) is fewer than the actually rendered rows ({actual}), which would hide the newest message behind the input box"
         );
     }
 
@@ -1148,7 +1148,7 @@ mod tests {
 
     #[test]
     fn wrap_input_wraps_long_line() {
-        // 首行可用宽度 = 10 - 2(提示符) = 8
+        // First line usable width = 10 - 2 (prompt) = 8
         let (lines, cursor_line, cursor_col) = wrap_input("abcdefghij", 10, 10, 2);
         assert_eq!(lines, vec!["abcdefgh", "ij"]);
         assert_eq!((cursor_line, cursor_col), (1, 2));
@@ -1162,7 +1162,7 @@ mod tests {
 
     #[test]
     fn wrap_input_cursor_before_soft_wrapped_char() {
-        // 首行容量 8：第 9 个字符会换到第二行，光标在第 9 个字符之前应落在第二行行首。
+        // First line capacity 8: the 9th character wraps to the second line, and a cursor before the 9th char should land at the start of the second line.
         let (lines, cursor_line, cursor_col) = wrap_input("abcdefghi", 8, 10, 2);
         assert_eq!(lines, vec!["abcdefgh", "i"]);
         assert_eq!((cursor_line, cursor_col), (1, 0));

@@ -1,119 +1,119 @@
-**Shirley 技术方案 · 流式输出（P1）**
+**Shirley technical design · Streaming output (P1)**
 
-**一、现状（已落地，本文档转为"已实现能力的设计说明"）**
+**1. Current state (landed; this document has become a "design description of an implemented capability")**
 
-流式已经接通：`encode_request` 的 `"stream"` 读 `ModelConfig.stream`（`main.rs` 里配置为 `true`），响应侧由 `chat_completions::decode_stream_response` 做 SSE 增量解析，`AgentEvent` 会逐片产出 `ContentDelta` / `ReasoningDelta`，TUI 的 `App::append_streaming_delta` 负责追加。
+Streaming is already wired up: the `"stream"` field in `encode_request` reads `ModelConfig.stream` (configured as `true` in `main.rs`), the response side does SSE incremental parsing in `chat_completions::decode_stream_response`, and `AgentEvent` yields `ContentDelta` / `ReasoningDelta` chunk by chunk, which the TUI's `App::append_streaming_delta` appends.
 
 ```rust
-// adapter/chat_completions/mod.rs（现状）
+// adapter/chat_completions/mod.rs (current)
 let body = serde_json::json!({
     "model": &config.model,
     "messages": encode_messages(&input.messages),
     "tools": encode_tools(&input.tools),
-    "thinking": { "type": thinking },          // 读 config.thinking
+    "thinking": { "type": thinking },          // reads config.thinking
     "reasoning_effort": &config.reasoning_effort,
-    "stream": &config.stream,                  // 读 config.stream
+    "stream": &config.stream,                  // reads config.stream
 });
 ```
 
-事件名定为 `ContentDelta`（不是早期草稿里的 `TextDetal`），reasoning 用 `ReasoningDelta`。`adapter/mod.rs` 的 `invoke` 在 `config.stream` 上分流；`runtime` 把 `AdapterEvent::ContentDelta` / `ReasoningDelta` 直接转成 `AgentEvent`。
+The event names are `ContentDelta` (not the `TextDetal` from the early draft), and reasoning uses `ReasoningDelta`. `invoke` in `adapter/mod.rs` branches on `config.stream`; `runtime` converts `AdapterEvent::ContentDelta` / `ReasoningDelta` directly into `AgentEvent`.
 
-**仍然存在的空白**：`decode_stream_response` 里对 SSE `id:` 行仍是 `todo!()`；`Agent::run_stream` 没有测试覆盖流式/非流式一致性。
+**Gaps that still exist**: the SSE `id:` line in `decode_stream_response` is still a `todo!()`; `Agent::run_stream` has no test covering streaming/non-streaming consistency.
 
-**二、为什么它不只是体验问题**
+**2. Why it is not just an experience issue**
 
-非流式下，一个长回答（或长 reasoning）期间 TUI 只能显示"AI 回复中 Ns"。用户无法判断是在思考、在生成、还是卡住了。对 Coding Agent 这种动辄几十秒的任务，这直接影响"敢不敢交给它"。同时，流式也是后面"边生成边执行"的前提。
+In non-streaming mode, during a long answer (or long reasoning) the TUI can only show "AI replying Ns". The user cannot tell whether it is thinking, generating, or stuck. For a Coding Agent doing tasks that routinely take tens of seconds, this directly affects "do I dare hand it over". At the same time, streaming is also the precondition for the later "execute while generating".
 
-**三、设计要点**
+**3. Design points**
 
-**3.1 协议层：SSE 解码（已实现）**
+**3.1 Protocol layer: SSE decoding (implemented)**
 
-ChatCompletions 流式是 `text/event-stream`，每行 `data: {...}`，以 `data: [DONE]` 结束。当前实现没有单独的 `SseDecoder` 结构体，而是在 `decode_stream_response` 内用一个 `buffer: String` 按 `\n\n` 切事件：
+ChatCompletions streaming is `text/event-stream`, with each line `data: {...}`, ending with `data: [DONE]`. The current implementation does not have a separate `SseDecoder` struct; instead, inside `decode_stream_response` it uses a `buffer: String` and splits events by `\n\n`:
 
 ```rust
-// crates/shirley-agent-sdk/src/adapter/chat_completions/mod.rs（现状）
+// crates/shirley-agent-sdk/src/adapter/chat_completions/mod.rs (current)
 let mut buffer = String::new();
 while let Some(chunk) = byte_stream.next().await {
     buffer.push_str(&String::from_utf8_lossy(&chunk));
     while let Some(pos) = buffer.find("\n\n") {
-        // 取出一个完整事件，逐行解析 event:/data:/id:
+        // take one complete event, parse line by line: event:/data:/id:
     }
 }
 ```
 
-注意点：chunk 边界会切断 JSON，所以按事件边界（空行）而不是按 chunk 边界解析；`[DONE]` 被当成终止哨兵跳过，不做 JSON 解析。（`id:` 行仍留了一个 `todo!()`。）
+Points to note: chunk boundaries can split JSON, so parse by event boundary (blank line), not by chunk boundary; `[DONE]` is treated as a terminating sentinel and skipped, without JSON parsing. (The `id:` line still leaves a `todo!()`.)
 
-**3.2 增量拼接**
+**3.2 Incremental assembly**
 
-流式的每个 delta 只带片段，需要累积成完整消息：
+Each streaming delta carries only a fragment, and they must be accumulated into a complete message:
 
 ```rust
 #[derive(Default)]
 struct StreamAccumulator {
     content: String,
     reasoning: String,
-    tool_calls: BTreeMap<usize, ToolCallAccumulator>, // 按 index 聚合
+    tool_calls: BTreeMap<usize, ToolCallAccumulator>, // aggregated by index
     finish_reason: Option<String>,
     usage: Option<Usage>,
 }
 ```
 
-工具调用的 delta 尤其要注意：`function.arguments` 是**分片下发的 JSON 字符串**，必须按 `index` 聚合后再解析，不能每片都尝试 `from_str`。
+The delta for tool calls deserves special attention: `function.arguments` is a **JSON string delivered in fragments**, and it must be aggregated by `index` before parsing; do not try `from_str` on every fragment.
 
-**3.3 事件产出（已实现，命名与草稿略有出入）**
+**3.3 Event production (implemented; naming differs slightly from the draft)**
 
-`AgentEvent` 实际新增的是：
+What `AgentEvent` actually adds is:
 
 ```rust
 pub enum AgentEvent {
-    ContentDelta(String),      // 文本增量（草稿里叫 TextDelta）
-    ReasoningDelta(String),    // 思考增量
-    // ... 原有事件
+    ContentDelta(String),      // text increment (called TextDelta in the draft)
+    ReasoningDelta(String),    // thinking increment
+    // ... existing events
 }
 ```
 
-注意没有单独的 `ToolCallDelta`：工具调用增量在 `decode_stream_response` 内部聚合（`merge_tool_call_deltas` + `finish_tool_calls`），只在流结束时通过 `Finished(ModelResponse)` 交付完整 `tool_calls`。
+Note there is no separate `ToolCallDelta`: tool-call increments are aggregated inside `decode_stream_response` (`merge_tool_call_deltas` + `finish_tool_calls`), and the complete `tool_calls` is delivered only at the end of the stream via `Finished(ModelResponse)`.
 
-**3.4 流结束后的一致性**
+**3.4 Consistency after the stream ends**
 
-关键约束：**流式与非流式最终落库的 `Message` 必须完全一致**。当前实现的做法是 `decode_stream_response` 内部累积 `content` / `reasoning_content` / `tool_calls`，在收到 `finish_reason` 时产出一个 `AdapterEvent::Finished(ModelResponse)`，之后走和现在完全相同的落库逻辑。这样压缩、`active_messages`、`RunResult` 都不用区分两种模式。
+Key constraint: **the `Message` ultimately persisted must be exactly the same for streaming and non-streaming**. The current implementation accumulates `content` / `reasoning_content` / `tool_calls` inside `decode_stream_response`, and on receiving `finish_reason` it produces an `AdapterEvent::Finished(ModelResponse)`, after which it goes through exactly the same persistence logic as now. This way compaction, `active_messages`, and `RunResult` do not need to distinguish the two modes.
 
-（草稿里提出的独立 `StreamAccumulator` 结构体没有单独抽出，累积逻辑直接内联在流式解码函数里。）
+(The standalone `StreamAccumulator` struct proposed in the draft was not extracted separately; the accumulation logic is inlined directly in the streaming decode function.)
 
-**四、`run_stream` 的改造（已实现）**
+**4. Rework of `run_stream` (implemented)**
 
-`Agent` 的方法名已经叫 `run_stream`（指事件流），模型是否流式由 `ModelConfig.stream` 决定。`adapter::invoke` 在 `config.stream` 上分流（`Adapters/mod.rs`）：流式消费 `decode_stream_response` 的事件流并 `yield`，非流式解析完整响应后 `yield` 一个 `Finished`。
+The `Agent` method is already named `run_stream` (referring to the event stream); whether the model streams is decided by `ModelConfig.stream`. `adapter::invoke` branches on `config.stream` (`adapter/mod.rs`): streaming consumes the event stream from `decode_stream_response` and `yield`s, non-streaming parses the full response and then `yield`s a single `Finished`.
 
 ```rust
-// adapter/mod.rs（现状）
+// adapter/mod.rs (current)
 if !config.stream {
-    // 完整响应 → yield AdapterEvent::Finished(msg)
+    // full response -> yield AdapterEvent::Finished(msg)
 } else {
-    // decode_stream_response → 逐事件 yield
+    // decode_stream_response -> yield event by event
 }
 ```
 
-（草稿里提到的 `GenerationConfig` / `ModelOutput` 枚举没有引入，开关直接放在 `ModelConfig` 上。）
+(The `GenerationConfig` / `ModelOutput` enums mentioned in the draft were not introduced; the switch sits directly on `ModelConfig`.)
 
-**五、TUI 侧（已实现）**
+**5. TUI side (implemented)**
 
-`AgentUpdate` 那层手写翻译已经去掉，`tui::apply` 直接消费 `AgentEvent`：
+The hand-written translation layer `AgentUpdate` has been removed, and `tui::apply` consumes `AgentEvent` directly:
 
-- 收到 `ContentDelta` → `App::append_streaming_delta(delta, false)`，追加到"当前正在生成的 Assistant 消息"（`streaming_delta_start` 指向起点，不是新增一条）。
-- 收到 `ReasoningDelta` → `App::append_streaming_delta(delta, true)`，追加到"当前思考块"。
-- 收到 `MessageAdded(Assistant)` → `App::finish_streaming_deltas()` 结束流式块，转为最终消息。
+- On `ContentDelta` -> `App::append_streaming_delta(delta, false)`, appended to "the Assistant message currently being generated" (`streaming_delta_start` points at the start; it does not add a new one).
+- On `ReasoningDelta` -> `App::append_streaming_delta(delta, true)`, appended to "the current thinking block".
+- On `MessageAdded(Assistant)` -> `App::finish_streaming_deltas()` ends the streaming block and turns it into the final message.
 
-`App` 已经有 `streaming_delta_start: Option<usize>` 来表达"进行中的消息"。
+`App` already has `streaming_delta_start: Option<usize>` to express "the message in progress".
 
-**六、性能与缓存注意**
+**6. Performance and caching notes**
 
-- 流式**不影响** prefix 缓存：请求体的前缀（system + 历史消息 + 工具定义）不变，`stream: true` 只是响应侧差异。`thinking` / `reasoning_effort` 现在读 `ModelConfig`（不再是硬编码），改动这些配置会改变请求前缀，破坏缓存——需要留意。
-- `ToolManager::definitions()` 的排序（按 name）必须保留，`Agent.md` 特别提醒过。
-- 每帧重建 `MessageCache` 在流式下会变成高频操作，必须改成增量追加（见 `testing.md` 的性能一节）。
+- Streaming does **not affect** the prefix cache: the request-body prefix (system + history messages + tool definitions) is unchanged; `stream: true` is only a response-side difference. `thinking` / `reasoning_effort` now read `ModelConfig` (no longer hard-coded); changing these configs changes the request prefix and breaks the cache -- keep this in mind.
+- The sorting of `ToolManager::definitions()` (by name) must be kept; `Agent.md` specifically warned about this.
+- Rebuilding `MessageCache` every frame becomes a high-frequency operation under streaming, and it must be changed to incremental appending (see the performance section of `testing.md`).
 
-**七、验收**
+**7. Acceptance**
 
-1. 开启 `stream: true`，TUI 逐字显示回答，reasoning 可见（`Ctrl+T` 控制）。
-2. 流式与非流式对同一 prompt，落库的 `Message::Assistant` 内容一致。（暂无测试守护）
-3. 工具调用在流式下能正确聚合出完整 `arguments` JSON。（`merge_tool_call_deltas` 已实现）
-4. 中途取消，已生成的部分保留，且不产生半条损坏消息。（取消通道尚未实现，见 `runtime-hardening.md` 第四节）
+1. With `stream: true` enabled, the TUI shows the answer character by character, and reasoning is visible (controlled by `Ctrl+T`).
+2. For the same prompt, streaming and non-streaming persist the same `Message::Assistant` content. (No test guards this yet.)
+3. Tool calls can correctly aggregate a complete `arguments` JSON under streaming. (`merge_tool_call_deltas` is implemented.)
+4. On a mid-stream cancel, the already-generated part is preserved and no half-corrupted message is produced. (The cancellation channel is not implemented yet; see section 4 of `runtime-hardening.md`.)

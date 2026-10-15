@@ -2,7 +2,6 @@
 
 A coding agent written in Rust, named after Shirley from *Code Geass*.
 
-> English | [简体中文](README.zh-CN.md)
 
 The repository is organized in three layers:
 

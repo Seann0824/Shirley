@@ -5,14 +5,17 @@ import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/ui/collap
 import { cn } from "@/ui/utils";
 import type { TaskViewWire } from "@/types/wire";
 
-// 任务账本卡片：把「模型自己记的任务进度」直接摆给用户看。
+// Task-ledger card: puts "the task progress the model tracks itself" directly in front of
+// the user.
 //
-// 为什么需要它：todo 账本此前只经 ContextProvider 注入给模型，用户完全看不到
-// 「任务在推进」这个最直接的信号。这里消费后端在 `todo` 工具完成时发的
-// `todo_updated` 结构化快照（不解析注入 XML）。
+// Why it is needed: the todo ledger was previously injected to the model only via
+// ContextProvider, so the user could not see "the task is moving forward" — the most direct
+// signal. This consumes the structured `todo_updated` snapshot the backend emits when the
+// `todo` tool completes (it does not parse the injected XML).
 //
-// 折叠策略：目标 + 进度常驻（一眼可见），步骤清单默认收起——步骤是「过程」，
-// 用户主要关心「目标是什么、推进到哪了」；想看细节再展开。
+// Collapse strategy: goal + progress stay visible (at a glance), while the step list is
+// collapsed by default — steps are the "process", and the user mainly cares "what is the
+// goal, how far has it advanced"; expand for details if wanted.
 export function TaskCard({ task }: { task: TaskViewWire }) {
   const [open, setOpen] = useState(false);
   const done = task.total > 0 && task.completed === task.total;
@@ -23,7 +26,7 @@ export function TaskCard({ task }: { task: TaskViewWire }) {
         <div className="flex items-center gap-2">
           <ListChecks className="size-3.5 shrink-0 text-muted" aria-hidden="true" />
           <span className="min-w-0 flex-1 truncate text-ink">
-            {task.goal ?? "任务"}
+            {task.goal ?? "Task"}
           </span>
           {task.total > 0 && (
             <span
@@ -38,7 +41,7 @@ export function TaskCard({ task }: { task: TaskViewWire }) {
           {task.steps.length > 0 && (
             <CollapsibleTrigger asChild>
               <Button type="button" variant="ghost" size="sm" className="text-muted">
-                <span className="sr-only">展开任务步骤</span>
+                <span className="sr-only">Expand task steps</span>
                 <ChevronDown
                   className={cn("transition-transform duration-150", open && "rotate-180")}
                   aria-hidden="true"

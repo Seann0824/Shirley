@@ -1,2 +1,2 @@
-## 现有相关记忆（避免重复；如需取代用其 id）
+## Existing related memories (avoid duplicates; to supersede, use its id)
 {{entries}}

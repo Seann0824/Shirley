@@ -1,155 +1,155 @@
-**Shirley —— 项目 Agent 指南**
+**Shirley -- Project Agent Guide**
 
-这份文件写给下一个接手这个仓库的 Agent（或者人）。我尽量写得像一份能直接照着干活的手册，而不是一份宣传材料。如果你只想知道"我该从哪里开始改代码"，请直接跳到 **上手路径** 那一节。
+This document is written for the next Agent (or human) who takes over this repository. I have tried to make it read like a manual you can work directly from, not a piece of marketing. If all you want to know is "where do I start changing code", jump straight to the **Getting Started** section.
 
-> 这份文件描述的是**当前代码的真实状态**。如果你改了架构，请顺手把这里对齐——上一版就因为落后十几个 commit 而误导过人。
+> This document describes the **current true state of the code**. If you change the architecture, please bring this in line too -- a previous version misled people because it lagged behind by a dozen commits.
 
 ---
 
-**一、这是什么**
+**1. What this is**
 
-Shirley 是一个用 Rust 写的 Coding Agent。名字来自《Code Geass》里的夏莉，`prompts/system.md` 里的角色设定（system prompt）就是按她的设定写的——这既是人格测试用例，也是真实的默认人设。
+Shirley is a Coding Agent written in Rust. The name comes from Shirley in *Code Geass*; the character setup in `prompts/system.md` (the system prompt) is written around her -- it is both a personality test case and the real default persona.
 
-整个仓库分成三层：
+The whole repository is split into three layers:
 
-| 层 | 位置 | 职责 |
+| Layer | Location | Responsibility |
 | --- | --- | --- |
-| 应用层 | `src/` | 一个可跑的 TUI 聊天 Agent，注册工具、驱动界面 |
-| SDK 层 | `crates/shirley-agent-sdk/` | 与业务无关的 Agent 基础能力：消息、工具、协议适配、ReAct 运行时、沙盒、工作区 |
-| 宏层 | `crates/shirley-agent-sdk-macros/` | `#[tool]` 属性宏，把普通 async 函数变成可被模型调用的工具 |
+| Application layer | `src/` | A runnable TUI chat Agent that registers tools and drives the interface |
+| SDK layer | `crates/shirley-agent-sdk/` | Business-agnostic Agent fundamentals: messages, tools, protocol adapters, the ReAct runtime, sandbox, workspace |
+| Macro layer | `crates/shirley-agent-sdk-macros/` | The `#[tool]` attribute macro that turns an ordinary async function into a model-callable tool |
 
-核心设计目标写在根目录的 `plan.md` 里：SDK 只沉淀"下次做 Agent 还会用到"的能力，不掺业务。当前聚焦的场景是"Coding Agent"，也就是拿它去做 TS 后端往 Rust 迁移这类长任务。
+The core design goal is written in the root `plan.md`: the SDK should only accumulate "capabilities you would still need the next time you build an Agent", with no business logic mixed in. The current focus is the "Coding Agent" scenario, i.e. using it for long tasks such as migrating a TS backend to Rust.
 
-**提示词一律走 md（约定）**：所有 system prompt / 注入文案 / 压缩模板的**正文**都维护在 `prompts/*.md`（应用层）与 `crates/shirley-agent-sdk/prompts/*.md`（SDK），Rust 代码只 `include_str!` 模板并用 `{{占位符}}` 填动态值（`src/prompt_template.rs::render`，单遍扫描、未知占位符原样保留）。改文案不必改代码；新增动态内容就加占位符。当前模板：`system.md` / `project_guide.md` / `project_guide_missing.md` / `compression_instruction.md` / `todo_header.md` / `todo_nag.md` / `skills_header.md` / `curator_*.md`（应用层），`compaction_template.md`（SDK）。
+**Prompts always go through md (a convention)**: the **body text** of every system prompt / injected copy / compression template is maintained in `prompts/*.md` (application layer) and `crates/shirley-agent-sdk/prompts/*.md` (SDK). Rust code only `include_str!`s the template and fills dynamic values via `{{placeholder}}` (`src/prompt_template.rs::render`, a single pass, unknown placeholders kept verbatim). Changing copy does not require changing code; to add dynamic content, add a placeholder. Current templates: `system.md` / `project_guide.md` / `project_guide_missing.md` / `compression_instruction.md` / `todo_header.md` / `todo_nag.md` / `skills_header.md` / `curator_*.md` (application layer), `compaction_template.md` (SDK).
 
-**`docs/` 是一组独立的技术方案文档**（和根目录的 `plan.md` 不是一回事）：
+**`docs/` is a set of independent technical design documents** (not the same thing as the root `plan.md`):
 
-| 文档 | 解决什么 |
+| Document | What it solves |
 | --- | --- |
-| `docs/README.md` | 文档索引 + 三条全局设计原则 |
-| `docs/architecture.md` | 架构图 + 每个功能落在哪些节点 |
-| `docs/roadmap.md` | 总路线图：分期、依赖关系、验收口径 |
-| `docs/security.md` | 权限层、bash 边界、密钥、工作区隔离 |
-| `docs/sandbox.md` | 进程沙盒：spec / 后端 / degraded / 超时 |
-| `docs/runtime-hardening.md` | max_steps、重试、超时、取消、压缩健壮性 |
-| `docs/streaming.md` | 流式输出与 reasoning 流式 |
-| `docs/adapter-layer.md` | 协议适配中间层、工具参数标准化、多协议 |
-| `docs/responses-api.md` | Responses 协议适配：请求 item 展开 / 响应解码 / 流式事件（**已实现**） |
-| `docs/anthropic-messages-api.md` | Anthropic Messages 协议适配：content block / 流式分片聚合 / usage 语义（**已实现**） |
-| `docs/todo.md` | 任务账本 `todo`：模型自维护、跨压缩存活的任务状态 / 每轮末尾注入（**已实现**；账本在应用层 `src/todo.rs`，SDK 只留通用接缝 `ContextProvider`） |
-| `docs/testing.md` | SDK 单测策略、缓存命中率基准 |
-| `docs/plan.md` | 错误处理统一化：已完成状态 + 后续任务清单 |
-| `docs/tool-lifecycle.md` | 工具生命周期：`ToolContext` 归 `ToolManager` / `on_register`（created）/ `on_unregister`（destroy）/ `unregister`（**已实现**） |
-| `docs/tool-macro.md` | 工具宏表达力：函数宏扩展可选伴生钩子，lifecycle 由宏接线（**已实现**） |
-| `docs/desktop-interface.md` | 桌面界面：Tauri 2 + React 迁移 shiwen 聊天 UI / 共享 LCA（`AgentEvent`）/ 剥离 shiwen 定制逻辑（**M0–M3 已落地**，含 `@` 引用重绑工作区文件、markdown 渲染对齐、聊天区固定宽度 `max-w-190`、连续工具调用收集成折叠区、**多项目多工作区**：登记 / 切换 / 重命名 / 归档 / 恢复） |
-| `docs/skills.md` | 技能（skills）：拥抱 Agent Skills 开放标准（`SKILL.md` 目录 / frontmatter）/ 渐进式披露（目录常驻 + 按需激活 + 资源按需读）/ `SkillContextProvider` 每轮末尾追加注入（目录 + 已激活正文，跨压缩存活、KV 友好）/ 应用层实现，SDK 零改动（**P0+P1+P2(slash) 已落地**：`src/skills/` 发现 + 解析 + 目录 + `activate_skill` / `SkillRuntime` 激活 + `read_skill_file` 资源读取 + `/<skill-name>` 命令层直接激活） |
+| `docs/README.md` | Document index + three global design principles |
+| `docs/architecture.md` | Architecture diagram + where each feature lives |
+| `docs/roadmap.md` | Overall roadmap: phases, dependencies, acceptance criteria |
+| `docs/security.md` | Permission layer, bash boundary, secrets, workspace isolation |
+| `docs/sandbox.md` | Process sandbox: spec / backend / degraded / timeout |
+| `docs/runtime-hardening.md` | max_steps, retry, timeout, cancellation, compaction robustness |
+| `docs/streaming.md` | Streaming output and reasoning streaming |
+| `docs/adapter-layer.md` | Protocol adapter middle layer, tool-argument normalization, multi-protocol |
+| `docs/responses-api.md` | Responses protocol adapter: request item expansion / response decoding / streaming events (**implemented**) |
+| `docs/anthropic-messages-api.md` | Anthropic Messages protocol adapter: content blocks / streaming fragment aggregation / usage semantics (**implemented**) |
+| `docs/todo.md` | The `todo` task ledger: model self-maintained, task state that survives compaction / injected at the end of each round (**implemented**; the ledger lives in the application layer `src/todo.rs`, the SDK only keeps the generic seam `ContextProvider`) |
+| `docs/testing.md` | SDK unit-test strategy, cache hit-rate benchmarks |
+| `docs/plan.md` | Error-handling unification: completed state + follow-up task list |
+| `docs/tool-lifecycle.md` | Tool lifecycle: `ToolContext` belongs to `ToolManager` / `on_register` (created) / `on_unregister` (destroy) / `unregister` (**implemented**) |
+| `docs/tool-macro.md` | Tool macro expressiveness: function macro extended with optional companion hooks, lifecycle wired by the macro (**implemented**) |
+| `docs/desktop-interface.md` | Desktop interface: Tauri 2 + React migration of the shiwen chat UI / shared LCA (`AgentEvent`) / stripping shiwen custom logic (**M0-M3 landed**, including `@` reference rebinding to workspace files, markdown rendering alignment, fixed chat width `max-w-190`, consecutive tool calls collected into a collapsible area, **multi-project multi-workspace**: register / switch / rename / archive / restore) |
+| `docs/skills.md` | Skills: embracing the Agent Skills open standard (`SKILL.md` directory / frontmatter) / progressive disclosure (catalog always resident + activate on demand + read resources on demand) / `SkillContextProvider` appended injection at the end of each round (catalog + activated body, survives compaction, KV-friendly) / application-layer implementation, zero SDK change (**P0+P1+P2(slash) landed**: `src/skills/` discovery + parsing + catalog + `activate_skill` / `SkillRuntime` activation + `read_skill_file` resource reading + `/<skill-name>` command-layer direct activation) |
 
 ---
 
-**二、整体架构**
+**2. Overall architecture**
 
-数据流向大致是这样：
+The data flow is roughly this:
 
 ```
-用户输入
-  → Agent::run_stream(task)
-      → 组装 active_messages（必要时先压缩上下文）
-      → adapter::invoke 返回 AdapterEvent 流
-          → 流式：ReasoningDelta / ContentDelta 增量
-          → 结束：Finished(ModelResponse)
-      → 落库 Assistant 消息
-      → 若有 tool_calls，并发执行工具（沙盒）
-      → 落库 Tool 消息
-      → 回到模型，直到没有工具调用
-  → 产出 AgentEvent 流（UI 消费）
-  → 结束时给出 RunResult
+User input
+  -> Agent::run_stream(task)
+      -> assemble active_messages (compress context first if necessary)
+      -> adapter::invoke returns an AdapterEvent stream
+          -> streaming: ReasoningDelta / ContentDelta increments
+          -> finish: Finished(ModelResponse)
+      -> persist the Assistant message
+      -> if there are tool_calls, run the tools concurrently (sandbox)
+      -> persist Tool messages
+      -> back to the model, until there are no more tool calls
+  -> produce an AgentEvent stream (consumed by the UI)
+  -> give a RunResult at the end
 ```
 
-**SDK 对外只暴露这些**（见 `crates/shirley-agent-sdk/src/lib.rs`）：
+**The SDK exposes only these** (see `crates/shirley-agent-sdk/src/lib.rs`):
 
-- `Agent`、`AgentError`、`AgentEvent`
-- `SystemPrompt`、`SystemPromptContext`（系统提示词：静态字符串或函数）
-- `CutPlan`、`CompactParts`、`plan_cut`（压缩切点/重建，供测试与上层观测）
-- `Message`、`ToolCall`、`Usage`
-- `ModelConfig`、`ModelProtocol`、`AdapterError`
-- `ErrorKind`、`SdkError`（统一错误契约）
-- `tool`（宏）、`ToolManager`、`Tool`、`ToolDefinition`、`ToolError`、`ToolContext`
-- `sandbox`（`Sandbox` / `SandboxSpec` / `SandboxOutput` / `SandboxBackend` / `ProcessBackend` / `SandboxError` / `NetworkPolicy` / `Capabilities`）
-- `workspace`（`WorkSpace` / `WorkspaceError`）
-- `ContextProvider`——**每轮请求末尾附加上下文**的通用接缝（应用层用它注入任务账本等；SDK 不内置具体内容）
-- `token`（`TokenCounter` / `HeuristicCounter` / `count_text` / `count_message` / `count_messages`）——token 记账
+- `Agent`, `AgentError`, `AgentEvent`
+- `SystemPrompt`, `SystemPromptContext` (system prompt: a static string or a function)
+- `CutPlan`, `CompactParts`, `plan_cut` (compaction cut point / rebuild, for tests and upper-layer observation)
+- `Message`, `ToolCall`, `Usage`
+- `ModelConfig`, `ModelProtocol`, `AdapterError`
+- `ErrorKind`, `SdkError` (unified error contract)
+- `tool` (macro), `ToolManager`, `Tool`, `ToolDefinition`, `ToolError`, `ToolContext`
+- `sandbox` (`Sandbox` / `SandboxSpec` / `SandboxOutput` / `SandboxBackend` / `ProcessBackend` / `SandboxError` / `NetworkPolicy` / `Capabilities`)
+- `workspace` (`WorkSpace` / `WorkspaceError`)
+- `ContextProvider` -- the generic seam for **appending context at the end of each request** (the application layer uses it to inject the task ledger etc.; the SDK does not build in any concrete content)
+- `token` (`TokenCounter` / `HeuristicCounter` / `count_text` / `count_message` / `count_messages`) -- token accounting
 
-真正的私有模块只有 `message` / `adapter` / `runtime`（以及 `tool` 的内部实现）——它们不直接 `pub mod`，只通过上面的 `pub use` re-export 必要类型。改动这些模块时要留意不要破坏对外契约。
+The only truly private modules are `message` / `adapter` / `runtime` (and the internal implementation of `tool`) -- they are not directly `pub mod`, and only re-export the necessary types through the `pub use` above. When changing these modules, be careful not to break the external contract.
 
 ---
 
-**三、关键模块速查**
+**3. Key module quick reference**
 
-**1. 消息模型** — `crates/shirley-agent-sdk/src/message/mod.rs`
+**1. Message model** -- `crates/shirley-agent-sdk/src/message/mod.rs`
 
-`Message` 是一个带 `#[serde(tag = "role")]` 的枚举，共五种：
+`Message` is an enum with `#[serde(tag = "role")]`, with five variants:
 
-- `System` / `User`：纯文本
-- `Assistant`：`content` 可选、`reasoning_content` 可选、`tool_calls` 列表
-- `Tool`：`tool_call_id` + 可选内容
-- `ContextSummary`：**不展示给用户**，编码成请求时降级为 system 消息，是上下文压缩的产物
+- `System` / `User`: plain text
+- `Assistant`: optional `content`, optional `reasoning_content`, a `tool_calls` list
+- `Tool`: `tool_call_id` + optional content
+- `ContextSummary`: **not shown to the user**, degraded to a system message when encoding a request, the product of context compaction
 
-`Usage` 是重点，它刻意区分"上报了 0"和"没上报"：
+`Usage` is important: it deliberately distinguishes "reported 0" from "not reported":
 
-- `cached_input_tokens: Option<u64>` —— `None` 表示供应商没上报
-- `cache_reported_input_tokens: Option<u64>` —— 累计命中率的真实分母（覆盖率）
-- `cache_hit_rate()` 在未上报时返回 `None`，**不要把测不到当成 0% 命中**
-- `Add` 实现里对 `Option` 做的是"保留已知的一侧"，不是当 0 累加
+- `cached_input_tokens: Option<u64>` -- `None` means the provider did not report it
+- `cache_reported_input_tokens: Option<u64>` -- the true denominator (coverage) of the cumulative hit rate
+- `cache_hit_rate()` returns `None` when not reported; **do not treat "cannot measure" as a 0% hit rate**
+- The `Add` impl does "keep the known side" for `Option`, not add-as-0
 
-**2. 统一错误契约** — `crates/shirley-agent-sdk/src/error.rs`
+**2. Unified error contract** -- `crates/shirley-agent-sdk/src/error.rs`
 
-- `ErrorKind`：稳定的错误分类（`Transport` / `RateLimited` / `ServerError` / `BadRequest` / `Unsupported` / `ToolFailure` / `Internal`），用于日志、指标、重试决策
-- `SdkError` trait：`kind()` + `is_retryable()`（默认由 `ErrorKind::is_retryable` 推导）
-- 各层错误（`AdapterError` / `ToolError` / `SandboxError` / `WorkspaceError` / `AgentError`）**各自留在自己的模块**，但都实现 `SdkError`。`AgentError` 用 `#[from]` 把它们收敛进来
-- 展示格式统一为 `[前缀]: 详情`，前缀留在变体旁，不从 `ErrorKind` 推导
-- **决策看分类，不看文案**：要判断重试与否，只依赖 `SdkError::is_retryable`，绝不 `match` 错误字符串
+- `ErrorKind`: stable error classification (`Transport` / `RateLimited` / `ServerError` / `BadRequest` / `Unsupported` / `ToolFailure` / `Internal`), used for logs, metrics, retry decisions
+- `SdkError` trait: `kind()` + `is_retryable()` (derived from `ErrorKind::is_retryable` by default)
+- Each layer's error (`AdapterError` / `ToolError` / `SandboxError` / `WorkspaceError` / `AgentError`) **stays in its own module**, but all implement `SdkError`. `AgentError` converges them via `#[from]`
+- The display format is unified as `[prefix]: detail`, and the prefix stays next to the variant, not derived from `ErrorKind`
+- **Decisions look at classification, not wording**: to decide whether to retry, rely only on `SdkError::is_retryable`, never `match` on the error string
 
-**3. 协议适配层** — `crates/shirley-agent-sdk/src/adapter/`
+**3. Protocol adapter layer** -- `crates/shirley-agent-sdk/src/adapter/`
 
-- `ModelConfig` 用 `bon` 生成 builder：`protocol` / `base_url` / `model` / `api_key` / `stream` / `thinking` / `reasoning_effort` / `temperature` / `max_output_tokens` / `context_window_tokens` / `tool_choice` / `extra_body`
-- `codec(protocol)` 返回三件套函数指针 `(Encoder, Decoder, StreamDecoder)`（请求编码 / 非流式解码 / 流式解码，流式也纳入 codec 抽象，`invoke` 里不再有按协议硬分支）。**三个协议均已实现**（`ChatCompletions` / `Responses` / `AnthropicMessages`），`UnsupportedProtocol` 变体保留供未来协议使用
-- `invoke()` 返回 `Stream<Item = Result<AdapterEvent, AdapterError>>`：
-  - 非流式：读完整 body、decode，产出单个 `Finished(ModelResponse)`
-  - 流式：走 `decode_stream_response`，逐块产出 `ReasoningDelta` / `ContentDelta` / `Finished`
-- `ensure_success` 单独抽出来做状态检查，保证错误体与状态码一起保留（重试决策的唯一依据）
-- `chat_completions/mod.rs` 里 `encode_messages` / `encode_tools` 做的是"内部 Message → OpenAI 格式"的转换；`dto.rs` 只做反序列化结构定义
-- `temperature` / `max_output_tokens` / `tool_choice` 已接线（`Some` 时才写入请求体，`max_output_tokens` 在 ChatCompletions 上的键名是 `max_tokens`）；`extra_body` 是覆盖请求体的逃生口（浅合并，`null` 删除键）；`thinking` 仅在开启时写 `{"type":"enabled"}`。见 `docs/sdk-gaps.md` gap-4
-- Responses 解码按 OpenAI 官方 schema 对齐（DeepSeek 本质是 OpenAI 兼容实现）：reasoning 取 `summary`（`summary_text`，OpenAI 系默认只回这个）优先、`content`（`reasoning_text`，DeepSeek 走这个）回退；流式同时认 `response.reasoning_text.delta` 与 `response.reasoning_summary_text.delta`；**非流式 `status:"failed"` 与流式一样转 `AdapterError`**（`cancelled`/`queued` 归 `Other`，不误报 `Stop`）；历史 assistant 文本用**纯字符串** content（`output_text` 只属输出 item，输入侧不接受）
-- Responses 的 `encode_input` 是**纯保序映射**：system 作为普通 `{role:"system"}` item 留在 `input` 原位，**不用顶层 `instructions`**（后者会被服务端插到 `input` 之前，把中段/末尾 system 搬到最前，破坏 KV 前缀缓存）。保序 = 追加消息不动前缀，是缓存命中的结构性保证；**别在这里加 sort / 分组 / 位置调整**
+- `ModelConfig` uses `bon` to generate a builder: `protocol` / `base_url` / `model` / `api_key` / `stream` / `thinking` / `reasoning_effort` / `temperature` / `max_output_tokens` / `context_window_tokens` / `tool_choice` / `extra_body`
+- `codec(protocol)` returns a trio of function pointers `(Encoder, Decoder, StreamDecoder)` (request encoding / non-streaming decoding / streaming decoding; streaming is also brought into the codec abstraction, and `invoke` no longer has hard protocol branches). **All three protocols are implemented** (`ChatCompletions` / `Responses` / `AnthropicMessages`); the `UnsupportedProtocol` variant is kept for future protocols
+- `invoke()` returns `Stream<Item = Result<AdapterEvent, AdapterError>>`:
+  - non-streaming: read the full body, decode, produce a single `Finished(ModelResponse)`
+  - streaming: go through `decode_stream_response`, yielding `ReasoningDelta` / `ContentDelta` / `Finished` chunk by chunk
+- `ensure_success` is pulled out separately for status checking, ensuring the error body and status code are kept together (the sole basis for retry decisions)
+- In `chat_completions/mod.rs`, `encode_messages` / `encode_tools` do the "internal Message -> OpenAI format" conversion; `dto.rs` only defines the deserialization structures
+- `temperature` / `max_output_tokens` / `tool_choice` are wired up (written into the request body only when `Some`; on ChatCompletions the key for `max_output_tokens` is `max_tokens`); `extra_body` is the escape hatch for overriding the request body (shallow merge, `null` deletes a key); `thinking` writes `{"type":"enabled"}` only when enabled. See `docs/sdk-gaps.md` gap-4
+- Responses decoding aligns with the official OpenAI schema (DeepSeek is essentially an OpenAI-compatible implementation): reasoning takes `summary` (`summary_text`, the OpenAI family returns only this by default) first, falling back to `content` (`reasoning_text`, which DeepSeek uses); streaming recognizes both `response.reasoning_text.delta` and `response.reasoning_summary_text.delta`; **non-streaming `status:"failed"` turns into `AdapterError` just like streaming** (`cancelled`/`queued` go to `Other`, not a false `Stop`); historical assistant text uses a **plain string** content (`output_text` belongs only to output items, and the input side does not accept it)
+- Responses' `encode_input` is a **pure order-preserving mapping**: system stays as an ordinary `{role:"system"}` item in `input` in its original position, **not using the top-level `instructions`** (the latter is inserted by the server before `input`, moving a mid/late system to the very front and breaking the KV prefix cache). Order preservation = appending a message does not touch the prefix, which is the structural guarantee of cache hits; **do not add sort / grouping / position adjustment here**
 
-已知设计债：`encode_messages` 写在适配层，但作者自己注释说"这逻辑其实该在 message 侧"。`encode_request` 里 `thinking` 现在按 `config.thinking` 映射成 `enabled` / `disabled`（**流式已实现**，不再写死）。
+Known design debt: `encode_messages` is written in the adapter layer, but the author's own comment says "this logic should really be on the message side". In `encode_request`, `thinking` is now mapped to `enabled` / `disabled` according to `config.thinking` (**streaming is implemented**, no longer hard-coded).
 
-**4. 工具系统** — `crates/shirley-agent-sdk/src/tool/mod.rs`
+**4. Tool system** -- `crates/shirley-agent-sdk/src/tool/mod.rs`
 
-- `Tool` trait：`definition()` 拿元信息，`invoke(Value, ToolContext)` 返回 `ToolFuture`；另有**两个默认钩子** `on_register`（= created）/ `on_unregister`（= destroy），默认 `Ok(())`——无状态工具零改动。`executed` 就是 `invoke` 本身，不另设钩子。见 `docs/tool-lifecycle.md`
-- `ToolManager`：持有 `ToolContext`（**不再是 `Agent` 的独立 builder 参数**）；注册时查重，`definitions()` **按名字排序**（这是为了让 prefix 稳定、提高缓存命中率，别随手删掉这个 sort）。新增 `unregister(name)`（先移出表 → 再调 `on_unregister`，best-effort，未注册返回 `NotFoundError`）、`context()` / `context_mut()`
-- `ToolContext`：类型擦除的运行时上下文容器（`Arc<HashMap<TypeId, Arc<dyn Any>>>`）。工具并发执行，所以上下文只能是 `Arc<Mutex<T>>` 这类内部可变性句柄；工具用 `ctx.get::<T>()` 取回。写入的两种途径：**注册钩子 `ctx.insert(value)`**（推荐，注册与注入同一步，不会漂移）或应用层 `with(data)`；清理用 `ctx.remove::<T>()`（按 `TypeId`，**每个工具请用自己的 newtype 状态**，避免误删同类型）。runtime 每次调用前 `self.tools.context().clone()` 分发（`Arc`，只加引用计数）。见 `docs/sdk-gaps.md` gap-1、`docs/tool-lifecycle.md`
-- `ToolError` 分四类：`ExecutionError` / `RepetitionError` / `NotFoundError` / `ArgumentsError`
+- `Tool` trait: `definition()` gets the metadata, `invoke(Value, ToolContext)` returns `ToolFuture`; plus **two default hooks** `on_register` (= created) / `on_unregister` (= destroy), defaulting to `Ok(())` -- stateless tools need zero changes. `executed` is just `invoke` itself; there is no separate hook. See `docs/tool-lifecycle.md`
+- `ToolManager`: holds the `ToolContext` (**no longer a separate builder parameter of `Agent`**); checks for duplicates on registration, and `definitions()` **sorts by name** (this is so the prefix is stable and the cache hit rate improves -- do not casually delete this sort). Adds `unregister(name)` (remove from the table first -> then call `on_unregister`, best-effort, returns `NotFoundError` if not registered), `context()` / `context_mut()`
+- `ToolContext`: a type-erased runtime context container (`Arc<HashMap<TypeId, Arc<dyn Any>>>`). Tools run concurrently, so the context can only be an interior-mutability handle such as `Arc<Mutex<T>>`; a tool retrieves it with `ctx.get::<T>()`. Two ways to write: **the registration hook `ctx.insert(value)`** (recommended, registration and injection are one step, so they cannot drift) or the application layer's `with(data)`; to clean up use `ctx.remove::<T>()` (by `TypeId`, **each tool should use its own newtype state** to avoid accidentally removing the same type). The runtime does `self.tools.context().clone()` before each call to dispatch (`Arc`, only bumps the refcount). See `docs/sdk-gaps.md` gap-1, `docs/tool-lifecycle.md`
+- `ToolError` has four categories: `ExecutionError` / `RepetitionError` / `NotFoundError` / `ArgumentsError`
 
-关于 `ToolDefinition.parameters`：它直接就是 JSON Schema。原先记为"绑死 OpenAI"的债，做 Responses 适配时得到修正——**Responses 的 `tools[].parameters` 也是 JSON Schema**，只少一层 `function` 包装。所以 JSON Schema 本身就是跨协议中间表示，不必另造 `ParamType`；真正的协议差异在**消息 item 结构**与**流式事件语义**上（见 `docs/responses-api.md`、`docs/adapter-layer.md`）。
+About `ToolDefinition.parameters`: it is directly JSON Schema. It was originally recorded as debt "hard-wired to OpenAI", but this was corrected while doing the Responses adapter -- **Responses' `tools[].parameters` is also JSON Schema**, just without the extra `function` wrapper. So JSON Schema itself is the cross-protocol intermediate representation, and there is no need to invent a `ParamType`; the real protocol differences are in the **message item structure** and the **streaming event semantics** (see `docs/responses-api.md`, `docs/adapter-layer.md`).
 
-**5. `#[tool]` 宏** — `crates/shirley-agent-sdk-macros/src/tool.rs`
+**5. The `#[tool]` macro** -- `crates/shirley-agent-sdk-macros/src/tool.rs`
 
-写法：
+Usage:
 
 ```rust
-#[tool(description = "bash 用于执行命令")]
+#[tool(description = "bash is used to run commands")]
 pub async fn bash(
-    #[param(description = "要执行的命令")] command: String,
-    #[param(description = "超时时间（秒）")] timeout: Option<u64>,
+    #[param(description = "the command to run")] command: String,
+    #[param(description = "timeout (seconds)")] timeout: Option<u64>,
 ) -> Result<String, shirley_agent_sdk::ToolError> { ... }
 ```
 
-有状态工具可声明一个 `ToolContext`（或 `&ToolContext`）参数——它**不进入参数 schema**，由 SDK 在调用时注入，按原位置传给函数（一个工具最多一个）：
+A stateful tool may declare one `ToolContext` (or `&ToolContext`) parameter -- it **does not go into the argument schema**, is injected by the SDK at call time, and is passed to the function in its original position (at most one per tool):
 
 ```rust
-#[tool(description = "把计数加一")]
-async fn bump(ctx: &ToolContext, #[param(description = "增量")] by: u32) -> Result<u32, ToolError> {
+#[tool(description = "increment the counter")]
+async fn bump(ctx: &ToolContext, #[param(description = "increment")] by: u32) -> Result<u32, ToolError> {
     let session = ctx.get::<Arc<Mutex<Session>>>()
         .ok_or_else(|| ToolError::ExecutionError("session not provided".into()))?;
     let mut guard = session.lock().unwrap();
@@ -158,17 +158,15 @@ async fn bump(ctx: &ToolContext, #[param(description = "增量")] by: u32) -> Re
 }
 ```
 
-可选**伴生钩子**：`on_register` / `on_unregister` 接的是用户写的普通函数（签名固定
-`fn(&mut ToolContext) -> Result<(), ToolError>`），宏把它们 wire 进生成的 `impl Tool`——
-用户只写实现，不碰 `Tool` trait / schema（这是硬约束："宏是唯一入口"）。不写钩子 = 空实现：
+Optional **companion hooks**: `on_register` / `on_unregister` take ordinary user-written functions (with a fixed signature `fn(&mut ToolContext) -> Result<(), ToolError>`), and the macro wires them into the generated `impl Tool` -- the user only writes the implementation and never touches the `Tool` trait / schema (this is a hard constraint: "the macro is the only entry point"). No hook written = empty impl:
 
 ```rust
-#[tool(description = "联网搜索", on_register = ws_on_register, on_unregister = ws_on_unregister)]
-async fn web_search(ctx: &ToolContext, #[param(description = "查询")] query: String)
+#[tool(description = "web search", on_register = ws_on_register, on_unregister = ws_on_unregister)]
+async fn web_search(ctx: &ToolContext, #[param(description = "query")] query: String)
     -> Result<String, ToolError> { ... }
 
 fn ws_on_register(ctx: &mut ToolContext) -> Result<(), ToolError> {
-    ctx.insert(WebSearchState::from_env()?);   // 注册即注入依赖
+    ctx.insert(WebSearchState::from_env()?);   // inject the dependency at registration time
     Ok(())
 }
 fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
@@ -177,235 +175,229 @@ fn ws_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
 }
 ```
 
-钩子定义仍在 `Tool` trait 上，宏只"引用"；详见 `docs/tool-lifecycle.md`、`docs/tool-macro.md`。
+The hook definitions still live on the `Tool` trait; the macro only "references" them; see `docs/tool-lifecycle.md`, `docs/tool-macro.md`.
 
-宏展开后会在同名 `mod` 里生成：`Arguments` 结构体（`Deserialize` + `JsonSchema` + `deny_unknown_fields`）、`GenerateTool`（实现 `Tool`，含钩子覆写）、`definition()`、`tool()`。调用方写 `tools::bash_tool::tool()` 注册即可。
+After expansion, the macro generates, in a `mod` of the same name: an `Arguments` struct (`Deserialize` + `JsonSchema` + `deny_unknown_fields`), `GenerateTool` (implements `Tool`, including hook overrides), `definition()`, `tool()`. The caller just writes `tools::bash_tool::tool()` to register it.
 
-宏的约束（踩过的坑）：
+Macro constraints (pitfalls we hit):
 
-- 函数不能用 `self`，参数不能解构、不能 `ref` / `@` 绑定
-- 参数描述必须写 `#[param(description = "...")]`，否则编译报错
-- 生成的 `invoke` 里调用的是 `super::#name`，所以**被修饰的函数和宏生成的 mod 必须在同一层级**（钩子同理：`on_register = f` 要求 `f` 与工具函数同层，宏生成 `super::f` 引用）
+- The function cannot use `self`, and parameters cannot be destructured or use `ref` / `@` bindings
+- The parameter description must be written as `#[param(description = "...")]`, otherwise it is a compile error
+- The generated `invoke` calls `super::#name`, so **the annotated function and the macro-generated mod must be at the same level** (same for hooks: `on_register = f` requires `f` to be at the same level as the tool function, and the macro generates a `super::f` reference)
 
-**6. ReAct 运行时** — `crates/shirley-agent-sdk/src/runtime/`
+**6. The ReAct runtime** -- `crates/shirley-agent-sdk/src/runtime/`
 
-这是整个项目的心脏。按职责拆成几个子模块，`mod.rs` 只负责接线与再导出：
+This is the heart of the whole project. It is split by responsibility into several submodules, and `mod.rs` only does the wiring and re-exports:
 
-- `agent.rs`：`Agent` 本体（构造、`run` / `run_stream` 主循环、压缩调度）
-- `compaction.rs`：压缩切点与重建（`CompressionConfig` / `CutPlan` / `CompactParts` / `plan_cut` / `background_len`）
-- `context.rs`：每轮请求末尾的附加上下文接缝（`ContextProvider`）
-- `event.rs`：对外事件与运行结果（`AgentEvent` / `RunResult` / `StopReason`）
-- `error.rs`：顶层错误收敛（`AgentError` + `SdkError`）
-- `prompt.rs`：系统提示词（`SystemPrompt` / `SystemPromptContext`）
+- `agent.rs`: the `Agent` itself (construction, the `run` / `run_stream` main loop, compaction scheduling)
+- `compaction.rs`: compaction cut point and rebuild (`CompressionConfig` / `CutPlan` / `CompactParts` / `plan_cut` / `background_len`)
+- `context.rs`: the append-context seam at the end of each request (`ContextProvider`)
+- `event.rs`: external events and run results (`AgentEvent` / `RunResult` / `StopReason`)
+- `error.rs`: top-level error convergence (`AgentError` + `SdkError`)
+- `prompt.rs`: system prompt (`SystemPrompt` / `SystemPromptContext`)
 
-`CompactParts` 的契约测试移到了 `crates/shirley-agent-sdk/tests/runtime_compaction.rs`（集成测试，只依赖公开 API）。
+The `CompactParts` contract test moved to `crates/shirley-agent-sdk/tests/runtime_compaction.rs` (an integration test that depends only on the public API).
 
-- `Agent::new` 是 `bon` builder：`model_config` / `system_prompt` / `working_dir` / `messages` / `tools` / `compression_instruction` / `compression_config` / `context_provider`。**SDK 不持有会话**：无 `session` 字段，落库 / 恢复全归应用层（见 `docs/session.md`）。**SDK 也不内置任务账本**（已移到应用层）——它只提供 `context_provider` 接缝
-- `system_prompt` 类型是 `SystemPrompt`（不是 `String`）：既接受固定字符串（`From<String>` / `From<&str>`），也接受**函数** `Fn(&SystemPromptContext) -> String`。函数形式让提示词按运行时上下文动态生成——`SystemPromptContext` 目前携带 `working_dir`。`working_dir` 是独立 builder 参数，构造时会用它解析一次提示词
-- `run()` 是 `run_stream()` 的薄封装，只等最后一个 `Finished`
-- 运行参数热切换接缝（应用层指令落地用，均不重建 `Agent`）：`set_model(model)` 只换模型名；`set_provider(base_url, api_key)` 换端点与密钥（与前者对称，`/login` 用）；`unregister_tool(name)` 运行期注销工具（触发其 `on_unregister`，与 `ToolManager::register` 对称）。这几条是 SDK 为应用层指令新增的接缝，模型配置的其余字段原样保留。**`switch_session` 已从 SDK 移除**（多会话重构，`docs/multi-session.md` 决策 9），**`SessionStore` 契约与 `session` 字段也已移出 SDK**（`docs/session.md`）——"哪个会话活跃"是应用层编排，SDK 不再有"当前会话"这个概念，也不持有会话日志；每个 `Agent` 对应一份固定工作集，切换由应用层 `SessionManager.active` 指针完成，落库由应用层事件驱动
-- **`messages` 的所有权边界**：`self.messages` 是 **SDK 私有工作集**，业务日志（`SessionStore`）才是真相源，两者靠单向 `MessageAdded` 事件桥接。业务侧对 SDK 状态只有两个入口：**seed**（构造时 `builder.messages(...)`）与 **`truncate_messages(len)`**（尾截断）。**SDK 不提供 `add` / `push` / `insert`**——向 `self.messages` 写入 user / assistant / tool 是 `run_stream` 主循环的协议副作用，不是对外 API；也**不应**新增「add 前 mutation hook」：只读观察已有 `MessageAdded` 覆盖，而可改写 / 否决的 hook 会引入第二写者、砸前缀缓存、把循环不变量外置，正是要消灭的 muddiness。需要「发出前脱敏 / 改写 / 注入」就走**出站 transform seam**（与 `ContextProvider` 同族：只作用于本轮 request 视图、**不动 `self.messages`**），不要动存储历史。一句话：该交出去的是「记录权」，不是「改核心状态的权」
-- `run_stream()` 返回 `Pin<Box<dyn Stream<Item = Result<AgentEvent, AgentError>> + Send + 'a>>`，用 `async_stream::try_stream!` 实现
-- 主循环：压缩检查 → 组装请求 → 调模型（消费 `AdapterEvent`）→ 落库 → 有 tool_calls 就并发跑（`FuturesUnordered`）→ 没工具调用就 `Finished` 退出
-- `AgentEvent` 有：`ContentDelta` / `ReasoningDelta`（流式增量）、`MessageAdded`、`CompressionStarted` / `CompressionFinished`、`ContextUsage`、`ToolStarted` / `ToolFinished`、`Usage`、`Finished(RunResult)`
-- `RunResult`：`messages`（本轮新增，从 `start_index` 切出）/ `stop_reason` / `usage`；`StopReason` 有 `Completed` / `MaxStepsReached` / `Cancelled`，**目前只会产生 `Completed`**
+- `Agent::new` is a `bon` builder: `model_config` / `system_prompt` / `working_dir` / `messages` / `tools` / `compression_instruction` / `compression_config` / `context_provider`. **The SDK does not hold a session**: there is no `session` field; persistence / restore is entirely the application layer's job (see `docs/session.md`). **The SDK also does not build in a task ledger** (it moved to the application layer) -- it only provides the `context_provider` seam
+- `system_prompt`'s type is `SystemPrompt` (not `String`): it accepts both a fixed string (`From<String>` / `From<&str>`) and a **function** `Fn(&SystemPromptContext) -> String`. The function form lets the prompt be generated dynamically from the runtime context -- `SystemPromptContext` currently carries `working_dir`. `working_dir` is a separate builder parameter, and the prompt is resolved once at construction time using it
+- `run()` is a thin wrapper around `run_stream()` that just waits for the last `Finished`
+- Hot-swap seams for run parameters (used by application-layer commands, none of which rebuild the `Agent`): `set_model(model)` only changes the model name; `set_provider(base_url, api_key)` changes the endpoint and key (symmetric with the former, used by `/login`); `unregister_tool(name)` unregisters a tool at runtime (triggering its `on_unregister`, symmetric with `ToolManager::register`). These are seams the SDK added for application-layer commands, and the remaining fields of the model config are kept as-is. **`switch_session` has been removed from the SDK** (multi-session refactor, `docs/multi-session.md` decision 9), and **the `SessionStore` contract and `session` field have also moved out of the SDK** (`docs/session.md`) -- "which session is active" is application-layer orchestration; the SDK no longer has a concept of a "current session", nor does it hold a session log; each `Agent` corresponds to a fixed working set, switching is done by the application layer's `SessionManager.active` pointer, and persistence is event-driven by the application layer
+- **The ownership boundary of `messages`**: `self.messages` is the **SDK's private working set**; the business log (`SessionStore`) is the source of truth, and the two are bridged by the one-way `MessageAdded` event. The business side has only two entries into SDK state: **seed** (via `builder.messages(...)` at construction) and **`truncate_messages(len)`** (tail truncation). **The SDK does not provide `add` / `push` / `insert`** -- writing user / assistant / tool into `self.messages` is a protocol side effect of the `run_stream` main loop, not a public API; and you should **not** add a "pre-add mutation hook": read-only observation is already covered by `MessageAdded`, whereas a rewritable / vetoable hook would introduce a second writer, smash the prefix cache, and externalize the loop invariants -- exactly the muddiness we want to eliminate. If you need "redact / rewrite / inject before sending", use the **outbound transform seam** (same family as `ContextProvider`: it only affects this round's request view and **does not touch `self.messages`**), do not touch the stored history. In one sentence: what should be handed over is the "right to record", not the "right to mutate core state"
+- `run_stream()` returns `Pin<Box<dyn Stream<Item = Result<AgentEvent, AgentError>> + Send + 'a>>`, implemented with `async_stream::try_stream!`
+- The main loop: compaction check -> assemble the request -> call the model (consume `AdapterEvent`) -> persist -> if there are tool_calls run them concurrently (`FuturesUnordered`) -> if there are no tool calls, `Finished` and exit
+- `AgentEvent` has: `ContentDelta` / `ReasoningDelta` (streaming increments), `MessageAdded`, `CompressionStarted` / `CompressionFinished`, `ContextUsage`, `ToolStarted` / `ToolFinished`, `Usage`, `Finished(RunResult)`
+- `RunResult`: `messages` (added this round, sliced from `start_index`) / `stop_reason` / `usage`; `StopReason` has `Completed` / `MaxStepsReached` / `Cancelled`, and **currently only `Completed` is produced**
 
-**上下文压缩**（这块最容易改坏）：
+**Context compaction** (this is the easiest part to break):
 
-- `should_schedule_compression` 在本轮 `(input + output) >= limit * trigger_ratio`（默认 `0.80`）时置 `compression_pending`，用放大 10000 倍的定点整数比较避免浮点精度问题
-- `active_messages()` 找到**最后一个** `ContextSummary`，只保留开头的 system 消息 + 从 summary 开始的消息
-- `compress_context()` 把压缩指令作为 system 追加，要求模型输出纯文本摘要，非空且无 tool_calls 才算成功，否则报 `CompressionError`
-- 摘要内容有**结构契约**：`COMPACTION_TEMPLATE` 定义了 XML 块（`current_goal` / `hard_constraints` / `decisions` / `progress` / `open_questions` / `compacted_range`），`compress_context` 会把它追加到调用方的 `compression_instruction` 之后。模板**不含** `next_step`、并显式禁止推演——修的就是"压缩器编造用户没提过的下一步"（`docs/compaction.md` 5.3）。**模板可配置**：`CompressionConfig.template`（默认即 `COMPACTION_TEMPLATE`），应用层经 `[compression]` 表覆盖
-- **压缩策略可配置**：`CompressionConfig { trigger_ratio, retain_ratio, template }`（默认 `0.80` / `0.20` / `COMPACTION_TEMPLATE`），经 `Agent` builder 的 `compression_config` 传入；`retain_budget` 与 `should_schedule_compression` 都读它。SDK 只管策略参数，领域取舍仍在 `compression_instruction`（见 `docs/compaction.md` 六之补）
-- 压缩成功后用 `CompactParts::rebuild` 重建 `self.messages`：**系统提示词不保留、不复制**——它由 `Agent` 单独持有（`system_prompt` 字段），每次重建都 `system_message()` 重新生成一条再置顶（函数形式的提示词会被**重新解析**，因此工作目录 / 项目指南的最新状态会反映进来）。`rebuild` 只返回 `[新 ContextSummary] + current_task + remain`
-- 压缩失败会中断整个 stream，UI 侧会显示成错误
-
----
-
-**四、应用层（TUI 与 Desktop）**
-
-- `src/main.rs`：读 `.env`（`dotenvy`），按 `--desktop` / `SHIRLEY_INTERFACE=desktop` 选 `Mode::Tui` / `Mode::Desktop`，然后交给 `bootstrap::AgentFactory::assemble` 装配。**装配逻辑已从 `main.rs` 抽到 `src/bootstrap.rs`**——`AgentFactory` 是 TUI 与桌面界面共享的 LCA（另一个 LCA 是 SDK 的 `Agent`），两个界面拿同一份装配产物、只是渲染方式不同。`AgentFactory::assemble` 做这些事：经 `settings::Settings::load_default()` 装载配置（**不再散读 env**，见下条），构造 `ModelConfig`（`stream(true)` / `thinking(true)` / `reasoning_effort("low")`），算出 `needs_login = !settings.is_configured()`（缺配置不阻断启动），并把模型配置 / 系统提示词 / 工作目录 / 会话目录（`src/session.rs` 的 `FileSessionCatalog`，多会话布局 `.shirley/sessions/<name>.jsonl`）连同该标志交给 `interface::run`。**工厂的产物是"能造 `Agent` 的能力"而非单个 `Agent`**（决策 5）：`build_agent(messages)` 每次造一个匿名 `Agent`（工具按需重建，见下）——多会话就多造几个；会话恢复由调用方先 `store.load()` 再 `build_agent(log)`（空 `Vec` = 全新会话）。启动时**惰性开一份空会话**（而非恢复最近修改的旧会话）：此刻只定会话名、**不落盘**，发首条消息才真正建文件（`create_lazy`，Codex 的 UX）；旧的单文件 `.shirley/session.jsonl` 会被 `adopt_legacy` 收编（会话持久化，见 `docs/session.md`）。工作目录由 `prompt::workspace_root()` 决定（`SHIRLEY_WORKSPACE` 优先，否则当前目录）——它**刻意不属于 `settings`**（是"在哪个项目跑"的会话级信息，不是"用户是谁"的配置）
-- `src/settings.rs`：**配置装载（方案 A）**。把"配置从哪来"与"怎么用"解耦，纯应用层、不碰 SDK。优先级 `内置默认 < 全局 config.toml < 工作区 .shirley/config.toml < 环境变量`。配置文件为 TOML，`[provider]` 表含 `protocol` / `base_url` / `api_key` / `models_url` / `model` / `context_window_tokens`（全 `Option`，`deny_unknown_fields`）。全局路径 `<config_dir>/shirley/config.toml`，工作区路径 `<root>/.shirley/config.toml`。环境变量层（`LOCAL_*`）放在**最后**以兼容既有 `.env` 习惯——老用户零改动。`Settings::load` 的环境读取用注入闭包（测试不打全局 env），`load_default` 才用真实 `config_dir` + 进程环境。缺 `base_url` **不再报错、不阻断启动**：`finalize` 落成空串，`Settings::is_configured()` 返回 `false`，应用层据此在 TUI 里自动进入 `/login` 引导用户补齐（见下条）。**也可写**：`save_provider(path, provider)` 先读后改再写（只覆盖传入字段、不动其它键、自动建目录、写完 chmod 600 收紧权限），是 `/login` 的落盘入口
-- `src/prompt.rs`：应用侧系统提示词构造。`build(working_dir)` 返回一个 `SystemPrompt` 函数，每次解析时读取当前工作目录与工作区里的 `Agent.md`，拼成"角色 + 工作区根 + 项目指南"。工作目录明确告诉模型（`plan.md`：AI 不知道工作区就会从根目录乱找），`Agent.md` 提供项目怎么跑、代码怎么组织。**文案与代码分离**：正文在 `prompts/system.md` / `project_guide.md` / `project_guide_missing.md`，`src/prompt.rs` 只 `include_str!` 模板 + 填 `{{working_dir}}` / `{{project_guide}}` 占位符（渲染器 `src/prompt_template.rs`）
-- `src/session.rs`：应用侧会话存储与**会话目录**（`docs/session.md`）。**会话契约与实现都在应用层**——`SessionStore` trait（`append` / `load` / `truncate`，同步签名）与 `SessionError`（`thiserror`，`Io` / `Backend`）定义在此，SDK 不再导出。`JsonlSessionStore` 把**原始 Message 全量日志**逐行落成 JSONL。**不含 system**（恢复时现生成）。**落库由应用层事件驱动**：SDK 只发 `MessageAdded`，`Session::apply_event` 收到即 `store.append`（TUI / desktop 共用路径）。`truncate` 先写临时文件再原子替换、并重开追加句柄（注意：内部 `rewrite_locked` 需在已持锁下调用，否则非重入锁会死锁）。多会话（`/session`）：`SessionCatalog` trait（`list` / `open` / `create` / `create_named` / `create_lazy` / `rename` / `delete`，与 `ModelCatalog` 对称；后四者带默认实现，不支持元数据的后端免改）+ `FileSessionCatalog`（一份会话 = `.shirley/sessions/<name>.jsonl`，目录扫描即列出，`adopt_legacy` 收编旧单文件）+ `SessionEntry { name, label, preview, modified_ms, turns }`（`preview` 取首条用户消息前 40 字，`modified_ms` = 文件 mtime 用于降序，`turns` = 用户轮数）+ `EmptySessionCatalog`（`App::new` 兜底）。**标题持久化为 sidecar `<name>.title`**（纯文本，不污染只存 Message 的 JSONL）；`rename` **只改标题、不改文件名 / 内容**（Codex `/rename` 语义，回避已打开句柄指向旧 inode 的问题），`delete` 删日志并 best-effort 删 sidecar。**惰性新建**：`create_lazy` 返回 `LazySessionStore`——构造时定名但**不落盘**，首次 `append`（首条消息）才物化（落 JSONL + 写标题 sidecar）；物化前 `load` / `truncate` 视为空 / 空操作。这样"打开应用没聊"不留空会话文件
-- `src/interface/selection.rs`：**鼠标选区**（`docs` 无独立文档）。左键按下记锚点、拖动延伸、松开即把选中文本写入系统剪贴板（`arboard`）——**全程只用鼠标，不需按复制键**。选区用屏幕单元格坐标表示，`highlight` 给缓冲区叠反色（渲染在一切之上），`text` 按符号显示宽度前进提取文本（跳过宽字符的续格，避免 CJK 之间插入假空格）。`Tui::draw` 在有选区时留存当帧缓冲区快照，松开左键时据此提取
-- `src/interface/tui.rs`：主循环用 `tokio::select!`，把**前台会话**的 `Agent` 通过 `SessionManager::take_agent(name)`（按会话名）移出去、`tokio::spawn` 到独立任务里跑，结果通过 `mpsc` 通道回传，完成后 `restore_agent(name, agent)` 放回来——每个会话各持一个 `Agent`，后台会话的上下文不因前台切换而丢。**直接消费 `AgentEvent`**（不再有 `AgentUpdate` 中间类型）。收到事件后统一走 `App::apply_event`（薄包装：转发到 `sessions.active_mut().apply_event` 并失效 `message_cache`）——**累加逻辑收敛到 `Session`，TUI 与 desktop 共享同一条事件处理路径**，UI 只读结果
-- `src/interface/app.rs`：纯状态机，`Item::Message` / `Item::Tools` 两种条目；`Role` 有 User / Assistant / Summary / Error；usage、context 用量、输入历史（上/下键回放）都缓存在这里；`toggle_thinking` / `toggle_tool_args` 控制展示
-- `src/interface/ui.rs`：`MessageCache` 做渲染缓存（按宽度失效），`footer_line` 展示上下文占用百分比和缓存命中率（单次 + 累计）。消息正文交给 `markdown::render` 转成带样式的 `Line`/`Span`。**滚动高度必须用 ratatui 自己的换行计数**（`Paragraph::line_count`，按词边界，需开启 `unstable-rendered-line-info` feature）来累计 `row_offsets`，不能用 `line.width().div_ceil(width)` 估算——后者按字符数取整会少算中英混排长行的行数，导致 `max_scroll` 偏小、最新消息被底部输入框遮挡（已修，回归测试 `cache_row_count_matches_paragraph_word_wrap`）
-- `src/interface/markdown.rs`：Markdown 渲染层。`parse` 用 `pulldown-cmark` 把 raw markdown 收敛成块级 AST（`Block`：Heading / Paragraph / Code / List / Quote / Table / Rule / Html），`render` 再把 `Block` 变成 ratatui 的 `Line`/`Span`。支持标题、粗斜体、行内代码、代码块、有序/无序/任务列表、嵌套列表（悬挂缩进）、引用、表格、分割线。错误消息不走 markdown（避免报错里的符号被当语法吃掉）。有 13 个单测覆盖各语法
-- `src/interface/event.rs`：终端事件在独立线程里 `poll` + `read`，通过无界通道送给异步侧。开启括号粘贴（`EnableBracketedPaste`），粘贴内容整体作为 `Event::Paste` 送达；`Drop` 时关闭两者。**开启鼠标捕获**（`EnableMouseCapture`）——拖动选中由程序自己实现（见 `selection.rs`），所以复制全程只用鼠标、不需再按复制键；捕获会接管终端原生选择，这是有意为之。`MouseEventKind::Moved`（无按键移动）在读循环里直接丢弃，否则鼠标一移动终端就狂发事件、主循环空转重绘
-- `src/interface/update.rs`：按键映射。`Esc`（AI 回复中 → 打断本轮；回溯编辑态 → 取消本次改动；否则退出）/ `Ctrl+C` 退出，`Ctrl+T` 切换思考显示，`Ctrl+O` 切换工具参数展开，`Enter` 提交，`Ctrl+A` / `Ctrl+E` 行首/行尾，`↑` / `↓` 历史回放，`PageUp` / `PageDown` 上下滚动（与鼠标滚轮等价，见 `event.rs`）。模型选择器面板打开时按键优先导向面板；指令候选浮层打开时 `↑↓←→` / `Tab` / `Enter` / `Esc` 优先导向浮层（其余按键继续正常编辑）。`Event::Paste` 走 `App::insert_input` 整段插入（换行归一为 `\n` 当普通字符），不触发发送。**鼠标事件不走这里**——由 `tui.rs::handle_mouse` 直接处理（需要最近一帧缓冲区与系统剪贴板）
-- `src/interface/command.rs`：快捷指令（slash commands）。仅作用于 TUI，**不接触 SDK**——指令要么展开成 prompt 发给 AI，要么作为本地系统消息，要么触发一个本地面板。当前有 `/init`（展开为生成 `Agent.md` 的 prompt）、`/model`（打开模型选择器）、`/rewind`（回退最后一条用户消息）、`/session`（打开会话选择器）、`/login`（分步登录：依次询问 base_url / api_key / model）。`CommandOutcome` 区分这几类；模糊匹配（fuzzy + Levenshtein）在输入 `/` 时给候选，浮层里 `↑↓` / `←→` 移动高亮、`Tab` / `Enter` 采纳当前高亮项、`Esc` 关闭浮层（不动输入）
-- `src/models.rs`：模型目录。`ModelEntry { label, value, provider }` + `trait ModelCatalog`（异步 `list()`，仿 SDK `ToolFuture` 手法）+ `StaticCatalog`（兜底静态列表）+ `RemoteCatalog`（请求 OpenAI 兼容 `GET /v1/models`，失败回退兜底）。`bootstrap.rs` 从 `LOCAL_BASE_URL` 推导接口、`LOCAL_MODELS_URL` 可覆盖。`/model` 打开面板时由主循环把目录移入后台任务异步加载（不阻塞 UI）
-- **历史回溯（`/rewind`，方案 A：只回退最新一条）**：直接取**最后一条**用户消息，把**原文填回输入框**（进入"编辑重发态"，输入框提示切换为「Enter 重新发送 · Esc 取消本次修改」）。只做最新一条（`docs/session.md` 一.决策 4），没有"选择"这个动作，故**没有选择面板**。进入编辑态时**输入框不再钉在底部，而是就地移动到该消息在会话中的渲染位置**——渲染层把该条消息替换成一个青色描边的输入框（上方是它之前的对话，下方是之后的对话，新消息只会把底部挤出视野、不挤压编辑框，见 `ui.rs` 的 `draw_rewind_edit`）。回车则先回退 Agent 与界面到该消息之前、再作为全新一轮发送，Esc 则直接取消本次改动（清空输入、退出编辑态，Agent/界面均不动）。被压缩掉的历史不在 `agent.messages` 里，天然不可回溯
-- **多会话切换（`/session`）**：模态选择器（与 `/model` 同款），列表首项固定是「＋ 新建会话」哨兵（`SessionPicker::NEW_NAME` 为空串），其余为真实会话、每项第二行显示首条用户消息预览。确认时**编排交给 `SessionManager`**（`src/interface/session.rs`，`docs/multi-session.md` 决策 4）——哨兵走 `create_new(None)`（`create_lazy`，惰性）、真实会话走 `switch_to(name)`：**已加载的会话只挪 `active` 指针、直接复用其就绪 `Agent`**（不重建，保住后台上下文）；未加载的先 `store.load()` 拿回全量日志、再经工厂 `build_agent(log)` 起 `Agent` 后插入再切前台。**`Agent` 匿名、身份住在容器上**（决策 4）：`Session.name` 是唯一真相源。切换后 `App::rebuild_items_from_agent` 整体重建界面条目并重置会话绑定统计（usage / 上下文占用）。会话目录是本地扫描（同步），由主循环直接取列表打开，无需后台任务。页脚会显示当前会话名。**TUI 与 desktop 共用同一个 `FileSessionCatalog` 描述的目录**（`docs/session.md` 八.决策 7）
-- **分步登录（`/login`，方案 A：分步问答版）**：**未配置模型服务（缺 `base_url`）时启动会自动进入本流程**——`bootstrap.rs` 算出 `needs_login` 传入 `interface::run`，`Tui::new` 据此调 `App::start_login()`，把"缺配置"从启动错误变成 TUI 内的一次引导；用户可 Esc 取消，取消后仍可手动 `/login`。不做表单浮层，而是**复用现有输入框与 `submit` 链路**——进入后输入框被临时征用为字段编辑器，每步一次回车。顺序固定 `base_url → api_key → model`，每步以当前配置（`agent.model_config()`）预填，直接回车即"保留不变"；`base_url` 空则留在本步重问（空端点无意义），`api_key` 空表示"无鉴权"（本地服务常见，会**明确清空**旧 key，与"保留旧值"不同）。走完先**热更新 Agent**（`set_provider` + 可选 `set_model`），再**落盘**到工作区 `<root>/.shirley/config.toml`（`settings::save_provider`，先读后改再写，不动其它键，写完 chmod 600）。热更新成功但落盘失败会如实告知（不假装成功）。`Esc` 取消登录（只退登录态，不退出程序，也不改配置）。渲染层无改动——提示语走既有的 `command_hint`（`ui.rs::input_hint` 已消费），登录态下 `on_input_changed` 与回溯编辑态一样保留提示。登录流程是内存态（`App::login: Option<LoginFlow>`），未走完不落盘。测试用 `set_config_path` 注入临时路径，避免污染真实工作区
-- `src/interface/app.rs`：输入编辑状态机。`insert_input` 支持粘贴多行文本（CRLF/CR 归一为 LF），光标始终落在字符边界
-- `src/interface/ui.rs`：输入框按显示宽度软换行 + 保留硬换行（`wrap_input`），框高随内容增长（上限 `INPUT_MAX_LINES = 10`），超出后内部纵向滚动，保证粘贴长文本时光标可见
-
-**已有工具**：
-
-- `bash`（`src/tools/bash.rs`）：先做 `split_whitespace` 黑名单检查（`rm` / `shutdown` / `reboot`，这只是临时兜底），然后**走进程沙盒**执行（`SandboxSpec::new("bash").arg("-c").arg(&command)`），默认 60s 超时。沙盒结果渲染时带 stdout / stderr / 退出码 / 超时提示。**真正的边界在沙盒后端，不在黑名单**
-- `read_file`（`src/tools/read.rs`）：**受控的文件读取**，用来替代裸 `cat`，从源头卡住上下文占用。关键约束：
-  - **路径受工作区约束**：经 SDK 的 `WorkSpace::resolve` 校验，拒绝绝对路径与 `..` 越界（越界/非法路径归为 `ArgumentsError`，模型换个写法就能成功）——落地 `docs/roadmap.md` 验收第 4 条
-  - **行数有上限**：默认 200 行、硬上限 `MAX_LINE_COUNT = 2000`（显式要求更多也只读到上限）
-  - **字节有上限**：单次输出 `MAX_OUTPUT_BYTES = 64KB` 封顶，单行超长时按字符边界截断
-  - **疑似密钥默认拒绝**：`.env` / `*.pem` / `*.key` / `id_rsa*` 等（见 `docs/security.md` 第三节）
-  - **二进制探测**：开头 8KB 出现 NUL 即拒绝；目录引导用 `ls`
-  - 返回**纯文本带行号**（非 JSON），截断时在末尾提示 `start_line=<下一行>` 续读——模型可直接读、可续读
-
-- `web_search`（`src/tools/web_search.rs`）：**联网搜索**，迁移自拾文（`shiwen-open-source`）。不走主模型路由，而是对 DeepSeek 的 **Anthropic-compatible Messages API**（`POST {base_url}/messages`）单独发一次有界请求，用服务端工具 `web_search_20250305` 拿回结构化来源（`web_search_tool_result`），归一化后作为**不可信外部数据**交给主模型。要点见 `docs/web-search.md`：
-  - **形态**：`#[tool]` 宏 + **注册钩子（`on_register`）**。工具函数无状态，运行所需的 client / 凭据 / 配置由 `WebSearchState` 承载，由 `web_search_on_register` 在**注册时**读 env 并 `ctx.insert(state)` 注入——"注册工具"与"注入依赖"合成同一步，不会漂移；`web_search_on_unregister` 注销时 `ctx.remove::<WebSearchState>()`。函数内 `ctx.get::<WebSearchState>()` 取回（只读 `Arc`，并发共享无需锁）；参数 schema 由宏从签名自动生成（`ToolContext` 不入 schema）。见 `docs/tool-lifecycle.md`
-  - 参数只有 `query`（非空、≤300 字符）；返回 JSON `{summary, query, sources[], truncated}`
-  - 归一化：按 URL 归并 citation snippet、去重、只留 http(s)、按 `max_results` 截断；**只认结构化 block，缺失即报错，绝不伪造来源**
-  - 安全：**不跟随重定向**、响应体 2MB 上限、总超时（`tokio::time::timeout`）
-  - 配置全走环境变量（`DEEPSEEK_API_KEY` 必填，其余有默认）；**未配置时不注册**，模型看不到该工具
-
-> `read` 工具曾在 commit `aaf0081` 被移除（当时判断"一个 bash 就够"），但裸 `cat` 没有输出上限，容易把上下文灌满。现已以 `read_file` 的形式**重新引入**，并补上工作区约束、行/字节上限与密钥脱敏。后续计划加 `apply_patch`（见根目录 `plan.md`）。
-
-**桌面界面（`docs/desktop-interface.md`，M0–M3 已落地）**：与 TUI **并存**的 Tauri 2 桌面界面，把 shiwen 的聊天 UI（React/TS + Tailwind 4）迁进来。两者是**兄弟界面、共享 LCA**——不是"TUI 上叠一层 web"：`interface/` 里全是 ratatui 专属逻辑，webview 是独立窗口，二者不能同时画同一份对话。共享层是 SDK 的 `Agent`（`run_stream()` → `AgentEvent` 流）+ `bootstrap::AgentFactory` 的应用装配 + `interface::session::SessionManager`（多会话编排）；desktop 侧用 Tauri command/event 消费同一份 `AgentEvent`，落点 `src/interface/desktop/`。
-
-- **启动**：`cargo run`（默认 TUI）不变；桌面窗口用 `cargo desktop`（= `cargo run --features desktop -- --desktop`，别名见 `.cargo/config.toml`），或 `SHIRLEY_INTERFACE=desktop cargo run --features desktop`。**注意 `--features` 是 cargo 参数，程序参数必须放在 `--` 之后**，否则程序看不到 `--desktop` 会退回 TUI。Tauri 依赖是 **feature-gated + optional**（`desktop` feature），默认构建不触碰 webview 工具链。
-- **结构**：`src/interface/desktop/`（Rust：`mod.rs` 门面 / `wire.rs` 事件映射 / `shell.rs` Tauri 壳）+ `src/interface/desktop/web/`（React+TS+Vite+Tailwind 4 前端，`dist` 由 `tauri.conf.json` 的 `frontendDist` 指向）。构建前端：`cd src/interface/desktop/web && npm install && npm run build`。
-- **commands**：`agent_send`（发起一轮，事件经 `agent://event` 推回；可选 `references` 为 `@` 引用的工作区路径，由 `compose_prompt` 拼进本轮 prompt）/ `agent_model_name` / `agent_list_models` / `agent_set_model`（热切换模型，不重建 Agent）/ `agent_search_files`（`@` 引用的工作区文件检索，纯应用层 `workspace_search`，不碰 SDK）/ `agent_cancel`（预留）。模型切换选择器放在发送按钮旁（`ModelSelector.tsx`，走 `AiChatComposer` 的 `trailingAction` 槽位），目录与切换都转发 Rust 侧 `ModelCatalog` / `Agent::set_model`，与 TUI 的 `/model` 同语义。
-- **多项目（多工作区）**：Shirley 作为独立 app 不绑定单一目录——可把多个工作区登记为「项目」，每个项目下挂自己的会话。注册表 `ProjectRegistry`（`src/project.rs`）只记「项目在哪」，落 `<config_dir>/shirley/projects.json`；每项目一个 `AgentFactory::assemble(root)`（各读该项目 `<root>/.shirley/config.toml`），会话日志仍落各项目自己的 `<root>/.shirley/sessions/`（随仓库走）。`DesktopState` 持有 `registry: Arc<Mutex<ProjectRegistry>>` + `runtimes: HashMap<project_id, Arc<Mutex<ProjectRuntime>>>`（每个 `ProjectRuntime { factory, sessions }`）；**运行时按项目懒加载**（`ensure_runtime`）。**项目 id = 规范路径**（全局唯一），会话名只在项目内唯一，故**前端路由键 = `project::session`**（与后端 pump 键一致）。commands：`agent_list_projects { archived? }` / `agent_add_project`（原生文件夹选择器 `tauri-plugin-dialog`，按路径去重 / 归档则恢复）/ `agent_rename_project { project, name }` / `agent_archive_project { project }` / `agent_restore_project { project }`；**「移除项目」= 归档**：只置 `archived = true` + 释放内存运行时，**不删磁盘数据**，可从归档列表恢复。前端左侧栏（`SessionSidebar.tsx`）渲染多项目分组：切换 / 重命名 / 归档（二次确认）/ 从归档恢复 / 新建项目，归档分组默认收起。
-- **会话管理（事实源 + 扇出，按项目隔离）**：每个 `ProjectRuntime` 持一个 `SessionManager`（与 TUI **同一个编排器语义、同一份 `<root>/.shirley/sessions` 数据**，经同一个 `FileSessionCatalog`）。所有会话命令加 `project` 参数：`agent_list_sessions { project }` / `agent_current_session { project }` / `agent_new_session { project, title? }` / `agent_switch_session { project, name }`（走 `SessionManager::create_new` / `switch_to`，与 TUI 同一接缝）/ `agent_rename_session { project, name, title }` / `agent_delete_session { project, name }` / `agent_load_history { project }`（从 `active_agent().messages()` 取 User / Assistant 正文成 `HistoryMessageWire`）。**运行态按 `project` + 会话名隔离**：`agent_send { project, text, references?, session? }` 按名 `take_agent` / `restore_agent`（不依赖 `active` 指针——后台会话运行时前台可能已切走），后台会话各自独立、可并行；同一会话运行中拒绝再次发送。**事件按会话扇出**：每个 `Session` 自持一条 `broadcast` 通道（`events: Sender<Result<AgentEvent, String>>`，容量 256），`agent_send` 把每个事件喂回 `SessionManager::apply_event(name, update)`（累加进对应 `Session`），再经 per-session pump 任务推给前端（pump 键 = `project::session`）；`agent_subscribe { project, session }` 在**同一把锁内先 `subscribe` 再 `snapshot`**（返回 `SessionSnapshotWire { session, items, running }`，不丢 / 不重），`agent_unsubscribe { project, session }` abort 该 pump。**`AgentEventWire` 每个变体带 `project: Option<String>` + `session: Option<String>`**（`with_route(project, session)` 打标），前端据此把事件路由到对应会话视图。前端 `SessionSidebar.tsx`（左侧栏）提供项目分组 + 会话列表 / 切换 / 新建（可命名）/ 重命名（内联编辑）/ 删除（两次点击确认）；切到某会话即 `openSession`（拿快照重建 transcript + 订阅其事件），切走退订。**本期范围**：项目 list / add / switch / rename / archive / restore；会话 list / new / switch / rename / delete；**不做** fork / 启动 `--resume`。
-- **`@` 引用**（`web/src/lib/file-mentions/`）：迁移自 shiwen 的 entity-mentions 交互骨架，对象**重绑到工作区文件/目录**（`useFileMentions` / `FileChips` / `FileMentionPopover`）；输入 `@` 触发候选浮层、选中生成 chip、发送时路径拼进本轮 prompt。检索落在应用层 `src/workspace_search.rs`（工作区遍历 + 关键词排序，跳过 `.git`/`node_modules`/`target` 等）。**引用不是 Agent 的对外契约**——`Message` / `AgentEvent` 未改，SDK 未新增对外类型。
-- **事件桥**：`wire.rs` 把 `AgentEvent` → `AgentEventWire`（JSON，`web/src/types/wire.ts` 为契约）。为支撑工具卡，`ToolStarted` / `ToolFinished` 两个既有变体**追加**了字段（`arguments` / `ok` / `output` / `elapsed_ms`）——字段追加、TUI 用 `..` 忽略，零破坏；仍未派生 `Serialize`（协议差异收敛在边界）。
-- **渲染对齐 shiwen**（见 `docs/desktop-interface.md` 4.3.1 / 4.3.2）：① markdown 与 shiwen 不一致**不在组件**（`AiMarkdown.tsx` 逐字节相同），在 `styles/index.css` 漏了 shiwen 的 `@source ".../node_modules/streamdown/dist/*.js"`——Tailwind 4 默认不扫 `node_modules`，streamdown 的 utility 类全没生成，补回即修复；② 聊天区固定宽度 `max-w-190`（760px）居中，`App.tsx` 用 `<section>` 包裹转写区 + 输入框；③ 连续工具调用收集进一个 `AiToolActivityDisclosure` 折叠区（「查看处理过程 · N 项」），不再每个调用铺一张卡。
-- **前端桥**：`web/src/lib/bridge.ts` 双模式（Tauri `invoke`/`listen` vs 纯浏览器 mock），`npm run dev` 可独立调试 UI。
-- **剥离决策（已确认）**：A2UI / entity / citation / space / share / OCR / SSE 线格式全删；**审批（approval）代码路径保留在 `AiToolExecutionCard.tsx`，但 `AssistantMessage.tsx` 第一期不渲染审批态执行项**；引入 Node/npm/Vite 构建链已获用户允许。
+- `should_schedule_compression` sets `compression_pending` when this round's `(input + output) >= limit * trigger_ratio` (default `0.80`), using a fixed-point integer comparison scaled up by 10000 to avoid floating-point precision issues
+- `active_messages()` finds the **last** `ContextSummary` and keeps only the system message at the start + the messages from the summary onward
+- `compress_context()` appends the compression instruction as a system message and requires the model to output a plain-text summary; only a non-empty summary with no tool_calls counts as success, otherwise it reports `CompressionError`
+- The summary content has a **structural contract**: `COMPACTION_TEMPLATE` defines XML blocks (`current_goal` / `hard_constraints` / `decisions` / `progress` / `open_questions` / `compacted_range`), and `compress_context` appends it after the caller's `compression_instruction`. The template **does not contain** `next_step` and explicitly forbids extrapolation -- this fixes "the compactor fabricating a next step the user never mentioned" (`docs/compaction.md` 5.3). **The template is configurable**: `CompressionConfig.template` (defaults to `COMPACTION_TEMPLATE`), overridable by the application layer via the `[compression]` table
+- **The compaction strategy is configurable**: `CompressionConfig { trigger_ratio, retain_ratio, template }` (defaults `0.80` / `0.20` / `COMPACTION_TEMPLATE`), passed in via the `Agent` builder's `compression_config`; both `retain_budget` and `should_schedule_compression` read it. The SDK only manages the strategy parameters; the domain trade-offs stay in `compression_instruction` (see `docs/compaction.md` supplement to section six)
+- After a successful compaction, `CompactParts::rebuild` rebuilds `self.messages`: **the system prompt is not kept, not copied** -- it is held separately by the `Agent` (the `system_prompt` field), and each rebuild regenerates one via `system_message()` and puts it on top (the function-form prompt is **re-resolved**, so the latest state of the working directory / project guide is reflected). `rebuild` only returns `[new ContextSummary] + current_task + remain`
+- A compaction failure aborts the entire stream, and the UI shows it as an error
 
 ---
 
-**5. 任务账本（todo）** — `src/todo.rs`（**应用层**，`docs/todo.md`）
+**4. Application layer (TUI and Desktop)**
 
-压缩的配套能力：压缩把对话压成摘要后，模型容易忘记自己做到哪。todo 记录
-"我做到哪了"。
+- `src/main.rs`: reads `.env` (`dotenvy`), selects `Mode::Tui` / `Mode::Desktop` based on `--desktop` / `SHIRLEY_INTERFACE=desktop`, then hands off to `bootstrap::AgentFactory::assemble`. **The assembly logic has been extracted from `main.rs` into `src/bootstrap.rs`** -- `AgentFactory` is the shared LCA of the TUI and the desktop interface (the other LCA is the SDK's `Agent`); both interfaces get the same assembly product and merely render it differently. `AgentFactory::assemble` does this: loads configuration via `settings::Settings::load_default()` (**no longer scattered env reads**, see the next item), builds the `ModelConfig` (`stream(true)` / `thinking(true)` / `reasoning_effort("low")`), computes `needs_login = !settings.is_configured()` (missing config does not block startup), and hands the model config / system prompt / working directory / session directory (`src/session.rs`'s `FileSessionCatalog`, multi-session layout `.shirley/sessions/<name>.jsonl`) together with that flag to `interface::run`. **The factory's product is "the ability to create an `Agent`", not a single `Agent`** (decision 5): `build_agent(messages)` creates an anonymous `Agent` each time (tools rebuilt on demand, see below) -- multiple sessions means multiple of them; session restore is done by the caller first `store.load()` then `build_agent(log)` (an empty `Vec` = a brand-new session). At startup it **lazily opens an empty session** (rather than restoring the most recently modified old session): at this point it only decides the session name and **does not persist**; the file is really created when the first message is sent (`create_lazy`, Codex's UX); the old single-file `.shirley/session.jsonl` is adopted by `adopt_legacy` (session persistence, see `docs/session.md`). The working directory is decided by `prompt::workspace_root()` (`SHIRLEY_WORKSPACE` first, otherwise the current directory) -- it **deliberately does not belong to `settings`** (it is "which project to run in", session-level information, not "who the user is", configuration)
+- `src/settings.rs`: **configuration loading (scheme A)**. It decouples "where configuration comes from" from "how it is used", purely application-layer, not touching the SDK. Priority `built-in defaults < global config.toml < workspace .shirley/config.toml < environment variables`. The config file is TOML; the `[provider]` table contains `protocol` / `base_url` / `api_key` / `models_url` / `model` / `context_window_tokens` (all `Option`, `deny_unknown_fields`). The global path is `<config_dir>/shirley/config.toml`, the workspace path is `<root>/.shirley/config.toml`. The environment-variable layer (`LOCAL_*`) is placed **last** to stay compatible with the existing `.env` habit -- old users need zero changes. `Settings::load`'s environment reads use an injected closure (tests do not touch global env); only `load_default` uses the real `config_dir` + process environment. A missing `base_url` **no longer errors and does not block startup**: `finalize` turns it into an empty string, `Settings::is_configured()` returns `false`, and the application layer accordingly automatically enters the `/login` flow in the TUI to guide the user to fill it in (see the next item). **It can also write**: `save_provider(path, provider)` reads first, then modifies, then writes (only overwriting the passed fields, not touching other keys, auto-creating the directory, and `chmod 600` after writing to tighten permissions); it is the persistence entry point for `/login`
+- `src/prompt.rs`: application-side system-prompt construction. `build(working_dir)` returns a `SystemPrompt` function that, on each resolution, reads the current working directory and the workspace's `Agent.md` and assembles "persona + workspace root + project guide". The working directory is explicitly told to the model (`plan.md`: an AI that does not know the workspace will wander from the root directory), and `Agent.md` provides how the project runs and how the code is organized. **Copy and code are separated**: the body text is in `prompts/system.md` / `project_guide.md` / `project_guide_missing.md`, and `src/prompt.rs` only `include_str!`s the template + fills the `{{working_dir}}` / `{{project_guide}}` placeholders (renderer `src/prompt_template.rs`)
+- `src/session.rs`: application-side session storage and the **session catalog** (`docs/session.md`). **The session contract and implementation are both in the application layer** -- the `SessionStore` trait (`append` / `load` / `truncate`, synchronous signatures) and `SessionError` (`thiserror`, `Io` / `Backend`) are defined here, and the SDK no longer exports them. `JsonlSessionStore` persists the **full raw Message log** line by line as JSONL. **No system** (regenerated on restore). **Persistence is event-driven by the application layer**: the SDK only emits `MessageAdded`, and `Session::apply_event` does `store.append` on receipt (the TUI / desktop share this path). `truncate` writes a temp file first then atomically replaces, and reopens the append handle (note: the internal `rewrite_locked` must be called while already holding the lock, otherwise the non-reentrant lock deadlocks). Multi-session (`/session`): the `SessionCatalog` trait (`list` / `open` / `create` / `create_named` / `create_lazy` / `rename` / `delete`, symmetric with `ModelCatalog`; the last four have default impls so backends without metadata support need no changes) + `FileSessionCatalog` (one session = `.shirley/sessions/<name>.jsonl`, a directory scan lists them, `adopt_legacy` adopts the old single file) + `SessionEntry { name, label, preview, modified_ms, turns }` (`preview` takes the first 40 chars of the first user message, `modified_ms` = file mtime for descending order, `turns` = number of user turns) + `EmptySessionCatalog` (`App::new` fallback). **The title is persisted as a sidecar `<name>.title`** (plain text, not polluting the Message-only JSONL); `rename` **only changes the title, not the filename / content** (Codex `/rename` semantics, sidestepping the problem of an already-open handle pointing at the old inode), and `delete` deletes the log and best-effort deletes the sidecar. **Lazy creation**: `create_lazy` returns a `LazySessionStore` -- it fixes the name at construction but **does not persist**; it materializes on the first `append` (first message) (writes the JSONL + the title sidecar); before materialization, `load` / `truncate` are treated as empty / no-ops. This way "opening the app without chatting" does not leave an empty session file
+- `src/interface/selection.rs`: **mouse selection** (no dedicated doc). Left button down records an anchor, dragging extends, releasing writes the selected text to the system clipboard (`arboard`) -- **the whole thing uses only the mouse, no copy key needed**. The selection is represented with screen-cell coordinates; `highlight` overlays reverse video on the buffer (rendered on top of everything); `text` extracts text by advancing by symbol display width (skipping the continuation cells of wide characters, avoiding fake spaces between CJK). `Tui::draw` keeps a snapshot of the current frame buffer when there is a selection, and extracts from it when the left button is released
+- `src/interface/tui.rs`: the main loop uses `tokio::select!`, moving the **foreground session**'s `Agent` out via `SessionManager::take_agent(name)` (by session name), `tokio::spawn`ing it into a separate task, sending results back through an `mpsc` channel, and putting it back with `restore_agent(name, agent)` when done -- each session holds its own `Agent`, and a background session's context is not lost when the foreground switches. **It consumes `AgentEvent` directly** (no more `AgentUpdate` intermediate type). On receiving an event it uniformly goes through `App::apply_event` (a thin wrapper: forwards to `sessions.active_mut().apply_event` and invalidates `message_cache`) -- **the accumulation logic is converged into `Session`, so the TUI and desktop share the same event-handling path**, and the UI only reads the result
+- `src/interface/app.rs`: a pure state machine, with two kinds of entries `Item::Message` / `Item::Tools`; `Role` has User / Assistant / Summary / Error; usage, context usage, and input history (up/down key replay) are all cached here; `toggle_thinking` / `toggle_tool_args` control display
+- `src/interface/ui.rs`: `MessageCache` does render caching (invalidated by width); `footer_line` shows the context usage percentage and cache hit rate (single + cumulative). The message body is handed to `markdown::render` to turn into styled `Line`/`Span`. **The scroll height must be accumulated using ratatui's own line-wrap counting** (`Paragraph::line_count`, by word boundary, requires the `unstable-rendered-line-info` feature) to build up `row_offsets`; you cannot estimate with `line.width().div_ceil(width)` -- the latter rounds by character count, undercounting long mixed Chinese/English lines, making `max_scroll` too small and the latest message obscured by the bottom input box (fixed, regression test `cache_row_count_matches_paragraph_word_wrap`)
+- `src/interface/markdown.rs`: the Markdown rendering layer. `parse` uses `pulldown-cmark` to converge raw markdown into a block-level AST (`Block`: Heading / Paragraph / Code / List / Quote / Table / Rule / Html), and `render` turns `Block` into ratatui `Line`/`Span`. Supports headings, bold/italic, inline code, code blocks, ordered/unordered/task lists, nested lists (hanging indent), quotes, tables, horizontal rules. Error messages do not go through markdown (to avoid symbols in an error being eaten as syntax). There are 13 unit tests covering the various syntaxes
+- `src/interface/event.rs`: terminal events are `poll`ed + `read` in a separate thread and sent to the async side through an unbounded channel. Bracketed paste is enabled (`EnableBracketedPaste`), so pasted content arrives as a single `Event::Paste`; both are disabled on `Drop`. **Mouse capture is enabled** (`EnableMouseCapture`) -- drag selection is implemented by the program itself (see `selection.rs`), so copying uses only the mouse and no copy key; the capture takes over native terminal selection, which is intentional. `MouseEventKind::Moved` (movement with no button) is discarded directly in the read loop, otherwise moving the mouse makes the terminal flood events and the main loop spin redrawing
+- `src/interface/update.rs`: key mapping. `Esc` (while the AI is replying -> interrupt this round; in rewind-edit state -> cancel this change; otherwise exit) / `Ctrl+C` exit, `Ctrl+T` toggle thinking display, `Ctrl+O` toggle tool-argument expansion, `Enter` submit, `Ctrl+A` / `Ctrl+E` line start/end, `Up` / `Down` history replay, `PageUp` / `PageDown` scroll up/down (equivalent to the mouse wheel, see `event.rs`). While the model picker panel is open, keys go to the panel first; while the command-candidate popover is open, `Up/Down/Left/Right` / `Tab` / `Enter` / `Esc` go to the popover first (other keys continue normal editing). `Event::Paste` goes through `App::insert_input` to insert the whole block (newlines normalized to `\n` as ordinary characters) and does not trigger sending. **Mouse events do not go here** -- they are handled directly by `tui.rs::handle_mouse` (it needs the last frame buffer and the system clipboard)
+- `src/interface/command.rs`: quick commands (slash commands). They only affect the TUI and **do not touch the SDK** -- a command either expands into a prompt sent to the AI, or is a local system message, or triggers a local panel. Currently there are `/init` (expands into a prompt that generates `Agent.md`), `/model` (opens the model picker), `/rewind` (rewinds the last user message), `/session` (opens the session picker), `/login` (step-by-step login: asks base_url / api_key / model in turn). `CommandOutcome` distinguishes these cases; fuzzy matching (fuzzy + Levenshtein) gives candidates when `/` is typed, and in the popover `Up/Down` / `Left/Right` move the highlight, `Tab` / `Enter` accept the highlighted item, and `Esc` closes the popover (without touching the input)
+- `src/models.rs`: the model catalog. `ModelEntry { label, value, provider }` + `trait ModelCatalog` (async `list()`, mimicking the SDK `ToolFuture` technique) + `StaticCatalog` (fallback static list) + `RemoteCatalog` (requests the OpenAI-compatible `GET /v1/models`, falls back on failure). `bootstrap.rs` derives the endpoint from `LOCAL_BASE_URL`, and `LOCAL_MODELS_URL` can override it. When `/model` opens the panel, the main loop moves the catalog into a background task to load asynchronously (not blocking the UI)
+- **History rewind (`/rewind`, scheme A: only rewind the latest one)**: it directly takes the **last** user message and fills the **original text back into the input box** (entering "edit-resend state", and the input box hint switches to "Enter to resend - Esc to cancel this change"). It only does the latest one (`docs/session.md` section 1 decision 4); there is no "selection" action, hence **no selection panel**. On entering edit state, **the input box is no longer pinned to the bottom but moves in place to the rendered position of that message in the conversation** -- the render layer replaces that message with an input box outlined in cyan (above it is the conversation before it, below it the conversation after; new messages only push the bottom out of view and do not squeeze the edit box, see `ui.rs`'s `draw_rewind_edit`). Pressing Enter first rewinds the Agent and the interface to before that message, then sends it as a brand-new round; Esc cancels this change directly (clears the input, exits edit state, and neither the Agent nor the interface moves). History that has been compacted away is not in `agent.messages` and is naturally not rewindable
+- **Multi-session switching (`/session`)**: a modal picker (the same style as `/model`), with the first item fixed as a "+ New session" sentinel (`SessionPicker::NEW_NAME` is an empty string) and the rest real sessions, each showing a preview of the first user message on its second line. On confirm, **orchestration is handed to `SessionManager`** (`src/interface/session.rs`, `docs/multi-session.md` decision 4) -- the sentinel goes through `create_new(None)` (`create_lazy`, lazy), and a real session goes through `switch_to(name)`: **an already-loaded session only moves the `active` pointer and directly reuses its ready `Agent`** (no rebuild, preserving background context); a not-yet-loaded one first does `store.load()` to get the full log, then starts an `Agent` via the factory's `build_agent(log)` and inserts it before switching the foreground. **The `Agent` is anonymous, identity lives on the container** (decision 4): `Session.name` is the single source of truth. After switching, `App::rebuild_items_from_agent` rebuilds the interface items entirely and resets the session-bound statistics (usage / context usage). The session catalog is a local scan (synchronous), so the main loop takes the list directly to open it, with no background task needed. The footer shows the current session name. **The TUI and desktop share the same catalog described by `FileSessionCatalog`** (`docs/session.md` section 8 decision 7)
+- **Step-by-step login (`/login`, scheme A: step-by-step Q&A version)**: **when the model service is not configured (missing `base_url`), startup automatically enters this flow** -- `bootstrap.rs` computes `needs_login` and passes it to `interface::run`, and `Tui::new` accordingly calls `App::start_login()`, turning "missing config" from a startup error into a guided step inside the TUI; the user can press Esc to cancel, and after canceling can still manually run `/login`. It does not build a form overlay, but **reuses the existing input box and `submit` path** -- after entering, the input box is temporarily commandeered as a field editor, one Enter per step. The order is fixed `base_url -> api_key -> model`, each step pre-filled with the current config (`agent.model_config()`), so pressing Enter directly means "keep unchanged"; if `base_url` is empty it stays on this step and re-asks (an empty endpoint is meaningless), and an empty `api_key` means "no auth" (common for local services, and it will **explicitly clear** the old key, unlike "keep the old value"). After finishing, it first **hot-updates the Agent** (`set_provider` + optionally `set_model`), then **persists** to the workspace `<root>/.shirley/config.toml` (`settings::save_provider`, read first then modify then write, not touching other keys, `chmod 600` after writing). If the hot update succeeds but persistence fails, it says so honestly (does not pretend to succeed). `Esc` cancels login (only leaves login state, does not exit the program, and does not change the config). The render layer is unchanged -- the prompt text goes through the existing `command_hint` (`ui.rs::input_hint` already consumes it), and in login state `on_input_changed` keeps the hint just like in rewind-edit state. The login flow is in-memory state (`App::login: Option<LoginFlow>`), and it is not persisted until finished. Tests use `set_config_path` to inject a temp path, avoiding polluting the real workspace
+- `src/interface/app.rs`: the input editing state machine. `insert_input` supports pasting multi-line text (CRLF/CR normalized to LF), and the cursor always lands on a character boundary
+- `src/interface/ui.rs`: the input box soft-wraps by display width and preserves hard newlines (`wrap_input`); the box height grows with the content (capped at `INPUT_MAX_LINES = 10`), and beyond that it scrolls vertically internally, keeping the cursor visible when pasting long text
 
-**归属修正**：账本**已从 SDK 移到应用层**。"记什么、怎么催、注入什么文案"是
-coding agent 这个产品的取舍，不是通用基础能力。SDK 只保留一个与业务无关的通用
-接缝——`ContextProvider`（`runtime/context.rs`）：`Agent` 组装每轮请求时调它，
-把返回文本作为一条 system **追加在末尾**。账本只是该接缝的一个应用层实现。
+**Existing tools**:
 
-| 文件 | 职责 |
+- `bash` (`src/tools/bash.rs`): first does a `split_whitespace` blacklist check (`rm` / `shutdown` / `reboot`, only a temporary fallback), then **runs through the process sandbox** (`SandboxSpec::new("bash").arg("-c").arg(&command)`), default 60s timeout. The sandbox result is rendered with stdout / stderr / exit code / timeout hint. **The real boundary is the sandbox backend, not the blacklist**
+- `read_file` (`src/tools/read.rs`): **controlled file reading**, used to replace raw `cat` and cap context usage at the source. Key constraints:
+  - **Path constrained by the workspace**: validated via the SDK's `WorkSpace::resolve`, rejecting absolute paths and `..` escapes (out-of-bounds / invalid paths are classified as `ArgumentsError`, so the model can succeed by changing its writing) -- implementing `docs/roadmap.md` acceptance item 4
+  - **Line count is capped**: default 200 lines, hard cap `MAX_LINE_COUNT = 2000` (an explicit request for more still only reads to the cap)
+  - **Bytes are capped**: a single output is capped at `MAX_OUTPUT_BYTES = 64KB`, and a single over-long line is truncated at a character boundary
+  - **Suspected secrets are rejected by default**: `.env` / `*.pem` / `*.key` / `id_rsa*` etc. (see `docs/security.md` section 3)
+  - **Binary detection**: a NUL in the first 8KB means reject; use `ls` to guide directories
+  - Returns **plain text with line numbers** (not JSON), and on truncation appends a hint `start_line=<next line>` for continuation -- the model can read it directly and continue
+- `web_search` (`src/tools/web_search.rs`): **web search**, migrated from shiwen (`shiwen-open-source`). It does not go through the main model route; instead it sends one bounded request to DeepSeek's **Anthropic-compatible Messages API** (`POST {base_url}/messages`), using the server tool `web_search_20250305` to get back structured sources (`web_search_tool_result`), normalizes them, and hands them to the main model as **untrusted external data**. Key points in `docs/web-search.md`:
+  - **Form**: `#[tool]` macro + **registration hook (`on_register`)**. The tool function is stateless; the client / credentials / config it needs to run are carried by `WebSearchState`, injected by `web_search_on_register` reading env at **registration time** and `ctx.insert(state)` -- "registering the tool" and "injecting the dependency" are combined into one step, so they cannot drift; `web_search_on_unregister` does `ctx.remove::<WebSearchState>()` on unregistration. Inside the function, `ctx.get::<WebSearchState>()` retrieves it (a read-only `Arc`, shared concurrently without a lock); the argument schema is auto-generated by the macro from the signature (`ToolContext` does not go into the schema). See `docs/tool-lifecycle.md`
+  - The only parameter is `query` (non-empty, <=300 chars); returns JSON `{summary, query, sources[], truncated}`
+  - Normalization: merge citation snippets by URL, dedupe, keep only http(s), truncate by `max_results`; **only accept structured blocks, error if missing, never fabricate sources**
+  - Security: **do not follow redirects**, a 2MB response-body cap, an overall timeout (`tokio::time::timeout`)
+  - Configuration is all via environment variables (`DEEPSEEK_API_KEY` required, the rest have defaults); **when unconfigured the tool is not registered**, so the model cannot see it
+
+> The `read` tool was once removed in commit `aaf0081` (the judgment at the time was "one bash is enough"), but raw `cat` has no output cap and easily floods the context. It has now been **reintroduced** in the form of `read_file`, with workspace constraints, line/byte caps, and secret redaction added. The plan is to add `apply_patch` later (see the root `plan.md`).
+
+**Desktop interface (`docs/desktop-interface.md`, M0-M3 landed)**: a Tauri 2 desktop interface that **coexists** with the TUI, bringing shiwen's chat UI (React/TS + Tailwind 4) in. The two are **sibling interfaces sharing an LCA** -- not "a web layer stacked on top of the TUI": `interface/` is full of ratatui-specific logic, the webview is a separate window, and the two cannot draw the same conversation at once. The shared layer is the SDK's `Agent` (`run_stream()` -> `AgentEvent` stream) + `bootstrap::AgentFactory`'s application assembly + `interface::session::SessionManager` (multi-session orchestration); the desktop side consumes the same `AgentEvent` via Tauri command/event, with its code under `src/interface/desktop/`.
+
+- **Startup**: `cargo run` (TUI by default) is unchanged; the desktop window uses `cargo desktop` (= `cargo run --features desktop -- --desktop`, alias in `.cargo/config.toml`), or `SHIRLEY_INTERFACE=desktop cargo run --features desktop`. **Note `--features` is a cargo argument and program arguments must go after `--`**, otherwise the program will not see `--desktop` and will fall back to the TUI. The Tauri dependency is **feature-gated + optional** (the `desktop` feature), so the default build does not touch the webview toolchain.
+- **Structure**: `src/interface/desktop/` (Rust: `mod.rs` facade / `wire.rs` event mapping / `shell.rs` Tauri shell) + `src/interface/desktop/web/` (React+TS+Vite+Tailwind 4 frontend; `dist` is pointed at by `tauri.conf.json`'s `frontendDist`). To build the frontend: `cd src/interface/desktop/web && npm install && npm run build`.
+- **commands**: `agent_send` (starts a round; events are pushed back via `agent://event`; the optional `references` are workspace paths referenced by `@`, composed into this round's prompt by `compose_prompt`) / `agent_model_name` / `agent_list_models` / `agent_set_model` (hot-swap the model, no Agent rebuild) / `agent_search_files` (`@`-reference workspace file search, pure application-layer `workspace_search`, not touching the SDK) / `agent_cancel` (reserved). The model-switch picker sits next to the send button (`ModelSelector.tsx`, via `AiChatComposer`'s `trailingAction` slot); both the catalog and the switch forward to the Rust side's `ModelCatalog` / `Agent::set_model`, with the same semantics as the TUI's `/model`.
+- **Multi-project (multi-workspace)**: as a standalone app, Shirley is not bound to a single directory -- multiple workspaces can be registered as "projects", each with its own sessions. The registry `ProjectRegistry` (`src/project.rs`) only records "where the project is", persisted to `<config_dir>/shirley/projects.json`; each project has an `AgentFactory::assemble(root)` (each reads that project's `<root>/.shirley/config.toml`), and session logs still land in each project's own `<root>/.shirley/sessions/` (traveling with the repo). `DesktopState` holds `registry: Arc<Mutex<ProjectRegistry>>` + `runtimes: HashMap<project_id, Arc<Mutex<ProjectRuntime>>>` (each `ProjectRuntime { factory, sessions }`); **runtimes are lazily loaded per project** (`ensure_runtime`). **Project id = canonical path** (globally unique), and a session name is unique only within a project, so **the frontend route key = `project::session`** (the same as the backend pump key). commands: `agent_list_projects { archived? }` / `agent_add_project` (native folder picker `tauri-plugin-dialog`, deduped by path / restore if archived) / `agent_rename_project { project, name }` / `agent_archive_project { project }` / `agent_restore_project { project }`; **"remove project" = archive**: it only sets `archived = true` + releases the in-memory runtime, and **does not delete on-disk data**, so it can be restored from the archived list. The frontend left sidebar (`SessionSidebar.tsx`) renders the multi-project grouping: switch / rename / archive (with a second confirmation) / restore from archive / new project, with the archived group collapsed by default.
+- **Session management (source of truth + fan-out, isolated per project)**: each `ProjectRuntime` holds one `SessionManager` (the **same orchestrator semantics as the TUI and the same `<root>/.shirley/sessions` data**, through the same `FileSessionCatalog`). All session commands take a `project` parameter: `agent_list_sessions { project }` / `agent_current_session { project }` / `agent_new_session { project, title? }` / `agent_switch_session { project, name }` (goes through `SessionManager::create_new` / `switch_to`, the same seam as the TUI) / `agent_rename_session { project, name, title }` / `agent_delete_session { project, name }` / `agent_load_history { project }` (takes User / Assistant body text from `active_agent().messages()` into `HistoryMessageWire`). **Runtime state is isolated by `project` + session name**: `agent_send { project, text, references?, session? }` does `take_agent` / `restore_agent` by name (not relying on the `active` pointer -- a background session may have its foreground switched away while it runs), and background sessions are independent and can run in parallel; sending is rejected while the same session is running. **Events fan out by session**: each `Session` holds its own `broadcast` channel (`events: Sender<Result<AgentEvent, String>>`, capacity 256); `agent_send` feeds each event back to `SessionManager::apply_event(name, update)` (accumulating into the corresponding `Session`), then a per-session pump task pushes it to the frontend (pump key = `project::session`); `agent_subscribe { project, session }` does `subscribe` first then `snapshot` **under the same lock** (returning `SessionSnapshotWire { session, items, running }`, no loss / no duplication), and `agent_unsubscribe { project, session }` aborts that pump. **Each `AgentEventWire` variant carries `project: Option<String>` + `session: Option<String>`** (tagged by `with_route(project, session)`), and the frontend routes events to the corresponding session view accordingly. The frontend `SessionSidebar.tsx` (left sidebar) provides project grouping + session list / switch / new (optionally named) / rename (inline edit) / delete (two-click confirm); switching to a session does `openSession` (takes a snapshot to rebuild the transcript + subscribes to its events), and switching away unsubscribes. **Scope this phase**: project list / add / switch / rename / archive / restore; session list / new / switch / rename / delete; **not doing** fork / startup `--resume`.
+- **`@` references** (`web/src/lib/file-mentions/`): migrated from shiwen's entity-mentions interaction skeleton, with the object **rebound to workspace files/directories** (`useFileMentions` / `FileChips` / `FileMentionPopover`); typing `@` triggers the candidate popover, selecting generates a chip, and on send the path is composed into this round's prompt. The search lives in the application layer `src/workspace_search.rs` (workspace traversal + keyword ranking, skipping `.git`/`node_modules`/`target` etc.). **A reference is not part of the Agent's external contract** -- `Message` / `AgentEvent` are unchanged, and the SDK adds no external type.
+- **Event bridge**: `wire.rs` maps `AgentEvent` -> `AgentEventWire` (JSON; `web/src/types/wire.ts` is the contract). To support tool cards, the two existing variants `ToolStarted` / `ToolFinished` **had fields appended** (`arguments` / `ok` / `output` / `elapsed_ms`) -- fields appended, the TUI ignores them with `..`, zero breakage; still no derived `Serialize` (protocol differences converge at the boundary).
+- **Render alignment with shiwen** (see `docs/desktop-interface.md` 4.3.1 / 4.3.2): (1) the markdown mismatch with shiwen was **not in the component** (`AiMarkdown.tsx` is byte-for-byte identical) but in `styles/index.css` missing shiwen's `@source ".../node_modules/streamdown/dist/*.js"` -- Tailwind 4 does not scan `node_modules` by default, so all of streamdown's utility classes were never generated; adding it back fixes it; (2) the chat area is a fixed width `max-w-190` (760px) centered, with `App.tsx` wrapping the transcript area + input box in a `<section>`; (3) consecutive tool calls are collected into a single `AiToolActivityDisclosure` collapsible area ("View process - N items") instead of one card per call.
+- **Frontend bridge**: `web/src/lib/bridge.ts` is dual-mode (Tauri `invoke`/`listen` vs a pure-browser mock), so `npm run dev` can debug the UI standalone.
+- **Stripping decisions (confirmed)**: A2UI / entity / citation / space / share / OCR / SSE wire format are all deleted; **the approval code path is kept in `AiToolExecutionCard.tsx`, but `AssistantMessage.tsx` does not render approval-state execution items in phase one**; introducing the Node/npm/Vite build chain has been approved by the user.
+
+---
+
+**5. Task ledger (todo)** -- `src/todo.rs` (**application layer**, `docs/todo.md`)
+
+A companion capability to compaction: after compaction turns the conversation into a summary, the model easily forgets where it got to. The todo records "where I got to".
+
+**Ownership correction**: the ledger **has moved from the SDK to the application layer**. "What to record, how to nag, what copy to inject" is a trade-off of the coding-agent product, not a generic fundamental capability. The SDK keeps only a business-agnostic generic seam -- `ContextProvider` (`runtime/context.rs`): the `Agent` calls it when assembling each round's request and appends the returned text as a system message **at the end**. The ledger is just one application-layer implementation of that seam.
+
+| File | Responsibility |
 | --- | --- |
-| `src/todo.rs`（应用层） | `TodoStore`（`Arc<Mutex<TaskState>>`）+ `TodoStatus` + `TodoUpdate` / `TodoStep`（补丁入参）+ `TodoTool`（手写 `Tool`，持有 `Arc<TodoStore>`）+ `TodoContextProvider`（`impl ContextProvider`）+ `TASK_STATE_HEADER` / `TODO_NAG_REMINDER` + 单测 |
-| `src/bootstrap.rs`（应用层） | `build_agent` 每个 `Agent` 新建一份 `Arc<TodoStore>`，注册 `TodoTool` 并作为 `context_provider` 注入 `TodoContextProvider`（两者共享同一 `Arc`） |
-| `runtime/context.rs`（SDK） | 通用接缝 `ContextProvider`；`agent.rs` 在 `active_messages()` 末尾调用它 |
+| `src/todo.rs` (application layer) | `TodoStore` (`Arc<Mutex<TaskState>>`) + `TodoStatus` + `TodoUpdate` / `TodoStep` (patch input) + `TodoTool` (hand-written `Tool`, holding an `Arc<TodoStore>`) + `TodoContextProvider` (`impl ContextProvider`) + `TASK_STATE_HEADER` / `TODO_NAG_REMINDER` + unit tests |
+| `src/bootstrap.rs` (application layer) | `build_agent` creates a fresh `Arc<TodoStore>` per `Agent`, registers `TodoTool`, and injects `TodoContextProvider` as `context_provider` (the two share the same `Arc`) |
+| `runtime/context.rs` (SDK) | The generic seam `ContextProvider`; `agent.rs` calls it at the end of `active_messages()` |
 
-核心设计（`docs/todo.md` 二、三个核心决策）：
+Core design (`docs/todo.md` section 2, three core decisions):
 
-- **模型写，不做程序化推断**：暴露 `todo` 工具，模型自己决定何时更新（状态判断发生在 AI 层最准）。
-- **不进 `self.messages`，每轮作为 system 追加在末尾注入**：账本单独持有，压缩碰不到它，天然跨压缩存活；注入位置选**末尾**是因为追加不动前面的前缀，账本稳定时前缀缓存照常命中（`responses-api.md` 里"system 原位保留"正是为这个）。代价是模型每次调 `todo` 会让"账本那条 system 之后"的前缀失效——这是"每轮可见"的固有代价，用"放末尾 + 只写变化"压到最小。三个适配器都能处理任意位置 system（ChatCompletions 原样输出 / Responses 原位保留 / Anthropic 摘到顶层 `system`）。
-- **补丁语义**：`goal` 设置替换、`steps` **整体替换**（清单短，每轮重发全量天然自纠）、`add_findings` / `add_open_questions` **追加**、`clear` 重置；未提供的字段保持原样。
-- **渲染成 XML**（`<task_state>` / `<goal>` / `<steps>` / `<findings>` / `<open_questions>`）：空账本不注入；`&` / `<` / `>` 转义；`MAX_RENDER_CHARS = 4000` 超限截断并显式标注（防账本自己垄断上下文）。
-- **nag 冷启动护栏**：空账本连续多轮未建时注入 `TODO_NAG_REMINDER`（`TODO_NAG_AFTER_ROUNDS = 3`）——空账本没有 header 可注入，模型开局缺一条明确触发指令。计数由 `TodoContextProvider` 的 `AtomicUsize` 维护（不再由 runtime 计）。
-- **切换会话清空**：会话切换由应用层 `SessionManager` 完成（每个会话自持独立 `Agent` + 独立 `TodoStore`），旧会话的任务账本随其 `Agent` 一并搁置，**天然不残留**。
+- **The model writes, no programmatic inference**: expose a `todo` tool, and the model decides when to update (state judgment is most accurate at the AI layer).
+- **Does not go into `self.messages`, injected as a system message at the end each round**: the ledger is held separately, compaction cannot touch it, and it naturally survives compaction; the injection position is chosen at **the end** because appending does not move the earlier prefix, so when the ledger is stable the prefix cache still hits (this is exactly what "keep system in place" in `responses-api.md` is for). The cost is that each time the model calls `todo`, the prefix after "that ledger system message" is invalidated -- an inherent cost of "visible every round", minimized by "put it at the end + write only the changes". All three adapters can handle a system message at any position (ChatCompletions outputs it as-is / Responses keeps it in place / Anthropic extracts it to the top-level `system`).
+- **Patch semantics**: `goal` is a replacing set, `steps` is **a whole replacement** (the list is short; resending the full list each round is naturally self-correcting), `add_findings` / `add_open_questions` **append**, `clear` resets; unprovided fields stay as-is.
+- **Rendered as XML** (`<task_state>` / `<goal>` / `<steps>` / `<findings>` / `<open_questions>`): an empty ledger is not injected; `&` / `<` / `>` are escaped; `MAX_RENDER_CHARS = 4000` truncates with an explicit marker when exceeded (to prevent the ledger from monopolizing the context).
+- **Nag cold-start guardrail**: when an empty ledger has not been created for several consecutive rounds, inject `TODO_NAG_REMINDER` (`TODO_NAG_AFTER_ROUNDS = 3`) -- an empty ledger has no header to inject, so the model lacks a clear trigger instruction at the start. The counter is maintained by `TodoContextProvider`'s `AtomicUsize` (no longer counted by the runtime).
+- **Cleared on session switch**: session switching is done by the application-layer `SessionManager` (each session holds its own `Agent` + `TodoStore`); the old session's task ledger is shelved along with its `Agent` and **naturally does not linger**.
 
-已知缺口见 `docs/todo.md` 第七节（无持久化 / 无自动清理 / 注入即失前缀缓存 / 模型可能不用）。
+Known gaps are in `docs/todo.md` section 7 (no persistence / no automatic cleanup / injection loses the prefix cache / the model may not use it).
 
 ---
 
-**五、沙盒与工作区（SDK 新增能力）**
+**6. Sandbox and workspace (SDK new capabilities)**
 
-**沙盒** — `crates/shirley-agent-sdk/src/sandbox/`
+**Sandbox** -- `crates/shirley-agent-sdk/src/sandbox/`
 
-| 文件 | 职责 |
+| File | Responsibility |
 | --- | --- |
-| `spec.rs` | 平台无关的执行意图：program + args、cwd、env、timeout、workspace_root、读写路径、网络策略（`SandboxSpec`） |
-| `backend/mod.rs` | 后端抽象 `SandboxBackend` + 能力自描述 `Capabilities` + `SandboxError` |
-| `backend/process.rs` | 裸进程后端（无隔离），仅用于开发/测试与降级基线 |
-| `output.rs` | 统一结果：stdout / stderr / exit_code / timed_out / isolation / **degraded** |
-| `mod.rs` | 门面 `Sandbox<B>`：统一施加超时，组装结果 |
+| `spec.rs` | Platform-agnostic execution intent: program + args, cwd, env, timeout, workspace_root, read/write paths, network policy (`SandboxSpec`) |
+| `backend/mod.rs` | Backend abstraction `SandboxBackend` + capability self-description `Capabilities` + `SandboxError` |
+| `backend/process.rs` | Bare process backend (no isolation), used only for development/testing and as a degraded baseline |
+| `output.rs` | Unified result: stdout / stderr / exit_code / timed_out / isolation / **degraded** |
+| `mod.rs` | Facade `Sandbox<B>`: uniformly applies the timeout, assembles the result |
 
-四条设计原则：边界在"能碰什么"不在命令字符串；默认拒绝（网络断、env 不继承、写路径空）；超时由最外层 `tokio::time::timeout` 强制，后端赖着不停也会被 kill；**降级透明**——后端做不到的约束写进 `output.degraded`，上层可据此拒绝结果。
+Four design principles: the boundary is in "what can be touched", not the command string; deny by default (network off, env not inherited, empty write paths); the timeout is enforced by the outermost `tokio::time::timeout`, so a backend that refuses to stop is still killed; **degradation is transparent** -- constraints the backend cannot enforce are written into `output.degraded`, and the upper layer can reject the result based on it.
 
-当前用 `ProcessBackend`，它会如实上报降级（隔离没生效）。真后端（macOS `sandbox-exec` / Linux `bwrap`）还没接。`SandboxBackend::execute` 返回 `impl Future`，trait 非 object-safe，暂时不能用 `Box<dyn>` 动态注入。
+Currently `ProcessBackend` is used, and it honestly reports degradation (isolation not in effect). The real backends (macOS `sandbox-exec` / Linux `bwrap`) are not hooked up yet. `SandboxBackend::execute` returns `impl Future`, the trait is not object-safe, and for now it cannot be dynamically injected with `Box<dyn>`.
 
-**工作区** — `crates/shirley-agent-sdk/src/workspace/mod.rs`
+**Workspace** -- `crates/shirley-agent-sdk/src/workspace/mod.rs`
 
-`WorkSpace`：`new(root)` + `resolve(input)`，把相对路径解析到工作区根目录下并做越界校验。`WorkspaceError` 区分 `OutsideRoot`（越界被拒绝）和 `InvalidPath`（路径本身没法用）——模型靠这个差别决定换路径还是换写法。
+`WorkSpace`: `new(root)` + `resolve(input)`, resolving a relative path under the workspace root and doing out-of-bounds validation. `WorkspaceError` distinguishes `OutsideRoot` (out of bounds, rejected) and `InvalidPath` (the path itself is unusable) -- the model uses this difference to decide whether to change the path or change its writing.
 
 ---
 
-**六、上手路径**
+**7. Getting started**
 
-想跑起来：
+To run it:
 
 ```sh
-cp .env.example .env   # 按需修改；.env 已在 .gitignore 中
+cp .env.example .env   # modify as needed; .env is in .gitignore
 cargo run
 ```
 
-配置来源（优先级从低到高）：内置默认 → 全局 `<config_dir>/shirley/config.toml` → 工作区 `<root>/.shirley/config.toml` → 环境变量。最省事的是在 `.env` 里写（兼容旧习惯）：`LOCAL_BASE_URL`（缺了不阻断启动，TUI 会自动进入 `/login` 引导补齐）、`LOCAL_API_KEY`（可选，本地服务常不需要）、`LOCAL_MODEL`、`LOCAL_PROTOCOL`、`LOCAL_MODELS_URL`、`LOCAL_CONTEXT_WINDOW_TOKENS`（可选，默认 52429）。也可以写 TOML 配置文件：`[provider]` 表 + `base_url` / `api_key` / `model` / `protocol` / `models_url` / `context_window_tokens`。`DEEPSEEK_*` 那组目前没被代码引用。`bash` 工具与系统提示词都会读 `SHIRLEY_WORKSPACE`（工作区根目录，缺省为当前目录）；系统提示词还会把工作区根目录下的 `Agent.md`（项目指南）内联进去。注意 `.env` 已在 `.gitignore` 里，**里面的 key 已经泄露过一次，别提交**。
+Configuration sources (priority from low to high): built-in defaults -> global `<config_dir>/shirley/config.toml` -> workspace `<root>/.shirley/config.toml` -> environment variables. The easiest is to write in `.env` (compatible with the old habit): `LOCAL_BASE_URL` (missing does not block startup; the TUI automatically enters the `/login` flow to guide completion), `LOCAL_API_KEY` (optional; local services often do not need it), `LOCAL_MODEL`, `LOCAL_PROTOCOL`, `LOCAL_MODELS_URL`, `LOCAL_CONTEXT_WINDOW_TOKENS` (optional, default 52429). You can also write a TOML config file: the `[provider]` table + `base_url` / `api_key` / `model` / `protocol` / `models_url` / `context_window_tokens`. The `DEEPSEEK_*` group is currently not referenced by the code. The `bash` tool and the system prompt both read `SHIRLEY_WORKSPACE` (workspace root, defaulting to the current directory); the system prompt also inlines `Agent.md` (the project guide) under the workspace root. Note `.env` is in `.gitignore`, and **the key inside it has leaked once, so do not commit it**.
 
-常用命令：
+Common commands:
 
 ```sh
-cargo build                        # 构建
-cargo test                         # 跑全部测试
-cargo test -p shirley-agent-sdk    # 只跑 SDK 测试
-cargo clippy --all-targets         # 静态检查
+cargo build                        # build
+cargo test                         # run all tests
+cargo test -p shirley-agent-sdk    # run only the SDK tests
+cargo clippy --all-targets         # static checks
 ```
 
-测试分布（应用层约 102 个）：`markdown.rs` 13 个、`app.rs` 28 个、`ui.rs` 11 个、`command.rs` 10 个、`bash.rs` 6 个（其中 `reports_sandbox_degradation` 是既有的红测试）、`read.rs` 10 个、`session.rs` 10 个、`models.rs` 4 个、`web_search.rs` 11 个、`todo.rs` 7 个；SDK 集成测试 `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 各 6 个、`tool_lifecycle.rs` 5 个、`tool_context.rs` 5 个、`runtime_compaction.rs` 20 个、`system_prompt_contract.rs` 4 个（`session_contract.rs` 已随 session 抽离删除）。
+Test distribution (about 102 in the application layer): `markdown.rs` 13, `app.rs` 28, `ui.rs` 11, `command.rs` 10, `bash.rs` 6 (of which `reports_sandbox_degradation` is a pre-existing red test), `read.rs` 10, `session.rs` 10, `models.rs` 4, `web_search.rs` 11, `todo.rs` 7; SDK integration tests `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 6 each, `tool_lifecycle.rs` 5, `tool_context.rs` 5, `runtime_compaction.rs` 20, `system_prompt_contract.rs` 4 (the `session_contract.rs` was deleted along with the session extraction).
 
 ---
 
-**七、当前状态与已知缺口**
+**8. Current state and known gaps**
 
-**已经能用的**：
+**What already works**:
 
-- 完整 ReAct 循环（含流式）：`ChatCompletions` / `Responses` / `AnthropicMessages` 三协议均已适配
-- 工具注册、参数 schema 生成、并发工具调用
-- 上下文自动压缩（默认 80% 阈值触发，阈值 / 保留比例 / 摘要模板均可配置）
-- usage 统计 + 缓存命中率（区分"未上报"）
-- 能跑的 TUI：流式增量渲染、思考显示、工具参数展开、输入历史、滚动、压缩状态提示
-- 进程沙盒框架（spec / 后端抽象 / degraded 上报 / 超时）
-- 工作区路径越界校验
-- 统一错误契约（`ErrorKind` / `SdkError`）
-- 任务账本（**应用层**）：`todo` 工具（模型自维护）+ `TodoContextProvider` 每轮末尾注入（跨压缩存活），由 `bootstrap::build_agent` 每会话注册并接线；多会话下账本随各会话独立 `Agent` / `TodoStore` 天然隔离。SDK 只提供通用接缝 `ContextProvider`
+- The full ReAct loop (including streaming): `ChatCompletions` / `Responses` / `AnthropicMessages` all three protocols are adapted
+- Tool registration, argument schema generation, concurrent tool calls
+- Automatic context compaction (triggered at the default 80% threshold; the threshold / retain ratio / summary template are all configurable)
+- usage statistics + cache hit rate (distinguishing "not reported")
+- A runnable TUI: streaming incremental rendering, thinking display, tool-argument expansion, input history, scrolling, compaction status hints
+- The process sandbox framework (spec / backend abstraction / degraded reporting / timeout)
+- Workspace path out-of-bounds validation
+- Unified error contract (`ErrorKind` / `SdkError`)
+- Task ledger (**application layer**): the `todo` tool (model self-maintained) + `TodoContextProvider` injected at the end of each round (survives compaction), registered and wired per session by `bootstrap::build_agent`; under multi-session, the ledger is naturally isolated as each session has its own `Agent` / `TodoStore`. The SDK only provides the generic seam `ContextProvider`
 
-**明确没做的**：
+**What is explicitly not done**:
 
-1. ~~**多协议**~~：`ChatCompletions` / `Responses` / `AnthropicMessages` **三协议均已实现**（含流式）。Anthropic 适配见 `docs/anthropic-messages-api.md`（`x-api-key` 头、`tool_result` 在 user 消息里、`input_tokens` 不含缓存需加回 `cache_read`、流式 `input_json_delta` 分片聚合；**协议差异全部收敛在适配层，`Message` 未改动**）
-2. **工具参数中间层**：目前直接生成 OpenAI schema，跨协议复用不了
-3. **真沙盒后端**：只有 `ProcessBackend`（无隔离），`sandbox-exec` / `bwrap` 未接
-4. **记忆系统**：**V1 已落地**（`docs/memory.md`、`src/memory/`）。`core.md` 常驻注入 + `index.md` 关键词检索注入（经 `ContextProvider` 接缝，每轮末尾追加）+ 会话结束增量 curator（同模型 + 确定性自检，`agent.complete` 一次性调用）+ 时间化冲突字段（`supersedes`，冲突不删历史）。**归应用层**（与 `todo.rs` 同款理由），SDK 只提供通用接缝。V2/V3（睡眠学习、BM25/embedding、跨工作区）见 `docs/memory.md` 第十节
-5. **权限控制 / 行为限制**：只有 bash 的硬编码黑名单 + 沙盒，没有通用的权限层（`docs/security.md` 里的 `PermissionPolicy` 还没落地）
-6. **任务规划**：长任务怎么拆解、怎么跟踪进度，还没设计
-7. **`apply_patch` 工具**：还没做（`plan.md` 里提到）
-8. ~~未接线配置~~：`temperature` / `max_output_tokens` / `tool_choice` 已接线，并新增 `extra_body` 逃生口（见 `docs/sdk-gaps.md` gap-4）
-9. **未使用的 `StopReason`**：`MaxStepsReached` / `Cancelled` 定义了但不会产生（没有 max_steps 和取消机制）
-10. **压缩重试**：压缩失败直接中断，`plan.md` 提到"压缩失败重试有时能成功"
-11. **技能（skills）**：**P0+P1+P2(slash) 已落地、P2 其余项+未落地**（`docs/skills.md`）。拥抱 Agent Skills 开放标准（`SKILL.md` 目录 + frontmatter），渐进式披露（Tier1 目录常驻 / Tier2 按需激活 / Tier3 资源按需读）。**应用层实现，SDK 零改动**：`src/skills/`（`parse` / `discovery` / `catalog` / `provider` / `runtime` / `tool`），经 `bootstrap::build_agent` 把 `SkillContextProvider` 接进 `CompositeContextProvider`。**P0** 每轮末尾注入 Tier1 目录；**P1** 新增 `activate_skill`（`name` 限枚举、剥 frontmatter、列 `resources`）+ `SkillRuntime`（已激活集合，与 provider 共享同一 `Arc`）+ 每轮末尾**追加**注入已激活正文（跨压缩存活）+ `read_skill_file`（Tier3 资源按需读，根钉死在 `skill.root`，复用 `read_file` 的 `read_text_range` 内核）。**KV 缓存关键约束**：注入恒为追加式——目录是稳定前缀、已激活块按激活顺序拼接在其后、旧内容逐字节不变（`runtime::SkillRuntime::render`）。**P2(slash)** 新增 `/<skill-name>` 命令入口（`CommandOutcome::ActivateSkill`，`CommandManager::resolve` / `fuzzy_match` 增 `skills: &[String]` 参数、内置指令优先；`BuiltAgent` / `Session` 仿 memory 模式带 `Arc<SkillRuntime>` 句柄，App 从前台会话取并直接 `runtime.activate`；无参=激活+本地系统提示、带参=激活+作为本轮 prompt 发送；复用 P1 注入接缝，KV 前缀不受影响）。**未做**（P2 其余+）：去重激活提示、每 skill 正文上限调优、`allowed-tools` 强制、skill 安装器 / 市场
+1. ~~**Multi-protocol**~~: `ChatCompletions` / `Responses` / `AnthropicMessages` **all three are implemented** (including streaming). The Anthropic adapter is in `docs/anthropic-messages-api.md` (`x-api-key` header, `tool_result` inside user messages, `input_tokens` excluding cache so `cache_read` must be added back, streaming `input_json_delta` fragment aggregation; **all protocol differences converge in the adapter layer, `Message` is unchanged**)
+2. **Tool-argument middle layer**: currently it generates OpenAI schema directly and cannot be reused across protocols
+3. **Real sandbox backends**: only `ProcessBackend` (no isolation); `sandbox-exec` / `bwrap` are not hooked up
+4. **Memory system**: **V1 has landed** (`docs/memory.md`, `src/memory/`). `core.md` always-resident injection + `index.md` keyword-retrieval injection (via the `ContextProvider` seam, appended at the end of each round) + an incremental curator at session end (same model + deterministic self-check, `agent.complete` one-shot call) + a temporal conflict field (`supersedes`, conflicts do not delete history). **Belongs to the application layer** (same reason as `todo.rs`); the SDK only provides the generic seam. V2/V3 (sleep learning, BM25/embedding, cross-workspace) are in `docs/memory.md` section 10
+5. **Permission control / behavior restriction**: only bash's hard-coded blacklist + the sandbox, no general permission layer (the `PermissionPolicy` in `docs/security.md` has not landed)
+6. **Task planning**: how to decompose long tasks and track progress is not yet designed
+7. **`apply_patch` tool**: not done yet (mentioned in `plan.md`)
+8. ~~Unwired configuration~~: `temperature` / `max_output_tokens` / `tool_choice` are wired up, and a new `extra_body` escape hatch is added (see `docs/sdk-gaps.md` gap-4)
+9. **Unused `StopReason`**: `MaxStepsReached` / `Cancelled` are defined but never produced (there is no max_steps and no cancellation mechanism)
+10. **Compaction retry**: a compaction failure aborts directly; `plan.md` mentions "retrying a compaction failure sometimes succeeds"
+11. **Skills**: **P0+P1+P2(slash) landed, the rest of P2+ not landed** (`docs/skills.md`). Embracing the Agent Skills open standard (`SKILL.md` directory + frontmatter), progressive disclosure (Tier1 catalog always resident / Tier2 activated on demand / Tier3 resources read on demand). **Application-layer implementation, zero SDK change**: `src/skills/` (`parse` / `discovery` / `catalog` / `provider` / `runtime` / `tool`), wired into `CompositeContextProvider` by `bootstrap::build_agent`. **P0** injects the Tier1 catalog at the end of each round; **P1** adds `activate_skill` (with `name` limited to an enum, strips frontmatter, lists `resources`) + `SkillRuntime` (the activated set, sharing the same `Arc` with the provider) + **appending** the activated body at the end of each round (survives compaction) + `read_skill_file` (Tier3 resources read on demand, with the root pinned to `skill.root`, reusing the `read_text_range` core of `read_file`). **KV cache key constraint**: injection is always append-style -- the catalog is a stable prefix, activated blocks are concatenated after it in activation order, and old content is byte-for-byte unchanged (`runtime::SkillRuntime::render`). **P2(slash)** adds a `/<skill-name>` command entry (`CommandOutcome::ActivateSkill`; `CommandManager::resolve` / `fuzzy_match` gain a `skills: &[String]` parameter, with built-in commands taking priority; `BuiltAgent` / `Session` carry an `Arc<SkillRuntime>` handle following the memory pattern, and the App takes it from the foreground session and calls `runtime.activate` directly; no args = activate + local system hint, with args = activate + send as this round's prompt; reuses the P1 injection seam, so the KV prefix is unaffected). **Not done** (the rest of P2+): dedup activation hints, per-skill body cap tuning, `allowed-tools` enforcement, skill installer / marketplace
 
+**Easy to fix along the way**:
 
-**顺手能修的**：
-
-- `adapter::ModelfinishReaon` 拼写错误（少个 i，应为 `ModelFinishReason`）——**仍然存在**
-- `chat_completions/mod.rs` 里 `encode_request` 上面那条 `todo: 这里目前没有处理工具注入逻辑，以及思考逻辑。` 注释已过时（工具和思考都处理了）
-- `runtime` 里工具执行失败时把错误 `to_string()` 塞进 tool message（有 TODO 标注，说"感觉这里不太合理"）
-- `bash.rs` 里 `render` 的降级提示目前被注释掉了，但单测 `reports_sandbox_degradation` 仍断言 `[沙盒降级]`——**这条测试应该是红的**，要么恢复渲染、要么改测试
-- `bash.rs` 里工具错误消息格式没有统一约定（有 TODO）
-
----
-
-**八、改代码前请记住**
-
-1. **别破坏 prefix 稳定性**。工具定义排序、消息顺序、system prompt 位置，任何变动都会影响缓存命中率。UI 状态栏会显示这个数字，改完自己看一眼。
-2. **`Option<u64>` 的语义是有意的**。"未上报"和"0"必须区分，别为了图省事用 `unwrap_or(0)`。
-3. **压缩是不可逆的**。`ContextSummary` 一旦写入，之前的消息在 `active_messages()` 里就不参与请求了，但原始消息仍留在 `self.messages` 里（注：压缩会把 `self.messages` **整体重建**变短，被压掉的原始消息不再回到工作集）。改这块要小心 `start_index` 的语义（`RunResult.messages` 是从这里切出来的）——**循环内压缩后必须 `start_index = start_index.min(self.messages.len())` 钳制**，否则切片越界 panic（真实炸过：`range start index 10 out of range for slice of length 6`，被 async_stream 包成 `Other("task panicked...")`）。同理，任何"记录下标 + 中途重建底层容器"的模式都脆弱：`run_stream` 开头那个压缩分支不炸纯属它发生在 `start_index` 记录**之前**的顺序依赖，将来在记录之后插入任何重建 `messages` 的路径都会再踩。
-4. **对外契约要保持小**。`lib.rs` 的 `pub use` 是 SDK 的门面，加东西之前先问自己：这是基础能力，还是业务逻辑？
-5. **错误分类是稳定的**。`ErrorKind` 给日志/指标/重试决策用，文案可以改，kind 不能随便改；要判断重试只看 `is_retryable`，别 match 字符串。
-6. **边界在沙盒，不在黑名单**。`bash` 的字符串黑名单只是临时兜底，别把它当成安全边界。
-7. **`plan.md` 和 `docs/` 都是活文档**。`plan.md` 有大量"我为什么这么设计"的思考过程，比代码注释更能说明问题；`docs/` 是分期落地的方案。改架构前先读一遍。
+- The `adapter::ModelfinishReaon` typo (missing an i, should be `ModelFinishReason`) -- **still present**
+- The `todo: this currently does not handle tool-injection logic or thinking logic.` comment above `encode_request` in `chat_completions/mod.rs` is outdated (both tools and thinking are handled)
+- In `runtime`, when a tool execution fails it stuffs the error `to_string()` into the tool message (there is a TODO noting "this feels a bit off")
+- In `bash.rs`, the degraded hint in `render` is currently commented out, but the unit test `reports_sandbox_degradation` still asserts `[sandbox degraded]` -- **this test should be red**; either restore the rendering or change the test
+- In `bash.rs`, the tool error-message format has no unified convention (there is a TODO)
 
 ---
 
-最后一句，算是我的私心：
+**9. Remember before changing code**
 
-这个项目叫 Shirley，但真正驱动它的是 `plan.md` 里那句"先聚焦一个 Agent 应用场景去实现，在实现的过程中不断做决策，发现哪些能力下次还能用上"。**不要为了抽象而抽象**。我见过太多 SDK 死在"预判了所有需求"上。
+1. **Do not break prefix stability**. Tool-definition sorting, message order, and the system-prompt position all affect the cache hit rate. The UI status bar shows this number; take a look after changing things.
+2. **The semantics of `Option<u64>` are intentional**. "Not reported" and "0" must be distinguished; do not use `unwrap_or(0)` for convenience.
+3. **Compaction is irreversible**. Once a `ContextSummary` is written, the earlier messages no longer participate in the request in `active_messages()`, but the original messages still stay in `self.messages` (note: compaction **rebuilds `self.messages` entirely** to be shorter, and the compacted-away original messages do not return to the working set). Be careful with the semantics of `start_index` here (`RunResult.messages` is sliced from it) -- **after an in-loop compaction you must clamp with `start_index = start_index.min(self.messages.len())`**, otherwise the slice goes out of bounds and panics (this really blew up: `range start index 10 out of range for slice of length 6`, wrapped by async_stream as `Other("task panicked...")`). Likewise, any pattern of "record an index + rebuild the underlying container midway" is fragile: the fact that the compaction branch at the start of `run_stream` does not blow up is purely an ordering dependency -- it happens **before** `start_index` is recorded; inserting any path that rebuilds `messages` after the record will hit it again.
+4. **Keep the external contract small**. The `pub use` in `lib.rs` is the SDK's facade; before adding something, ask yourself: is this a fundamental capability, or business logic?
+5. **Error classification is stable**. `ErrorKind` is for logs/metrics/retry decisions; the wording can change, the kind cannot be changed casually; to decide retry, look only at `is_retryable`, do not match strings.
+6. **The boundary is in the sandbox, not the blacklist**. `bash`'s string blacklist is only a temporary fallback; do not treat it as a security boundary.
+7. **`plan.md` and `docs/` are living documents**. `plan.md` has a lot of "why I designed it this way" thinking, which explains things better than code comments; `docs/` are the phased plans. Read them before changing the architecture.
 
-有不确定的地方，去翻 `git log`。提交信息写得很清楚，从 `macro foundation` 到 `context compression` 再到 `sandbox execution framework`，每一步的意图都留下来了。
+---
+
+One last thing, a bit of self-interest:
+
+This project is called Shirley, but what really drives it is the line in `plan.md`: "focus on implementing one Agent application scenario first, and in the process of implementing it keep making decisions to discover which capabilities will be useful next time". **Do not abstract for abstraction's sake**. I have seen too many SDKs die on "anticipated every requirement".
+
+When unsure, go dig through `git log`. The commit messages are written very clearly; from `macro foundation` to `context compression` to `sandbox execution framework`, the intent of every step is left behind.

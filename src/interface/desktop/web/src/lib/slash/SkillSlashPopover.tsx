@@ -5,8 +5,9 @@ import { cn } from "@/ui/utils";
 import type { SkillEntry } from "@/lib/bridge";
 
 /**
- * `/` 技能候选浮层。与 `FileMentionPopover` 同款形态：一列候选 + 键盘选择，
- * 但不带搜索框——query 由输入框本身承载（`/` 之后的文本即查询）。
+ * `/` skill candidate popover. Same shape as `FileMentionPopover`: a column of candidates
+ * + keyboard selection, but without a search box — the query is carried by the input itself
+ * (the text after `/` is the query).
  */
 export function SkillSlashPopover({
   open,
@@ -46,7 +47,7 @@ export function SkillSlashPopover({
   return (
     <div
       role="listbox"
-      aria-label="选择技能"
+      aria-label="Select a skill"
       className="z-50 w-full min-w-0 overflow-hidden rounded-card border border-line bg-surface shadow-lg"
       data-skill-slash-popover
     >
@@ -67,13 +68,13 @@ export function SkillSlashPopover({
                 onClick={onRetry}
                 className="flex w-fit items-center gap-1 rounded bg-quiet px-2 py-1 text-label text-ink hover:bg-overlay"
               >
-                点击重试
+                Click to retry
               </button>
             </div>
           )}
           {showEmpty && (
             <div className="px-3 py-2 text-body-sm text-muted">
-              {query ? "没有匹配的技能" : "当前项目没有可用技能"}
+              {query ? "No matching skills" : "No skills available for this project"}
             </div>
           )}
           {!error &&
