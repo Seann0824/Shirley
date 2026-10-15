@@ -4,6 +4,7 @@ mod bootstrap;
 mod interface;
 mod memory;
 mod models;
+mod plugins;
 mod project;
 mod prompt;
 mod prompt_template;

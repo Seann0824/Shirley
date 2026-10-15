@@ -17,13 +17,14 @@ use crate::{
 
 // Honestly this conversion logic feels like it belongs on the message side, rather than being
 // written here in the adapter layer for message handling.
-fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
-    let encode_message = |msg: &message::Message| {
-        match msg {
+fn encode_messages(messages: &[message::Message]) -> Result<Vec<Value>, AdapterError> {
+    let mut out = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let value = match msg {
             message::Message::User { content } => {
                 serde_json::json!({
                     "role": "user",
-                    "content": content,
+                    "content": super::content::chat_content(content)?,
                 })
             }
             message::Message::Assistant {
@@ -80,9 +81,10 @@ fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
                     "content": content,
                 })
             }
-        }
-    };
-    messages.iter().map(encode_message).collect()
+        };
+        out.push(value);
+    }
+    Ok(out)
 }
 
 // Convert the tools into the format the API requires
@@ -123,7 +125,7 @@ pub fn encode_request(
         "model": &config.model,
         // This should convert, right? But it depends: we currently treat ChatCompletions as the
         // sole protocol, and the others are adapted from it.
-        "messages": encode_messages(input.messages),
+        "messages": encode_messages(input.messages)?,
         "tools": encode_tools(input.tools),
         "stream": &config.stream,
     });

@@ -88,6 +88,27 @@ pub(crate) fn is_cjk_word_char(code: u32) -> bool {
     )
 }
 
+/// Tokens billed for one image reference.
+///
+/// Images are billed by the provider by resolution/detail, not by characters. We
+/// cannot know the exact number without decoding the image, so use a flat,
+/// deliberately generous constant so the compaction budget does not under-count
+/// an image-heavy turn. It is a heuristic, like everything else in this module.
+const IMAGE_TOKENS: u64 = 384;
+
+/// Estimate the tokens a [`message::Content`] occupies (uncalibrated).
+pub fn count_content(content: &message::Content) -> u64 {
+    content
+        .as_parts()
+        .iter()
+        .map(|part| match part {
+            message::ContentPart::Text { text } => count_text(text),
+            message::ContentPart::Image(_) => IMAGE_TOKENS,
+        })
+        .sum::<u64>()
+        + ROLE_OVERHEAD
+}
+
 /// Estimate how many tokens a single message occupies (uncalibrated).
 ///
 /// Only counts fields that are **actually serialized into the request**: `reasoning_content`
@@ -96,8 +117,8 @@ pub(crate) fn is_cjk_word_char(code: u32) -> bool {
 pub fn count_message(message: &message::Message) -> u64 {
     match message {
         message::Message::System { content }
-        | message::Message::User { content }
         | message::Message::ContextSummary { content } => count_text(content) + ROLE_OVERHEAD,
+        message::Message::User { content } => count_content(content),
         message::Message::Assistant {
             content,
             reasoning_content,
@@ -347,7 +368,7 @@ mod tests {
     #[test]
     fn every_message_has_role_overhead() {
         let empty_user = Message::User {
-            content: String::new(),
+            content: String::new().into(),
         };
         assert_eq!(count_message(&empty_user), ROLE_OVERHEAD);
     }

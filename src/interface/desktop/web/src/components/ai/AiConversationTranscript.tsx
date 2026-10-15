@@ -6,6 +6,7 @@ import {
   MessageScrollerContent,
   useMessageAutoScroll,
 } from "@/ui/chat";
+import { Pencil } from "lucide-react";
 import { AiAssistantAvatar } from "./AiAssistantAvatar";
 import { AiMarkdown } from "@/components/ai/AiMarkdown";
 import type { FileReference } from "@/lib/file-mentions/types";
@@ -32,6 +33,8 @@ export function AiConversationTranscript({
   emptyContent,
   renderMessageContent,
   renderAfterMessage,
+  editableMessageId,
+  onEditMessage,
 }: {
   messages: AiTranscriptMessage[];
   conversationKey: string;
@@ -42,6 +45,10 @@ export function AiConversationTranscript({
   emptyContent?: ReactNode;
   renderMessageContent?: (message: AiTranscriptMessage, index: number) => ReactNode;
   renderAfterMessage?: (message: AiTranscriptMessage, index: number) => ReactNode;
+  /** Id of the one message that can be edited (the last user message); others show no button. */
+  editableMessageId?: Key | null;
+  /** Enter edit mode for that message (the caller pre-fills the composer). */
+  onEditMessage?: (message: AiTranscriptMessage) => void;
 }) {
   const contentKey = messages
     .map(
@@ -67,6 +74,10 @@ export function AiConversationTranscript({
           {messages.length === 0 && !pendingLabel && emptyContent}
           {messages.map((message, index) => {
             const isAssistant = message.role === "assistant";
+            const canEdit =
+              !isAssistant &&
+              editableMessageId != null &&
+              String(message.id) === String(editableMessageId);
             return (
               <div
                 key={message.id}
@@ -79,6 +90,19 @@ export function AiConversationTranscript({
                   className={isAssistant ? "flex-col items-start gap-2" : undefined}
                 >
                   {isAssistant && <AiAssistantAvatar responding={message.status === "streaming"} />}
+                  {!isAssistant && canEdit ? (
+                    // The edit affordance sits next to the bubble, appears only on hover /
+                    // focus-within, and reserves no layout space (hidden -> flex).
+                    <button
+                      type="button"
+                      aria-label="Edit and resend this message"
+                      title="Edit and resend"
+                      onClick={() => onEditMessage?.(message)}
+                      className="hidden shrink-0 items-center self-center rounded-md p-1.5 text-muted transition-colors group-hover:flex group-focus-within:flex hover:bg-surface-2 hover:text-ink"
+                    >
+                      <Pencil className="size-3.5" />
+                    </button>
+                  ) : null}
                   <Bubble
                     variant={isAssistant ? "ghost" : "default"}
                     className={isAssistant ? undefined : "whitespace-pre-wrap"}

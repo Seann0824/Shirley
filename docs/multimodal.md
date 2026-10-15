@@ -14,10 +14,14 @@ where the image comes from / how the user picks it)**. This follows the same lin
 draws for `context_window_tokens` (fact in `ModelConfig`, decision in the app), `extra_body` (escape
 hatch in the SDK, values from the app), and `tool_calling` (transport mechanism in the adapter).
 
-> **Implementation status**: **proposal, not landed**. No image handling exists anywhere in the
-> repository today (`rg -i "image"` finds only the markdown renderer's `Tag::Image` and the desktop
-> brand assets). The concrete code touch-points are listed in section 3; the decisions that must be
-> made before coding are in section 8.
+> **Implementation status**: **SDK mechanism landed; application-layer policy not landed.**
+> The SDK now carries structured image parts (`Content` / `ContentPart::Image` / `ImagePart` /
+> `ImageSource` in `message/mod.rs`), all three adapters encode them (`adapter/content.rs`), the
+> capability fact lives on `ModelConfig.supports_images` (default `false`) with a send-time guard in
+> `adapter::invoke`, and image references are token-estimated in `token/mod.rs`. The application
+> layer has only the **minimal wiring** (`supports_images` flows from settings -> `ModelConfig`);
+> there is still no attach-image UI, no `@`-image flow, and sessions persist references only. The
+> decisions in section 8 are settled; the still-open application-layer work is in section 10.
 
 ---
 

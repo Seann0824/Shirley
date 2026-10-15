@@ -34,8 +34,9 @@ pub struct Agent {
     /// App-owned session identity, sent only to local model proxies for conversation reuse.
     request_session_id: Option<String>,
     /// User input and assistant deltas not yet committed when the stream is dropped, for the
-    /// driver to flush into storage.
-    pending_user: Option<String>,
+    /// driver to flush into storage. The user turn is structured [`message::Content`] so it can
+    /// carry images alongside text.
+    pending_user: Option<message::Content>,
     pending_content: String,
     pending_reasoning: String,
     tools: tool::ToolManager,
@@ -256,7 +257,13 @@ impl Agent {
     }
 
     pub async fn run(&mut self, task: &str) -> Result<RunResult, AgentError> {
-        let mut events = self.run_stream(task);
+        self.run_content(message::Content::text(task)).await
+    }
+
+    /// Like [`Agent::run`], but the user turn is structured [`message::Content`] (text plus
+    /// image parts). The `&str` version delegates here.
+    pub async fn run_content(&mut self, task: message::Content) -> Result<RunResult, AgentError> {
+        let mut events = self.run_stream_content(task);
         while let Some(event) = events.next().await {
             if let AgentEvent::Finished(result) = event? {
                 return Ok(result);
@@ -323,7 +330,17 @@ impl Agent {
         &'a mut self,
         task: &'a str,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + Send + 'a>> {
-        self.pending_user = Some(task.to_owned());
+        self.run_stream_content(message::Content::text(task))
+    }
+
+    /// Like [`Agent::run_stream`], but the user turn is structured [`message::Content`] (text
+    /// parts plus image parts). The `&str` version delegates here, so a text-only turn produces
+    /// byte-identical bytes as before (the plain-string fast path keeps the KV prefix cache).
+    pub fn run_stream_content(
+        &mut self,
+        task: message::Content,
+    ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + Send + '_>> {
+        self.pending_user = Some(task);
         Box::pin(async_stream::try_stream! {
             let client = self.client.clone();
             let mut total_usage = message::Usage::default();

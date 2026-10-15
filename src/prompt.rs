@@ -27,6 +27,10 @@ const SYSTEM_TEMPLATE: &str = include_str!("../prompts/system.md");
 const GUIDE_TEMPLATE: &str = include_str!("../prompts/project_guide.md");
 /// Hint template for when the project guide is missing.
 const GUIDE_MISSING_TEMPLATE: &str = include_str!("../prompts/project_guide_missing.md");
+/// Subagent guidance, injected **only for the top-level agent when the `subagent` tool is enabled**.
+/// A child agent has no `subagent` tool (structural recursion guard), so telling it about one would
+/// be a factual lie; hence this block is conditional.
+const SUBAGENT_GUIDE_TEMPLATE: &str = include_str!("../prompts/subagent_guide.md");
 
 /// Resolve the coding agent's workspace root.
 ///
@@ -67,10 +71,32 @@ pub fn build(working_dir: PathBuf) -> SystemPrompt {
     })
 }
 
+/// Like [`build`], but decides whether to inject the subagent guidance.
+///
+/// `subagents = true` is passed only for the **top-level** agent when the `subagent` tool is
+/// registered; child agents (and a disabled config) get `false`, so the guidance never appears
+/// where the tool does not exist.
+pub fn build_with_subagents(working_dir: PathBuf, subagents: bool) -> SystemPrompt {
+    SystemPrompt::from(move |context: &SystemPromptContext| {
+        let root = context
+            .working_dir
+            .clone()
+            .unwrap_or_else(|| working_dir.clone());
+        render_with_subagents(&root, subagents)
+    })
+}
+
 /// Assemble the role, working directory, and project guide into the final text.
 ///
 /// Split out so it is independently testable: no dependency on the closure or runtime context.
 fn render(root: &Path) -> String {
+    // Default: inject the subagent guidance (the top-level agent). Tests that do not care about
+    // subagents go through here and still get the full prompt.
+    render_with_subagents(root, true)
+}
+
+/// Assemble the final prompt. `subagents` controls whether the subagent guidance block is injected.
+fn render_with_subagents(root: &Path, subagents: bool) -> String {
     // Project guide block: inline the original text if present, otherwise give a "explore on your own first" hint.
     let guide_block = match read_guide(root) {
         Some(guide) => render_template(
@@ -80,10 +106,23 @@ fn render(root: &Path) -> String {
         None => render_template(GUIDE_MISSING_TEMPLATE, &[("guide_file", GUIDE_FILE_NAME)]),
     };
 
+    // Subagent guidance is only injected where the `subagent` tool exists; otherwise the placeholder
+    // renders to the empty string (the renderer keeps unknown placeholders verbatim, so an empty
+    // value is passed explicitly).
+    let subagent_block = if subagents {
+        SUBAGENT_GUIDE_TEMPLATE.to_owned()
+    } else {
+        String::new()
+    };
+
     let working_dir = root.display().to_string();
     render_template(
         SYSTEM_TEMPLATE,
-        &[("working_dir", &working_dir), ("project_guide", &guide_block)],
+        &[
+            ("working_dir", &working_dir),
+            ("project_guide", &guide_block),
+            ("subagent_guide", &subagent_block),
+        ],
     )
 }
 
@@ -148,6 +187,26 @@ mod tests {
             text.contains("do not mistake the model service"),
             "should state that the tool execution environment is authoritative: {text}"
         );
+    }
+
+    #[test]
+    fn render_injects_subagent_guide_only_when_enabled() {
+        // The guidance must appear exactly where the `subagent` tool exists (top level, enabled),
+        // and be absent for child agents (which have no such tool).
+        let dir = tempfile_dir("render_subagent");
+        let with = render_with_subagents(&dir, true);
+        assert!(
+            with.contains("`subagent` tool"),
+            "top level should get the subagent guidance: {with}"
+        );
+        let without = render_with_subagents(&dir, false);
+        assert!(
+            !without.contains("`subagent` tool"),
+            "child agent must not get the subagent guidance: {without}"
+        );
+        // The placeholder must be fully substituted, never left verbatim.
+        assert!(!with.contains("{{subagent_guide}}"), "placeholder must be substituted");
+        assert!(!without.contains("{{subagent_guide}}"), "placeholder must be substituted");
     }
 
     #[test]

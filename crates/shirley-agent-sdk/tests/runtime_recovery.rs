@@ -594,7 +594,7 @@ async fn compaction_does_not_reset_execution_budget() {
         .model_config(model)
         .compression_instruction("Preserve progress")
         .messages(vec![Message::User {
-            content: "prior task ".repeat(400),
+            content: "prior task ".repeat(400).into(),
         }])
         .tools(evidence_tools())
         .max_steps(2)
@@ -630,7 +630,7 @@ async fn provider_rejection_keeps_original_context_without_local_estimate_gate()
         .model_config(model)
         .compression_instruction("Preserve progress")
         .messages(vec![Message::User {
-            content: "constraint ".repeat(5000),
+            content: "constraint ".repeat(5000).into(),
         }])
         .build()
         .unwrap();

@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 #[serde(tag = "role", rename_all = "snake_case")]
@@ -7,7 +8,7 @@ pub enum Message {
         content: String,
     },
     User {
-        content: String,
+        content: Content,
     },
     Assistant {
         content: Option<String>,
@@ -24,6 +25,207 @@ pub enum Message {
     ContextSummary {
         content: String,
     },
+}
+
+/// Message content: text, or a mix of text and images.
+///
+/// Backward compatible with the historical "content is a plain string" shape:
+/// content that is pure text serializes as a JSON string, and a JSON string
+/// deserializes into a single text part. Only content that actually carries an
+/// image becomes a JSON array of parts. This keeps old session logs readable and
+/// keeps the request bytes for a text-only message identical (KV prefix cache).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Content(Vec<ContentPart>);
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ContentPart {
+    Text { text: String },
+    Image(ImagePart),
+}
+
+/// An image reference. The SDK stores a **reference**, never decoded pixels.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct ImagePart {
+    pub source: ImageSource,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<ImageDetail>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ImageSource {
+    /// A complete URL. Covers both `data:` (base64 inline) and `https:` forms.
+    Url { url: String },
+    /// A provider-side file reference (e.g. a file uploaded through the Files API).
+    FileId { file_id: String },
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ImageDetail {
+    Low,
+    High,
+    Auto,
+}
+
+impl Content {
+    /// Build a text-only content (the common case).
+    pub fn text(text: impl Into<String>) -> Self {
+        Content(vec![ContentPart::Text { text: text.into() }])
+    }
+
+    pub fn parts(parts: Vec<ContentPart>) -> Self {
+        Content(parts)
+    }
+
+    pub fn as_parts(&self) -> &[ContentPart] {
+        &self.0
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// True when every part is text (so it can be encoded as a plain string).
+    pub fn is_text_only(&self) -> bool {
+        self.0
+            .iter()
+            .all(|part| matches!(part, ContentPart::Text { .. }))
+    }
+
+    pub fn has_images(&self) -> bool {
+        self.0
+            .iter()
+            .any(|part| matches!(part, ContentPart::Image(_)))
+    }
+
+    /// Concatenated text of all text parts; images are ignored.
+    /// Used for display, titles and token estimation.
+    pub fn as_text(&self) -> String {
+        let mut out = String::new();
+        for part in &self.0 {
+            if let ContentPart::Text { text } = part {
+                out.push_str(text);
+            }
+        }
+        out
+    }
+}
+
+impl ImagePart {
+    pub fn url(url: impl Into<String>) -> Self {
+        ImagePart {
+            source: ImageSource::Url { url: url.into() },
+            detail: None,
+        }
+    }
+
+    pub fn file_id(file_id: impl Into<String>) -> Self {
+        ImagePart {
+            source: ImageSource::FileId {
+                file_id: file_id.into(),
+            },
+            detail: None,
+        }
+    }
+
+    pub fn with_detail(mut self, detail: ImageDetail) -> Self {
+        self.detail = Some(detail);
+        self
+    }
+}
+
+impl ContentPart {
+    pub fn image(part: ImagePart) -> Self {
+        ContentPart::Image(part)
+    }
+}
+
+impl From<String> for Content {
+    fn from(value: String) -> Self {
+        Content(vec![ContentPart::Text { text: value }])
+    }
+}
+
+impl From<&str> for Content {
+    fn from(value: &str) -> Self {
+        Content(vec![ContentPart::Text {
+            text: value.to_owned(),
+        }])
+    }
+}
+
+impl From<Vec<ContentPart>> for Content {
+    fn from(value: Vec<ContentPart>) -> Self {
+        Content(value)
+    }
+}
+
+impl PartialEq<str> for Content {
+    fn eq(&self, other: &str) -> bool {
+        self.as_text() == other
+    }
+}
+
+impl PartialEq<&str> for Content {
+    fn eq(&self, other: &&str) -> bool {
+        self.as_text() == *other
+    }
+}
+
+impl Serialize for Content {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        // Pure text (including empty) stays a plain string: identical bytes to the
+        // historical shape, so old logs round-trip and text-only requests keep the
+        // prefix cache.
+        if self.is_text_only() {
+            return serializer.serialize_str(&self.as_text());
+        }
+        self.0.serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for Content {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Text(String),
+            Parts(Vec<ContentPart>),
+        }
+        Ok(match Repr::deserialize(deserializer)? {
+            Repr::Text(text) => Content(vec![ContentPart::Text { text }]),
+            Repr::Parts(parts) => Content(parts),
+        })
+    }
+}
+
+impl fmt::Display for Content {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut first = true;
+        for part in &self.0 {
+            match part {
+                ContentPart::Text { text } => {
+                    let _ = write!(f, "{text}");
+                }
+                ContentPart::Image(_) => {
+                    if !first {
+                        let _ = write!(f, " ");
+                    }
+                    let _ = write!(f, "[image]");
+                }
+            }
+            first = false;
+        }
+        Ok(())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -104,8 +306,6 @@ impl std::ops::Add for Usage {
         }
     }
 }
-
-use std::fmt;
 
 impl fmt::Display for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {

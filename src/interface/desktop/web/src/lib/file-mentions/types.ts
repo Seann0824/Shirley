@@ -7,7 +7,7 @@
 // message echo via `InlineReferences`); they differ only in `kind`: the icon, and the
 // meaning handed to the Rust side after serialization (file/dir -> path; skill -> skill name).
 
-export type ReferenceKind = "file" | "dir" | "skill";
+export type ReferenceKind = "file" | "dir" | "skill" | "image";
 
 export type FileReference = {
   /** file/dir = workspace path; skill = skill name. */
@@ -17,6 +17,12 @@ export type FileReference = {
   kind: ReferenceKind;
   /** Skill description (used for the tooltip / popover subtitle only when `kind === "skill"`). */
   description?: string;
+  /**
+   * Pasted image payload (`kind === "image"`): a `data:` URL (base64 inline). The bytes live
+   * only in the editor / this round's request — they are never persisted into the session log
+   * (the log keeps the text-only shape, same as `@` file references).
+   */
+  dataUrl?: string;
 };
 
 /** Whether this is a non-file skill reference (sent with `/` skill-activation semantics). */

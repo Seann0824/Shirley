@@ -710,7 +710,7 @@ impl App {
         };
 
         self.rewind_target = Some(ui_index);
-        self.set_input(content);
+        self.set_input(content.as_text());
         self.message_cache = None;
         // Enter "edit and resend" mode: Enter resends, Esc cancels this edit.
         // The input box is drawn in place at that message's position by the render layer (see `ui.rs::draw_rewind_edit`).
@@ -910,6 +910,7 @@ impl App {
             models_url: None,
             model: model.clone(),
             context_window_tokens: None,
+            supports_images: None,
             // `/login` only changes the endpoint / key / model; thinking and the escape hatch stay as-is (None = do not override).
             thinking: None,
             reasoning_effort: None,

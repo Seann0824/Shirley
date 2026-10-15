@@ -32,6 +32,12 @@ pub struct ModelEntry {
     /// The application layer uses it to pick the `ToolCalling` for the model: `content` means the model does not support
     /// native function calling and should go through the text protocol. `None` = not declared (falls back to the default `Native`).
     pub tool_mode: Option<String>,
+    /// Whether the model accepts image input, declared by the provider (`supports_images`, optional).
+    ///
+    /// Same shape as `tool_mode`: a **capability fact carried by catalog data**, applied per model when
+    /// switching. `Some(true/false)` = declared (overrides the global `[provider] supports_images`);
+    /// `None` = not declared (falls back to the global setting). See `bootstrap::model_config_for`.
+    pub supports_images: Option<bool>,
 }
 
 impl ModelEntry {
@@ -45,12 +51,19 @@ impl ModelEntry {
             value: value.into(),
             provider: provider.into(),
             tool_mode: None,
+            supports_images: None,
         }
     }
 
     /// Chain-set the tool transport mode (used when building `StaticCatalog` fallback entries).
     pub fn with_tool_mode(mut self, tool_mode: Option<String>) -> Self {
         self.tool_mode = tool_mode;
+        self
+    }
+
+    /// Chain-set the image capability declared by the catalog (used when building entries).
+    pub fn with_supports_images(mut self, supports_images: Option<bool>) -> Self {
+        self.supports_images = supports_images;
         self
     }
 }
@@ -91,7 +104,9 @@ impl StaticCatalog {
 
     pub fn builtin() -> Self {
         Self::new(vec![
-            ModelEntry::new("deepseek-v4.1-flash", "deepseek-v4.1-flash", "local"),
+            // Known multimodal model: declare image input so it works out of the box.
+            ModelEntry::new("deepseek-v4.1-flash", "deepseek-v4.1-flash", "local")
+                .with_supports_images(Some(true)),
             ModelEntry::new("hy3", "hy3", "local"),
         ])
     }
@@ -211,6 +226,9 @@ struct ModelDto {
     /// The tool transport mode declared by the provider (optional, see [`ModelEntry::tool_mode`]).
     #[serde(default)]
     tool_mode: Option<String>,
+    /// Whether the model accepts image input (optional, see [`ModelEntry::supports_images`]).
+    #[serde(default)]
+    supports_images: Option<bool>,
 }
 
 impl ModelCatalog for RemoteCatalog {
@@ -238,7 +256,9 @@ impl ModelCatalog for RemoteCatalog {
                             let label = m.name.unwrap_or_else(|| m.id.clone());
                             let provider = m.owned_by.unwrap_or_else(|| "remote".to_owned());
                             let tool_mode = normalize_tool_mode(&m.id, &provider, m.tool_mode);
-                            ModelEntry::new(label, m.id, provider).with_tool_mode(tool_mode)
+                            ModelEntry::new(label, m.id, provider)
+                                .with_tool_mode(tool_mode)
+                                .with_supports_images(m.supports_images)
                         })
                         .collect::<Vec<_>>(),
                 )

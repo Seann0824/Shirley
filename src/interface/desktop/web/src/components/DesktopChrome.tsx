@@ -1,7 +1,7 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowLeft, ArrowRight, Folder, FolderPlus, House,
-  MessageSquarePlus, Moon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, SquarePen, Sun,
+  MessageSquarePlus, Moon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Puzzle, SquarePen, Sun,
 } from "lucide-react";
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from "@/ui/context-menu";
 import { cn } from "@/ui/utils";
@@ -36,7 +36,7 @@ function IconButton({ label, children, active, className, ...props }: {
 export function DesktopChrome({
   title, projectName, sidebarCollapsed, canGoBack, canGoForward,
   navigationBusy, onBack, onForward, onToggleSidebar, onHome,
-  onNewChat, onAddProject, topContent, children,
+  onNewChat, onAddProject, activeView = "chat", onPlugins, topContent, children,
 }: {
   title: string;
   projectName?: string;
@@ -50,6 +50,10 @@ export function DesktopChrome({
   onHome: () => void;
   onNewChat: () => void;
   onAddProject: () => void;
+  /** Which primary view the nav rail highlights: `chat` (Home) or `plugins`. */
+  activeView?: "chat" | "plugins";
+  /** Open the Plugins page (sources + browse). */
+  onPlugins: () => void;
   /** Custom content for the content-area top bar; falls back to the default
    *  "folder icon + title + project name". Lets different pages (Home / sessions)
    *  customize the top-bar right area. */
@@ -170,7 +174,8 @@ export function DesktopChrome({
       </header>
       <div className="flex min-h-0 flex-1">
         <nav aria-label="Main navigation" className="flex w-14 shrink-0 flex-col items-center gap-2 bg-frame py-3">
-          <IconButton label="Home" active className="size-10" onClick={onHome}><House className="size-5" /></IconButton>
+          <IconButton label="Home" active={activeView === "chat"} className="size-10" onClick={onHome}><House className="size-5" /></IconButton>
+          <IconButton label="Plugins" active={activeView === "plugins"} className="size-10" onClick={onPlugins}><Puzzle className="size-5" /></IconButton>
           <div className="flex-1" />
           <IconButton label={dark ? "Switch to light appearance" : "Switch to dark appearance"} className="size-10" onClick={toggleTheme}>{dark ? <Sun className="size-5" /> : <Moon className="size-5" />}</IconButton>
           <img src="/brand/shirley-logo.png" alt="Shirley" className="mt-1 size-8 rounded-full object-cover" draggable={false} />

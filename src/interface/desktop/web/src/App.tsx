@@ -7,9 +7,11 @@ import {
 } from "@/components/ai/AiConversationTranscript";
 import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { AssistantMessage } from "@/components/AssistantMessage";
+import { ImageHoverPreview } from "@/components/ImageHoverPreview";
 import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
+import { PluginsPage } from "@/components/ai/PluginsPage";
 import { NewChatControls } from "@/components/ai/NewChatControls";
 import { AiConversationSkeleton } from "@/components/ai/AiConversationSkeleton";
 import { AiConversationMinimap } from "@/components/ai/AiConversationMinimap";
@@ -31,6 +33,13 @@ import { cn } from "@/ui/utils";
 
 let messageSeq = 0;
 const nextId = () => `m${++messageSeq}`;
+
+/** Index of a message by id; falls back to the end (append) when not found. */
+function indexOfMessage(messages: AiTranscriptMessage[], id: string | undefined): number {
+  if (id == null) return messages.length;
+  const index = messages.findIndex((message) => String(message.id) === String(id));
+  return index < 0 ? messages.length : index;
+}
 
 /** Sidebar collapse preference (local UI state only; not synced / persisted). */
 const SIDEBAR_STORAGE_KEY = "shirley.desktop.sidebar-collapsed";
@@ -94,6 +103,8 @@ type PendingTurn = {
   display: string;
   refs: FileReference[];
   sendPaths: string[];
+  /** Pasted images as `data:` URLs (routed to `agent_send`'s `images` channel). */
+  images: string[];
 };
 
 /**
@@ -236,8 +247,14 @@ export function App() {
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState<string | null>(null);
+  // Top-level view: the chat surface (Home) or the Plugins page. A UI-only switch
+  // (no routing); the chat state stays mounted-independent so switching back is instant.
+  const [activeView, setActiveView] = useState<"chat" | "plugins">("chat");
   const [input, setInput] = useState("");
   const [references, setReferences] = useState<FileReference[]>([]);
+  // "Edit the last user message and resend" mode: which session view + which message id
+  // is being edited. Only the last user message is ever editable (option A, same as TUI).
+  const [editingTurn, setEditingTurn] = useState<{ key: string; messageId: string } | null>(null);
   const [model, setModel] = useState("");
   // UI-level error (project / session / model switch failure); runtime errors go into each session view's `error`.
   const [uiError, setUiError] = useState("");
@@ -794,6 +811,8 @@ export function App() {
       display: string,
       refs: FileReference[],
       sendPaths: string[],
+      images: string[],
+      options?: { resend?: boolean; editMessageId?: string },
     ) => {
       const key = viewKey(project, session);
       if (views[key]?.busy ?? false) return;
@@ -802,12 +821,18 @@ export function App() {
       turnStartRef.current.set(key, Date.now());
       setViews((prev) => {
         const view = prev[key] ?? emptyView();
+        // Edit + resend rewrites history: drop the edited user message and every reply
+        // after it from the view before appending the new turn. The backend does the same
+        // to the Agent + persisted log (`agent_resend`), keeping the three consistent.
+        const base = options?.resend
+          ? view.messages.slice(0, indexOfMessage(view.messages, options.editMessageId))
+          : view.messages;
         return {
           ...prev,
           [key]: {
             ...view,
             messages: [
-              ...view.messages,
+              ...base,
               { id: nextId(), role: "user", content: display, status: "complete", references: refs },
               { id: assistantId, role: "assistant", content: "", status: "streaming" },
             ],
@@ -821,7 +846,11 @@ export function App() {
 
       try {
         const bridge = await agentBridge();
-        await bridge.send(project, session, text, sendPaths);
+        if (options?.resend) {
+          await bridge.resend(project, session, text, sendPaths, images);
+        } else {
+          await bridge.send(project, session, text, sendPaths, images);
+        }
       } catch (e) {
         const message = e instanceof Error ? e.message : String(e);
         applyEvent(key, { type: "error", message, project, session });
@@ -832,13 +861,22 @@ export function App() {
 
   /** Submit a turn: send immediately when idle, otherwise enqueue into pending and send automatically once the previous turn ends. */
   const submit = useCallback(
-    async (project: string, session: string, text: string, display: string, refs: FileReference[], sendPaths: string[]) => {
+    async (
+      project: string,
+      session: string,
+      text: string,
+      display: string,
+      refs: FileReference[],
+      sendPaths: string[],
+      images: string[],
+      options?: { resend?: boolean; editMessageId?: string },
+    ) => {
       const key = viewKey(project, session);
       if (views[key]?.busy ?? false) {
-        enqueueTurn({ id: nextId(), project, session, text, display, refs, sendPaths });
+        enqueueTurn({ id: nextId(), project, session, text, display, refs, sendPaths, images });
         return;
       }
-      await dispatchTurn(project, session, text, display, refs, sendPaths);
+      await dispatchTurn(project, session, text, display, refs, sendPaths, images, options);
     },
     [views, dispatchTurn, enqueueTurn],
   );
@@ -860,7 +898,7 @@ export function App() {
         if (!current) return prev;
         return { ...prev, [key]: { ...current, pending: rest } };
       });
-      void dispatchTurn(next.project, next.session, next.text, next.display, next.refs, next.sendPaths);
+      void dispatchTurn(next.project, next.session, next.text, next.display, next.refs, next.sendPaths, next.images);
     }
   }, [views, dispatchTurn]);
 
@@ -869,6 +907,9 @@ export function App() {
     const session = sessionName;
     if (!project || !session) return;
     const key = viewKey(project, session);
+    // Edit mode for the last user message: submit rewinds that turn and resends the edited
+    // text (the old reply is discarded), instead of appending a new turn.
+    const editing = editingTurn && editingTurn.key === key ? editingTurn : null;
 
     const refs = references;
     // `/` skill entry (same semantics as the TUI): the skill appears as a chip in the
@@ -876,7 +917,7 @@ export function App() {
     // notice (not sent to the model); with args = activate + use args as this turn's
     // prompt. Desktop has no local built-in slash commands; only a chip takes this path.
     const skill = refs.find((reference) => reference.kind === "skill");
-    if (skill) {
+    if (skill && !editing) {
       try {
         await (await agentBridge()).activateSkill(project, session, skill.name);
       } catch (e) {
@@ -914,7 +955,7 @@ export function App() {
       // With args: after activating, treat args as this turn's prompt and continue
       // through the normal send flow; display keeps the chip, but **the skill name is not
       // sent to the backend as a reference path** (sendPaths empty). Enqueue if running.
-      await submit(project, session, args, `${CHIP_TOKEN}${args}`, [skill], []);
+      await submit(project, session, args, `${CHIP_TOKEN}${args}`, [skill], [], []);
       return;
     }
 
@@ -923,19 +964,65 @@ export function App() {
     // placeholders** — `InlineReferences` places chips back into the body by placeholder
     // position, so stripping them renders not a single tag (a past bug).
     const plain = stripTokens(input).trim();
-    if (!plain) return;
+    // Images are a valid payload on their own (no text needed): allow an image-only turn.
+    const images = refs.filter((reference) => reference.kind === "image").map((reference) => reference.dataUrl ?? "");
+    if (!plain && images.length === 0) return;
     setInput("");
     setReferences([]);
     setUiError("");
+    setEditingTurn(null);
     await submit(
       project,
       session,
       plain,
       input.trim(),
       refs,
-      refs.map((reference) => reference.path),
+      // Only file/dir refs travel as workspace paths; images go through the `images` channel.
+      refs.filter((reference) => reference.kind !== "image").map((reference) => reference.path),
+      images,
+      editing ? { resend: true, editMessageId: editing.messageId } : undefined,
     );
-  }, [activeProject, input, references, sessionName, slashSearch, submit]);
+  }, [activeProject, input, references, sessionName, slashSearch, submit, editingTurn]);
+
+  /** Enter edit mode for a user message: pre-fill the composer; submit will resend. */
+  const beginEdit = useCallback(
+    (message: AiTranscriptMessage) => {
+      if (!activeProject || !sessionName) return;
+      const key = viewKey(activeProject, sessionName);
+      if (views[key]?.busy) return;
+      setEditingTurn({ key, messageId: String(message.id) });
+      setInput(message.content);
+      setReferences(message.references ?? []);
+      setUiError("");
+      requestAnimationFrame(() => editorRef.current?.focus());
+    },
+    [activeProject, sessionName, views],
+  );
+
+  /** Leave edit mode without resending (Esc / session switch). */
+  const cancelEdit = useCallback(() => {
+    setEditingTurn(null);
+    setInput("");
+    setReferences([]);
+  }, []);
+
+  // Esc cancels edit mode with no side effects (mirrors the TUI's `/rewind` Esc).
+  useEffect(() => {
+    if (!editingTurn) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        cancelEdit();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [editingTurn, cancelEdit]);
+
+  // Switching project / session abandons any in-progress edit.
+  useEffect(() => {
+    setEditingTurn(null);
+  }, [activeProject, sessionName]);
 
   const stop = useCallback(async () => {
     const project = activeProject;
@@ -1065,7 +1152,9 @@ export function App() {
   );
 
   return (
-    <DesktopChrome
+    <>
+      <ImageHoverPreview />
+      <DesktopChrome
       title={(activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
       projectName={mode === "chat" ? "Chat" : projects.find((entry) => entry.id === activeProject)?.name}
       sidebarCollapsed={sidebarCollapsed}
@@ -1075,13 +1164,20 @@ export function App() {
       onBack={() => void navigateHistory(-1)}
       onForward={() => void navigateHistory(1)}
       onToggleSidebar={toggleSidebar}
+      activeView={activeView}
       onHome={() => {
+        setActiveView("chat");
         setSidebarCollapsed(false);
         writeBool(SIDEBAR_STORAGE_KEY, false);
       }}
+      onPlugins={() => setActiveView("plugins")}
       onNewChat={() => activeProject ? void newSession(activeProject) : void addProject()}
       onAddProject={() => void addProject()}
     >
+      {activeView === "plugins" ? (
+        <PluginsPage />
+      ) : (
+        <>
       {/* Left sidebar: NewChat / pinned / projects (multi-project + session navigation). */}
       <SessionSidebar
         collapsed={sidebarCollapsed}
@@ -1131,6 +1227,12 @@ export function App() {
           viewportRef={transcriptViewportRef}
           extraContentKey={busy ? "busy" : ""}
           emptyContent={heroNode}
+          editableMessageId={
+            !busy && activeProject && sessionName
+              ? ([...view.messages].reverse().find((message) => message.role === "user")?.id ?? null)
+              : null
+          }
+          onEditMessage={beginEdit}
           renderMessageContent={(message) =>
             message.role === "assistant" ? (
               <AssistantMessage
@@ -1181,7 +1283,10 @@ export function App() {
           />
         )}
       </main>
-    </DesktopChrome>
+        </>
+      )}
+      </DesktopChrome>
+    </>
   );
 }
 

@@ -645,7 +645,7 @@ fn draw_subagent_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Re
                     "task".to_owned(),
                     Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
                 )));
-                lines.extend(markdown::render(content, Style::default(), inner_width));
+                lines.extend(markdown::render(&content.as_text(), Style::default(), inner_width));
                 lines.push(Line::default());
             }
             Message::Assistant { content, .. } => {
@@ -1235,7 +1235,7 @@ mod tests {
         let mut app = App::new(Agent::builder().model_config(config).build().unwrap());
         for i in 0..4 {
             app.add_message(Message::User {
-                content: format!("user turn {i}"),
+                content: format!("user turn {i}").into(),
             });
             app.add_message(Message::Assistant {
                 content: Some(format!(

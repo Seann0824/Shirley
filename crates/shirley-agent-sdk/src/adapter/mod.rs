@@ -1,5 +1,6 @@
 mod anthropic_messages;
 mod chat_completions;
+mod content;
 mod responses;
 mod sse;
 mod tool_calling;
@@ -42,6 +43,11 @@ pub struct ModelConfig {
     pub temperature: Option<f64>,
     pub max_output_tokens: Option<u32>,
     pub context_window_tokens: Option<u64>,
+    /// Whether the configured model accepts image input. Defaults to `false`
+    /// (deny by default): the send-time guard rejects a request that carries an
+    /// image unless the application has explicitly opted in.
+    #[builder(default)]
+    pub supports_images: bool,
     /// `tool_choice` is passed through as-is (`"auto"` / `"none"` / `"required"` or an object).
     ///
     /// Uses [`serde_json::Value`] rather than an enum: providers vary in shape, and an enum would
@@ -314,6 +320,18 @@ pub async fn invoke<'a>(
 ) -> Pin<Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send + 'a>> {
     Box::pin(async_stream::try_stream! {
         let (encode, decode, decode_stream) = codec(&config.protocol)?;
+
+        // Send-time capability guard: fail fast before touching the network. The
+        // model only accepts images when the application has explicitly declared
+        // it (deny by default). This is the one place the capability fact is
+        // enforced, so every protocol and both streaming modes are covered.
+        if !config.supports_images && content::messages_have_images(input.messages) {
+            Err(AdapterError::Encode(
+                "the configured model does not accept image input; set \
+                 ModelConfig.supports_images = true to enable it"
+                    .to_owned(),
+            ))?;
+        }
 
         // Content tool protocol (see `tool_calling`): the protocol instance is built internally
         // from the mode, invisible to the outside. Encoding view: the tool catalog is injected

@@ -48,7 +48,7 @@ use crate::{
 ///
 /// **One-to-many**: an assistant with text + tool_calls produces "a text item + several
 /// function_call items".
-fn encode_input(messages: &[message::Message]) -> Vec<Value> {
+fn encode_input(messages: &[message::Message]) -> Result<Vec<Value>, AdapterError> {
     let mut input: Vec<Value> = Vec::new();
 
     for message in messages {
@@ -65,7 +65,7 @@ fn encode_input(messages: &[message::Message]) -> Vec<Value> {
             message::Message::User { content } => input.push(serde_json::json!({
                 "type": "message",
                 "role": "user",
-                "content": [{ "type": "input_text", "text": content }],
+                "content": super::content::responses_content(content)?,
             })),
 
             // Historical reasoning (reasoning_content) is deliberately not echoed back: the server
@@ -115,7 +115,7 @@ fn encode_input(messages: &[message::Message]) -> Vec<Value> {
         }
     }
 
-    input
+    Ok(input)
 }
 
 /// Tool definition -> Responses format (one less level of `function` wrapping).
@@ -152,7 +152,7 @@ pub fn encode_request(
     }
     super::attach_local_session_header(&mut headers, &config.base_url, input.session_id)?;
 
-    let items = encode_input(input.messages);
+    let items = encode_input(input.messages)?;
     let mut body = serde_json::json!({
         "model": &config.model,
         "input": items,

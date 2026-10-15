@@ -140,6 +140,7 @@ impl AgentFactory {
             .tool_calling(resolve_tool_calling(&settings))
             .build();
         model_config.context_window_tokens = Some(settings.context_window_tokens);
+        model_config.supports_images = settings.supports_images;
 
         // Compression strategy: if config does not specify it, follow the SDK default (`CompressionConfig::default`).
         let compression_config = settings.compression.to_sdk();
@@ -192,7 +193,7 @@ impl AgentFactory {
 
         Ok(Self {
             model_config,
-            system_prompt: prompt::build(working_dir.clone()),
+            system_prompt: prompt::build_with_subagents(working_dir.clone(), subagent_enabled),
             compression_config,
             max_steps: settings.max_steps,
             working_dir: working_dir.clone(),
@@ -226,6 +227,14 @@ impl AgentFactory {
     /// needs to `set_query` via this handle before each round (`docs/memory.md` §4.2).
     pub fn build_agent(self: &Arc<Self>, messages: Vec<Message>) -> Result<BuiltAgent, AgentError> {
         self.build_agent_with(messages, None, None)
+    }
+
+    /// The system prompt for an `Agent` that has **no** `subagent` tool (a child, or the top level
+    /// with subagents disabled). Re-derived from the working dir so the subagent guidance block is
+    /// left out (it would be a factual lie where the tool does not exist). For the test factories
+    /// that install a fixed prompt this still yields a valid (non-empty) system message.
+    fn system_prompt_without_subagents(&self) -> SystemPrompt {
+        prompt::build_with_subagents(self.working_dir.clone(), false)
     }
 
     /// Build one `Agent`, optionally as a **child** with a filtered tool table (`docs/subagent.md` P0).
@@ -315,9 +324,19 @@ impl AgentFactory {
             Arc::new(SkillContextProvider::new(skill_runtime.clone())) as Arc<dyn ContextProvider>,
         ]);
 
+        // Subagent guidance is injected only for the top-level agent when the tool is registered:
+        // a child has no `subagent` tool (structural recursion guard), so it must not be told about one.
+        // A test factory may set a fixed `SystemPrompt::from("test")`; only re-derive for the real
+        // function-form prompt built by `assemble`.
+        let system_prompt = if tool_filter.is_none() && self.subagent_enabled {
+            self.system_prompt.clone()
+        } else {
+            self.system_prompt_without_subagents()
+        };
+
         let agent = Agent::builder()
             .model_config(self.model_config.clone())
-            .system_prompt(self.system_prompt.clone())
+            .system_prompt(system_prompt)
             .working_dir(self.working_dir.clone())
             .compression_instruction(COMPRESSION_INSTRUCTION)
             .compression_config(self.compression_config.clone())
@@ -346,6 +365,12 @@ impl AgentFactory {
         config.model = entry.value.clone();
         config.tool_calling =
             resolve_tool_calling_for(entry.tool_mode.as_deref(), config.tool_calling);
+        // Image capability is a catalog-declared fact, same shape as `tool_mode`: when the
+        // entry declares it, the per-model declaration wins; when it does not (`None`), the
+        // global `[provider] supports_images` (already in `config`) is kept.
+        if let Some(supports_images) = entry.supports_images {
+            config.supports_images = supports_images;
+        }
         config
     }
 
@@ -942,6 +967,32 @@ mod tests {
         let config = f.model_config_for(&plain);
         assert_eq!(config.model, "plain");
         assert!(!config.tool_calling.is_content(), "undeclared should fall back to the config default Native");
+    }
+
+    /// `model_config_for`: image capability is a catalog-declared fact, applied per model.
+    /// Declared wins; undeclared keeps the global `[provider] supports_images`.
+    #[test]
+    fn model_config_for_applies_entry_supports_images() {
+        let f = factory(tmp_root("mcfg_img"));
+        // Baseline: the factory's global config has images off (deny by default).
+        assert!(!f.model_config.supports_images);
+
+        let with_images = ModelEntry::new("vision", "vision", "p").with_supports_images(Some(true));
+        let without = ModelEntry::new("text", "text", "p").with_supports_images(Some(false));
+        let undeclared = ModelEntry::new("plain", "plain", "p");
+
+        assert!(
+            f.model_config_for(&with_images).supports_images,
+            "a model declaring images should turn the capability on"
+        );
+        assert!(
+            !f.model_config_for(&without).supports_images,
+            "a model explicitly declaring no images should turn the capability off"
+        );
+        assert!(
+            !f.model_config_for(&undeclared).supports_images,
+            "undeclared should keep the global config value"
+        );
     }
 
     /// A running session must not be deleted (avoid deleting a log being written).

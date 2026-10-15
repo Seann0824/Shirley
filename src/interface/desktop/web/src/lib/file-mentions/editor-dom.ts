@@ -50,7 +50,13 @@ export function serializeEditor(root: HTMLElement): string {
 export function readChips(root: HTMLElement): FileReference[] {
   return Array.from(root.querySelectorAll<HTMLElement>("[data-chip='true']")).map((el) => {
     const kind =
-      el.dataset.kind === "dir" ? "dir" : el.dataset.kind === "skill" ? "skill" : "file";
+      el.dataset.kind === "dir"
+        ? "dir"
+        : el.dataset.kind === "skill"
+          ? "skill"
+          : el.dataset.kind === "image"
+            ? "image"
+            : "file";
     const reference: FileReference = {
       path: el.dataset.path ?? "",
       name: el.dataset.name ?? "",

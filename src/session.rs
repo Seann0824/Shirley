@@ -568,7 +568,7 @@ fn summary_of(path: &Path) -> (String, usize) {
         if let Ok(Message::User { content }) = serde_json::from_str::<Message>(&line) {
             turns += 1;
             if preview.is_empty() {
-                let one_line = content.replace('\n', " ");
+                let one_line = content.as_text().replace('\n', " ");
                 preview = truncate_chars(&one_line, 40);
             }
         }
@@ -593,7 +593,7 @@ fn truncate_chars(text: &str, max: usize) -> String {
 /// long input to the titling model.
 pub fn first_user_message(messages: &[Message]) -> Option<String> {
     messages.iter().find_map(|message| match message {
-        Message::User { content } => Some(truncate_chars(content, AUTO_TITLE_INPUT_CHARS)),
+        Message::User { content } => Some(truncate_chars(&content.as_text(), AUTO_TITLE_INPUT_CHARS)),
         _ => None,
     })
 }
@@ -661,7 +661,7 @@ mod tests {
 
     fn user(content: &str) -> Message {
         Message::User {
-            content: content.to_owned(),
+            content: content.to_owned().into(),
         }
     }
 
@@ -963,7 +963,7 @@ mod tests {
         .is_none());
         // Over-long input is truncated by character with an ellipsis.
         let long = "字".repeat(AUTO_TITLE_INPUT_CHARS + 50);
-        let got = first_user_message(&[Message::User { content: long }]).unwrap();
+        let got = first_user_message(&[Message::User { content: long.into() }]).unwrap();
         assert!(got.ends_with('…'));
         assert_eq!(got.chars().count(), AUTO_TITLE_INPUT_CHARS + 1);
     }

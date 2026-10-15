@@ -40,6 +40,44 @@ export type SkillEntry = {
   description: string;
 };
 
+/** A plugin download source / marketplace index (aligned with Rust's `PluginSourceWire`). */
+export type PluginSource = {
+  /** Stable id used to request this source. */
+  id: string;
+  /** Human-facing name. */
+  name: string;
+  /** One-line description of what the source offers. */
+  description: string;
+  /** Ecosystem: `claude_marketplace` | `dsh_registry` | `mcp_registry`. */
+  kind: string;
+  /** URL of the index file (fetched as JSON). */
+  url: string;
+  /** Homepage for more context (`null` when unknown). */
+  homepage: string | null;
+  /** Index wire format (selects the parser). */
+  format: string;
+  /** Whether the index is large (the UI may warn before fetching). */
+  large: boolean;
+};
+
+/** One normalized plugin entry (aligned with Rust's `PluginEntryWire`). */
+export type PluginEntry = {
+  /** Id of the source this entry came from. */
+  source_id: string;
+  /** Plugin name. */
+  name: string;
+  /** One-line description (may be empty). */
+  description: string;
+  /** Author / owner (`null` when unknown). */
+  author: string | null;
+  /** Category / topic (`null` when unknown). */
+  category: string | null;
+  /** Upstream location the plugin can be fetched from (`null` when unknown). */
+  source: string | null;
+  /** Homepage / repository URL (`null` when unknown). */
+  homepage: string | null;
+};
+
 /** A project = an associated workspace directory (aligned with Rust's `ProjectEntryWire`). */
 export type ProjectEntry = {
   /** Project id (canonical path string) — used for rename / archive / restore. */
@@ -117,9 +155,28 @@ export type AgentBridge = {
    * subscription (`openSession`), not through a direct send callback.
    *
    * `references` are the workspace paths from `@` references; the Rust side composes
-   * them into this turn's prompt.
+   * them into this turn's prompt. `images` are pasted images as `data:` URLs; they are
+   * sent as structured `ContentPart::Image` parts (not folded into the prompt text).
    */
-  send: (project: string, session: string, text: string, references: string[]) => Promise<void>;
+  send: (
+    project: string,
+    session: string,
+    text: string,
+    references: string[],
+    images: string[],
+  ) => Promise<void>;
+  /**
+   * Edit the **last user message** and resend: rewinds that turn (drops the old user
+   * message and every reply after it, in memory and on disk) and sends `text` as a new
+   * turn. Same "option A" semantic as the TUI's `/rewind`.
+   */
+  resend: (
+    project: string,
+    session: string,
+    text: string,
+    references: string[],
+    images: string[],
+  ) => Promise<void>;
   /** Request cancellation of the given session's current turn. */
   cancel: (project: string, session: string) => Promise<void>;
   /**
@@ -145,6 +202,14 @@ export type AgentBridge = {
   listSkills: (project: string) => Promise<SkillEntry[]>;
   /** Activate a skill in a given session of a project (the `/<skill-name>` entry, same semantics as the TUI). */
   activateSkill: (project: string, session: string, name: string) => Promise<void>;
+  /** List the registered plugin download sources (pure metadata, no network). */
+  listPluginSources: () => Promise<PluginSource[]>;
+  /**
+   * Fetch one plugin source's index and return its normalized, capped entry list.
+   * This is the real download-source integration; installing the plugins themselves
+   * is a later phase.
+   */
+  fetchPluginSource: (sourceId: string, limit?: number) => Promise<PluginEntry[]>;
   /** List all sessions of a project (most recently modified first). */
   listSessions: (project: string) => Promise<SessionEntry[]>;
   /** A project's current session name (null if none). */
@@ -206,8 +271,11 @@ async function createTauriBridge(): Promise<AgentBridge> {
     async restoreProject(project) {
       await invoke("agent_restore_project", { project });
     },
-    async send(project, session, text, references) {
-      await invoke("agent_send", { project, text, references, session });
+    async send(project, session, text, references, images) {
+      await invoke("agent_send", { project, text, references, images, session });
+    },
+    async resend(project, session, text, references, images) {
+      await invoke("agent_resend", { project, text, references, images, session });
     },
     async cancel(project, session) {
       await invoke("agent_cancel", { project, session });
@@ -241,6 +309,12 @@ async function createTauriBridge(): Promise<AgentBridge> {
     },
     async activateSkill(project, session, name) {
       await invoke("agent_activate_skill", { project, session, name });
+    },
+    async listPluginSources() {
+      return invoke<PluginSource[]>("agent_list_plugin_sources");
+    },
+    async fetchPluginSource(sourceId, limit) {
+      return invoke<PluginEntry[]>("agent_fetch_plugin_source", { sourceId, limit });
     },
     async listSessions(project) {
       return invoke<SessionEntry[]>("agent_list_sessions", { project });
@@ -316,7 +390,7 @@ function createMockBridge(): AgentBridge {
         entry.last_opened_ms = Date.now();
       }
     },
-    async send(project, session, text, references) {
+    async send(project, session, text, references, images) {
       const key = routeKey(project, session);
       cancelled.delete(key);
       const emit = (event: AgentEventWire) => {
@@ -326,6 +400,9 @@ function createMockBridge(): AgentBridge {
         if (references.length > 0) {
           emit({ type: "content_delta", text: `(mock) references ${references.join(", ")} · ` } as AgentEventWire);
         }
+        if (images.length > 0) {
+          emit({ type: "content_delta", text: `(mock) ${images.length} image(s) · ` } as AgentEventWire);
+        }
         emit({ type: "content_delta", text: "(mock) received: " } as AgentEventWire);
         for (const ch of text) {
           await new Promise((r) => setTimeout(r, 20));
@@ -334,6 +411,10 @@ function createMockBridge(): AgentBridge {
         }
         emit({ type: "finished", stop_reason: "completed" } as AgentEventWire);
       })();
+    },
+    // Mock keeps no persisted history, so "edit + resend" behaves like a plain send.
+    async resend(project, session, text, references, images) {
+      await this.send(project, session, text, references, images);
     },
     async cancel(project, session) {
       cancelled.add(routeKey(project, session));
@@ -384,6 +465,15 @@ function createMockBridge(): AgentBridge {
     },
     async activateSkill() {
       // mock: activation has no side effect (the backend writes SkillRuntime).
+    },
+    async listPluginSources() {
+      return mockPluginSources.map((source) => ({ ...source }));
+    },
+    async fetchPluginSource(sourceId) {
+      // mock: return a few fake entries per source so the Plugins page is debuggable in a plain browser.
+      const source = mockPluginSources.find((entry) => entry.id === sourceId);
+      if (!source) throw new Error(`unknown plugin source: ${sourceId}`);
+      return mockPluginsBySource[sourceId] ?? [];
     },
     async listSessions(project) {
       return mockSessions(project).map((s) => ({ ...s }));
@@ -451,6 +541,50 @@ function createMockBridge(): AgentBridge {
 }
 
 // mock state: lets the multi-project / multi-session UI be debugged independently under a plain-browser `npm run dev`.
+const mockPluginSources: PluginSource[] = [
+  {
+    id: "claude-official",
+    name: "Claude Code Plugins (official)",
+    description: "Anthropic's official Claude Code plugin marketplace.",
+    kind: "claude_marketplace",
+    url: "https://cdn.jsdelivr.net/gh/anthropics/claude-plugins-official@main/.claude-plugin/marketplace.json",
+    homepage: "https://github.com/anthropics/claude-plugins-official",
+    format: "claude_marketplace_json",
+    large: false,
+  },
+  {
+    id: "dsh-community",
+    name: "dsh Community Registry",
+    description: "Community-scanned index of DeepSeek Harness (dsh) plugins.",
+    kind: "dsh_registry",
+    url: "https://cdn.jsdelivr.net/gh/vbarter/dsh-plugin-registry@main/data/plugins-lite.json",
+    homepage: "https://dsplugin.app/",
+    format: "dsh_registry_json",
+    large: true,
+  },
+  {
+    id: "mcp-registry",
+    name: "MCP Registry (official)",
+    description: "The official Model Context Protocol server registry.",
+    kind: "mcp_registry",
+    url: "https://registry.modelcontextprotocol.io/v0/servers?limit=100",
+    homepage: "https://registry.modelcontextprotocol.io/",
+    format: "mcp_registry_json",
+    large: false,
+  },
+];
+const mockPluginsBySource: Record<string, PluginEntry[]> = {
+  "claude-official": [
+    { source_id: "claude-official", name: "agent-sdk-dev", description: "Development kit for the Claude Agent SDK", author: "Anthropic", category: "development", source: "./plugins/agent-sdk-dev", homepage: "https://github.com/anthropics/claude-plugins-public" },
+    { source_id: "claude-official", name: "adobe-for-creativity", description: "Adobe creative AI tools", author: "Adobe", category: "design", source: "https://github.com/adobe/skills.git#plugins/creative-cloud/adobe-for-creativity", homepage: null },
+  ],
+  "dsh-community": [
+    { source_id: "dsh-community", name: "mirage#dsh", description: "(mock) virtual workspace provider", author: "strukto-ai", category: "tools", source: "https://github.com/strukto-ai/mirage", homepage: "https://github.com/strukto-ai/mirage" },
+  ],
+  "mcp-registry": [
+    { source_id: "mcp-registry", name: "ac.inference.sh/mcp", description: "Run 150+ AI apps", author: null, category: "mcp", source: "inference.sh", homepage: "https://sh.inference.ac" },
+  ],
+};
 let mockProjectSeq = 1;
 let mockSeq = 0;
 const mockProjects: ProjectEntry[] = [

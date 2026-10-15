@@ -226,6 +226,9 @@ pub struct ProviderSettings {
     pub model: Option<String>,
     /// The context window token count.
     pub context_window_tokens: Option<u64>,
+    /// Whether the model accepts image input. Default `false` (deny by default);
+    /// the SDK rejects a request carrying an image unless this is explicitly on.
+    pub supports_images: Option<bool>,
     /// Whether to enable thinking (reasoning). Default `true`.
     ///
     /// A real Anthropic-compatible endpoint requires `thinking` to also provide `budget_tokens`, whereas the adapter
@@ -301,6 +304,8 @@ pub struct Settings {
     pub models_url: Option<String>,
     pub model: String,
     pub context_window_tokens: u64,
+    /// Whether the model accepts image input (default `false`).
+    pub supports_images: bool,
     /// Whether to enable thinking (default `true`).
     pub thinking: bool,
     /// Reasoning effort (default `low`).
@@ -439,6 +444,9 @@ impl Settings {
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
 
+        // Image input is opt-in: deny by default.
+        let supports_images = merged.supports_images.unwrap_or(false);
+
         // The thinking switch defaults to on; reasoning effort defaults to `low` (consistent with the old hardcoding).
         let thinking = merged.thinking.unwrap_or(true);
         let reasoning_effort = merged
@@ -476,6 +484,7 @@ impl Settings {
             models_url: merged.models_url.filter(|v| !v.trim().is_empty()),
             model,
             context_window_tokens,
+            supports_images,
             thinking,
             reasoning_effort,
             extra_body,
@@ -521,6 +530,12 @@ fn env_layer(env: &dyn Fn(&str) -> Option<String>) -> ProviderSettings {
         models_url: env("LOCAL_MODELS_URL"),
         model: env("LOCAL_MODEL"),
         context_window_tokens: env("LOCAL_CONTEXT_WINDOW_TOKENS").and_then(|v| v.parse().ok()),
+        supports_images: env("LOCAL_SUPPORTS_IMAGES").map(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "1" | "true" | "yes" | "on"
+            )
+        }),
         // `LOCAL_THINKING` is parsed with the usual truthy spellings; when absent it makes no statement (None), yielding to the file layer / built-in defaults.
         thinking: env("LOCAL_THINKING").map(|v| {
             matches!(
@@ -559,6 +574,7 @@ fn merge_into(base: &mut ProviderSettings, over: ProviderSettings) {
         models_url,
         model,
         context_window_tokens,
+        supports_images,
         thinking,
         reasoning_effort,
         extra_body,

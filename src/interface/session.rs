@@ -284,7 +284,7 @@ impl Session {
             match message {
                 Message::User { content } => items.push(Item::Message(ChatMessage {
                     role: Role::User,
-                    content: content.clone(),
+                    content: content.as_text(),
                 })),
                 Message::Assistant {
                     content,
@@ -359,7 +359,7 @@ impl Session {
 
     pub(crate) fn add_message(&mut self, message: Message) {
         match message {
-            Message::User { content } => self.push_message(Role::User, content),
+            Message::User { content } => self.push_message(Role::User, content.as_text()),
             Message::Assistant {
                 content,
                 tool_calls,
@@ -433,7 +433,7 @@ impl Session {
         {
             self.add_error(format!("failed to truncate session log: {error}"));
         }
-        Some(content)
+        Some(content.as_text())
     }
 
     fn record_usage(&mut self, usage: Usage) {
@@ -887,6 +887,36 @@ impl SessionManager {
             session.remember_model();
             session.finish_turn();
         }
+    }
+
+    /// Rewind the last user turn of the session named `name`: drop the last user message
+    /// **and every assistant / tool message after it** from both the in-memory `Agent` and
+    /// the disk log, then remove the corresponding view items (the edited user item and
+    /// everything after it). Returns the original user text so the UI can pre-fill an editor.
+    ///
+    /// This is the shared entry for the TUI (`/rewind` re-submit) and the desktop
+    /// (`agent_resend`): "rewind the last turn" is a session / UI business semantic, so the
+    /// orchestration lives here; the SDK only offers the atomic `Agent::truncate_messages`.
+    ///
+    /// Returns `None` when the session does not exist, is running, or has no user message.
+    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    pub fn rewind_last_turn(&mut self, name: &str) -> Option<String> {
+        let session = self.session_mut(name)?;
+        // Do not rewind while a turn is in flight (its `Agent` is out in a background task).
+        if session.running {
+            return None;
+        }
+        let content = session.rewind_last_user_turn()?;
+        // Drop the edited user item and every item after it (the old reply's view).
+        if let Some(index) = session
+            .items
+            .iter()
+            .rposition(|item| matches!(item, Item::Message(message) if message.role == Role::User))
+        {
+            session.items.truncate(index);
+        }
+        session.streaming_delta_start = None;
+        Some(content)
     }
 
     /// Accumulate one event into the session named `name`, and fan it out to its subscribers.

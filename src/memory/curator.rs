@@ -227,7 +227,7 @@ pub fn render_transcript(messages: &[Message]) -> String {
         match message {
             Message::User { content } => {
                 out.push_str("## User\n");
-                out.push_str(content.trim());
+                out.push_str(content.as_text().trim());
                 out.push_str("\n\n");
             }
             Message::Assistant {

@@ -30,6 +30,8 @@ export function FileChip({
   const tooltip = reference.description
     ? `${reference.name} — ${reference.description}`
     : reference.path;
+  const isImage = reference.kind === "image";
+  const imageSrc = isImage ? (reference.dataUrl ?? reference.path) : "";
   return (
     <span
       className={cn(
@@ -39,8 +41,20 @@ export function FileChip({
       title={tooltip}
       data-reference-chip
       data-kind={reference.kind}
+      // Marker only: `ImageHoverPreview` reads the nested <img>.src, so the (potentially
+      // large) data URL is not duplicated into an attribute.
+      data-image-preview={isImage ? "true" : undefined}
     >
-      <Icon className="size-3 shrink-0 text-muted" data-icon="inline-start" />
+      {isImage ? (
+        <img
+          src={imageSrc}
+          alt={reference.name}
+          className="size-4 shrink-0 rounded-[3px] object-cover"
+          data-icon="inline-start"
+        />
+      ) : (
+        <Icon className="size-3 shrink-0 text-muted" data-icon="inline-start" />
+      )}
       <span className="min-w-0 max-w-40 truncate">
         {reference.kind === "skill" ? `/${reference.name}` : reference.name}
       </span>
@@ -139,10 +153,20 @@ export function createChipElement(reference: FileReference): HTMLElement {
   span.title = reference.description
     ? `${reference.name} — ${reference.description}`
     : reference.path;
+  const label = reference.kind === "skill" ? `/${reference.name}` : reference.name;
+  if (reference.kind === "image") {
+    // Pasted image: render a thumbnail instead of an icon; `data-image-preview` marks the
+    // chip for the global hover preview (which reads this <img>.src).
+    const src = reference.dataUrl ?? reference.path;
+    span.dataset.imagePreview = "true";
+    span.innerHTML =
+      `<img src="${escapeHtml(src)}" alt="${escapeHtml(reference.name)}" class="size-4 shrink-0 rounded-[3px] object-cover" />` +
+      `<span class="min-w-0 max-w-40 truncate">${escapeHtml(label)}</span>`;
+    return span;
+  }
   const paths = iconPathsFor(reference.kind)
     .map((d) => `<path d="${d}"/>`)
     .join("");
-  const label = reference.kind === "skill" ? `/${reference.name}` : reference.name;
   span.innerHTML =
     `<svg class="size-3 shrink-0 text-muted" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>` +
     `<span class="min-w-0 max-w-40 truncate">${escapeHtml(label)}</span>`;

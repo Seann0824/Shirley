@@ -33,7 +33,7 @@ use std::sync::Arc;
 use futures::{FutureExt, StreamExt};
 use std::panic::AssertUnwindSafe;
 use serde::Serialize;
-use shirley_agent_sdk::{Agent, AgentEvent, Message, RunResult, StopReason};
+use shirley_agent_sdk::{Agent, AgentEvent, Content, ContentPart, ImagePart, Message, RunResult, StopReason};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::{Mutex, oneshot};
@@ -236,6 +236,81 @@ struct SkillEntryWire {
     description: String,
 }
 
+/// Plugin source descriptor consumed by the frontend (aligned with `PluginSource` in
+/// `web/src/lib/bridge.ts`). Mirrors `crate::plugins::model::PluginSource` but stays
+/// a separate DTO at the boundary (the app-layer model may evolve independently).
+#[derive(Debug, Clone, Serialize)]
+struct PluginSourceWire {
+    id: String,
+    name: String,
+    description: String,
+    kind: &'static str,
+    url: String,
+    homepage: Option<String>,
+    format: &'static str,
+    large: bool,
+}
+
+impl From<crate::plugins::PluginSource> for PluginSourceWire {
+    fn from(source: crate::plugins::PluginSource) -> Self {
+        Self {
+            id: source.id,
+            name: source.name,
+            description: source.description,
+            kind: source_kind_str(source.kind),
+            url: source.url,
+            homepage: source.homepage,
+            format: source_format_str(source.format),
+            large: source.large,
+        }
+    }
+}
+
+/// Normalized plugin entry consumed by the frontend (aligned with `PluginEntry` in
+/// `web/src/lib/bridge.ts`).
+#[derive(Debug, Clone, Serialize)]
+struct PluginEntryWire {
+    source_id: String,
+    name: String,
+    description: String,
+    author: Option<String>,
+    category: Option<String>,
+    source: Option<String>,
+    homepage: Option<String>,
+}
+
+impl From<crate::plugins::PluginEntry> for PluginEntryWire {
+    fn from(entry: crate::plugins::PluginEntry) -> Self {
+        Self {
+            source_id: entry.source_id,
+            name: entry.name,
+            description: entry.description,
+            author: entry.author,
+            category: entry.category,
+            source: entry.source,
+            homepage: entry.homepage,
+        }
+    }
+}
+
+fn source_kind_str(kind: crate::plugins::PluginSourceKind) -> &'static str {
+    use crate::plugins::PluginSourceKind::*;
+    match kind {
+        ClaudeMarketplace => "claude_marketplace",
+        DshRegistry => "dsh_registry",
+        McpRegistry => "mcp_registry",
+    }
+}
+
+fn source_format_str(format: crate::plugins::SourceFormat) -> &'static str {
+    use crate::plugins::SourceFormat::*;
+    match format {
+        ClaudeMarketplaceJson => "claude_marketplace_json",
+        DshRegistryJson => "dsh_registry_json",
+        McpRegistryJson => "mcp_registry_json",
+    }
+}
+
 /// Project entry consumed by the frontend (aligned with `ProjectEntry` in `web/src/lib/bridge.ts`).
 #[derive(Debug, Clone, Serialize)]
 struct ProjectEntryWire {
@@ -302,7 +377,7 @@ fn history_from_messages(messages: &[Message]) -> Vec<HistoryMessageWire> {
         .filter_map(|message| match message {
             Message::User { content } => Some(HistoryMessageWire {
                 role: "user",
-                content: content.clone(),
+                content: content.as_text(),
             }),
             Message::Assistant { content, .. } => content
                 .as_ref()
@@ -331,6 +406,24 @@ fn compose_prompt(text: &str, references: &[String]) -> String {
     prompt.push('\n');
     prompt.push_str(text);
     prompt
+}
+
+/// Build the structured user turn: prompt text followed by pasted image parts.
+///
+/// `images` are `data:` URLs; each becomes an [`ImagePart`] with an inline (base64) source.
+/// With no images the result is a single text part, so text-only turns keep the plain-string
+/// fast path (and the KV prefix cache).
+fn user_content(prompt: &str, images: &[String]) -> Content {
+    let mut parts: Vec<ContentPart> = Vec::new();
+    if !prompt.is_empty() {
+        parts.push(ContentPart::Text {
+            text: prompt.to_owned(),
+        });
+    }
+    for url in images {
+        parts.push(ContentPart::Image(ImagePart::url(url.clone())));
+    }
+    Content::from(parts)
 }
 
 // ---------------------------------------------------------------------------
@@ -445,17 +538,74 @@ async fn agent_send(
     project: String,
     text: String,
     references: Option<Vec<String>>,
+    images: Option<Vec<String>>,
     session: Option<String>,
 ) -> Result<(), String> {
     let runtime = ensure_runtime(&state, &project).await?;
     let prompt = compose_prompt(&text, references.as_deref().unwrap_or(&[]));
+    // The user turn is structured content: the prompt text (with `@` references folded in)
+    // plus any pasted images. When there are no images this is a single text part, which
+    // serializes as a plain string — byte-identical to the historical shape.
+    let user_content = user_content(&prompt, images.as_deref().unwrap_or(&[]));
+    spawn_turn(&state, runtime, project, session, text, user_content).await
+}
 
+/// Edit the **last user message** and resend: first rewind that turn (drop the old user
+/// message and every assistant / tool message after it, both in memory and on disk), then
+/// start the edited text as a brand-new turn — the old reply is discarded.
+///
+/// "Edit and resend" is only meaningful for the last user turn (there is no per-message
+/// selection in the UI), so this is the same "option A" semantic as the TUI's `/rewind`.
+#[tauri::command]
+async fn agent_resend(
+    state: State<'_, DesktopState>,
+    project: String,
+    text: String,
+    references: Option<Vec<String>>,
+    images: Option<Vec<String>>,
+    session: Option<String>,
+) -> Result<(), String> {
+    let runtime = ensure_runtime(&state, &project).await?;
+    // Roll back the last turn before sending the edited text. Doing this in one locked
+    // step (rewind + begin_turn) keeps the agent / store / view items consistent.
+    {
+        let mut guard = runtime.lock().await;
+        let session_name = match session.clone() {
+            Some(name) => name,
+            None => guard
+                .sessions
+                .active_name()
+                .map(str::to_owned)
+                .ok_or_else(|| "current session is not yet persisted".to_owned())?,
+        };
+        if guard.sessions.rewind_last_turn(&session_name).is_none() {
+            return Err("no message to edit".to_owned());
+        }
+    }
+    let prompt = compose_prompt(&text, references.as_deref().unwrap_or(&[]));
+    let user_content = user_content(&prompt, images.as_deref().unwrap_or(&[]));
+    spawn_turn(&state, runtime, project, session, text, user_content).await
+}
+
+/// Take the session's `Agent`, register the cancel handle, and spawn the run task that
+/// drives `run_stream`, feeding every `AgentEvent` back into the session.
+///
+/// Shared by `agent_send` (new turn) and `agent_resend` (edit + resend): both differ only
+/// in whether the previous turn was rewound first; the run driving is identical.
+async fn spawn_turn(
+    state: &DesktopState,
+    runtime: Arc<Mutex<ProjectRuntime>>,
+    project: String,
+    session: Option<String>,
+    text: String,
+    user_content: Content,
+) -> Result<(), String> {
     // Start this turn: take the session's `Agent` and optimistically record the
     // **user message** into its view items (`Session::apply_event` deliberately ignores
     // `MessageAdded(User)`, leaving it to the driver to record).
     let (mut agent, memory, session_name) = {
         let mut guard = runtime.lock().await;
-        let session_name = match session.clone() {
+        let session_name = match session {
             Some(name) => name,
             None => guard
                 .sessions
@@ -493,7 +643,7 @@ async fn agent_send(
         let terminal_update = guard_turn(async {
             let mut cancel_rx = cancel_rx;
             // Record pending input even if cancellation happens during memory prefetch.
-            let mut stream = agent.run_stream(&prompt);
+            let mut stream = agent.run_stream_content(user_content);
             if let Some(memory) = memory.as_ref() {
                 tokio::select! {
                     biased;
@@ -884,6 +1034,32 @@ async fn agent_activate_skill(
         })
 }
 
+/// List the registered plugin download sources (the *catalog of catalogs*).
+///
+/// Pure metadata: reads the static registry, touches no network. The frontend
+/// renders these as the "sources" list; fetching one is a separate command.
+#[tauri::command]
+async fn agent_list_plugin_sources() -> Result<Vec<PluginSourceWire>, String> {
+    Ok(crate::plugins::registry()
+        .into_iter()
+        .map(PluginSourceWire::from)
+        .collect())
+}
+
+/// Fetch one plugin source's index and return its normalized, capped entry list.
+///
+/// `limit` caps the number of entries returned (0/None -> the default cap). This
+/// is the **real** download-source integration: it GETs the marketplace index
+/// and parses it. Downloading/installing the plugins themselves is a later phase.
+#[tauri::command]
+async fn agent_fetch_plugin_source(
+    source_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<PluginEntryWire>, String> {
+    let entries = crate::plugins::fetch_source(&source_id, limit).await?;
+    Ok(entries.into_iter().map(PluginEntryWire::from).collect())
+}
+
 /// List all sessions of a project (most recently modified first).
 #[tauri::command]
 async fn agent_list_sessions(
@@ -1202,6 +1378,7 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
             agent_archive_project,
             agent_restore_project,
             agent_send,
+            agent_resend,
             agent_subscribe,
             agent_unsubscribe,
             agent_cancel,
@@ -1211,6 +1388,8 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
             agent_search_files,
             agent_list_skills,
             agent_activate_skill,
+            agent_list_plugin_sources,
+            agent_fetch_plugin_source,
             agent_list_sessions,
             agent_current_session,
             agent_new_session,

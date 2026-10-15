@@ -38,7 +38,7 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Messages -> `(system, messages)`.
 ///
 /// `System` / `ContextSummary` are lifted to the top-level `system`; the rest become content-block messages.
-fn encode_messages(messages: &[message::Message]) -> (Option<String>, Vec<Value>) {
+fn encode_messages(messages: &[message::Message]) -> Result<(Option<String>, Vec<Value>), AdapterError> {
     let mut system: Vec<String> = Vec::new();
     let mut encoded: Vec<Value> = Vec::new();
 
@@ -49,7 +49,7 @@ fn encode_messages(messages: &[message::Message]) -> (Option<String>, Vec<Value>
 
             message::Message::User { content } => encoded.push(serde_json::json!({
                 "role": "user",
-                "content": [{ "type": "text", "text": content }],
+                "content": super::content::anthropic_content(content)?,
             })),
 
             // Block order: thinking -> text -> tool_use. thinking must come first.
@@ -110,7 +110,7 @@ fn encode_messages(messages: &[message::Message]) -> (Option<String>, Vec<Value>
     } else {
         Some(system.join("\n\n"))
     };
-    (system, encoded)
+    Ok((system, encoded))
 }
 
 /// Tool definition -> Anthropic format (`input_schema` is just JSON Schema).
@@ -149,7 +149,7 @@ pub fn encode_request(
         headers.insert("x-api-key", api_key_header);
     }
 
-    let (system, messages) = encode_messages(input.messages);
+    let (system, messages) = encode_messages(input.messages)?;
     let mut body = serde_json::json!({
         "model": &config.model,
         // Anthropic's `max_tokens` is required; use the fallback when unconfigured.

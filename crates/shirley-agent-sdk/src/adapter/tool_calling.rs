@@ -306,7 +306,7 @@ impl ContentToolProtocol for TaggedToolProtocol {
     fn render_result(&self, call: &ToolCall, output: &str) -> Message {
         let header = self.result_template.replace("{tool}", &call.name);
         Message::User {
-            content: format!("{header}\n{output}"),
+            content: format!("{header}\n{output}").into(),
         }
     }
 }
@@ -690,14 +690,15 @@ pub(crate) fn encode_messages_for_content(
                     // The built-in protocol feeds back user text; non-text rendering (a custom
                     // protocol) degrades to passing each entry through individually.
                     match rendered {
-                        Message::User { content } | Message::System { content } => blocks.push(content),
+                        Message::User { content } => blocks.push(content.as_text()),
+                        Message::System { content } => blocks.push(content),
                         other => passthrough.push(other),
                     }
                     index += 1;
                 }
                 if !blocks.is_empty() {
                     out.push(Message::User {
-                        content: blocks.join("\n\n"),
+                        content: blocks.join("\n\n").into(),
                     });
                 }
                 out.extend(passthrough);
@@ -1758,7 +1759,7 @@ mod tests {
                 String::new()
             }
             fn render_result(&self, _call: &ToolCall, _output: &str) -> Message {
-                Message::User { content: String::new() }
+                Message::User { content: String::new().into() }
             }
         }
         let mut parser = Bare.stream_parser();
@@ -1793,6 +1794,7 @@ mod tests {
         let msg = protocol().render_result(&call, "hello");
         match msg {
             Message::User { content } => {
+                let content = content.as_text();
                 assert!(content.contains("\"tool\":\"bash\""));
                 assert!(content.ends_with("hello"));
             }
@@ -1902,6 +1904,7 @@ mod tests {
         let Message::User { content } = &out[1] else {
             panic!("expected user (rendered tool result)");
         };
+        let content = content.as_text();
         assert!(content.contains("{\"tool\":\"bash\"}"), "feedback header: {content}");
         assert!(content.contains("file.txt"), "feedback body: {content}");
     }
@@ -1946,6 +1949,7 @@ mod tests {
         let Message::User { content } = &out[1] else {
             panic!("expected single merged user, got {:?}", out[1]);
         };
+        let content = content.as_text();
         // Both result blocks are present, each headed per the template.
         assert!(content.contains("{\"tool\":\"bash\"}"), "missing bash block: {content}");
         assert!(content.contains("file.txt"), "missing bash output: {content}");
