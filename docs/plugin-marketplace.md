@@ -26,7 +26,7 @@ There are three layers to the problem:
    data-fetching scripts (the `flight-cli` / `hnair-cli` skills) + a map renderer. Today they can only
    be scattered together by **directory convention**, with no manifest, no version, no dependencies,
    no enable/disable.
-2. **Tools are hard-coded at compile time.** Beyond `bash` / `read_file` / `web_search`, the user
+2. **Tools are hard-coded at compile time.** Beyond `bash` / `read` / `web_search`, the user
    **cannot** add tools to Shirley at runtime -- unless they modify Rust and recompile. This is the
    biggest experience gap compared with Claude Code / Codex.
 3. **Compatibility is zero.** The ecosystem has already accumulated a large number of Claude Code

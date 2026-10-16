@@ -37,6 +37,11 @@ pub enum IndexRecord {
     Started {
         id: String,
         kind: String,
+        /// A short human-readable label for this subagent ("what is this agent doing"), so a
+        /// transcript list is legible without reading the whole task. Model-supplied when given,
+        /// otherwise derived from the first line of `task`.
+        #[serde(default)]
+        name: String,
         task: String,
         /// The owning session name (the "parent" in the tree).
         parent: Option<String>,

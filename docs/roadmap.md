@@ -66,7 +66,7 @@ Definition of P0 done (testable):
 1. Run one real migration sub-task against the repository, with no human intervention throughout and no infinite loop.
 2. Inject a 429 / 500 once; the Agent can back off, retry, and continue.
 3. When `bash` runs a command that fails to compile, the model receives stderr and the exit code.
-4. Attempting to `read_file` a file outside the workspace is rejected with a clear error. (**implemented**: `src/tools/read.rs`, validated via `WorkSpace::resolve`)
+4. Attempting to `read` a file outside the workspace is rejected with a clear error. (**implemented**: `src/tools/read.rs`, validated via `WorkSpace::resolve`)
 5. Switching to an unimplemented protocol returns `Err` rather than panicking.
 
 Definition of P1 done:

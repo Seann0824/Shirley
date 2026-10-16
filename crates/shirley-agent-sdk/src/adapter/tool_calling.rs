@@ -40,7 +40,7 @@ const ERRORS_TEMPLATE: &str = include_str!("../../prompts/tool_calling_errors.md
 /// Injection character limit for the tool catalog (the "Available tools" section).
 ///
 /// The fixed contract text is bounded and always emitted in full; only the catalog section,
-/// which **grows with the number of tools**, gets truncated — with many tools (bash / read_file /
+/// which **grows with the number of tools**, gets truncated — with many tools (bash / read /
 /// web_search / todo / skills …) it can expand significantly and crowd out the front of the
 /// context. Over the limit it is truncated at a char boundary and **explicitly flagged** (not
 /// silent), the same strategy as `todo`'s `MAX_RENDER_CHARS`.
@@ -1422,14 +1422,14 @@ mod tests {
     #[test]
     fn parses_full_document() {
         let doc = protocol().parse(
-            "<thinking>let me think</thinking>\n<description>let me take a look</description>\n<tool>\n<name>read_file</name>\n<params>{\"path\":\"a.rs\"}</params>\n</tool>",
+            "<thinking>let me think</thinking>\n<description>let me take a look</description>\n<tool>\n<name>read</name>\n<params>{\"path\":\"a.rs\"}</params>\n</tool>",
         );
         assert_eq!(doc.thinking.as_deref(), Some("let me think"));
         assert_eq!(doc.description.as_deref(), Some("let me take a look"));
         assert_eq!(
             doc.calls,
             vec![ParsedToolCall {
-                name: "read_file".into(),
+                name: "read".into(),
                 arguments: "{\"path\":\"a.rs\"}".into(),
             }]
         );
@@ -1470,7 +1470,7 @@ mod tests {
                 "type": "message",
                 "role": "assistant",
                 "content": [{"type": "output_text", "text":
-                    "<thinking>check the path</thinking><description>let me read the file first</description><tool><name>read_file</name><params>{\"path\":\"a.txt\"}</params></tool>"
+                    "<thinking>check the path</thinking><description>let me read the file first</description><tool><name>read</name><params>{\"path\":\"a.txt\"}</params></tool>"
                 }]
             }]
         })).unwrap();
@@ -1478,7 +1478,7 @@ mod tests {
         let Message::Assistant { content, tool_calls, .. } = message else { panic!("expected assistant") };
         assert_eq!(content.as_deref(), Some("let me read the file first"));
         assert_eq!(tool_calls.len(), 1);
-        assert_eq!(tool_calls[0].name, "read_file");
+        assert_eq!(tool_calls[0].name, "read");
         assert_eq!(tool_calls[0].arguments, r#"{"path":"a.txt"}"#);
     }
 
@@ -1493,8 +1493,8 @@ mod tests {
     fn parses_multiple_independent_top_level_calls() {
         let doc = protocol().parse(concat!(
             "<description>Checking both files</description>",
-            "<tool><name>read_file</name><params>{\"path\":\"a.rs\"}</params></tool>",
-            "<tool><name>read_file</name><params>{\"path\":\"b.rs\"}</params></tool>",
+            "<tool><name>read</name><params>{\"path\":\"a.rs\"}</params></tool>",
+            "<tool><name>read</name><params>{\"path\":\"b.rs\"}</params></tool>",
         ));
         assert!(doc.errors.is_empty());
         assert_eq!(doc.calls.len(), 2);
@@ -1712,12 +1712,12 @@ mod tests {
         let protocol = protocol();
         let (thinking, content) = collect_visible(
             &protocol,
-            &["<thinking>think a bit</thinking>\n<description>doing it now</description>\n<tool><name>read_file</name><params>{\"path\":\"a.rs\"}</params></tool>"],
+            &["<thinking>think a bit</thinking>\n<description>doing it now</description>\n<tool><name>read</name><params>{\"path\":\"a.rs\"}</params></tool>"],
         );
         // thinking / description increments are visible; the `<tool>` block is fully suppressed.
         assert_eq!(thinking, "think a bit");
         assert_eq!(content, "doing it now");
-        assert!(!content.contains("read_file"));
+        assert!(!content.contains("read"));
         assert!(!content.contains("tool"));
     }
 
@@ -1928,7 +1928,7 @@ mod tests {
                     },
                     ToolCall {
                         id: "content_call_1".into(),
-                        name: "read_file".into(),
+                        name: "read".into(),
                         arguments: "{\"path\":\"a.rs\"}".into(),
                     },
                 ],
@@ -1953,8 +1953,8 @@ mod tests {
         // Both result blocks are present, each headed per the template.
         assert!(content.contains("{\"tool\":\"bash\"}"), "missing bash block: {content}");
         assert!(content.contains("file.txt"), "missing bash output: {content}");
-        assert!(content.contains("{\"tool\":\"read_file\"}"), "missing read_file block: {content}");
-        assert!(content.contains("fn main() {}"), "missing read_file output: {content}");
+        assert!(content.contains("{\"tool\":\"read\"}"), "missing read block: {content}");
+        assert!(content.contains("fn main() {}"), "missing read output: {content}");
         // The two blocks are separated by a blank line.
         assert_eq!(content.matches("{\"tool\":").count(), 2, "there should be two blocks: {content}");
     }

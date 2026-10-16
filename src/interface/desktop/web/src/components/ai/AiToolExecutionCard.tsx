@@ -28,6 +28,7 @@ import {
 
 const TOOL_LABELS: Record<string, string> = {
   bash: "Run command",
+  read: "Read file",
   read_file: "Read file",
   web_search: "Search the web",
   todo: "Update tasks",

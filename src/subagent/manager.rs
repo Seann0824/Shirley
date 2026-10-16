@@ -39,8 +39,10 @@ pub const DEFAULT_WAIT_TIMEOUT_MS: u64 = 600_000;
 /// Upper bound on a caller-supplied `timeout_ms` (1 hour).
 pub const MAX_WAIT_TIMEOUT_MS: u64 = 3_600_000;
 
-/// Task length cap (chars), same convention as `read_file`'s argument validation.
+/// Task length cap (chars), same convention as `read`'s argument validation.
 const MAX_TASK_CHARS: usize = 4000;
+/// Display-name cap (chars); longer names are truncated with an ellipsis.
+const MAX_NAME_CHARS: usize = 60;
 /// Per-subagent event channel capacity (same order as `Session::events`).
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
@@ -149,6 +151,9 @@ pub struct SubagentResult {
 pub struct SubagentInfo {
     pub id: String,
     pub kind: SubagentKind,
+    /// A short human-readable label ("what is this agent doing"). Model-supplied when given,
+    /// otherwise derived from the first line of `task`. Purely for display.
+    pub name: String,
     pub task: String,
     pub status: SubagentStatus,
     pub started_ms: u64,
@@ -338,6 +343,7 @@ impl SubagentManager {
     pub fn dispatch(
         self: &Arc<Self>,
         kind: SubagentKind,
+        name: Option<String>,
         task: String,
         tools: Option<Vec<String>>,
         deny_tools: Option<Vec<String>>,
@@ -389,9 +395,11 @@ impl SubagentManager {
 
         let id = format!("sa_{:x}", self.next_seq.fetch_add(1, Ordering::Relaxed) + 1);
         let started_ms = now_ms();
+        let name = resolve_name(name, &task);
         let info = SubagentInfo {
             id: id.clone(),
             kind,
+            name: name.clone(),
             task: task.clone(),
             status: SubagentStatus::Running,
             started_ms,
@@ -410,7 +418,7 @@ impl SubagentManager {
         // arrives while the child is running does not miss the terminal `Status`).
         let (sender, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
         self.events.lock().unwrap().insert(id.clone(), sender);
-        self.record_started(&id, kind, &task, started_ms);
+        self.record_started(&id, kind, &name, &task, started_ms);
 
         let manager = self.clone();
         let child_id = id.clone();
@@ -623,13 +631,14 @@ impl SubagentManager {
     }
 
     /// Append the `started` index record (best-effort).
-    fn record_started(&self, id: &str, kind: SubagentKind, task: &str, started_ms: u64) {
+    fn record_started(&self, id: &str, kind: SubagentKind, name: &str, task: &str, started_ms: u64) {
         let Some(store) = self.store() else {
             return;
         };
         let _ = store.append_index(&IndexRecord::Started {
             id: id.to_owned(),
             kind: kind.as_str().to_owned(),
+            name: name.to_owned(),
             task: task.to_owned(),
             parent: Some(store.session().to_owned()),
             started_ms,
@@ -679,15 +688,21 @@ impl SubagentManager {
                     IndexRecord::Started {
                         id,
                         kind,
+                        name,
                         task,
                         started_ms,
                         ..
                     } => {
                         let kind = SubagentKind::from_str(&kind).unwrap_or(SubagentKind::Spawn);
+                        let name = resolve_name(
+                            (!name.is_empty()).then_some(name),
+                            &task,
+                        );
                         registry.entry(id.clone()).or_insert_with(|| SubagentHandle {
                             info: SubagentInfo {
                                 id,
                                 kind,
+                                name,
                                 task,
                                 status: SubagentStatus::Running,
                                 started_ms,
@@ -767,6 +782,34 @@ fn summarize(messages: &[Message]) -> String {
         }
     }
     last
+}
+
+/// Resolve a subagent's display name: the model-supplied `name` when it is non-empty, otherwise
+/// the first line of `task` (trimmed, capped). This keeps older logs (no `name`) legible.
+fn resolve_name(name: Option<String>, task: &str) -> String {
+    if let Some(name) = name {
+        let name = name.trim();
+        if !name.is_empty() {
+            return truncate_chars(name, MAX_NAME_CHARS);
+        }
+    }
+    let first_line = task.lines().next().unwrap_or("").trim();
+    let fallback = if first_line.is_empty() {
+        "subagent"
+    } else {
+        first_line
+    };
+    truncate_chars(fallback, MAX_NAME_CHARS)
+}
+
+/// Cap a display name by chars (not bytes) so a multi-byte boundary is never split.
+fn truncate_chars(text: &str, max: usize) -> String {
+    if text.chars().count() <= max {
+        return text.to_owned();
+    }
+    let mut out: String = text.chars().take(max.saturating_sub(1)).collect();
+    out.push('…');
+    out
 }
 
 fn now_ms() -> u64 {

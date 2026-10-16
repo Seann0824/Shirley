@@ -164,7 +164,7 @@ copied:
   neither `Message` nor `AgentEvent` changes, and the SDK adds no external type because of it (see
   section 8, acceptance item 4).
 - **Search boundary**: traverse only under the workspace root, skipping `.git` / `node_modules` /
-  `target` / `dist` etc., with a cap on the entry count; this is the same origin as the `read_file`
+  `target` / `dist` etc., with a cap on the entry count; this is the same origin as the `read`
   tool's workspace constraint, but **implemented in the application layer**, not touching the SDK.
 
 #### 4.3.0 Inline mixed layout: `contenteditable` rich input (**landed**)

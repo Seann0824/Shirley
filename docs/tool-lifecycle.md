@@ -205,7 +205,7 @@ The hook is `&mut self`; it either **carries its own state** or **is fed by the 
   ```rust
   let mut tools = ToolManager::new();
   tools.register(tools::bash_tool::tool())?;
-  tools.register(tools::read_file_tool::tool())?;
+  tools.register(tools::read_tool::tool())?;
   match tools::WebSearchTool::from_env() {
       Ok(Some(tool)) => { tools.register(tool)?; }   // registration carries its own dependency, cannot drift
       Ok(None) => {}                                  // not configured, silently skip

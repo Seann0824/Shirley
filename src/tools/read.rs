@@ -19,7 +19,7 @@ const BINARY_SNIFF_BYTES: usize = 8 * 1024;
 
 /// Workspace root: reads the `SHIRLEY_WORKSPACE` env var first, otherwise falls back to the current directory.
 /// Kept consistent with the `bash` tool to avoid drift between the two.
-fn workspace_root() -> Option<PathBuf> {
+pub(crate) fn workspace_root() -> Option<PathBuf> {
     std::env::var("SHIRLEY_WORKSPACE")
         .ok()
         .filter(|value| !value.trim().is_empty())
@@ -29,7 +29,7 @@ fn workspace_root() -> Option<PathBuf> {
 
 /// Suspected secret file: rejected by default, to avoid reading `.env` / private keys into the context and then sending them to the model
 /// (see `docs/security.md` section 3).
-fn is_secret_file(name: &str) -> bool {
+pub(crate) fn is_secret_file(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name == ".env"
         || name.starts_with(".env.")
@@ -44,7 +44,7 @@ fn is_secret_file(name: &str) -> bool {
 }
 
 /// Clip `text` at a character boundary to no more than `budget` bytes.
-fn clip_to_budget(text: &str, budget: usize) -> &str {
+pub(crate) fn clip_to_budget(text: &str, budget: usize) -> &str {
     if text.len() <= budget {
         return text;
     }
@@ -66,9 +66,9 @@ fn clip_to_budget(text: &str, budget: usize) -> &str {
 /// Returning plain text rather than structured JSON is deliberate -- directly readable by the model, and the line numbers make it easy to
 /// continue reading with `start_line`.
 #[tool(
-    description = "Read the contents of a text file inside the workspace by line, returning line-numbered text. Reads have line and byte caps; when content is truncated, a hint on how to continue is shown at the end. For large files, first locate content with rg/grep, then use this tool to read the relevant range; do not read the whole file with cat."
+    description = "Read the contents of a text file inside the workspace by line, returning line-numbered text. Reads have line and byte caps; when content is truncated, a hint on how to continue is shown at the end. For large files, first locate content with the grep tool, then use this tool to read the relevant range; do not read the whole file with cat."
 )]
-pub async fn read_file(
+pub async fn read(
     #[param(description = "file path, relative to the workspace root; absolute paths or paths escaping the workspace are not accepted")]
     path: String,
     #[param(description = "start line, 1-based; defaults to line 1")]
@@ -83,7 +83,7 @@ pub async fn read_file(
 
 /// Controlled read kernel: reads the relative path `path` under `root` by line, returning a line-numbered excerpt.
 ///
-/// This is the **only read implementation** for `read_file` (root = workspace) and `read_skill_file` (root = skill directory)
+/// This is the **only read implementation** for `read` (root = workspace) and `read_skill_file` (root = skill directory)
 /// -- the boundary lives in one place (`docs/security.md`): paths constrained to `root`, hard caps on line /
 /// byte counts, suspected-secret rejection, binary sniffing. `display` is the path name shown to the model
 /// (a relative reference), kept separate from `path`, so skill scenarios can show forms like `scripts/foo.py`.
@@ -276,7 +276,7 @@ mod tests {
         // SAFETY: env var is changed serially within the test, not concurrently with other threads.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read_file("a.txt".into(), None, None).await.unwrap();
+        let out = read("a.txt".into(), None, None).await.unwrap();
 
         assert!(out.contains("     1 | first"), "should include line numbers: {out}");
         assert!(out.contains("     3 | third"), "should read the third line: {out}");
@@ -292,7 +292,7 @@ mod tests {
         std::fs::write(dir.join("b.txt"), body).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read_file("b.txt".into(), Some(3), Some(2)).await.unwrap();
+        let out = read("b.txt".into(), Some(3), Some(2)).await.unwrap();
 
         assert!(out.contains("     3 | line3"), "should start at line 3: {out}");
         assert!(out.contains("     4 | line4"), "should read two lines: {out}");
@@ -307,7 +307,7 @@ mod tests {
         let dir = temp_workspace("escape");
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read_file("../etc/passwd".into(), None, None)
+        let err = read("../etc/passwd".into(), None, None)
             .await
             .unwrap_err();
         assert!(
@@ -324,7 +324,7 @@ mod tests {
         let dir = temp_workspace("absolute");
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read_file("/etc/hosts".into(), None, None).await.unwrap_err();
+        let err = read("/etc/hosts".into(), None, None).await.unwrap_err();
         assert!(
             matches!(err, ToolError::ArgumentsError(_)),
             "absolute path should be rejected: {err:?}"
@@ -339,7 +339,7 @@ mod tests {
         std::fs::write(dir.join(".env"), "LOCAL_API_KEY=leak").unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read_file(".env".into(), None, None).await.unwrap_err();
+        let err = read(".env".into(), None, None).await.unwrap_err();
         assert!(err.to_string().contains("secret"), "should reject secret files: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -351,7 +351,7 @@ mod tests {
         std::fs::write(dir.join("bin"), [0u8, 1, 2, 3, 0, 255]).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read_file("bin".into(), None, None).await.unwrap_err();
+        let err = read("bin".into(), None, None).await.unwrap_err();
         assert!(err.to_string().contains("binary"), "should reject binary: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -363,7 +363,7 @@ mod tests {
         std::fs::create_dir(dir.join("sub")).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read_file("sub".into(), None, None).await.unwrap_err();
+        let err = read("sub".into(), None, None).await.unwrap_err();
         assert!(err.to_string().contains("directory"), "should guide to use ls: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -377,7 +377,7 @@ mod tests {
         std::fs::write(dir.join("big.txt"), big).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read_file("big.txt".into(), None, None).await.unwrap();
+        let out = read("big.txt".into(), None, None).await.unwrap();
         assert!(out.contains("truncated"), "should hint truncation: length {}", out.len());
         assert!(
             out.len() <= MAX_OUTPUT_BYTES + 200,
@@ -398,13 +398,14 @@ mod tests {
 
         // Use the macro-generated `tool()` to verify the full path of registration + argument deserialization + invocation.
         let mut manager = ToolManager::new();
-        manager.register(read_file::tool()).expect("registration should succeed");
+        manager.register(read::tool()).expect("registration should succeed");
 
         let definition = manager
             .definitions()
             .into_iter()
-            .find(|d| d.name == "read_file")
-            .expect("should get the read_file definition");
+            .find(|d| d.name == "read")
+            .expect("should get the read definition");
+        assert!(manager.definitions().iter().all(|tool| tool.name != "read_file"));
         assert!(
             definition.description.contains("line"),
             "the description should explain the read semantics: {}",
@@ -413,7 +414,7 @@ mod tests {
 
         let call = ToolCall {
             id: "c1".into(),
-            name: "read_file".into(),
+            name: "read".into(),
             arguments: r#"{"path":"m.txt","start_line":1,"line_count":1}"#.into(),
         };
         let output = manager
@@ -437,7 +438,7 @@ mod tests {
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         // Explicitly request far more lines than the cap; still only read up to the cap.
-        let out = read_file("many.txt".into(), None, Some(MAX_LINE_COUNT * 2))
+        let out = read("many.txt".into(), None, Some(MAX_LINE_COUNT * 2))
             .await
             .unwrap();
         let lines = out.lines().filter(|l| l.contains(" | ")).count();

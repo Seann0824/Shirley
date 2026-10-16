@@ -20,11 +20,53 @@ use super::vector::{cosine, VectorStore};
 #[derive(Debug, Clone)]
 pub struct Scored {
     pub entry: Entry,
-    /// Relative path (for `read_file` to fetch the full text; not yet wired in V1, retrieval results only use `entry`).
+    /// Relative path (for `read` to fetch the full text; not yet wired in V1, retrieval results only use `entry`).
     #[allow(dead_code)]
     pub path: String,
     /// Match score (higher = more relevant).
     pub score: f64,
+    /// **Observability only**: which retrieval leg(s) produced this hit.
+    ///
+    /// Set by the three legs ([`search`] / [`search_vector`] / [`hybrid_search`]) and used by the local
+    /// `SHIRLEY_MEMORY_DEBUG` trace in the provider. It **never enters the model context** -- the injected
+    /// text (see `provider::render`) does not read this field.
+    pub source: MatchSource,
+}
+
+/// Which retrieval leg(s) produced a hit. A tiny bitflag so RRF fusion can union the legs.
+///
+/// **Debug/observability only** -- the value is never serialized into the prompt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MatchSource(u8);
+
+impl MatchSource {
+    /// Produced by the BM25 (keyword) leg.
+    pub const BM25: MatchSource = MatchSource(1);
+    /// Produced by the semantic (vector/cosine) leg.
+    pub const VECTOR: MatchSource = MatchSource(2);
+
+    /// Union of two sources (used when RRF fuses the two legs by id).
+    pub fn union(self, other: MatchSource) -> MatchSource {
+        MatchSource(self.0 | other.0)
+    }
+
+    pub fn has_bm25(self) -> bool {
+        self.0 & 1 != 0
+    }
+
+    pub fn has_vector(self) -> bool {
+        self.0 & 2 != 0
+    }
+
+    /// `bm25` / `vector` / `both` / `none` -- for the debug trace.
+    pub fn label(self) -> &'static str {
+        match (self.has_bm25(), self.has_vector()) {
+            (true, true) => "both",
+            (true, false) => "bm25",
+            (false, true) => "vector",
+            (false, false) => "none",
+        }
+    }
 }
 
 /// Project an index line from one entry.
@@ -122,6 +164,7 @@ pub fn search(entries: &[(String, Entry)], query: &str, limit: usize) -> Vec<Sco
                 entry: entry.clone(),
                 path: path.clone(),
                 score,
+                source: MatchSource::BM25,
             })
         })
         .collect();
@@ -154,6 +197,7 @@ pub fn search_vector(
                 entry: entry.clone(),
                 path: path.clone(),
                 score,
+                source: MatchSource::VECTOR,
             })
         })
         .collect();
@@ -200,11 +244,16 @@ pub fn hybrid_search(
             let contribution = 1.0 / (RRF_K + (rank + 1) as f64);
             fused
                 .entry(hit.entry.id.clone())
-                .and_modify(|existing| existing.score += contribution)
+                .and_modify(|existing| {
+                    existing.score += contribution;
+                    // keep track of which legs contributed (debug/observability).
+                    existing.source = existing.source.union(hit.source);
+                })
                 .or_insert_with(|| Scored {
                     entry: hit.entry.clone(),
                     path: hit.path.clone(),
                     score: contribution,
+                    source: hit.source,
                 });
         }
     }

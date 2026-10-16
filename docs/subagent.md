@@ -28,7 +28,7 @@ The main Agent's context is **a single line**: all exploration, all tool output,
 up in the same `self.messages`, so:
 
 - **The context is flooded by a one-off task.** Dispatch a job like "list all call sites under this
-  directory", and the dozens of intermediate `read_file` / `bash` calls all stay on the main line,
+  directory", and the dozens of intermediate `read` / `bash` calls all stay on the main line,
   and once compaction comes they get compressed into a summary -- the information loss lands on the
   main Agent, while this exploration **should have been one-off**.
 - **Cannot parallelize.** The main Agent can only advance one thing at a time; two mutually
@@ -199,7 +199,7 @@ Returns unified JSON (easy for the model to parse, same style as `web_search`):
 ```
 
 **Argument validation** (`ToolError::ArgumentsError`, the model can succeed by changing its writing,
-same convention as `read_file`): `action` is limited to the enum; `spawn`/`fork` require `task` to be
+same convention as `read`): `action` is limited to the enum; `spawn`/`fork` require `task` to be
 non-empty and <= the char cap; `wait`/`status`/`cancel` require `id` to be present (`wait` may omit
 it); `timeout_ms` has a cap.
 
@@ -223,7 +223,7 @@ Merge rule (child tool table = the following set):
 **Why the boundary belongs to the "parent", not the "child"**: what a tool can touch is the
 **dispatcher's** responsibility -- the parent best knows whether this subtask "should touch bash /
 can write files / needs network". Only by handing out the boundary can the parent issue constraints
-like "read-only investigation child" (give only `read_file`), "no-network child" (do not give
+like "read-only investigation child" (give only `read`), "no-network child" (do not give
 `web_search`), "cannot-modify-files child". This is exactly the prototype of `PermissionPolicy` in
 `docs/security.md`, landing first at the subagent layer.
 
@@ -233,7 +233,7 @@ allowlist/denylist before registering (the existing `ToolManager::unregister(nam
 simply do not register it in the factory). The **default set** is decided by the `[subagent]`
 configuration's `default_tools` (default = all tools).
 
-**Validation** (`ToolError::ArgumentsError`, same convention as `read_file`): an unknown tool name is
+**Validation** (`ToolError::ArgumentsError`, same convention as `read`): an unknown tool name is
 **rejected outright**, not silently ignored -- if the model writes a wrong name it must be able to
 find out immediately; `subagent` itself can never enter the allowlist (recursion guard).
 
@@ -308,7 +308,7 @@ registry.**
 **Recursion guard (important)**: when creating the child Agent, **do not register the `subagent`
 tool** in the tool set (or register it per `depth < max_depth`). Otherwise the child will dispatch a
 child, nesting without bound. The semantics of `max_depth=1` is "a child cannot dispatch a child",
-which is the P0 default. The child can still use bash / read_file / todo etc.
+which is the P0 default. The child can still use bash / read / todo etc.
 
 > On `max_steps`: Sean thinks the SDK default of 64 is too low for long tasks (memory). subagent's
 > `per_task_max_steps` is **independently configurable**, and because the subtask scope is narrower,
@@ -500,8 +500,8 @@ Ok(BuiltAgent { agent, todo, memory, skills, subagents })      // BuiltAgent gai
    `definitions()` (`subagent` is placed by name sorting); no "changes every round" system is
    injected (unless `SubagentContextProvider` is enabled, and its content also follows "stable prefix
    + write only the changes").
-10. **Tool-table control**: a child `Agent` created by `spawn { tools:["read_file"] }` has **only
-    `read_file`** in its `ToolManager` (no `bash` / no `subagent`); an unknown tool name returns
+10. **Tool-table control**: a child `Agent` created by `spawn { tools:["read"] }` has **only
+    `read`** in its `ToolManager` (no `bash` / no `subagent`); an unknown tool name returns
     `ArgumentsError`; `deny_tools` correctly subtracts from the default set.
 11. **Click to preview**: after the child finishes, `load()` on `<subagent-id>.jsonl` yields a full
     `Message` transcript and can be rendered; desktop `agent_load_subagent` returns a non-empty

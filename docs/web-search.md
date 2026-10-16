@@ -5,7 +5,7 @@
 ## 1. What it is
 
 DeepSeek's native web-search capability, migrated from shiwen (`shiwen-open-source`), registered into `ToolManager` as Shirley's
-**fourth tool** (`bash` / `read_file` / `todo` / `web_search`).
+**fourth tool** (`bash` / `read` / `todo` / `web_search`).
 
 Key point: it **does not go through the main model's chat-completions route**; instead it sends one bounded
 auxiliary request to DeepSeek's
@@ -22,7 +22,7 @@ For the criterion, see item 4 of section 8 of `Agent.md`: the SDK only accumulat
   `web_search_20250305`); it is a business integration, not a generic capability.
 - It reuses the seams **the SDK already provides**, such as the `Tool` trait / `ToolManager` / `ToolError`,
   and does not require a new SDK contract.
-- Analogy: `bash` / `read_file` are also in the application layer, because they are bound to "this machine / this workspace".
+- Analogy: `bash` / `read` are also in the application layer, because they are bound to "this machine / this workspace".
 
 So it lands in `src/tools/web_search.rs`, using the `#[tool]` macro + a **registration hook (`on_register`)**:
 
@@ -99,7 +99,7 @@ so the model will not see a tool that always fails.
 - Removed `CancellationToken`: Shirley's `Tool` trait does not expose a cancellation handle, and the timeout is handled by
   `tokio::time::timeout` as a fallback (the cancellation mechanism in `docs/runtime-hardening.md` has not landed yet).
 - The configuration source is simplified from "application config layer + environment variables" to **reading environment variables directly**, in the same vein as `bash` /
-  `read_file` reading `SHIRLEY_WORKSPACE`; config loading (`settings.rs`) still only handles the provider.
+  `read` reading `SHIRLEY_WORKSPACE`; config loading (`settings.rs`) still only handles the provider.
 
 ## 7. Tests
 

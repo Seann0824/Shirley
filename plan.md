@@ -236,7 +236,7 @@ commands.
 
 (Backfill) In practice, keeping only bash has an obvious problem: `cat` on a large file has no output
 cap, so the model can flood the context with one raw read. So add the read capability back in the
-form of `read_file` -- not restoring the old `read`, but a **controllable version**: the path is
+form of a bounded `read` tool, rather than the old unrestricted version: the path is
 constrained by the workspace, with a double cap on lines (default 200 / max 2000) and bytes (64KB),
 and suspected secrets and binary files rejected by default. The core idea: a capability should be
 controllable, rather than simply deleting or opening it up.

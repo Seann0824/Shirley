@@ -141,7 +141,7 @@ impl SkillCatalog {
 
 /// Header of the directory block: tells the model what this is and how to use it (Tier1 -> Tier2).
 ///
-/// From P1 on, guide the model to load instructions with `activate_skill` (user-level skills live outside the workspace, and `read_file`
+/// From P1 on, guide the model to load instructions with `activate_skill` (user-level skills live outside the workspace, and `read`
 /// cannot reach them); `location` is still listed for human troubleshooting. See `docs/skills.md` 5.3 / section 9.
 pub const SKILLS_HEADER: &str = include_str!("../../prompts/skills_header.md");
 

@@ -13,6 +13,12 @@ the model" into "running inside a restricted fake world".
 | `output.rs` | Unified result: stdout/stderr/exit_code/timed_out/**degraded** |
 | `mod.rs` | Facade `Sandbox`: applies the timeout uniformly and assembles the result |
 
+`ProcessBackend` captures at most 32 KiB of raw bytes from **each** of stdout and stderr,
+then appends a truncation notice with the omitted byte count. Both pipes are drained
+concurrently through EOF even after reaching the cap, so large single-line output cannot
+grow the capture buffers without bound or block the child on a full pipe. Invalid or cut
+UTF-8 is decoded lossily. Small output and the process exit status are preserved.
+
 ## Four design principles
 
 1. **The boundary is "what can be touched", not the command string.** The spec uses `program + args`, never a `bash -c` string that cannot be statically reasoned about.

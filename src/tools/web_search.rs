@@ -8,7 +8,7 @@
 //! Differences from the source implementation:
 //! - dropped the DB audit event and `CancellationToken` (Shirley's tool layer does not expose a cancel handle,
 //!   timeouts are enforced by `tokio::time::timeout`);
-//! - configuration now comes from environment variables (consistent with `bash` / `read_file` reading `SHIRLEY_WORKSPACE`),
+//! - configuration now comes from environment variables (consistent with `bash` / `read` reading `SHIRLEY_WORKSPACE`),
 //!   when unconfigured the tool is **not registered**, so the model cannot see it.
 //!
 //! Shape: `#[tool]` macro + **registration hook (`on_register`)**. The tool itself is stateless (the macro-generated

@@ -6,7 +6,7 @@
 //! **Two-level injection** (4.1):
 //! 1. **Resident**: the full `core.md` (profile / explicit preferences / active projects) -- small, stable, cache-friendly;
 //! 2. **Relevant**: the **summaries** of the top-k entries retrieved from the store for the current query (not the full text; the full text is fetched by
-//!    the AI with `read_file`).
+//!    the AI with `read`).
 //!
 //! **Where the query comes from**: `ContextProvider::context(&self)` takes no argument, so it cannot see "what the user said in this round".
 //! So the provider holds a shared runtime [`MemoryRuntime`], which contains a
@@ -186,6 +186,8 @@ impl MemoryRuntime {
                 *usage.entry(hit.entry.id.clone()).or_insert(0) += 1;
             }
         }
+        // Debug trace (local stderr only; never enters the model context).
+        trace_hits("recall", query, query_vector.is_some(), &hits);
         hits
     }
 
@@ -221,6 +223,10 @@ impl MemoryRuntime {
             for hit in &relevant {
                 *usage.entry(hit.entry.id.clone()).or_insert(0) += 1;
             }
+        }
+        // Debug trace (local stderr only; never enters the model context).
+        if let Some(q) = query.as_deref().filter(|q| !q.trim().is_empty()) {
+            trace_hits("inject", q, self.query_vector_present(), &relevant);
         }
 
         if core.is_none() && relevant.is_empty() {
@@ -372,6 +378,53 @@ fn escape(input: &str) -> String {
         .replace('&', "&amp;")
         .replace('<', "&lt;")
         .replace('>', "&gt;")
+}
+
+/// True when the `SHIRLEY_MEMORY_DEBUG` env var is set to a truthy value.
+///
+/// **Local debugging only** -- this switch changes nothing about retrieval and nothing about what
+/// is injected into the model context; it only gates a stderr trace of which retrieval leg(s)
+/// produced each hit (`bm25` / `vector` / `both`).
+fn memory_debug_enabled() -> bool {
+    matches!(
+        std::env::var("SHIRLEY_MEMORY_DEBUG").as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("on")
+    )
+}
+
+impl MemoryRuntime {
+    /// Whether a query vector was prefetched for this round (debug observability).
+    fn query_vector_present(&self) -> bool {
+        self.query_vector
+            .lock()
+            .expect("memory query vector lock poisoned")
+            .is_some()
+    }
+}
+
+/// Emit a one-line-per-hit stderr trace of the retrieval leg(s) behind each hit.
+///
+/// `leg` is `"inject"` (automatic per-round injection via `render`) or `"recall"` (the `recall`
+/// tool). `has_vector` says whether the semantic leg actually ran this round (prefetched query
+/// vector present); when `false`, every hit is necessarily `bm25`. No-op unless
+/// `SHIRLEY_MEMORY_DEBUG` is set.
+fn trace_hits(leg: &str, query: &str, has_vector: bool, hits: &[Scored]) {
+    if !memory_debug_enabled() {
+        return;
+    }
+    eprintln!(
+        "[memory:debug] {leg} query={query:?} semantic_leg={} hits={}",
+        if has_vector { "on" } else { "off (bm25 only)" },
+        hits.len()
+    );
+    for (rank, hit) in hits.iter().enumerate() {
+        eprintln!(
+            "[memory:debug]   #{rank} source={} score={:.4} id={}",
+            hit.source.label(),
+            hit.score,
+            hit.entry.id
+        );
+    }
 }
 
 #[cfg(test)]

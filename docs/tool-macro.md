@@ -126,7 +126,7 @@ fn on_register(&mut self, ctx: &mut ::shirley_agent_sdk::ToolContext) -> Result<
 
 - **The hook definitions still live on the `Tool` trait** (with empty default implementations); the macro only "references" them -- it does not move the lifecycle
   semantics into the macro.
-- **No hook written = empty implementation**: stateless tools (`bash` / `read_file`) need **zero changes**.
+- **No hook written = empty implementation**: stateless tools (`bash` / `read`) need **zero changes**.
 - **The user only writes**: the tool function + an optional ordinary `fn`; they do not touch `impl Tool`, the schema, or the trait.
 - The hook signature is fixed as `fn(&mut ToolContext) -> Result<(), ToolError>` -- determined by the `Tool` trait definition;
   the macro only references them by name.
@@ -150,7 +150,7 @@ fn on_register(&mut self, ctx: &mut ::shirley_agent_sdk::ToolContext) -> Result<
 | Output | a complete `Tool` impl (`GenerateTool`) |
 | State | none (can inject into `ToolContext` via a registration hook) |
 | lifecycle | wired by the `on_register` / `on_unregister` attributes; not written means an empty impl |
-| Applies to | all tools (`bash` / `read_file` / `web_search`) |
+| Applies to | all tools (`bash` / `read` / `web_search`) |
 
 There is only one macro. `todo`, because it needs to hold an `Arc<TodoStore>` and is internal to the SDK, still hand-writes `impl Tool` --
 it is the only exception, not the paradigm.

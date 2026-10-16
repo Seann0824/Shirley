@@ -52,7 +52,7 @@ capability-pack format** and can directly consume existing skills in the ecosyst
 it gives its own users an extension point to "write a repeatedly-used project procedure as a skill".
 
 The current Shirley has no corresponding concept: the system prompt (`src/prompt.rs`) statically
-inlines `Agent.md`, and the toolset is fixed (`bash` / `read_file` / `web_search`). **There is no seam
+inlines `Agent.md`, and the toolset is fixed (`bash` / `read` / `web_search`). **There is no seam
 for a "pluggable capability pack"** -- this is exactly what this document adds.
 
 ---
@@ -171,7 +171,7 @@ always resident, Tier2 is activated on demand, and Tier3 is read on demand.
 
 Three reasons:
 
-- **File reading is infeasible for user-level skills**. Shirley's `read_file` is validated by
+- **File reading is infeasible for user-level skills**. Shirley's `read` is validated by
   `WorkSpace::resolve` and **rejects absolute paths and out-of-bounds paths** -- whereas a user-level
   skill is in `~/.agents/skills/`, outside the workspace, which the model simply cannot read.
 - **A dedicated tool can do what generic reading cannot**: strip the frontmatter (give the model only
@@ -213,8 +213,8 @@ A skill may come from a third-party repository `git clone`d (even a malicious re
 | Dimension | A. Fully inline into the prompt | B. File-read activation | C. Dedicated tool + ContextProvider (**recommended**) |
 | --- | --- | --- | --- |
 | Tier1 catalog | full body stuffed into system | catalog + location stuffed into system | catalog stuffed into system (same as B) |
-| Tier2 activation | no activation needed (already full) | the model reads `SKILL.md` with `read_file` | `activate_skill(name)` returns the body |
-| User-level skill | readable (read in at startup) | **unreadable** (`read_file` rejects out-of-bounds) | readable (the tool resolves against the skill root internally) |
+| Tier2 activation | no activation needed (already full) | the model reads `SKILL.md` with `read` | `activate_skill(name)` returns the body |
+| User-level skill | readable (read in at startup) | **unreadable** (`read` rejects out-of-bounds) | readable (the tool resolves against the skill root internally) |
 | Context usage | **explodes** (N skills all resident in full) | small | small |
 | Anti-hallucination of skill names | N/A | cannot (the model can fabricate a path) | can (name limited to an enum) |
 | Survives compaction | naturally (in system) | **lost** (the body is compacted away as an ordinary message) | naturally (the provider re-injects each round) |
@@ -312,13 +312,13 @@ memory's runtime distribution.
 
 **5.5 Tier3: `read_skill_file(skill, path)`**
 
-User-level skills are outside the workspace, and `read_file` cannot reach them. So give a read tool
+User-level skills are outside the workspace, and `read` cannot reach them. So give a read tool
 **constrained by the skill root**:
 
 - Input `skill` (enum) + `path` (relative to the skill root, rejecting `..` / absolute paths).
-- Reuse `read_file`'s line cap (default 200 / cap 2000), byte cap (64KB), binary detection, and secret
+- Reuse `read`'s line cap (default 200 / cap 2000), byte cap (64KB), binary detection, and secret
   filtering -- **the same set of boundaries**, only changing the root from `WorkSpace` to `skill.root`.
-- In implementation, extract `read_file`'s read kernel into `read_text_range(root, path, ...)`, shared
+- In implementation, extract `read`'s read kernel into `read_text_range(root, path, ...)`, shared
   by both, to avoid boundary drift (aligned with `docs/security.md` "the boundary exists in only one
   place").
 

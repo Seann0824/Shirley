@@ -20,7 +20,7 @@ The result of `split_whitespace` is only used for checking; what actually runs i
 - `r''m -rf /` (the shell concatenates it, and string matching does not see `rm`)
 
 At the same time, the `read` tool at that time had no path restriction at all; it could read `~/.ssh/id_rsa`, and it could read `.env` to pull the API key into context and send it to the model.
-(Note: `read` was once removed; it has now been reintroduced as `read_file` with **this section's constraints landed** -- workspace boundary validation + suspected-secret file rejection, see below.)
+(Note: `read` was once removed; it has now been reintroduced as `read` with **this section's constraints landed** -- workspace boundary validation + suspected-secret file rejection, see below.)
 
 **2. Design goals**
 
@@ -40,7 +40,7 @@ LOCAL_BASE_URL=http://127.0.0.1:8788/v1/chat/completions
 LOCAL_CONTEXT_WINDOW_TOKENS=104858
 ```
 
-3. Add default redaction on the `read_file` tool side: reject when it matches patterns such as `.env`, `*.pem`, `id_rsa*`, `*.key` (**implemented**, see `src/tools/read.rs::is_secret_file`).
+3. Add default redaction on the `read` tool side: reject when it matches patterns such as `.env`, `*.pem`, `id_rsa*`, `*.key` (**implemented**, see `src/tools/read.rs::is_secret_file`).
 4. Long term: do not persist secrets to disk; inject them at startup from the environment or the system keychain.
 
 **4. Workspace isolation**

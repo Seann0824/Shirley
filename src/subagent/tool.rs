@@ -54,6 +54,10 @@ impl SubagentTool {
                             "enum": ["spawn", "fork", "wait", "list", "status", "cancel"],
                             "description": "spawn = clean-context child; fork = child inherits a snapshot of this conversation; wait = block on a dispatched child; list = all subagents; status = one subagent; cancel = abort a running child."
                         },
+                        "name": {
+                            "type": "string",
+                            "description": "spawn/fork only: a short human-readable label for this subagent (what it is doing), shown in the UI so the user can tell agents apart. Optional; defaults to the first line of `task`."
+                        },
                         "task": {
                             "type": "string",
                             "description": "The sub-task for the child (required for spawn/fork). Self-contained: state the goal and what to report back."
@@ -95,6 +99,8 @@ impl SubagentTool {
 struct SubagentArgs {
     action: String,
     #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
     task: Option<String>,
     #[serde(default)]
     tools: Option<Vec<String>>,
@@ -132,7 +138,7 @@ impl Tool for SubagentTool {
                         .ok_or_else(|| ToolError::ArgumentsError("`task` is required".into()))?;
                     // depth = 0 for a top-level dispatch (the parent is always the top level).
                     let id = manager
-                        .dispatch(kind, task, args.tools, args.deny_tools, 0)
+                        .dispatch(kind, args.name.clone(), task, args.tools, args.deny_tools, 0)
                         .map_err(map_error)?;
                     if args.detach.unwrap_or(false) {
                         // Non-blocking: hand back the handle; the child runs on.
@@ -142,6 +148,7 @@ impl Tool for SubagentTool {
                         return Ok(serde_json::json!({
                             "id": info.id,
                             "kind": info.kind.as_str(),
+                            "name": info.name,
                             "status": info.status.as_str(),
                         }));
                     }
@@ -228,6 +235,7 @@ fn info_json(info: &SubagentInfo) -> serde_json::Value {
     let mut value = serde_json::json!({
         "id": info.id,
         "kind": info.kind.as_str(),
+        "name": info.name,
         "task": info.task,
         "status": info.status.as_str(),
         "elapsed_ms": info.elapsed_ms(),

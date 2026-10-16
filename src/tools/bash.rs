@@ -65,7 +65,9 @@ fn render(output: &SandboxOutput, command: &str) -> String {
 }
 
 // TODO: tool error messages should have a uniform format, so that execution failures can be reported back in a designed format.
-#[tool(description = "bash is used to run commands, e.g. system commands like python, grep, find, git")]
+#[tool(
+    description = "Run shell commands such as python, find, or git. Use the grep tool for workspace content searches and read for file contents. Only the first 32 KiB of stdout and stderr are returned, with a truncation notice for larger output. A line limit such as head does not cap bytes. Redirect large output to a file and use read to inspect relevant ranges."
+)]
 pub async fn bash(
     #[param(description = "the command to execute")] command: String,
     #[param(description = "timeout in seconds")] timeout: Option<u64>,

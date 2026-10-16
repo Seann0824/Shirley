@@ -4,7 +4,7 @@
 //! exist in the workspace and rank them by keyword", unrelated to the agent runtime. The SDK
 //! gained no public capability for it (a footnote to "building the desktop doesn't require changing the SDK" — if the app layer can solve it, don't stuff it into the SDK).
 //!
-//! Its boundary matches the `read_file` tool: it only walks under the workspace root, skips
+//! Its boundary matches the `read` tool: it only walks under the workspace root, skips
 //! dependency / build / VCS directories, and caps the traversal size so a big repo can't freeze the UI.
 
 #![cfg_attr(not(feature = "desktop"), allow(dead_code))]

@@ -625,12 +625,13 @@ impl ContextProvider for CompositeContextProvider {
     }
 }
 
-/// Build a `ToolManager` with all tools registered (bash / read_file are always registered;
+/// Build a `ToolManager` with all tools registered (bash / grep / read are always registered;
 /// web_search is not registered when unconfigured). Each `Agent` holds one; tool state is isolated per instance.
 fn assemble_tools() -> ToolManager {
     let mut tool_manager = ToolManager::new();
     let _ = tool_manager.register(tools::bash_tool::tool());
-    let _ = tool_manager.register(tools::read_file_tool::tool());
+    let _ = tool_manager.register(tools::grep_tool::tool());
+    let _ = tool_manager.register(tools::read_tool::tool());
     if let Err(error) = tool_manager.register(tools::web_search_tool::tool()) {
         eprintln!("[web_search] not enabled: {error}");
     }
@@ -761,27 +762,46 @@ mod tests {
     }
 
     #[test]
+    fn grep_and_read_are_registered_and_available_to_children() {
+        let manager = assemble_tools();
+        let names: Vec<String> = manager.definitions().iter()
+            .map(|tool| tool.name.clone()).collect();
+        assert!(names.iter().any(|name| name == "grep"));
+        assert!(names.iter().any(|name| name == "read"));
+        assert!(names.iter().all(|name| name != "read_file"));
+        assert!(filtered_tool_names(&names, &ToolSelection::default())
+            .iter().any(|name| name == "grep"));
+        assert_eq!(
+            filtered_tool_names(&names, &ToolSelection {
+                allow: Some(vec!["grep".into(), "read".into()]),
+                deny: vec![],
+            }),
+            vec!["grep", "read"]
+        );
+    }
+
+    #[test]
     fn child_tool_filter_applies_allow_deny_and_recursion_guard() {
         let names = vec![
             "bash".to_string(),
-            "read_file".to_string(),
+            "read".to_string(),
             "subagent".to_string(),
         ];
         // No selection: everything except `subagent` (the recursion guard is structural).
         assert_eq!(
             filtered_tool_names(&names, &ToolSelection::default()),
-            vec!["bash", "read_file"]
+            vec!["bash", "read"]
         );
         // Allowlist keeps only the named tools.
         assert_eq!(
             filtered_tool_names(
                 &names,
                 &ToolSelection {
-                    allow: Some(vec!["read_file".into()]),
+                    allow: Some(vec!["read".into()]),
                     deny: vec![],
                 }
             ),
-            vec!["read_file"]
+            vec!["read"]
         );
         // Denylist subtracts from the default set.
         assert_eq!(
@@ -792,7 +812,7 @@ mod tests {
                     deny: vec!["bash".into()],
                 }
             ),
-            vec!["read_file"]
+            vec!["read"]
         );
         // Even an explicit allow of `subagent` cannot get it back.
         assert!(

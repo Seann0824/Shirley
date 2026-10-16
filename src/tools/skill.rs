@@ -87,8 +87,8 @@ impl Tool for ActivateSkillTool {
 
 /// `read_skill_file(skill, path)`: read a resource inside a skill directory on demand (Tier3).
 ///
-/// User-level skills live outside the workspace, so `read_file` can't reach them — this tool
-/// **pins** the root to `skill.root` and reuses `read_file`'s reading kernel (the same line/byte
+/// User-level skills live outside the workspace, so `read` can't reach them — this tool
+/// **pins** the root to `skill.root` and reuses `read`'s reading kernel (the same line/byte
 /// limits, secret filtering, binary detection, and out-of-bounds checks), just with a different
 /// root (`docs/skills.md` 5.5).
 pub struct ReadSkillFileTool {

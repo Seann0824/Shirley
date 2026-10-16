@@ -191,7 +191,7 @@ mod tests {
 
     #[test]
     fn ignores_unknown_and_multiline_values() {
-        let text = "---\nname: x\ndescription: works\nmetadata:\n  key: value\nallowed-tools: bash read_file\n---\nbody";
+        let text = "---\nname: x\ndescription: works\nmetadata:\n  key: value\nallowed-tools: bash read\n---\nbody";
         let meta = parse_skill(text, "x", PathBuf::from("/s/x")).unwrap();
         assert_eq!(meta.description, "works");
     }

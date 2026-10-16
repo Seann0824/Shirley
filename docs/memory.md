@@ -98,7 +98,7 @@ automatically carries context":
   preferences / active projects) **injected automatically every round**, not depending on the AI
   calling proactively;
 - **On-demand detail layer (L2)**: the full entry text and the original conversation, retrieved with
-  `read_file` (or a future memory tool) when the AI needs it.
+  `read` (or a future memory tool) when the AI needs it.
 
 Why two layers are necessary: chapter 3 experiment 3-11's conclusion -- **relying only on the
 always-resident layer loses detail due to capacity limits, and relying only on retrieval cannot find
@@ -237,7 +237,7 @@ it does not move the prefix, is cache-friendly, and compaction cannot touch it.
    and stable, prefix-cache friendly -- this is the source of "stably visible".
 2. **Relevant injection**: the program matches the top-k entries' **summaries** (not full text) from
    `index.md` by **the current query + working directory**, and injects them. When the AI wants the
-   full text it retrieves it with `read_file`.
+   full text it retrieves it with `read`.
 
 ```
 +-- Always-resident overview layer (L0/L1) ------------------+
@@ -245,7 +245,7 @@ it does not move the prefix, is cache-friendly, and compaction cannot touch it.
 |  -> injected automatically each round (appended by ContextProvider) |
 +-- On-demand detail layer (L2) -----------------------------+
 |  full entry text / raw conversation JSONL / evidence       |
-|  -> retrieved by the AI with read_file / a future memory tool |
+|  -> retrieved by the AI with read / a future memory tool |
 +------------------------------------------------------------+
 ```
 
@@ -344,7 +344,7 @@ trajectory curation**.
 
 Landed in Shirley (V1 simplification):
 
-- **The "environment" is the workspace**: read-only probing = the existing `read_file` / directory
+- **The "environment" is the workspace**: read-only probing = the existing `read` / directory
   listing (the SDK's `WorkSpace` already guarantees out-of-bounds rejection); no new tools, no write
   permission needed;
 - **The probe target is `procedure` / fact-class candidates**: such memories must cite **verified
@@ -575,7 +575,7 @@ src/memory/
 6. **Injection loses the prefix cache**: the same cost as `todo.md` -- when `core.md` changes, the
    prefix after it is invalidated, minimized by "put it at the end + stable content".
 7. **Limited coverage of environment probing** (paper 2609.11060): V1's "environment" is only the
-   workspace, and probing = read-only `read_file` / directory listing; it cannot probe external
+   workspace, and probing = read-only `read` / directory listing; it cannot probe external
    systems, running state, or future tasks. So probing's gain **depends on the evidence gap left in
    the trajectory** -- it is small when the trajectory is already enough to support an executable
    record, and largest when an unresolved join / position / procedure is left (the paper also

@@ -17,9 +17,9 @@ This document answers two questions: how the project is layered (structure), and
 ```mermaid
 graph TD
     subgraph App["Application layer src/"]
-        MAIN["main.rs<br/>read .env / build ModelConfig<br/>register bash + read_file"]
+        MAIN["main.rs<br/>read .env / build ModelConfig<br/>register bash + read"]
         IFACE["interface/<br/>TUI state machine and rendering"]
-        TOOLS["tools/<br/>bash / read_file"]
+        TOOLS["tools/<br/>bash / read"]
     end
 
     subgraph SDK["SDK layer crates/shirley-agent-sdk/"]

@@ -13,6 +13,7 @@ use std::process::Stdio;
 
 // tokio's async Command: used to spawn the subprocess (async = does not block while waiting for it
 // to finish).
+use tokio::io::{AsyncRead, AsyncReadExt};
 use tokio::process::Command;
 
 // Bring in the interface to implement and the types to use.
@@ -25,15 +26,42 @@ use crate::sandbox::spec::{NetworkPolicy, SandboxSpec};
 #[derive(Default)]
 pub struct ProcessBackend;
 
+/// Retain at most 32 KiB from each pipe. A line limit cannot bound minified JS or
+/// source maps: a single line can be many megabytes long.
+const MAX_CAPTURE_BYTES: usize = 32 * 1024;
+
+async fn capture_output(mut pipe: impl AsyncRead + Unpin) -> std::io::Result<String> {
+    let mut captured = Vec::with_capacity(MAX_CAPTURE_BYTES);
+    let mut omitted = 0_u64;
+    let mut buffer = [0_u8; 8192];
+    loop {
+        let len = pipe.read(&mut buffer).await?;
+        if len == 0 {
+            break;
+        }
+        let keep = len.min(MAX_CAPTURE_BYTES - captured.len());
+        captured.extend_from_slice(&buffer[..keep]);
+        omitted = omitted.saturating_add((len - keep) as u64);
+        // Keep draining after the cap so a full pipe cannot block the command.
+    }
+    let mut text = String::from_utf8_lossy(&captured).into_owned();
+    if omitted > 0 {
+        text.push_str(&format!(
+            "\n[output truncated: {omitted} bytes omitted; capture limit is {MAX_CAPTURE_BYTES} bytes per stream. Narrow the query or redirect output to a file and read a relevant range.]\n"
+        ));
+    }
+    Ok(text)
+}
+
 // `impl SandboxBackend for ProcessBackend` = "make ProcessBackend satisfy the SandboxBackend
 // contract". The braces must implement every method the trait requires.
 impl SandboxBackend for ProcessBackend {
     // Implement capabilities: report that it "can isolate nothing".
     fn capabilities(&self) -> Capabilities {
         Capabilities {
-            filesystem_isolation: false, // cannot isolate the filesystem
-            network_isolation: false,    // cannot isolate the network
-            resource_limits: false,      // cannot limit resources
+            filesystem_isolation: false,  // cannot isolate the filesystem
+            network_isolation: false,     // cannot isolate the network
+            resource_limits: false,       // cannot limit resources
             label: "none (bare process)", // label: bare process
         }
     }
@@ -98,13 +126,18 @@ impl SandboxBackend for ProcessBackend {
         cmd.stdout(Stdio::piped());
         cmd.stderr(Stdio::piped());
 
-        // Spawn and wait for the subprocess to finish, capturing the output.
-        let output = cmd
-            .output() // wait asynchronously, returning Result<Output, io::Error>
-            .await    // .await means "wait for this async operation to complete"
-            // If spawning fails, turn io::Error into our SandboxError::Spawn.
-            // `?` means "return early if it's Err".
+        // Drain both pipes concurrently with bounded buffers. Command::output()
+        // buffers everything before returning, which can flood memory and context.
+        let mut child = cmd
+            .spawn()
             .map_err(|e| SandboxError::Spawn(format!("failed to spawn {}: {e}", spec.program)))?;
+        let stdout = child.stdout.take().expect("stdout is piped");
+        let stderr = child.stderr.take().expect("stderr is piped");
+        let (status, stdout, stderr) =
+            tokio::try_join!(child.wait(), capture_output(stdout), capture_output(stderr),)
+                .map_err(|e| {
+                    SandboxError::Spawn(format!("failed to capture {}: {e}", spec.program))
+                })?;
 
         // The process has finished by now. Next, "faithfully report the degradation entries".
 
@@ -119,9 +152,8 @@ impl SandboxBackend for ProcessBackend {
         // Add a corresponding degradation note based on the network policy the spec requires.
         match spec.network {
             // If the caller asked for no network but we cannot do it, say so faithfully.
-            NetworkPolicy::Disabled => {
-                degraded.push("no network isolation: NetworkPolicy::Disabled is not enforced".to_owned())
-            }
+            NetworkPolicy::Disabled => degraded
+                .push("no network isolation: NetworkPolicy::Disabled is not enforced".to_owned()),
             // If a proxy is required, we likewise cannot do it; say so faithfully.
             // `{ .. }` means "we don't care about the addr value inside; ignore it".
             NetworkPolicy::Proxy { .. } => {
@@ -138,13 +170,10 @@ impl SandboxBackend for ProcessBackend {
 
         // Assemble and return the result. Ok(...) means success.
         Ok(SandboxOutput {
-            // Convert the subprocess's stdout bytes into a string.
-            // from_utf8_lossy: replaces invalid bytes with a placeholder instead of erroring.
-            // .into_owned(): turns the borrowed result into an owned String.
-            stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+            stdout,
+            stderr,
             // .code() gets the exit code; None when killed by a signal.
-            exit_code: output.status.code(),
+            exit_code: status.code(),
             // Always false here — because timeouts are judged uniformly by the outer Sandbox, and
             // a process that made it here did not time out.
             timed_out: false,

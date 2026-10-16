@@ -7,6 +7,8 @@ import { aggregateToolExecutions } from "./toolErrorUtils";
 
 const TOOL_LABELS: Record<string, string> = {
   bash: "Run command",
+  read: "Read file",
+  // Legacy name remains displayable in persisted session history.
   read_file: "Read file",
   read_skill_file: "Read skill file",
   web_search: "Search the web",
@@ -80,7 +82,7 @@ function ToolIcon({ execution }: { execution: AiToolExecution }) {
     : execution.tool_name === "bash" ? Terminal
     : execution.tool_name === "web_search" ? Globe
     : execution.tool_name === "todo" ? ListChecks
-    : execution.tool_name === "read_file" || execution.tool_name === "read_skill_file" ? BookOpen
+    : ["read", "read_file", "read_skill_file"].includes(execution.tool_name) ? BookOpen
     : Wrench;
   return <Icon size={14} aria-hidden="true" className={`shrink-0${execution.status === "running" ? " animate-spin" : ""}${execution.status === "error" ? " text-danger-ink" : ""}`} />;
 }
@@ -88,7 +90,7 @@ function ToolIcon({ execution }: { execution: AiToolExecution }) {
 function activityLabel(execution: AiToolExecution): string {
   const input = execution.input;
   const path = input?.path ?? input?.file_path;
-  if ((execution.tool_name === "read_file" || execution.tool_name === "read_skill_file") && typeof path === "string") {
+  if (["read", "read_file", "read_skill_file"].includes(execution.tool_name) && typeof path === "string") {
     return `Read ${path.replaceAll("\\", "/").split("/").filter(Boolean).at(-1) || path}`;
   }
   const detail = execution.tool_name === "bash" ? input?.command
