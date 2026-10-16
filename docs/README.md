@@ -9,6 +9,7 @@ This set of documents is a technical design proposal for the current repository 
 | Document | What it solves | Priority |
 | --- | --- | --- |
 | `architecture.md` | Architecture diagram + which node each feature lands on | Read this first |
+| `storage.md` | Global configuration/state layout, project namespaces and lossless legacy migration (**implemented**) | P0 |
 | `roadmap.md` | Overall roadmap: phases, dependencies, acceptance criteria | Second |
 | `security.md` | Permission layer, bash boundary, secrets, workspace isolation | P0 |
 | `sandbox.md` | Process sandbox: spec / backend / degraded / timeout / ownership of the execution strategy | P0 |

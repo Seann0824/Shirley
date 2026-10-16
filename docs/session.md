@@ -299,7 +299,7 @@ The previous seven sections solve "how one session is persisted and recovered". 
 **Decision 1: one session = one independent log; the directory is the index.**
 
 The single file `<root>/.shirley/session.jsonl` is upgraded to a directory
-`<root>/.shirley/sessions/<name>.jsonl`, where each session is still a complete JSONL log (reusing
+`<config_dir>/shirley/workspaces/<workspace-id>/sessions/<name>.jsonl`, where each session is still a complete JSONL log (reusing
 `JsonlSessionStore`, semantics unchanged). The name defaults to the creation timestamp
 (`YYYYMMDD-HHMMSS`), and **scanning the directory is "listing the sessions"** -- no extra index file is
 needed, and there is no consistency problem of "the index and the log disagreeing" (continuing
@@ -346,7 +346,7 @@ turn count shown by Codex's resume picker.
 At startup, `bootstrap::assemble` **directly `create_lazy()` a new session** (rather than recovering
 the "most recently modified" old session): the starting point for a user running a coding agent should
 be a clean new conversation, avoiding carrying the context of a historical session right away.
-Historical sessions are still in the `.shirley/sessions/` directory, opened with the `/session` picker
+Historical sessions are still in the `<state>/sessions/` directory, opened with the `/session` picker
 when needed.
 
 **"Lazy" = do not persist at startup** (Codex's UX): at this moment only the session name is
@@ -388,7 +388,7 @@ old inode". `delete(name)` deletes the log and best-effort deletes the title sid
 **Decision 7: desktop and TUI share the same session data.**
 
 The two interfaces **share the directory described by the same `FileSessionCatalog` instance**
-(`<root>/.shirley/sessions`) -- this is the landing point of "sharing one copy of data": complete the
+(`<config_dir>/shirley/workspaces/<workspace-id>/sessions`) -- this is the landing point of "sharing one copy of data": complete the
 operations at the catalog layer, and the two interfaces automatically share them. The desktop side
 puts the factory's `session_catalog` (previously TUI-only) into `DesktopState` as well, adding
 commands:
@@ -421,7 +421,7 @@ add / switch / rename / archive / restore.
   (sharing the recovery rules);
 - The old single-file log is adopted on the first startup, with no history lost;
 - **Startup does not persist**: when the app is opened but no message is sent, no empty session file
-  appears in `.shirley/sessions/`; the session appears only after the first message is sent (the same
+  appears in `<state>/sessions/`; the session appears only after the first message is sent (the same
   for TUI / desktop);
 - The TUI and desktop see the same session list; creating / renaming / deleting on one side is visible
   on the other after a refresh.

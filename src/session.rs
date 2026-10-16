@@ -261,7 +261,7 @@ impl SessionEntry {
 /// database backend, neither the commands nor the picker UI need to change.
 ///
 /// **The TUI and desktop share the same implementation**: both sides' session list / switch / rename / delete
-/// land in this layer, so they naturally share the same `<root>/.shirley/sessions` data.
+/// land in this layer, so they naturally share the same `<config_dir>/shirley/workspaces/<workspace-id>/sessions` data.
 pub trait SessionCatalog: Send + Sync {
     /// List all sessions, **sorted by last-modified time descending** (newest first).
     fn list(&self) -> Result<Vec<SessionEntry>, SessionError>;
@@ -320,7 +320,7 @@ pub trait SessionCatalog: Send + Sync {
     /// Move a session (along with its title) from the current directory to `dest_dir`.
     ///
     /// Used for "move a session to another project" -- each project has its own
-    /// `<root>/.shirley/sessions` directory, so a move is copying `<name>.jsonl` and
+    /// `<config_dir>/shirley/workspaces/<workspace-id>/sessions` directory, so a move is copying `<name>.jsonl` and
     /// `<name>.title` into the target directory. If the target already has a same-named session it **errors**
     /// (no silent overwrite, to avoid data loss). The default implementation errors.
     fn move_to(&self, _name: &str, _dest_dir: &Path) -> Result<(), SessionError> {
@@ -328,7 +328,7 @@ pub trait SessionCatalog: Send + Sync {
     }
 }
 
-/// A local-directory-based session catalog: `<root>/.shirley/sessions/<name>.jsonl`.
+/// A session catalog under a globally stored workspace state directory.
 ///
 /// Each session is an independent JSONL log (reusing [`JsonlSessionStore`]),
 /// and scanning the directory is "listing sessions". The name defaults to a timestamp, naturally ordered and needing no extra index.
@@ -340,10 +340,10 @@ pub struct FileSessionCatalog {
 }
 
 impl FileSessionCatalog {
-    /// The session directory under the workspace root: `<root>/.shirley/sessions`.
+    /// `root` is an application state directory, not the source workspace.
     pub fn new(root: impl AsRef<Path>) -> Self {
         Self {
-            dir: root.as_ref().join(".shirley").join("sessions"),
+            dir: root.as_ref().join("sessions"),
         }
     }
 
@@ -396,7 +396,7 @@ impl FileSessionCatalog {
         base
     }
 
-    /// Migrate the old single-file log: if `<root>/.shirley/session.jsonl` exists and there is currently
+    /// Adopt the old single-file log: if `<state>/session.jsonl` exists and there is currently
     /// no session yet, adopt it as the first session. Called only once at startup.
     ///
     /// This way upgrading to the multi-session layout does not lose the user's existing conversation (the old version had only one log).
@@ -799,7 +799,7 @@ mod tests {
     #[test]
     fn catalog_adopts_legacy_single_file() {
         let dir = tmp_dir("legacy");
-        let shirley = dir.join(".shirley");
+        let shirley = dir.clone();
         std::fs::create_dir_all(&shirley).unwrap();
         let legacy = shirley.join("session.jsonl");
         std::fs::write(

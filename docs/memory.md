@@ -155,10 +155,10 @@ lands in the workspace root. Each root has the same directory structure.
 ├── procedures/                     # procedural memory: behavior flows ("X first, then Y")
 └── facts/                          # semantic facts (profile / cross-project knowledge)
 
-<root>/.shirley/memory/             # project domain: specific to the current workspace (travels with the repo, isolated per workspace)
+<config_dir>/shirley/workspaces/<workspace-id>/memory/             # project domain: specific to the current workspace (stored globally, isolated per workspace)
 ├── core.md / index.md / vectors.json
 ├── episodic/ preferences/ procedures/ facts/
-<root>/.shirley/sessions/*.jsonl    # raw evidence layer (already present, append-only)
+<config_dir>/shirley/workspaces/<workspace-id>/sessions/*.jsonl    # raw evidence layer (already present, append-only)
 ```
 
 The semantic types align with chapter 3's three cognitive-science memory classes (episodic /

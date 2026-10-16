@@ -759,7 +759,7 @@ impl App {
         self.login.is_some()
     }
 
-    /// Override `/login`'s persistence target (defaults to the workspace `.shirley/config.toml`).
+    /// Override `/login`'s persistence target (defaults to the global config).
     /// Lets tests inject a temp path to avoid polluting the real workspace.
     #[cfg(test)]
     pub fn set_config_path(&mut self, path: impl Into<std::path::PathBuf>) {
@@ -870,7 +870,7 @@ impl App {
         }
     }
 
-    /// Persist + hot-update: write the workspace config and make the Agent immediately use the new endpoint.
+    /// Persist + hot-update: write the global config and make the Agent immediately use the new endpoint.
     fn finish_login(&mut self, flow: &LoginFlow, model: Option<String>) {
         self.command_hint = None;
         self.message_cache = None;
@@ -897,12 +897,12 @@ impl App {
             }
         }
 
-        // Persist: write the config file (read, modify, then write; other keys untouched). The workspace path by default;
+        // Persist: write the global config (read, modify, then write; other keys untouched);
         // tests can override it to a temp path (see `set_config_path`).
         let target = self
             .config_path
             .clone()
-            .unwrap_or_else(|| crate::prompt::workspace_root().join(".shirley/config.toml"));
+            .unwrap_or_else(crate::storage::config_path);
         let provider = crate::settings::ProviderSettings {
             protocol: None,
             base_url: Some(flow.base_url.clone()),
@@ -1440,7 +1440,7 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&root);
         let factory = std::sync::Arc::new(
-            crate::bootstrap::AgentFactory::assemble(root).expect("assemble factory"),
+            crate::bootstrap::AgentFactory::assemble_at(root.clone(), root.join("app-data")).expect("assemble factory"),
         );
         let built = factory.build_agent(Vec::new()).expect("build agent");
         let sessions = crate::interface::session::SessionManager::with_factory(

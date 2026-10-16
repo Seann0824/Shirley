@@ -7,8 +7,7 @@
 //! **This is an application-layer concern, not in the SDK**: the SDK only knows a single `working_dir`; "which projects
 //! I have open at once" is desktop-interface orchestration, not a base capability.
 //!
-//! Session logs still land in **each project's own** `<root>/.shirley/sessions/` (travels with the repo, migratable,
-//! gitignorable) -- the registry only records "where the project is", it does not move data inside the project.
+//! Session logs still land in **each project's own** `<config_dir>/shirley/workspaces/<workspace-id>/sessions/` (stored globally, isolated by canonical workspace path) -- the registry only records "where the project is", runtime state is resolved by `crate::storage`.
 //!
 //! # Archive semantics
 //!
@@ -28,9 +27,6 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
-
-/// Location of the global registry relative to `config_dir` (same root as global memory `shirley/memory`).
-const REGISTRY_REL: &str = "shirley/projects.json";
 
 /// Registry error. `Io` covers read/write failures, `Canonicalize` covers invalid paths (nonexistent / no permission).
 #[derive(Debug, thiserror::Error)]
@@ -101,9 +97,7 @@ fn default_name(path: &Path) -> String {
 impl ProjectRegistry {
     /// Load using the real `config_dir` (degrades to an in-memory, non-persisted empty table when `config_dir` is unavailable).
     pub fn load_default() -> Result<Self, ProjectError> {
-        let path = dirs::config_dir()
-            .map(|dir| dir.join(REGISTRY_REL))
-            .unwrap_or_else(|| PathBuf::from("shirley-projects.json"));
+        let path = crate::storage::global_root().join("projects.json");
         Self::load(path)
     }
 

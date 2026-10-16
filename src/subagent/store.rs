@@ -3,7 +3,7 @@
 //! A session's subagents are persisted **alongside** the session log, never inside it:
 //!
 //! ```text
-//! <root>/.shirley/sessions/
+//! <config_dir>/shirley/workspaces/<workspace-id>/sessions/
 //!   <session>.jsonl                 # the parent log -- still pure `Message`, untouched
 //!   <session>.agents/
 //!     index.jsonl                   # one JSON record per started/finished subagent
@@ -78,9 +78,9 @@ impl SubagentStore {
         }
     }
 
-    /// Build directly from a workspace root (`<root>/.shirley/sessions/<session>.agents`).
+    /// Build from an application state root (`<state>/sessions/<session>.agents`).
     pub fn new(root: &Path, session: &str) -> Self {
-        Self::for_session(&root.join(".shirley").join("sessions"), session)
+        Self::for_session(&root.join("sessions"), session)
     }
 
     pub fn dir(&self) -> &Path {

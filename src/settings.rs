@@ -12,8 +12,7 @@
 //! 1. Built-in defaults (protocol `ChatCompletions`, model `deepseek-v4.1-flash`,
 //!    context window `104858 >> 1`) -- consistent with the old `main.rs` behavior.
 //! 2. Global config: `<config_dir>/shirley/config.toml`.
-//! 3. Workspace config: `<workspace_root>/.shirley/config.toml`.
-//! 4. Env vars: `LOCAL_API_KEY` / `LOCAL_BASE_URL` / `LOCAL_MODELS_URL` /
+//! 3. Env vars: `LOCAL_API_KEY` / `LOCAL_BASE_URL` / `LOCAL_MODELS_URL` /
 //!    `LOCAL_MODEL` / `LOCAL_PROTOCOL` / `LOCAL_CONTEXT_WINDOW_TOKENS`.
 //!
 //! Env vars go last for compatibility with the existing `.env` habit: old users change nothing,
@@ -29,11 +28,6 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use shirley_agent_sdk::{CompressionConfig, ModelProtocol};
-
-/// The location of the global config relative to `config_dir`.
-const GLOBAL_CONFIG_REL: &str = "shirley/config.toml";
-/// The location of the workspace config relative to the workspace root.
-const WORKSPACE_CONFIG_REL: &str = ".shirley/config.toml";
 
 /// Built-in default model: consistent with the old hardcoding in `main.rs`; upgrading does not change default behavior.
 const DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
@@ -138,8 +132,9 @@ pub struct MemorySettings {
     pub curator_protocol: Option<String>,
     /// When the entry count reaches this threshold, trigger a periodic consolidation after curation (sleep learning). Default `0` = do not auto-trigger.
     pub consolidate_after_entries: Option<usize>,
-    /// **V2.5** embedding endpoint (OpenAI-compatible `POST .../embeddings`). The semantic leg of hybrid retrieval is enabled only when **all three are configured**;
-    /// if any is missing -> pure BM25 (honest degradation, never pretend there is a semantic leg).
+    /// **V2.5** embedding endpoint (OpenAI-compatible `POST .../embeddings`). Configure this
+    /// and `embedding_model` in the global config so Chat and project sessions share semantic retrieval.
+    /// Missing endpoint or model -> pure BM25; the API key is optional for local services.
     pub embedding_base_url: Option<String>,
     /// The embedding endpoint's key; defaults to treating it as "no auth" (common for local services).
     pub embedding_api_key: Option<String>,
@@ -345,7 +340,6 @@ impl Settings {
     /// `env` is the env var reader (injected for testing, does not touch global env).
     /// When `global_path` is `None`, skip the global layer (e.g. `config_dir` is unavailable).
     pub fn load(
-        workspace_root: &Path,
         global_path: Option<&Path>,
         env: &dyn Fn(&str) -> Option<String>,
     ) -> Result<Self, SettingsError> {
@@ -353,38 +347,35 @@ impl Settings {
             Some(path) => FileSettings::load_file(path)?,
             None => None,
         };
-        let workspace = FileSettings::load_file(&workspace_root.join(WORKSPACE_CONFIG_REL))?;
         let env_layer = env_layer(env);
 
         // Lowest priority first, overridden layer by layer. The file layers take their `[provider]` table; the env layer is already a table.
         let merged = merge_all([
             global.as_ref().map(|s| s.provider.clone()),
-            workspace.as_ref().map(|s| s.provider.clone()),
             Some(env_layer),
         ]);
 
-        // The compression strategy is likewise overridden layer by layer (the env layer has no such key, only the two file layers).
+        // The compression strategy is likewise overridden layer by layer (the env layer has no such key, only the global file layer).
         let mut compression = CompressionSettings::default();
-        for layer in [&global, &workspace].into_iter().flatten() {
+        for layer in [&global].into_iter().flatten() {
             compression.merge_into(layer.compression.clone());
         }
 
-        // The memory config is likewise overridden layer by layer (the env layer has no such key, only the two file layers).
+        // The memory config is likewise overridden layer by layer (the env layer has no such key, only the global file layer).
         let mut memory = MemorySettings::default();
-        for layer in [&global, &workspace].into_iter().flatten() {
+        for layer in [&global].into_iter().flatten() {
             memory.merge_into(layer.memory.clone());
         }
 
         // The subagent config is likewise overridden layer by layer (the env layer has no such key).
         let mut subagent = SubagentSettings::default();
-        for layer in [&global, &workspace].into_iter().flatten() {
+        for layer in [&global].into_iter().flatten() {
             subagent.merge_into(layer.subagent.clone());
         }
 
-        let max_steps = workspace
+        let max_steps = global
             .as_ref()
             .and_then(|s| s.runtime.max_steps)
-            .or_else(|| global.as_ref().and_then(|s| s.runtime.max_steps))
             .unwrap_or(64);
         // `max_steps == 0` is allowed and means "no execution cap" (see `RuntimeSettings`).
         Self::finalize(merged, compression, memory, subagent, max_steps)
@@ -392,8 +383,9 @@ impl Settings {
 
     /// Convenience entry point: uses the real `config_dir` and process env vars.
     pub fn load_default(workspace_root: &Path) -> Result<Self, SettingsError> {
-        let global = dirs::config_dir().map(|dir| dir.join(GLOBAL_CONFIG_REL));
-        Self::load(workspace_root, global.as_deref(), &|key| {
+        let paths = crate::storage::StoragePaths::new(crate::storage::global_root(), workspace_root)?;
+        paths.migrate()?;
+        Self::load(Some(&crate::storage::config_path()), &|key| {
             std::env::var(key).ok()
         })
     }
@@ -511,9 +503,8 @@ fn restrict_permissions(path: &Path) {
 /// Write a set of provider config into the config file (**read first, modify, then write**; only overrides the passed-in fields,
 /// leaving other keys in the file untouched). Returns the written path for the caller to report to the user.
 ///
-/// This is the persistence entry point for `/login`. The path is given by the caller: by default it is the workspace
-/// `<root>/.shirley/config.toml` (the semantics of `/login` is "which model service the current project uses",
-/// landing in the project so it travels with the project); tests can inject a temp path. For global effect, just pass a different path.
+/// Persistence entry point for `/login`. Production callers pass the shared global
+/// config path; tests can inject an isolated temporary path.
 pub fn save_provider(path: &Path, provider: ProviderSettings) -> Result<PathBuf, SettingsError> {
     let mut existing = FileSettings::load_file(path)?.unwrap_or_default();
     merge_into(&mut existing.provider, provider);
@@ -553,7 +544,7 @@ fn env_layer(env: &dyn Fn(&str) -> Option<String>) -> ProviderSettings {
 /// Layer-by-layer override: a higher-priority `Some` beats a lower-priority `Some`.
 ///
 /// Inputs are ordered **from lowest to highest priority**; `None` layers are skipped directly.
-fn merge_all(layers: [Option<ProviderSettings>; 3]) -> ProviderSettings {
+fn merge_all(layers: [Option<ProviderSettings>; 2]) -> ProviderSettings {
     let mut merged = ProviderSettings::default();
     for layer in layers.into_iter().flatten() {
         merge_into(&mut merged, layer);
@@ -622,9 +613,7 @@ mod tests {
     #[test]
     fn env_supplies_base_url_and_defaults_fill_rest() {
         let root = temp_root("env_only");
-        let settings = Settings::load(
-            &root,
-            None,
+        let settings = Settings::load(Some(&root.join("config.toml")),
             &env_of(&[("LOCAL_BASE_URL", "http://x/v1/chat/completions")]),
         )
         .unwrap();
@@ -637,11 +626,11 @@ mod tests {
     }
 
     #[test]
-    fn runtime_limit_inherits_global_overrides_per_workspace_and_allows_zero_as_unlimited() {
+    fn runtime_limit_is_global_and_allows_zero_as_unlimited() {
         let root = temp_root("runtime_budget");
         let global = root.join("global.toml");
         std::fs::write(&global, "[runtime]\nmax_steps = 128\n").unwrap();
-        let ws = root.join(".shirley");
+        let ws = root.clone();
         std::fs::create_dir_all(&ws).unwrap();
         std::fs::write(
             ws.join("config.toml"),
@@ -649,22 +638,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            Settings::load(&root, Some(&global), &env_of(&[]))
+            Settings::load(Some(&global), &env_of(&[]))
                 .unwrap()
                 .max_steps,
             128
         );
-        std::fs::write(ws.join("config.toml"), "[runtime]\nmax_steps = 12\n").unwrap();
+        std::fs::write(&global, "[runtime]\nmax_steps = 12\n").unwrap();
         assert_eq!(
-            Settings::load(&root, Some(&global), &env_of(&[]))
+            Settings::load(Some(&global), &env_of(&[]))
                 .unwrap()
                 .max_steps,
             12
         );
         // `0` is the documented "unlimited" sentinel and must be accepted (not an error).
-        std::fs::write(ws.join("config.toml"), "[runtime]\nmax_steps = 0\n").unwrap();
+        std::fs::write(&global, "[runtime]\nmax_steps = 0\n").unwrap();
         assert_eq!(
-            Settings::load(&root, Some(&global), &env_of(&[]))
+            Settings::load(Some(&global), &env_of(&[]))
                 .unwrap()
                 .max_steps,
             0
@@ -676,7 +665,7 @@ mod tests {
     fn missing_base_url_yields_unconfigured_not_error() {
         // A missing base_url is no longer an error (does not block startup), but an "unconfigured" state.
         let root = temp_root("missing");
-        let settings = Settings::load(&root, None, &env_of(&[])).unwrap();
+        let settings = Settings::load(Some(&root.join("config.toml")), &env_of(&[])).unwrap();
         assert_eq!(settings.base_url, "");
         assert!(!settings.is_configured());
         // The remaining fields still fill in defaults, so ModelConfig can still be constructed.
@@ -687,12 +676,12 @@ mod tests {
     fn present_base_url_is_configured() {
         let root = temp_root("configured");
         let settings =
-            Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+            Settings::load(Some(&root.join("config.toml")), &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
         assert!(settings.is_configured());
     }
 
     #[test]
-    fn workspace_file_overrides_global() {
+    fn only_global_file_supplies_settings() {
         let root = temp_root("ws_over_global");
         let global_dir = temp_root("global_dir");
         let global = global_dir.join("config.toml");
@@ -701,7 +690,7 @@ mod tests {
             "[provider]\nbase_url = \"http://global\"\nmodel = \"g-model\"\n",
         )
         .unwrap();
-        let ws_dir = root.join(".shirley");
+        let ws_dir = root.clone();
         std::fs::create_dir_all(&ws_dir).unwrap();
         std::fs::write(
             ws_dir.join("config.toml"),
@@ -709,16 +698,16 @@ mod tests {
         )
         .unwrap();
 
-        let settings = Settings::load(&root, Some(&global), &env_of(&[])).unwrap();
-        // The workspace overrides base_url; the global model is retained.
-        assert_eq!(settings.base_url, "http://workspace");
+        let settings = Settings::load(Some(&global), &env_of(&[])).unwrap();
+        // Only the global file is read; the unrelated file cannot override it.
+        assert_eq!(settings.base_url, "http://global");
         assert_eq!(settings.model, "g-model");
     }
 
     #[test]
     fn env_overrides_files() {
         let root = temp_root("env_over_file");
-        let ws_dir = root.join(".shirley");
+        let ws_dir = root.clone();
         std::fs::create_dir_all(&ws_dir).unwrap();
         std::fs::write(
             ws_dir.join("config.toml"),
@@ -726,9 +715,7 @@ mod tests {
         )
         .unwrap();
 
-        let settings = Settings::load(
-            &root,
-            None,
+        let settings = Settings::load(Some(&root.join("config.toml")),
             &env_of(&[
                 ("LOCAL_BASE_URL", "http://env"),
                 ("LOCAL_MODEL", "env-model"),
@@ -744,14 +731,14 @@ mod tests {
     #[test]
     fn parses_provider_table_from_file() {
         let root = temp_root("parse_table");
-        let ws_dir = root.join(".shirley");
+        let ws_dir = root.clone();
         std::fs::create_dir_all(&ws_dir).unwrap();
         std::fs::write(
             ws_dir.join("config.toml"),
             "[provider]\nprotocol = \"responses\"\nbase_url = \"http://x\"\ncontext_window_tokens = 128000\n",
         )
         .unwrap();
-        let settings = Settings::load(&root, None, &env_of(&[])).unwrap();
+        let settings = Settings::load(Some(&root.join("config.toml")), &env_of(&[])).unwrap();
         assert_eq!(settings.protocol, ModelProtocol::Responses);
         assert_eq!(settings.context_window_tokens, 128000);
     }
@@ -759,23 +746,21 @@ mod tests {
     #[test]
     fn unknown_key_is_rejected() {
         let root = temp_root("unknown_key");
-        let ws_dir = root.join(".shirley");
+        let ws_dir = root.clone();
         std::fs::create_dir_all(&ws_dir).unwrap();
         std::fs::write(
             ws_dir.join("config.toml"),
             "[provider]\nbase_url = \"http://x\"\nbas_url = \"typo\"\n",
         )
         .unwrap();
-        let err = Settings::load(&root, None, &env_of(&[])).unwrap_err();
+        let err = Settings::load(Some(&root.join("config.toml")), &env_of(&[])).unwrap_err();
         assert!(matches!(err, SettingsError::Parse { .. }), "a typo'd key should error: {err}");
     }
 
     #[test]
     fn zero_context_window_is_rejected() {
         let root = temp_root("zero_ctx");
-        let err = Settings::load(
-            &root,
-            None,
+        let err = Settings::load(Some(&root.join("config.toml")),
             &env_of(&[
                 ("LOCAL_BASE_URL", "http://x"),
                 ("LOCAL_CONTEXT_WINDOW_TOKENS", "0"),
@@ -788,9 +773,7 @@ mod tests {
     #[test]
     fn unknown_protocol_is_rejected() {
         let root = temp_root("bad_proto");
-        let err = Settings::load(
-            &root,
-            None,
+        let err = Settings::load(Some(&root.join("config.toml")),
             &env_of(&[("LOCAL_BASE_URL", "http://x"), ("LOCAL_PROTOCOL", "gemini")]),
         )
         .unwrap_err();
@@ -800,7 +783,7 @@ mod tests {
     #[test]
     fn save_provider_preserves_other_keys() {
         let root = temp_root("save_preserve");
-        let path = root.join(".shirley/config.toml");
+        let path = root.join("config.toml");
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         // Pre-set a models_url (not overridden this time).
         std::fs::write(
@@ -847,7 +830,7 @@ mod tests {
     #[test]
     fn saved_provider_round_trips_through_load() {
         let root = temp_root("save_roundtrip");
-        let path = root.join(".shirley/config.toml");
+        let path = root.join("config.toml");
         save_provider(
             &path,
             ProviderSettings {
@@ -857,7 +840,7 @@ mod tests {
             },
         )
         .unwrap();
-        let settings = Settings::load(&root, None, &env_of(&[])).unwrap();
+        let settings = Settings::load(Some(&root.join("config.toml")), &env_of(&[])).unwrap();
         assert_eq!(settings.base_url, "http://saved");
         assert_eq!(settings.model, "m");
     }
@@ -865,16 +848,16 @@ mod tests {
     #[test]
     fn empty_file_is_empty_layer() {
         let root = temp_root("empty_file");
-        let ws_dir = root.join(".shirley");
+        let ws_dir = root.clone();
         std::fs::create_dir_all(&ws_dir).unwrap();
         std::fs::write(ws_dir.join("config.toml"), "   \n").unwrap();
         let settings =
-            Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+            Settings::load(Some(&root.join("config.toml")), &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
         assert_eq!(settings.base_url, "http://x");
     }
 
     #[test]
-    fn memory_table_parses_and_merges() {
+    fn memory_settings_come_from_global_file() {
         let root = temp_root("memory_table");
         let global_dir = temp_root("memory_global");
         let global = global_dir.join("config.toml");
@@ -883,7 +866,7 @@ mod tests {
             "[memory]\ncurator_model = \"g-curator\"\nconsolidate_after_entries = 10\n",
         )
         .unwrap();
-        let ws_dir = root.join(".shirley");
+        let ws_dir = root.clone();
         std::fs::create_dir_all(&ws_dir).unwrap();
         std::fs::write(
             ws_dir.join("config.toml"),
@@ -891,18 +874,52 @@ mod tests {
         )
         .unwrap();
 
-        let settings = Settings::load(&root, Some(&global), &env_of(&[])).unwrap();
-        // The workspace overrides curator_model; the global consolidate_after_entries is retained.
-        assert_eq!(settings.memory.curator_model.as_deref(), Some("ws-curator"));
-        assert_eq!(settings.memory.curator_base_url.as_deref(), Some("http://c"));
+        let settings = Settings::load(Some(&global), &env_of(&[])).unwrap();
+        // All memory settings come from the global file.
+        assert_eq!(settings.memory.curator_model.as_deref(), Some("g-curator"));
+        assert_eq!(settings.memory.curator_base_url, None);
         assert_eq!(settings.memory.consolidate_after_entries, Some(10));
+    }
+
+    #[test]
+    fn global_embedding_is_inherited_by_chat_and_project_workspaces() {
+        let root = temp_root("global_embedding_inheritance");
+        let global = root.join("global.toml");
+        std::fs::write(
+            &global,
+            "[memory]\nembedding_base_url = \"http://localhost:11434/v1/embeddings\"\nembedding_model = \"nomic-embed-text\"\n",
+        )
+        .unwrap();
+        let chat = root.join("chat");
+        let project = root.join("project");
+        std::fs::create_dir_all(&chat).unwrap();
+        std::fs::create_dir_all(project.join(".shirley")).unwrap();
+        // Project-specific curator settings must not erase global embedding settings.
+        std::fs::write(
+            project.join(".shirley/config.toml"),
+            "[memory]\ncurator_model = \"project-curator\"\n",
+        )
+        .unwrap();
+        for _workspace in [&chat, &project] {
+            let settings = Settings::load(Some(&global), &env_of(&[])).unwrap();
+            assert_eq!(
+                settings.memory.embedding_base_url.as_deref(),
+                Some("http://localhost:11434/v1/embeddings")
+            );
+            assert_eq!(
+                settings.memory.embedding_model.as_deref(),
+                Some("nomic-embed-text")
+            );
+            assert_eq!(settings.memory.embedding_api_key, None);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn memory_table_absent_is_default() {
         let root = temp_root("memory_absent");
         let settings =
-            Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+            Settings::load(Some(&root.join("config.toml")), &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
         assert_eq!(settings.memory, MemorySettings::default());
     }
 
@@ -910,7 +927,7 @@ mod tests {
     fn thinking_defaults_to_true_and_effort_to_low() {
         let root = temp_root("thinking_default");
         let settings =
-            Settings::load(&root, None, &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+            Settings::load(Some(&root.join("config.toml")), &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
         assert!(settings.thinking, "default should enable thinking");
         assert_eq!(settings.reasoning_effort, "low");
         assert_eq!(settings.extra_body, None);
@@ -919,7 +936,7 @@ mod tests {
     #[test]
     fn thinking_and_extra_body_parse_from_provider_table() {
         let root = temp_root("thinking_extra");
-        let ws_dir = root.join(".shirley");
+        let ws_dir = root.clone();
         std::fs::create_dir_all(&ws_dir).unwrap();
         std::fs::write(
             ws_dir.join("config.toml"),
@@ -927,7 +944,7 @@ mod tests {
         )
         .unwrap();
 
-        let settings = Settings::load(&root, None, &env_of(&[])).unwrap();
+        let settings = Settings::load(Some(&root.join("config.toml")), &env_of(&[])).unwrap();
         assert!(!settings.thinking, "thinking should be configured to false");
         assert_eq!(settings.reasoning_effort, "high");
         assert_eq!(

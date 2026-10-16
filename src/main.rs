@@ -9,6 +9,7 @@ mod prompt;
 mod prompt_template;
 mod session;
 mod settings;
+mod storage;
 mod subagent;
 mod skills;
 mod todo;
@@ -43,6 +44,14 @@ async fn main() -> Result<(), AgentError> {
 
     // Workspace root: decides "which project this run is for", and is the source of workspace-level config.
     let working_dir = prompt::workspace_root();
+
+    // Move legacy project-local state before any session files are opened.
+    let migrated = storage::migrate_all(&working_dir)
+        .map_err(|error| AgentError::Other(Box::new(error)))?;
+    if std::env::args().any(|arg| arg == "--migrate-data") {
+        println!("Migrated {migrated} legacy workspaces into {}", storage::global_root().display());
+        return Ok(());
+    }
 
     // Application assembly (config / model catalog / tools / sessions / Agent) — shared by both interfaces.
     let factory = bootstrap::AgentFactory::assemble(working_dir)?;

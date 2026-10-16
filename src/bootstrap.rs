@@ -14,7 +14,7 @@
 //! tool definitions are reused by the factory; `todo` / session logs are isolated per instance inside `Agent::new`),
 //! thereby supporting parallel sessions.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use shirley_agent_sdk::{
@@ -90,27 +90,18 @@ pub struct AgentFactory {
     subagent_default_timeout_ms: u64,
 }
 
-/// The location of global memory relative to `config_dir` (cross-project).
-const GLOBAL_MEMORY_REL: &str = "shirley/memory";
-/// The location of workspace memory relative to the workspace root (travels with the repo).
-const WORKSPACE_MEMORY_REL: &str = ".shirley/memory";
-
-/// Memory root dirs: `[global, workspace]`. When `config_dir` is unavailable, degrades to workspace-only.
-fn memory_roots(working_dir: &Path) -> Vec<PathBuf> {
-    let mut roots = Vec::new();
-    if let Some(config_dir) = dirs::config_dir() {
-        roots.push(config_dir.join(GLOBAL_MEMORY_REL));
-    }
-    roots.push(working_dir.join(WORKSPACE_MEMORY_REL));
-    roots
-}
-
 impl AgentFactory {
     /// Assemble all runtime dependencies. The working dir is decided by [`crate::prompt::workspace_root`].
     pub fn assemble(working_dir: PathBuf) -> Result<Self, AgentError> {
-        // Config loading (Plan A): priority `built-in defaults < global config.toml < workspace
-        // .shirley/config.toml < env vars`.
-        let settings = Settings::load_default(&working_dir)
+        Self::assemble_at(working_dir, crate::storage::global_root())
+    }
+
+    /// Explicit application-data root for isolated tests and assembly.
+    pub(crate) fn assemble_at(working_dir: PathBuf, global_root: PathBuf) -> Result<Self, AgentError> {
+        let paths = crate::storage::StoragePaths::new(global_root, &working_dir)
+            .map_err(|error| AgentError::Other(Box::new(error)))?;
+        paths.migrate().map_err(|error| AgentError::Other(Box::new(error)))?;
+        let settings = Settings::load(Some(&paths.global.join("config.toml")), &|key| std::env::var(key).ok())
             .map_err(|error| AgentError::Other(Box::new(error)))?;
         let needs_login = !settings.is_configured();
 
@@ -145,8 +136,8 @@ impl AgentFactory {
         // Compression strategy: if config does not specify it, follow the SDK default (`CompressionConfig::default`).
         let compression_config = settings.compression.to_sdk();
 
-        // Session persistence: multi-session layout `<root>/.shirley/sessions/<name>.jsonl`.
-        let file_catalog = session::FileSessionCatalog::new(&working_dir);
+        // All runtime data lives globally; canonical project identity isolates sessions.
+        let file_catalog = session::FileSessionCatalog::new(&paths.state);
         file_catalog
             .adopt_legacy()
             .map_err(|error| AgentError::Other(Box::new(error)))?;
@@ -200,7 +191,7 @@ impl AgentFactory {
             model_catalog,
             session_catalog,
             needs_login,
-            memory_roots: memory_roots(&working_dir),
+            memory_roots: paths.memory_roots(),
             curator_model_config,
             consolidate_after_entries: settings.memory.consolidate_after_entries.unwrap_or(0),
             embedder,
@@ -477,7 +468,7 @@ impl AgentFactory {
 
     /// The session log dir (for the curator's evidence verification).
     fn sessions_dir(&self) -> PathBuf {
-        self.working_dir.join(".shirley").join("sessions")
+        self.session_catalog.storage_dir().expect("factory catalog has a session storage directory")
     }
 }
 
@@ -701,7 +692,7 @@ pub(crate) mod test_support {
             model_catalog: Arc::new(StaticCatalog::builtin()) as Arc<dyn ModelCatalog>,
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
             needs_login: false,
-            memory_roots: vec![root.join(".shirley/memory")],
+            memory_roots: vec![root.join("memory")],
             curator_model_config: None,
             consolidate_after_entries: 0,
             embedder: None,
@@ -749,7 +740,7 @@ mod tests {
             model_catalog: Arc::new(StaticCatalog::builtin()) as Arc<dyn ModelCatalog>,
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
             needs_login: false,
-            memory_roots: vec![root.join(".shirley/memory")],
+            memory_roots: vec![root.join("memory")],
             curator_model_config: None,
             consolidate_after_entries: 0,
             embedder: None,
@@ -759,6 +750,32 @@ mod tests {
             subagent_default_tools: None,
             subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
         }
+    }
+
+    #[test]
+    fn global_storage_restores_legacy_sessions_and_project_memory() {
+        let root = std::env::temp_dir().join(format!("shirley-global-migration-{}", std::process::id()));
+        let workspace = root.join("repo");
+        let legacy = workspace.join(".shirley");
+        std::fs::create_dir_all(legacy.join("sessions")).unwrap();
+        std::fs::create_dir_all(legacy.join("memory/facts")).unwrap();
+        let message = Message::User { content: "existing conversation".into() };
+        std::fs::write(legacy.join("sessions/existing.jsonl"), format!("{}\n", serde_json::to_string(&message).unwrap())).unwrap();
+        std::fs::write(legacy.join("sessions/existing.title"), "Existing title").unwrap();
+        std::fs::write(legacy.join("memory/facts/project.md"), "---\nid: fact-project\ntype: fact\ndomain: project\nsubject: project\ncreated_at: 2026-10-16\nstatus: active\nconfidence: high\nsource:\n  - session: existing.jsonl#turn:1\n---\n\nExisting project fact.\n").unwrap();
+        let factory = AgentFactory::assemble_at(workspace.clone(), root.join("global")).unwrap();
+        let sessions = factory.session_catalog.list().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].label, "Existing title");
+        assert_eq!(sessions[0].preview, "existing conversation");
+        assert!(factory.sessions_dir().starts_with(root.join("global")));
+        assert!(factory.memory_store().list_entries().unwrap().iter().any(|(_, entry)| entry.id == "fact-project"));
+        let messages = factory.session_catalog.open("existing").unwrap().load().unwrap();
+        assert_eq!(serde_json::to_value(messages).unwrap(), serde_json::to_value(vec![message]).unwrap());
+        assert!(!legacy.exists());
+        let _ = AgentFactory::assemble_at(workspace, root.join("global")).unwrap();
+        assert!(!legacy.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

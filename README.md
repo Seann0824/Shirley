@@ -18,16 +18,40 @@ cp .env.example .env   # create it yourself using the keys documented in .env
 cargo run
 ```
 
-Configuration comes from four layers, each overriding the previous one field by field:
+Configuration comes from three layers, each overriding the previous one field by field:
 
 1. built-in defaults (protocol, model, context window)
 2. global `<config_dir>/shirley/config.toml`
-3. workspace `<root>/.shirley/config.toml`
-4. environment variables (`LOCAL_*`)
+3. environment variables (`LOCAL_*`)
 
-A layer only speaks for the keys it actually sets — anything omitted falls through to the layer below. That is why overriding just `model` in the workspace config still inherits `base_url` from the global one.
+A layer only speaks for the keys it actually sets — anything omitted falls through to the layer below. All chats and projects read the same global configuration. `/login` saves there too.
 
-![Shirley configuration structure](docs/assets/config-resolution.en.svg)
+Configure memory embeddings in the **global** config so ordinary Chat and project
+sessions inherit the same semantic retrieval settings. On macOS this file is
+`~/Library/Application Support/shirley/config.toml`:
+
+```toml
+[memory]
+embedding_base_url = "http://localhost:11434/v1/embeddings"
+embedding_model = "nomic-embed-text"
+# embedding_api_key = "..." # only when the service requires authentication
+```
+
+The embedding service must be running. Restart Shirley after changing these settings,
+since loaded chat/project runtimes retain their embedding client.
+
+All mutable application data lives under `<config_dir>/shirley/` (macOS:
+`~/Library/Application Support/shirley/`). `config.toml`, `projects.json` and personal
+`memory/` are shared globally. Each canonical workspace path maps to
+`workspaces/<workspace-id>/`, containing its `sessions/`, subagent transcripts, project
+`memory/` and a `workspace.json` identity record. Ordinary Chat uses the same storage rule.
+
+Existing project `.shirley/` directories are migrated on startup, including archived
+projects registered with Shirley. Missing global settings are imported once; existing
+global values win. Original project configs are retained as `legacy-config.toml` in the
+global workspace state directory. Divergent same-path files cause an error and are
+preserved rather than overwritten. Run `cargo run --features desktop -- --migrate-data`
+to migrate without opening a chat. See [global storage](docs/storage.md).
 
 The easiest path is to put it in `.env`:
 
@@ -78,7 +102,7 @@ LOCAL_MODEL=deepseek-chat
 LOCAL_API_KEY=sk-...
 ```
 
-The same three, written as a config file (`<root>/.shirley/config.toml` or `<config_dir>/shirley/config.toml`):
+The same three, written in the global config file (`<config_dir>/shirley/config.toml`):
 
 ```toml
 # Chat Completions
@@ -108,7 +132,7 @@ api_key = "sk-..."
 
 Protocol differences are absorbed entirely by the adapter layer — the `Message` model and the rest of the SDK are protocol-agnostic. See [`docs/adapter-layer.md`](docs/adapter-layer.md) and the per-protocol notes in [`docs/`](docs/).
 
-To change the protocol, edit `LOCAL_PROTOCOL` or the config file and restart. The TUI's `/login` can update `base_url` / `api_key` / `model` at runtime (writing the workspace config), and `/model` swaps the model name — but the protocol itself is set at startup.
+To change the protocol, edit `LOCAL_PROTOCOL` or the global config file and restart. The TUI's `/login` can update `base_url` / `api_key` / `model` at runtime (writing the global config), and `/model` swaps the model name — but the protocol itself is set at startup.
 
 ## Build and test
 

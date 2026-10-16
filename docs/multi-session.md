@@ -242,7 +242,7 @@ factory reuses the same `ModelConfig` / tool registration / system prompt / work
 compression instruction:
 
 - `assemble` returns **the factory + the shared `session_catalog`** (now `session_catalog` is already
-  `Arc`-shared, with TUI / desktop reading the same `<root>/.shirley/sessions`).
+  `Arc`-shared, with TUI / desktop reading the same `<config_dir>/shirley/workspaces/<workspace-id>/sessions`).
 - The factory must **create a new `ToolManager` and re-register tools each time** (`ToolManager` is not
   `Clone`), but the `on_register` hooks (such as `web_search`'s credential injection) run once each --
   acceptable, because state is isolated per tool instance anyway.

@@ -326,7 +326,7 @@ which is the P0 default. The child can still use bash / read / todo etc.
 **Decision 9: the parent session JSONL format is **unchanged**; subagent goes to an independent
 sidecar.**
 
-Status quo (`src/session.rs`): `.shirley/sessions/<name>.jsonl` has one `Message` per line
+Status quo (`src/session.rs`): `<state>/sessions/<name>.jsonl` has one `Message` per line
 (`serde(tag="role")`), and `load()` does **line-by-line `serde_json::from_str::<Message>`**.
 
 If subagent events were stuffed into the same line stream as the parent JSONL, it would **break
@@ -339,7 +339,7 @@ pure Message stream", and the `truncate` (rewind) semantics would have to be red
 into two layers:
 
 ```
-.shirley/sessions/
+<state>/sessions/
 ├── <session>.jsonl            # parent session: still pure Message lines (unchanged, zero breakage)
 ├── <session>.title
 └── <session>.agents/

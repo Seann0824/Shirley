@@ -6,8 +6,8 @@
 //! register multiple workspaces as "projects", each with its own sessions. The
 //! registry ([`ProjectRegistry`]) only records "where the project is", persisted to
 //! `<config_dir>/shirley/projects.json`; **one [`AgentFactory`] per project** (each
-//! reading that project's `<root>/.shirley/config.toml`), and session logs still go
-//! to each project's own `<root>/.shirley/sessions/` (traveling with the repo).
+//! reading the shared global `config.toml`), and session logs still go
+//! to each project's own `<config_dir>/shirley/workspaces/<workspace-id>/sessions/` (stored globally).
 //!
 //! "Remove project" = **archive**: only sets the `archived` flag, never deletes disk
 //! data, and can be restored from the archive list.
@@ -54,15 +54,13 @@ const EVENT_NAME: &str = "agent://event";
 /// reuses the same project-scoped commands (`agent_send` / `agent_subscribe` /
 /// `agent_list_sessions` ...). It never enters [`ProjectRegistry`], so it never shows
 /// up in the project list; sessions land in
-/// `<config_dir>/shirley/chat/.shirley/sessions/` (same root as global memory, not
+/// `<config_dir>/shirley/workspaces/<chat-workspace-id>/sessions/` (same root as global memory, not
 /// bound to a repo).
 const CHAT_PROJECT_ID: &str = "__chat__";
 
 /// Chat mode workspace root: `<config_dir>/shirley/chat`. Falls back to a temp dir when `config_dir` is unavailable.
 fn chat_root() -> PathBuf {
-    dirs::config_dir()
-        .map(|dir| dir.join("shirley").join("chat"))
-        .unwrap_or_else(|| std::env::temp_dir().join("shirley-chat"))
+    crate::storage::global_root().join("chat")
 }
 
 /// Runtime for a single project: one assembled factory + its multi-session orchestrator.
@@ -174,7 +172,7 @@ async fn ensure_runtime(
     }
     // Chat mode: the pseudo project bypasses the registry and assembles a runtime
     // directly from `<config_dir>/shirley/chat`. This lets all project-scoped commands
-    // be reused unchanged (session logs also land in that directory's `.shirley`).
+    // be reused unchanged (session logs use its globally resolved workspace state).
     if project == CHAT_PROJECT_ID {
         let root = chat_root();
         let runtime = tauri::async_runtime::spawn_blocking(move || {
@@ -1066,7 +1064,7 @@ async fn agent_delete_session(
 /// Move a session to another project (cross-project session log migration).
 ///
 /// Semantics: move the source session's `<name>.jsonl` and `<name>.title` from the
-/// source project's `<root>/.shirley/sessions` to the same path under the target
+/// source project's `<config_dir>/shirley/workspaces/<workspace-id>/sessions` to the same path under the target
 /// project, and have the source `SessionManager` forget it (rejected while running).
 /// **Does not auto-switch to the target session** — avoiding an unexpected jump that
 /// interrupts the user.
@@ -1346,7 +1344,9 @@ mod tests {
         let root = tmp_root("resume_latest");
         let _ = std::fs::remove_dir_all(&root);
 
-        let catalog = FileSessionCatalog::new(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let paths = crate::storage::StoragePaths::new(root.join("app-data"), &root).unwrap();
+        let catalog = FileSessionCatalog::new(&paths.state);
         let (older, older_store) = catalog.create_named(Some("older session")).unwrap();
         older_store
             .append(&Message::User {
@@ -1362,7 +1362,7 @@ mod tests {
             })
             .unwrap();
 
-        let factory = Arc::new(AgentFactory::assemble(root.clone()).unwrap());
+        let factory = Arc::new(AgentFactory::assemble_at(root.clone(), root.join("app-data")).unwrap());
         let runtime = runtime_from_factory(factory).unwrap();
 
         assert_eq!(
@@ -1384,13 +1384,14 @@ mod tests {
         let root = tmp_root("resume_empty");
         let _ = std::fs::remove_dir_all(&root);
 
-        let factory = Arc::new(AgentFactory::assemble(root.clone()).unwrap());
-        let runtime = runtime_from_factory(factory).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        let factory = Arc::new(AgentFactory::assemble_at(root.clone(), root.join("app-data")).unwrap());
+        let runtime = runtime_from_factory(factory.clone()).unwrap();
 
         assert!(runtime.sessions.active_name().is_some(), "an empty session should be opened");
         // The lazy session is not persisted yet: there should be no jsonl in the session directory.
         assert!(
-            FileSessionCatalog::new(&root).list().unwrap().is_empty(),
+            factory.session_catalog.list().unwrap().is_empty(),
             "a lazy empty session should not be persisted immediately"
         );
 
