@@ -11,7 +11,6 @@ import { ImageHoverPreview } from "@/components/ImageHoverPreview";
 import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
-import { PluginsPage } from "@/components/ai/PluginsPage";
 import { NewChatControls } from "@/components/ai/NewChatControls";
 import { AiConversationSkeleton } from "@/components/ai/AiConversationSkeleton";
 import { AiConversationMinimap } from "@/components/ai/AiConversationMinimap";
@@ -247,9 +246,6 @@ export function App() {
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState<string | null>(null);
-  // Top-level view: the chat surface (Home) or the Plugins page. A UI-only switch
-  // (no routing); the chat state stays mounted-independent so switching back is instant.
-  const [activeView, setActiveView] = useState<"chat" | "plugins">("chat");
   const [input, setInput] = useState("");
   const [references, setReferences] = useState<FileReference[]>([]);
   // "Edit the last user message and resend" mode: which session view + which message id
@@ -1164,20 +1160,13 @@ export function App() {
       onBack={() => void navigateHistory(-1)}
       onForward={() => void navigateHistory(1)}
       onToggleSidebar={toggleSidebar}
-      activeView={activeView}
       onHome={() => {
-        setActiveView("chat");
         setSidebarCollapsed(false);
         writeBool(SIDEBAR_STORAGE_KEY, false);
       }}
-      onPlugins={() => setActiveView("plugins")}
       onNewChat={() => activeProject ? void newSession(activeProject) : void addProject()}
       onAddProject={() => void addProject()}
     >
-      {activeView === "plugins" ? (
-        <PluginsPage />
-      ) : (
-        <>
       {/* Left sidebar: NewChat / pinned / projects (multi-project + session navigation). */}
       <SessionSidebar
         collapsed={sidebarCollapsed}
@@ -1283,8 +1272,6 @@ export function App() {
           />
         )}
       </main>
-        </>
-      )}
       </DesktopChrome>
     </>
   );

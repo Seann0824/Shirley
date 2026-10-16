@@ -236,81 +236,6 @@ struct SkillEntryWire {
     description: String,
 }
 
-/// Plugin source descriptor consumed by the frontend (aligned with `PluginSource` in
-/// `web/src/lib/bridge.ts`). Mirrors `crate::plugins::model::PluginSource` but stays
-/// a separate DTO at the boundary (the app-layer model may evolve independently).
-#[derive(Debug, Clone, Serialize)]
-struct PluginSourceWire {
-    id: String,
-    name: String,
-    description: String,
-    kind: &'static str,
-    url: String,
-    homepage: Option<String>,
-    format: &'static str,
-    large: bool,
-}
-
-impl From<crate::plugins::PluginSource> for PluginSourceWire {
-    fn from(source: crate::plugins::PluginSource) -> Self {
-        Self {
-            id: source.id,
-            name: source.name,
-            description: source.description,
-            kind: source_kind_str(source.kind),
-            url: source.url,
-            homepage: source.homepage,
-            format: source_format_str(source.format),
-            large: source.large,
-        }
-    }
-}
-
-/// Normalized plugin entry consumed by the frontend (aligned with `PluginEntry` in
-/// `web/src/lib/bridge.ts`).
-#[derive(Debug, Clone, Serialize)]
-struct PluginEntryWire {
-    source_id: String,
-    name: String,
-    description: String,
-    author: Option<String>,
-    category: Option<String>,
-    source: Option<String>,
-    homepage: Option<String>,
-}
-
-impl From<crate::plugins::PluginEntry> for PluginEntryWire {
-    fn from(entry: crate::plugins::PluginEntry) -> Self {
-        Self {
-            source_id: entry.source_id,
-            name: entry.name,
-            description: entry.description,
-            author: entry.author,
-            category: entry.category,
-            source: entry.source,
-            homepage: entry.homepage,
-        }
-    }
-}
-
-fn source_kind_str(kind: crate::plugins::PluginSourceKind) -> &'static str {
-    use crate::plugins::PluginSourceKind::*;
-    match kind {
-        ClaudeMarketplace => "claude_marketplace",
-        DshRegistry => "dsh_registry",
-        McpRegistry => "mcp_registry",
-    }
-}
-
-fn source_format_str(format: crate::plugins::SourceFormat) -> &'static str {
-    use crate::plugins::SourceFormat::*;
-    match format {
-        ClaudeMarketplaceJson => "claude_marketplace_json",
-        DshRegistryJson => "dsh_registry_json",
-        McpRegistryJson => "mcp_registry_json",
-    }
-}
-
 /// Project entry consumed by the frontend (aligned with `ProjectEntry` in `web/src/lib/bridge.ts`).
 #[derive(Debug, Clone, Serialize)]
 struct ProjectEntryWire {
@@ -1034,32 +959,6 @@ async fn agent_activate_skill(
         })
 }
 
-/// List the registered plugin download sources (the *catalog of catalogs*).
-///
-/// Pure metadata: reads the static registry, touches no network. The frontend
-/// renders these as the "sources" list; fetching one is a separate command.
-#[tauri::command]
-async fn agent_list_plugin_sources() -> Result<Vec<PluginSourceWire>, String> {
-    Ok(crate::plugins::registry()
-        .into_iter()
-        .map(PluginSourceWire::from)
-        .collect())
-}
-
-/// Fetch one plugin source's index and return its normalized, capped entry list.
-///
-/// `limit` caps the number of entries returned (0/None -> the default cap). This
-/// is the **real** download-source integration: it GETs the marketplace index
-/// and parses it. Downloading/installing the plugins themselves is a later phase.
-#[tauri::command]
-async fn agent_fetch_plugin_source(
-    source_id: String,
-    limit: Option<usize>,
-) -> Result<Vec<PluginEntryWire>, String> {
-    let entries = crate::plugins::fetch_source(&source_id, limit).await?;
-    Ok(entries.into_iter().map(PluginEntryWire::from).collect())
-}
-
 /// List all sessions of a project (most recently modified first).
 #[tauri::command]
 async fn agent_list_sessions(
@@ -1388,8 +1287,6 @@ pub fn run(factory: AgentFactory) -> std::io::Result<()> {
             agent_search_files,
             agent_list_skills,
             agent_activate_skill,
-            agent_list_plugin_sources,
-            agent_fetch_plugin_source,
             agent_list_sessions,
             agent_current_session,
             agent_new_session,
