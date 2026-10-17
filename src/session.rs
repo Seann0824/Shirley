@@ -12,11 +12,13 @@
 //! Persistence timing is driven by the application layer: when `Session::apply_event` receives the SDK's `MessageAdded` event it
 //! calls [`SessionStore::append`] (the SDK only emits events, never persists).
 
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use serde::{Deserialize, Serialize};
 use shirley_agent_sdk::Message;
 
 /// Storage abstraction for session logs.
@@ -339,6 +341,37 @@ pub struct FileSessionCatalog {
     dir: PathBuf,
 }
 
+/// The version stamped into `index.json`; a mismatch is treated as an empty cache (full recompute).
+const INDEX_VERSION: u32 = 1;
+
+/// A single cached session summary inside `index.json`.
+///
+/// Mirrors the `SessionEntry` fields that are expensive to recompute (reading the whole `.jsonl`
+/// to derive `preview` / `turns`). `label` is **not** cached-authoritative: it is re-read from the
+/// tiny `.title` sidecar every `list()` so `rename` takes effect immediately.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct CachedEntry {
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    label: String,
+    #[serde(default)]
+    preview: String,
+    #[serde(default)]
+    modified_ms: u64,
+    #[serde(default)]
+    turns: usize,
+}
+
+/// On-disk `index.json`: a best-effort cache of session summaries, keyed by name on load.
+#[derive(Debug, Serialize, Deserialize)]
+struct SessionIndex {
+    #[serde(default)]
+    version: u32,
+    #[serde(default)]
+    sessions: Vec<CachedEntry>,
+}
+
 impl FileSessionCatalog {
     /// `root` is an application state directory, not the source workspace.
     pub fn new(root: impl AsRef<Path>) -> Self {
@@ -396,6 +429,59 @@ impl FileSessionCatalog {
         base
     }
 
+    /// Path to the cache file: `<dir>/index.json` (same directory as the `*.jsonl` / `*.title`).
+    fn index_path(&self) -> PathBuf {
+        self.dir.join("index.json")
+    }
+
+    /// Load the cache as a `name -> CachedEntry` map. Missing / unreadable / wrong-version /
+    /// malformed all degrade to an **empty map** (full recompute) -- a broken cache must never
+    /// make `list()` fail.
+    fn load_index(&self) -> HashMap<String, CachedEntry> {
+        let Ok(text) = std::fs::read_to_string(self.index_path()) else {
+            return HashMap::new();
+        };
+        let Ok(index) = serde_json::from_str::<SessionIndex>(&text) else {
+            return HashMap::new();
+        };
+        if index.version != INDEX_VERSION {
+            return HashMap::new();
+        }
+        index
+            .sessions
+            .into_iter()
+            .map(|entry| (entry.name.clone(), entry))
+            .collect()
+    }
+
+    /// Best-effort atomic write of the cache: write a unique temp file then rename over
+    /// `index.json`. Any failure is swallowed (the cache is only an optimization).
+    fn write_index(&self, sessions: &[CachedEntry]) {
+        if std::fs::create_dir_all(&self.dir).is_err() {
+            return;
+        }
+        let index = SessionIndex {
+            version: INDEX_VERSION,
+            sessions: sessions.to_vec(),
+        };
+        let Ok(json) = serde_json::to_string(&index) else {
+            return;
+        };
+        // A per-call unique suffix avoids concurrent writers clobbering each other's temp file.
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let tmp = self.dir.join(format!("index.json.{}.{}.tmp", std::process::id(), unique));
+        if std::fs::write(&tmp, json).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+            return;
+        }
+        if std::fs::rename(&tmp, self.index_path()).is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+
     /// Adopt the old single-file log: if `<state>/session.jsonl` exists and there is currently
     /// no session yet, adopt it as the first session. Called only once at startup.
     ///
@@ -420,7 +506,12 @@ impl FileSessionCatalog {
 
 impl SessionCatalog for FileSessionCatalog {
     fn list(&self) -> Result<Vec<SessionEntry>, SessionError> {
+        // Old cache: `name -> CachedEntry`. Used to reuse `preview` / `turns` for unchanged files.
+        let cached = self.load_index();
         let mut entries: Vec<(u64, SessionEntry)> = Vec::new();
+        // The freshly reconciled cache we will (maybe) write back.
+        let mut next_cache: Vec<CachedEntry> = Vec::new();
+
         let read = match std::fs::read_dir(&self.dir) {
             Ok(read) => read,
             // The directory does not exist yet = no sessions yet, not an error.
@@ -430,6 +521,7 @@ impl SessionCatalog for FileSessionCatalog {
         for item in read {
             let item = item?;
             let path = item.path();
+            // `index.json` is not `.jsonl`, so this extension filter skips it naturally.
             if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
                 continue;
             }
@@ -443,18 +535,42 @@ impl SessionCatalog for FileSessionCatalog {
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
                 .map(|d| d.as_millis() as u64)
                 .unwrap_or(0);
-            let (preview, turns) = summary_of(&path);
+            // The title is always re-read from the tiny `.title` sidecar, so `rename` (which only
+            // touches `.title`, not the `.jsonl` mtime) takes effect immediately with no hook.
+            let label = self.read_title(name).unwrap_or_else(|| name.to_owned());
+            // Reuse the cached summary only when the file's mtime is unchanged; otherwise recompute
+            // by reading the whole `.jsonl`.
+            let (preview, turns) = match cached.get(name) {
+                Some(entry) if entry.modified_ms == modified_ms => {
+                    (entry.preview.clone(), entry.turns)
+                }
+                _ => summary_of(&path),
+            };
+            next_cache.push(CachedEntry {
+                name: name.to_owned(),
+                label: label.clone(),
+                preview: preview.clone(),
+                modified_ms,
+                turns,
+            });
             entries.push((
                 modified_ms,
                 SessionEntry {
                     name: name.to_owned(),
-                    label: self.read_title(name).unwrap_or_else(|| name.to_owned()),
+                    label,
                     preview,
                     modified_ms,
                     turns,
                 },
             ));
         }
+
+        // Compare the reconciled cache with the old one; only write back when something changed
+        // (name set, or any name's modified_ms / preview / turns / label differs).
+        if index_changed(&cached, &next_cache) {
+            self.write_index(&next_cache);
+        }
+
         // Most recently modified first.
         entries.sort_by(|a, b| b.0.cmp(&a.0));
         Ok(entries.into_iter().map(|(_, e)| e).collect())
@@ -551,6 +667,26 @@ impl SessionCatalog for FileSessionCatalog {
         }
         Ok(())
     }
+}
+
+/// Whether the reconciled cache differs from the previously loaded one, so `list()` only writes
+/// `index.json` when something actually changed. Compares name sets and, for each name, the
+/// `modified_ms` / `preview` / `turns` / `label` fields.
+fn index_changed(old: &HashMap<String, CachedEntry>, next: &[CachedEntry]) -> bool {
+    if old.len() != next.len() {
+        return true;
+    }
+    for entry in next {
+        match old.get(&entry.name) {
+            Some(prev)
+                if prev.modified_ms == entry.modified_ms
+                    && prev.preview == entry.preview
+                    && prev.turns == entry.turns
+                    && prev.label == entry.label => {}
+            _ => return true,
+        }
+    }
+    false
 }
 
 /// Read a session's preview (first user message, truncated to 40 chars) and user turn count. Returns `("", 0)` on failure.
@@ -872,6 +1008,82 @@ mod tests {
         // Deleting again errors (already gone).
         assert!(catalog.delete(&entry.name).is_err());
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_writes_index_json_on_first_scan() {
+        let dir = tmp_dir("index_write");
+        let catalog = FileSessionCatalog::new(&dir);
+        let (entry, store) = catalog.create_named(Some("first title")).unwrap();
+        store.append(&user("hello world")).unwrap();
+        // First list() performs a full scan and writes the cache.
+        let listed = catalog.list().unwrap();
+        assert_eq!(listed.len(), 1);
+        let index_path = catalog.index_path();
+        assert!(index_path.exists(), "index.json should be written on first list");
+        let raw = std::fs::read_to_string(&index_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(parsed["version"], 1);
+        let sessions = parsed["sessions"].as_array().unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0]["name"], entry.name);
+        assert_eq!(sessions[0]["label"], "first title");
+        assert_eq!(sessions[0]["preview"], "hello world");
+        assert_eq!(sessions[0]["turns"], 1);
+        assert!(sessions[0]["modified_ms"].as_u64().unwrap() > 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn list_reconciles_index_by_mtime_and_drops_deleted_sessions() {
+        let dir = tmp_dir("index_reconcile");
+        let catalog = FileSessionCatalog::new(&dir);
+        let (entry, store) = catalog.create().unwrap();
+        store.append(&user("first message")).unwrap();
+        // First list builds the cache.
+        let first = catalog.list().unwrap();
+        assert_eq!(first.len(), 1);
+        assert_eq!(first[0].preview, "first message");
+        assert_eq!(first[0].turns, 1);
+        assert!(catalog.index_path().exists());
+
+        // Second list with no changes hits the cache and returns the same result.
+        let second = catalog.list().unwrap();
+        assert_eq!(second, first);
+
+        // Rename only touches the tiny .title sidecar (jsonl mtime unchanged): label must update
+        // immediately even though preview/turns come from the cache.
+        catalog.rename(&entry.name, "renamed").unwrap();
+        let renamed = catalog.list().unwrap();
+        assert_eq!(renamed[0].label, "renamed");
+        assert_eq!(renamed[0].preview, "first message");
+        assert_eq!(renamed[0].turns, 1);
+
+        // Mutating the jsonl (new user turn) changes its mtime -> preview/turns recomputed.
+        // Bump the mtime explicitly to avoid same-millisecond flakiness on coarse filesystems.
+        let log = catalog.path_for(&entry.name);
+        let mut f = OpenOptions::new().append(true).open(&log).unwrap();
+        writeln!(f, "{}", serde_json::to_string(&user("second message")).unwrap()).unwrap();
+        drop(f);
+        let bumped = std::time::SystemTime::now() + std::time::Duration::from_millis(10);
+        let _ = filetime_set(&log, bumped);
+        let after_append = catalog.list().unwrap();
+        assert_eq!(after_append[0].turns, 2);
+        // preview still points at the first user message.
+        assert_eq!(after_append[0].preview, "first message");
+
+        // Deleting the file removes the entry from the next list (reconcile drops it).
+        catalog.delete(&entry.name).unwrap();
+        assert!(catalog.list().unwrap().is_empty());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Best-effort mtime bump; some platforms/toolchains make `set_modified` awkward, so this
+    /// is a small helper that is simply skipped if unavailable. Uses `File::set_times` via
+    /// std (Rust 1.75+).
+    fn filetime_set(path: &Path, when: std::time::SystemTime) -> std::io::Result<()> {
+        let file = OpenOptions::new().write(true).open(path)?;
+        file.set_modified(when)
     }
 
     #[test]

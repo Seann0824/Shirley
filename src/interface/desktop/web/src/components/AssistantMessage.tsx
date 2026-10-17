@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Archive, LoaderCircle } from "lucide-react";
 import { AiMarkdown } from "@/components/ai/AiMarkdown";
+import { AiAssistantMarkdown } from "@/components/ai/AiAssistantMarkdown";
 import { AiToolActivityDisclosure } from "@/components/ai/AiToolActivityDisclosure";
 import { TextDisclosure } from "@/components/ai/TextDisclosure";
 import type { AiSegment } from "@/types/ai";
@@ -64,7 +65,7 @@ export function AssistantMessage({
       )}
       {result?.kind === "content" && (
         <div data-ai-result>
-          <AiMarkdown content={result.text} streaming={false} />
+          <AiAssistantMarkdown content={result.text} streaming={false} />
         </div>
       )}
     </div>
@@ -98,5 +99,5 @@ function SegmentView({ segment, streaming }: { segment: AiSegment; streaming: bo
   if (segment.kind === "tools") {
     return <AiToolActivityDisclosure executions={segment.executions} decidingToolIds={new Set<number>()} onToolDecision={() => {}} />;
   }
-  return <AiMarkdown content={segment.text} streaming={streaming} />;
+  return <AiAssistantMarkdown content={segment.text} streaming={streaming} />;
 }

@@ -96,6 +96,12 @@ export type SubagentSummary = {
   stop_reason: string;
 };
 
+/** Bridge capability description (lets the UI adapt to native vs. cloud transports). */
+export type BridgeCapabilities = {
+  /** Whether a native folder picker exists (Tauri desktop = true; cloud HTTP = false, use manual path input). */
+  nativeFolderPicker: boolean;
+};
+
 export type AgentBridge = {
   /** List projects. `archived = true` includes archived projects (for the archive list). */
   listProjects: (archived?: boolean) => Promise<ProjectEntry[]>;
@@ -105,6 +111,13 @@ export type AgentBridge = {
    * user cancels.
    */
   addProject: () => Promise<ProjectEntry | null>;
+  /**
+   * Cloud (server) mode only: create/open a project from a server-side absolute path.
+   * Tauri mode does not implement this (calling it throws).
+   */
+  addProjectByPath: (path: string, name?: string | null) => Promise<ProjectEntry | null>;
+  /** Describe this bridge's capabilities (native folder picker availability etc.). */
+  capabilities: () => BridgeCapabilities;
   /** Rename a project: display name only; path / session data untouched. */
   renameProject: (project: string, name: string) => Promise<void>;
   /** Archive a project: only sets the flag, no disk data deleted (restorable from the archive). */
@@ -216,6 +229,12 @@ async function createTauriBridge(): Promise<AgentBridge> {
     async addProject() {
       return invoke<ProjectEntry | null>("agent_add_project");
     },
+    async addProjectByPath() {
+      throw new Error("addProjectByPath is only available in server mode");
+    },
+    capabilities() {
+      return { nativeFolderPicker: true };
+    },
     async renameProject(project, name) {
       await invoke("agent_rename_project", { project, name });
     },
@@ -322,6 +341,12 @@ function createMockBridge(): AgentBridge {
       mockProjects.push(entry);
       mockSessionsByProject.set(id, []);
       return { ...entry };
+    },
+    async addProjectByPath() {
+      throw new Error("addProjectByPath is only available in server mode");
+    },
+    capabilities() {
+      return { nativeFolderPicker: true };
     },
     async renameProject(project, name) {
       const entry = mockProjects.find((p) => p.id === project);
@@ -528,9 +553,165 @@ function mockSessions(project: string): SessionEntry[] {
   return [...(mockSessionsByProject.get(project) ?? [])].sort((a, b) => b.modified_ms - a.modified_ms);
 }
 
+
+// ---------------------------------------------------------------------------
+// HTTP / WebSocket transport (cloud web version)
+//
+// Same `AgentBridge` contract as the Tauri bridge, but the transport is the
+// browser's own: commands go to `POST /api/cmd/{name}` (JSON in / JSON out) and
+// events arrive on a single `GET /ws` WebSocket (every `AgentEventWire`, tagged
+// with its `project` + `session`). This is what makes the cloud web build
+// "the desktop frontend, with the SDK running on the server" — the UI code is
+// byte-for-byte the desktop one; only this file's transport differs.
+// ---------------------------------------------------------------------------
+
+/** POST a command to the server; throws with the server's error text on non-2xx. */
+async function httpCall<T>(baseUrl: string, name: string, args?: unknown): Promise<T> {
+  const res = await fetch(`${baseUrl}/api/cmd/${name}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(args ?? {}),
+  });
+  const text = await res.text();
+  if (!res.ok) throw new Error(text || `request failed: ${res.status}`);
+  return (text ? JSON.parse(text) : null) as T;
+}
+
+function createHttpBridge(baseUrl: string = ""): AgentBridge {
+  const handlers = new Map<string, (event: AgentEventWire) => void>();
+
+  // One SSE stream for the whole app; events are routed by `project::session` to the
+  // per-session handler registered by `openSession`. `EventSource` reconnects on drop
+  // by itself, so there is no manual reconnect loop here.
+  const es = new EventSource(`${baseUrl}/api/events`);
+  es.addEventListener("agent_event", (ev) => {
+    let wire: AgentEventWire;
+    try {
+      wire = JSON.parse((ev as MessageEvent).data) as AgentEventWire;
+    } catch {
+      return;
+    }
+    if (wire.project == null || wire.session == null) return;
+    handlers.get(routeKey(wire.project, wire.session))?.(wire);
+  });
+
+  return {
+    async listProjects(archived) {
+      return httpCall<ProjectEntry[]>(baseUrl, "agent_list_projects", { archived: archived ?? false });
+    },
+    async addProject() {
+      // Cloud mode has no native folder picker: the UI uses `addProjectByPath` instead.
+      return null;
+    },
+    async addProjectByPath(path, name) {
+      return httpCall<ProjectEntry | null>(baseUrl, "agent_add_project", { path, name });
+    },
+    capabilities() {
+      return { nativeFolderPicker: false };
+    },
+    async renameProject(project, name) {
+      await httpCall(baseUrl, "agent_rename_project", { project, name });
+    },
+    async archiveProject(project) {
+      await httpCall(baseUrl, "agent_archive_project", { project });
+    },
+    async restoreProject(project) {
+      await httpCall(baseUrl, "agent_restore_project", { project });
+    },
+    async send(project, session, text, references, images) {
+      await httpCall(baseUrl, "agent_send", { project, text, references, images, session });
+    },
+    async resend(project, session, text, references, images) {
+      await httpCall(baseUrl, "agent_resend", { project, text, references, images, session });
+    },
+    async cancel(project, session) {
+      await httpCall(baseUrl, "agent_cancel", { project, session });
+    },
+    async openSession(project, session, onEvent) {
+      const key = routeKey(project, session);
+      handlers.set(key, onEvent);
+      const snapshot = await httpCall<SessionSnapshot>(baseUrl, "agent_subscribe", { project, session });
+      return {
+        snapshot,
+        unsubscribe: () => {
+          handlers.delete(key);
+          void httpCall(baseUrl, "agent_unsubscribe", { project, session }).catch(() => {});
+        },
+      };
+    },
+    async modelName(project) {
+      return httpCall<string>(baseUrl, "agent_model_name", { project });
+    },
+    async listModels(project) {
+      return httpCall<ModelEntry[]>(baseUrl, "agent_list_models", { project });
+    },
+    async setModel(project, value) {
+      await httpCall(baseUrl, "agent_set_model", { project, model: value });
+    },
+    async searchFiles(project, query) {
+      return httpCall<FileEntry[]>(baseUrl, "agent_search_files", { project, query });
+    },
+    async listSkills(project) {
+      return httpCall<SkillEntry[]>(baseUrl, "agent_list_skills", { project });
+    },
+    async activateSkill(project, session, name) {
+      await httpCall(baseUrl, "agent_activate_skill", { project, session, name });
+    },
+    async listSessions(project) {
+      return httpCall<SessionEntry[]>(baseUrl, "agent_list_sessions", { project });
+    },
+    async currentSession(project) {
+      return httpCall<string | null>(baseUrl, "agent_current_session", { project });
+    },
+    async newSession(project, title) {
+      return httpCall<SessionEntry>(baseUrl, "agent_new_session", { project, title });
+    },
+    async switchSession(project, name) {
+      await httpCall(baseUrl, "agent_switch_session", { project, name });
+    },
+    async renameSession(project, name, title) {
+      await httpCall(baseUrl, "agent_rename_session", { project, name, title });
+    },
+    async deleteSession(project, name) {
+      await httpCall(baseUrl, "agent_delete_session", { project, name });
+    },
+    async moveSession(project, name, targetProject) {
+      await httpCall(baseUrl, "agent_move_session", { project, name, targetProject });
+    },
+    async loadHistory(project) {
+      return httpCall<HistoryMessage[]>(baseUrl, "agent_load_history", { project });
+    },
+    async listSubagents(project, session) {
+      return httpCall<SubagentSummary[]>(baseUrl, "agent_list_subagents", { project, session });
+    },
+    async loadSubagent(project, session, id) {
+      return httpCall<HistoryMessage[]>(baseUrl, "agent_load_subagent", { project, session, id });
+    },
+    async cancelSubagent(project, session, id) {
+      await httpCall(baseUrl, "agent_cancel_subagent", { project, session, id });
+    },
+  };
+}
+
 let cached: Promise<AgentBridge> | null = null;
 
 export function agentBridge(): Promise<AgentBridge> {
-  cached ??= isTauri ? createTauriBridge() : Promise.resolve(createMockBridge());
+  // Transport selection (four states):
+  // - inside Tauri + remote server URL -> HTTP/SSE to the cloud server
+  // - inside Tauri                     -> native invoke / listen
+  // - plain browser dev                -> mock (debug the UI standalone with `npm run dev`)
+  // - plain browser prod               -> HTTP/SSE (same-origin, the cloud web build served by the Rust server)
+  const dev = Boolean((import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV);
+  const remoteUrl =
+    (typeof localStorage !== "undefined" && localStorage.getItem("shirley.serverUrl")) ||
+    (window as unknown as { __SHIRLEY_SERVER__?: string }).__SHIRLEY_SERVER__ ||
+    "";
+  cached ??= isTauri
+    ? remoteUrl
+      ? Promise.resolve(createHttpBridge(remoteUrl))
+      : createTauriBridge()
+    : dev
+      ? Promise.resolve(createMockBridge())
+      : Promise.resolve(createHttpBridge());
   return cached;
 }

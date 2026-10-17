@@ -585,8 +585,16 @@ export function App() {
     try {
       setUiError("");
       const bridge = await agentBridge();
-      const entry = await bridge.addProject();
-      if (!entry) return; // user cancelled
+      const caps = bridge.capabilities();
+      let entry: ProjectEntry | null;
+      if (caps.nativeFolderPicker) {
+        entry = await bridge.addProject();
+      } else {
+        const path = window.prompt("输入服务器上的项目目录绝对路径：");
+        if (!path) return; // user cancelled
+        entry = await bridge.addProjectByPath(path.trim());
+      }
+      if (!entry) return; // user cancelled / failed
       await reloadProjects();
       await selectProject(entry.id);
     } catch (e) {

@@ -24,12 +24,18 @@ mod workspace_search;
 enum Mode {
     Tui,
     Desktop,
+    /// Cloud web interface: HTTP + WebSocket server, only-chat UI (no project
+    /// management). Gated behind the `server` cargo feature (`--features server`).
+    Server,
 }
 
 impl Mode {
     fn from_env_and_args() -> Self {
-        if std::env::args().any(|arg| arg == "--desktop")
-            || std::env::var("SHIRLEY_INTERFACE").as_deref() == Ok("desktop")
+        let interface = std::env::var("SHIRLEY_INTERFACE").ok();
+        if std::env::args().any(|arg| arg == "--server") || interface.as_deref() == Some("server") {
+            Mode::Server
+        } else if std::env::args().any(|arg| arg == "--desktop")
+            || interface.as_deref() == Some("desktop")
         {
             Mode::Desktop
         } else {
@@ -63,6 +69,13 @@ async fn main() -> Result<(), AgentError> {
         Mode::Tui => interface::run(factory).await,
         // Desktop interface: enter the Tauri event loop (blocks the main thread).
         Mode::Desktop => interface::desktop::run(factory),
+        // Cloud web interface: run the HTTP + WebSocket server on the tokio runtime.
+        #[cfg(feature = "server")]
+        Mode::Server => interface::server::run(factory).await,
+        #[cfg(not(feature = "server"))]
+        Mode::Server => Err(std::io::Error::other(
+            "server mode requires building with `--features server`",
+        )),
     }
     .map_err(|error| AgentError::Other(Box::new(error)))?;
 
