@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use shirley_agent_sdk::workspace::{WorkSpace, WorkspaceError};
-use shirley_agent_sdk::{ToolError, tool};
+use shirley_agent_sdk::{ToolContext, ToolError, tool};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
 
 /// Default line count. Used when the model does not specify, to avoid "reading the whole file by the way".
@@ -25,6 +25,26 @@ pub(crate) fn workspace_root() -> Option<PathBuf> {
         .filter(|value| !value.trim().is_empty())
         .map(PathBuf::from)
         .or_else(|| std::env::current_dir().ok())
+}
+
+/// The Agent's real workspace root, injected into the [`ToolContext`] by the application layer
+/// (`bootstrap::build_agent_with`).
+///
+/// `read` / `grep` used to derive their root from the `SHIRLEY_WORKSPACE` env var (falling back to
+/// the process CWD), which is decoupled from the `Agent`'s `working_dir`. Whenever the two differ
+/// (e.g. the desktop interface's multi-project mode: one process, several project roots), a relative
+/// path was resolved against the wrong directory and reported as an error. Carrying the real root
+/// here keeps the tools aligned with the Agent.
+#[derive(Clone, Debug)]
+pub struct WorkspaceRoot(pub PathBuf);
+
+/// Resolve the workspace root the tools should operate against, preferring the [`ToolContext`]
+/// value the application layer injected, then falling back to the legacy `SHIRLEY_WORKSPACE` env
+/// var / process CWD (so the tools still work when invoked without a context, e.g. unit tests).
+pub(crate) fn resolve_workspace_root(ctx: &ToolContext) -> Option<PathBuf> {
+    ctx.get::<WorkspaceRoot>()
+        .map(|root| root.0.clone())
+        .or_else(workspace_root)
 }
 
 /// Suspected secret file: rejected by default, to avoid reading `.env` / private keys into the context and then sending them to the model
@@ -69,6 +89,7 @@ pub(crate) fn clip_to_budget(text: &str, budget: usize) -> &str {
     description = "Read the contents of a text file inside the workspace by line, returning line-numbered text. Reads have line and byte caps; when content is truncated, a hint on how to continue is shown at the end. For large files, first locate content with the grep tool, then use this tool to read the relevant range; do not read the whole file with cat."
 )]
 pub async fn read(
+    ctx: &ToolContext,
     #[param(description = "file path, relative to the workspace root; absolute paths or paths escaping the workspace are not accepted")]
     path: String,
     #[param(description = "start line, 1-based; defaults to line 1")]
@@ -76,7 +97,7 @@ pub async fn read(
     #[param(description = "maximum number of lines to read, defaults to 200, hard cap 2000")]
     line_count: Option<usize>,
 ) -> Result<String, ToolError> {
-    let root = workspace_root()
+    let root = resolve_workspace_root(ctx)
         .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
     read_text_range(&root, &path, &path, start_line, line_count).await
 }
@@ -276,7 +297,7 @@ mod tests {
         // SAFETY: env var is changed serially within the test, not concurrently with other threads.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read("a.txt".into(), None, None).await.unwrap();
+        let out = read(&ToolContext::new(), "a.txt".into(), None, None).await.unwrap();
 
         assert!(out.contains("     1 | first"), "should include line numbers: {out}");
         assert!(out.contains("     3 | third"), "should read the third line: {out}");
@@ -292,7 +313,7 @@ mod tests {
         std::fs::write(dir.join("b.txt"), body).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read("b.txt".into(), Some(3), Some(2)).await.unwrap();
+        let out = read(&ToolContext::new(), "b.txt".into(), Some(3), Some(2)).await.unwrap();
 
         assert!(out.contains("     3 | line3"), "should start at line 3: {out}");
         assert!(out.contains("     4 | line4"), "should read two lines: {out}");
@@ -307,7 +328,7 @@ mod tests {
         let dir = temp_workspace("escape");
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read("../etc/passwd".into(), None, None)
+        let err = read(&ToolContext::new(), "../etc/passwd".into(), None, None)
             .await
             .unwrap_err();
         assert!(
@@ -324,7 +345,7 @@ mod tests {
         let dir = temp_workspace("absolute");
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read("/etc/hosts".into(), None, None).await.unwrap_err();
+        let err = read(&ToolContext::new(), "/etc/hosts".into(), None, None).await.unwrap_err();
         assert!(
             matches!(err, ToolError::ArgumentsError(_)),
             "absolute path should be rejected: {err:?}"
@@ -339,7 +360,7 @@ mod tests {
         std::fs::write(dir.join(".env"), "LOCAL_API_KEY=leak").unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(".env".into(), None, None).await.unwrap_err();
+        let err = read(&ToolContext::new(), ".env".into(), None, None).await.unwrap_err();
         assert!(err.to_string().contains("secret"), "should reject secret files: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -351,7 +372,7 @@ mod tests {
         std::fs::write(dir.join("bin"), [0u8, 1, 2, 3, 0, 255]).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read("bin".into(), None, None).await.unwrap_err();
+        let err = read(&ToolContext::new(), "bin".into(), None, None).await.unwrap_err();
         assert!(err.to_string().contains("binary"), "should reject binary: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -363,7 +384,7 @@ mod tests {
         std::fs::create_dir(dir.join("sub")).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read("sub".into(), None, None).await.unwrap_err();
+        let err = read(&ToolContext::new(), "sub".into(), None, None).await.unwrap_err();
         assert!(err.to_string().contains("directory"), "should guide to use ls: {err}");
         std::fs::remove_dir_all(&dir).ok();
     }
@@ -377,7 +398,7 @@ mod tests {
         std::fs::write(dir.join("big.txt"), big).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read("big.txt".into(), None, None).await.unwrap();
+        let out = read(&ToolContext::new(), "big.txt".into(), None, None).await.unwrap();
         assert!(out.contains("truncated"), "should hint truncation: length {}", out.len());
         assert!(
             out.len() <= MAX_OUTPUT_BYTES + 200,
@@ -438,7 +459,7 @@ mod tests {
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         // Explicitly request far more lines than the cap; still only read up to the cap.
-        let out = read("many.txt".into(), None, Some(MAX_LINE_COUNT * 2))
+        let out = read(&ToolContext::new(), "many.txt".into(), None, Some(MAX_LINE_COUNT * 2))
             .await
             .unwrap();
         let lines = out.lines().filter(|l| l.contains(" | ")).count();

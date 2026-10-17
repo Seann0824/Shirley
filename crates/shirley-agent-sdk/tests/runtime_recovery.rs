@@ -495,10 +495,9 @@ async fn successive_compactions_inherit_findings_evidence_and_ledger() {
         },
         Message::Tool {
             tool_call_id: "history".into(),
-            content: Some(format!(
-                "modelName returned empty; {}",
-                "code evidence ".repeat(1000)
-            )),
+            content: Some(
+                format!("modelName returned empty; {}", "code evidence ".repeat(1000)).into(),
+            ),
         },
     ];
     let mut agent = Agent::builder()
@@ -687,7 +686,7 @@ async fn restored_archive_compacts_only_latest_working_set() {
         });
         history.push(Message::Tool {
             tool_call_id: format!("history-{i}"),
-            content: Some("source evidence ".repeat(300)),
+            content: Some("source evidence ".repeat(300).into()),
         });
     }
     let mut agent = Agent::builder()
@@ -751,7 +750,7 @@ async fn over_budget_scratchpad_is_removed_before_tool_evidence() {
         },
         Message::Tool {
             tool_call_id: "recent".into(),
-            content: Some("recent result ".repeat(700)),
+            content: Some("recent result ".repeat(700).into()),
         },
     ];
     let mut agent = Agent::builder()

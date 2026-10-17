@@ -19,7 +19,10 @@ pub enum Message {
     },
     Tool {
         tool_call_id: String,
-        content: Option<String>,
+        // Symmetric with `User`: a tool result may carry text and/or images (e.g. a
+        // computer-use screenshot). `Content`'s Serialize keeps a text-only result a plain
+        // string, so historical logs round-trip and text-only requests keep the prefix cache.
+        content: Option<Content>,
     },
     // Never shown; downgraded to a system message when encoding a request
     ContextSummary {
@@ -340,7 +343,7 @@ impl fmt::Display for Message {
                     f,
                     "⚙️ Tool Result [{}]: {}",
                     tool_call_id,
-                    content.as_deref().unwrap_or("")
+                    content.as_ref().map(|content| content.to_string()).unwrap_or_default()
                 );
                 Ok(())
             }

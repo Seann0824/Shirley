@@ -106,12 +106,27 @@ fn encode_input(messages: &[message::Message]) -> Result<Vec<Value>, AdapterErro
             message::Message::Tool {
                 tool_call_id,
                 content,
-            } => input.push(serde_json::json!({
-                "type": "function_call_output",
-                "call_id": tool_call_id,
-                // output allows a string or an array of content blocks; a string is most direct for plain text.
-                "output": content.clone().unwrap_or_default(),
-            })),
+            } => {
+                // `function_call_output` is text-only; an image result (a computer-use
+                // screenshot) is split into the text output plus a trailing user item
+                // that carries the image.
+                input.push(serde_json::json!({
+                    "type": "function_call_output",
+                    "call_id": tool_call_id,
+                    // output allows a string or an array of content blocks; a string is most direct for plain text.
+                    "output": content
+                        .as_ref()
+                        .map(|content| content.as_text())
+                        .unwrap_or_default(),
+                }));
+                if let Some(images) = content.as_ref().and_then(super::content::images_only) {
+                    input.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": super::content::responses_content(&images)?,
+                    }));
+                }
+            }
         }
     }
 

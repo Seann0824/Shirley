@@ -96,8 +96,10 @@ pub(crate) fn is_cjk_word_char(code: u32) -> bool {
 /// an image-heavy turn. It is a heuristic, like everything else in this module.
 const IMAGE_TOKENS: u64 = 384;
 
-/// Estimate the tokens a [`message::Content`] occupies (uncalibrated).
-pub fn count_content(content: &message::Content) -> u64 {
+/// Estimate the tokens a [`message::Content`]'s parts occupy (uncalibrated), **without**
+/// the role wrapper. Shared by `User` (adds [`ROLE_OVERHEAD`]) and `Tool` (adds
+/// [`TOOL_MESSAGE_OVERHEAD`] instead), so a text result counts exactly as it did before.
+pub fn count_content_parts(content: &message::Content) -> u64 {
     content
         .as_parts()
         .iter()
@@ -106,7 +108,11 @@ pub fn count_content(content: &message::Content) -> u64 {
             message::ContentPart::Image(_) => IMAGE_TOKENS,
         })
         .sum::<u64>()
-        + ROLE_OVERHEAD
+}
+
+/// Estimate the tokens a [`message::Content`] occupies (uncalibrated).
+pub fn count_content(content: &message::Content) -> u64 {
+    count_content_parts(content) + ROLE_OVERHEAD
 }
 
 /// Estimate how many tokens a single message occupies (uncalibrated).
@@ -142,7 +148,7 @@ pub fn count_message(message: &message::Message) -> u64 {
         } => {
             let mut total = count_text(tool_call_id) + TOOL_MESSAGE_OVERHEAD;
             if let Some(content) = content {
-                total += count_text(content);
+                total += count_content_parts(content);
             }
             total
         }

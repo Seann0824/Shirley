@@ -259,6 +259,13 @@ impl AgentFactory {
         // tool definitions are stable (prefix-cache friendly), and `on_register` hooks (e.g. web_search's
         // credential injection) each run once -- state is isolated per tool instance anyway, which is acceptable (decision 5).
         let mut tool_manager = assemble_tools();
+        // Pin `read` / `grep` to this Agent's real workspace root. Without it they would fall
+        // back to the `SHIRLEY_WORKSPACE` env var / process CWD, which is decoupled from the
+        // Agent's `working_dir` (e.g. the desktop interface's multi-project mode: one process,
+        // several project roots), so a relative path resolved against the wrong directory.
+        tool_manager
+            .context_mut()
+            .insert(tools::read::WorkspaceRoot(self.working_dir.clone()));
         let _ = tool_manager.register(tools::TodoTool::new(todo_store.clone()));
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
         // Memory writes go **through no** tool; they are done only by the background curator (`docs/memory.md` decision 3).

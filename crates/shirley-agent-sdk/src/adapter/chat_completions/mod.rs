@@ -75,11 +75,21 @@ fn encode_messages(messages: &[message::Message]) -> Result<Vec<Value>, AdapterE
                 tool_call_id,
                 content,
             } => {
-                serde_json::json!({
+                // The tool role accepts text only; an image result (a computer-use
+                // screenshot) is split into a text tool message followed by a trailing
+                // user message that carries the image part.
+                out.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": content,
-                })
+                    "content": content.as_ref().map(|content| content.as_text()),
+                }));
+                if let Some(images) = content.as_ref().and_then(super::content::images_only) {
+                    out.push(serde_json::json!({
+                        "role": "user",
+                        "content": super::content::chat_content(&images)?,
+                    }));
+                }
+                continue;
             }
         };
         out.push(value);

@@ -10,9 +10,9 @@ use globset::Glob;
 use ignore::WalkBuilder;
 use regex::bytes::RegexBuilder;
 use shirley_agent_sdk::workspace::{WorkSpace, WorkspaceError};
-use shirley_agent_sdk::{ToolError, tool};
+use shirley_agent_sdk::{ToolContext, ToolError, tool};
 
-use super::read::{clip_to_budget, is_secret_file, workspace_root};
+use super::read::{clip_to_budget, is_secret_file, resolve_workspace_root};
 
 const DEFAULT_RESULTS: usize = 100;
 const MAX_RESULTS: usize = 500;
@@ -38,6 +38,7 @@ struct SearchOptions {
     description = "Search workspace text with a regex (or fixed_strings=true for literal text). Use this instead of bash grep/rg. Respects nested .gitignore, .ignore, .rgignore and Git excludes, including outside Git repositories; glob only narrows results and cannot override ignores. Hidden files are excluded unless include_hidden=true. Ignored files require include_ignored=true, even for an explicit file path. Skips binaries, symlinks, suspected secrets, VCS/runtime state and files over 2 MiB. Returns path:line:text, or paths with files_only=true. Results have hard count, line-length, byte and scan limits; truncation is reported. No shell or external rg installation is needed."
 )]
 pub async fn grep(
+    ctx: &ToolContext,
     #[param(
         description = "regex pattern; matched independently on each line; use fixed_strings=true for literal punctuation"
     )]
@@ -71,7 +72,7 @@ pub async fn grep(
     )]
     include_hidden: Option<bool>,
 ) -> Result<String, ToolError> {
-    let root = workspace_root()
+    let root = resolve_workspace_root(ctx)
         .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
     let options = SearchOptions {
         path,

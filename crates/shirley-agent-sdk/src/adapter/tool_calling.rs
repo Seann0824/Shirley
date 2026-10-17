@@ -686,7 +686,11 @@ pub(crate) fn encode_messages_for_content(
                         name: name.to_string(),
                         arguments: String::new(),
                     };
-                    let rendered = protocol.render_result(&call, content.as_deref().unwrap_or(""));
+                    let output = content
+                        .as_ref()
+                        .map(|content| content.as_text())
+                        .unwrap_or_default();
+                    let rendered = protocol.render_result(&call, &output);
                     // The built-in protocol feeds back user text; non-text rendering (a custom
                     // protocol) degrades to passing each entry through individually.
                     match rendered {

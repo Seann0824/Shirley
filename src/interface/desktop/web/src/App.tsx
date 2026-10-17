@@ -1050,6 +1050,13 @@ export function App() {
       ? (views[viewKey(activeProject, sessionName)] ?? emptyView())
       : emptyView();
   const busy = view.busy;
+  // The user message currently being edited in place (matches the active session). While set,
+  // the composer is rendered at the message's position instead of the bottom, and submit rewinds
+  // that turn and resends (see `send` / `beginEdit`).
+  const editing =
+    editingTurn && activeProject && sessionName && editingTurn.key === viewKey(activeProject, sessionName)
+      ? editingTurn
+      : null;
   const error = uiError || view.error;
   // New chat (Codex-style empty session): a session is attached but has no messages yet,
   // and is not loading / running. In this state the input is centered with Chat/Work and
@@ -1222,6 +1229,8 @@ export function App() {
               : null
           }
           onEditMessage={beginEdit}
+          editingMessageId={editing?.messageId ?? null}
+          renderEditContent={() => composerNode}
           renderMessageContent={(message) =>
             message.role === "assistant" ? (
               <AssistantMessage
@@ -1258,7 +1267,10 @@ export function App() {
               turns={view.pending}
               onRemove={(id) => activeProject && sessionName && removePending(viewKey(activeProject, sessionName), id)}
             />
-            {composerNode}
+            {/* While editing the last user message, the composer is rendered inline at that
+                message's position (see the transcript above); hide the bottom one to avoid two
+                editors sharing the same state. */}
+            {!editing && composerNode}
           </>
         )}
         </section>

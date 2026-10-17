@@ -468,14 +468,20 @@ impl Agent {
                                             let started = std::time::Instant::now();
                                             let (ok, content, error_kind) =
                                                 match tools.invoke(call, ctx).await {
-                                                    Ok(output) => (true, output.to_string(), None),
+                                                    Ok(output) => {
+                                                        (true, value_to_content(output), None)
+                                                    }
                                                     // The tool message carries the error text for the
                                                     // model to read; the stable kind travels on the
                                                     // event so the UI classifies structurally instead
                                                     // of sniffing the text.
                                                     Err(error) => {
                                                         let kind = crate::SdkError::kind(&error);
-                                                        (false, error.to_string(), Some(kind))
+                                                        (
+                                                            false,
+                                                            message::Content::text(error.to_string()),
+                                                            Some(kind),
+                                                        )
                                                     }
                                                 };
                                             (call, ok, content, error_kind, started.elapsed().as_millis() as u64)
@@ -496,7 +502,7 @@ impl Agent {
                                             call_id: call.id.clone(),
                                             name: call.name.clone(),
                                             ok,
-                                            output: content.clone(),
+                                            output: content.to_string(),
                                             error_kind,
                                             elapsed_ms,
                                         };
@@ -824,10 +830,14 @@ fn trim_compaction_tool_outputs(
         .iter()
         .enumerate()
         .filter_map(|(i, msg)| match msg {
+            // Only text-only results are excerpted; an image result (e.g. a
+            // computer-use screenshot) is never truncated, so no observation is lost.
             message::Message::Tool {
-                content: Some(text),
+                content: Some(content),
                 ..
-            } => Some((i, token::count_text(text))),
+            } if content.is_text_only() => {
+                Some((i, token::count_content_parts(content)))
+            }
             _ => None,
         })
         .collect();
@@ -838,11 +848,12 @@ fn trim_compaction_tool_outputs(
         }
         let message::Message::Tool {
             tool_call_id,
-            content: Some(text),
+            content: Some(content),
         } = &mut messages[i]
         else {
             unreachable!()
         };
+        let text = content.as_text();
         let marker = format!(
             "\n[tool result excerpt; middle omitted; original tool_call_id={tool_call_id}]\n"
         );
@@ -854,7 +865,7 @@ fn trim_compaction_tool_outputs(
             continue;
         }
         let keep = target - marker_cost;
-        let prefix = text_prefix_for_tokens(text, keep / 2);
+        let prefix = text_prefix_for_tokens(&text, keep / 2);
         let suffix: String = text.chars().rev().collect();
         let suffix = text_prefix_for_tokens(&suffix, keep - keep / 2);
         let excerpt = format!(
@@ -863,10 +874,28 @@ fn trim_compaction_tool_outputs(
         );
         let new_cost = token::count_text(&excerpt);
         if new_cost < cost {
-            *text = excerpt;
+            *content = message::Content::text(excerpt);
             total = total.saturating_sub(cost - new_cost);
         }
     }
+}
+
+/// Convert a tool's JSON output into message content.
+///
+/// A tool may return **structured content**: a JSON array that deserializes into
+/// [`message::Content`] and carries at least one image (a computer-use screenshot). That is
+/// kept structured so the image reaches the model. Everything else becomes text, using the
+/// compact JSON rendering (`Value::to_string`) — for a plain string result that is the
+/// quoted form the runtime always produced, so the request bytes (and the prefix cache) are
+/// unchanged for every existing tool.
+fn value_to_content(output: serde_json::Value) -> message::Content {
+    if output.is_array()
+        && let Ok(content) = serde_json::from_value::<message::Content>(output.clone())
+        && content.has_images()
+    {
+        return content;
+    }
+    message::Content::text(output.to_string())
 }
 
 fn text_prefix_for_tokens(text: &str, budget: u64) -> &str {
@@ -967,7 +996,7 @@ mod tests {
         let mut messages = vec![
             message::Message::Tool {
                 tool_call_id: "large".into(),
-                content: Some(original),
+                content: Some(original.into()),
             },
             message::Message::Tool {
                 tool_call_id: "small".into(),
@@ -982,6 +1011,7 @@ mod tests {
         else {
             panic!()
         };
+        let excerpt = excerpt.as_text();
         assert!(excerpt.starts_with("important start"));
         assert!(excerpt.ends_with("critical end"));
         assert!(excerpt.contains("tool_call_id=large"));

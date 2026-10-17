@@ -249,8 +249,8 @@ pub fn render_transcript(messages: &[Message]) -> String {
                 content,
             } => {
                 out.push_str(&format!("## Tool result ({tool_call_id})\n"));
-                if let Some(content) = content.as_deref() {
-                    out.push_str(content.trim());
+                if let Some(content) = content.as_ref() {
+                    out.push_str(content.as_text().trim());
                 }
                 out.push('\n');
                 out.push('\n');

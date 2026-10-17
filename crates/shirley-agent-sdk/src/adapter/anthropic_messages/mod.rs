@@ -91,17 +91,33 @@ fn encode_messages(messages: &[message::Message]) -> Result<(Option<String>, Vec
             }
 
             // In Anthropic, a tool result is a `tool_result` block inside a **user message**.
+            // A text-only result keeps its historical plain-string shape (byte-stable);
+            // only a result that actually carries an image is encoded as content blocks
+            // (Anthropic's `tool_result.content` natively accepts image blocks).
             message::Message::Tool {
                 tool_call_id,
                 content,
-            } => encoded.push(serde_json::json!({
-                "role": "user",
-                "content": [{
-                    "type": "tool_result",
-                    "tool_use_id": tool_call_id,
-                    "content": content.clone().unwrap_or_default(),
-                }],
-            })),
+            } => {
+                let block = match content {
+                    Some(content) if content.has_images() => serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_call_id,
+                        "content": super::content::anthropic_content(content)?,
+                    }),
+                    other => serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_call_id,
+                        "content": other
+                            .as_ref()
+                            .map(|content| content.as_text())
+                            .unwrap_or_default(),
+                    }),
+                };
+                encoded.push(serde_json::json!({
+                    "role": "user",
+                    "content": [block],
+                }));
+            }
         }
     }
 

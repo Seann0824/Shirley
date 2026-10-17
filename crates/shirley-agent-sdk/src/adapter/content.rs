@@ -124,11 +124,33 @@ fn anthropic_image(image: &ImagePart) -> Result<Value, AdapterError> {
 }
 
 /// Whether any message carries an image part. Used by the send-time capability guard.
+///
+/// Scans `User` **and** `Tool` (a computer-use screenshot is a tool result); a tool
+/// image that the capability guard missed would be sent to a model that cannot read it.
 pub(crate) fn messages_have_images(messages: &[crate::message::Message]) -> bool {
     messages.iter().any(|message| match message {
         crate::message::Message::User { content } => content.has_images(),
+        crate::message::Message::Tool {
+            content: Some(content),
+            ..
+        } => content.has_images(),
         _ => false,
     })
+}
+
+/// The image parts of `content` as a fresh content, or `None` when there are none.
+///
+/// Protocols whose tool-result slot is text-only (ChatCompletions / Responses) split a
+/// tool result into a text part and a trailing user message; this extracts the images
+/// for that trailing message.
+pub(crate) fn images_only(content: &Content) -> Option<Content> {
+    let images: Vec<ContentPart> = content
+        .as_parts()
+        .iter()
+        .filter(|part| matches!(part, ContentPart::Image(_)))
+        .cloned()
+        .collect();
+    (!images.is_empty()).then(|| Content::parts(images))
 }
 
 #[cfg(test)]

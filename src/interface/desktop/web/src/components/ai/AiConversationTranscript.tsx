@@ -35,6 +35,8 @@ export function AiConversationTranscript({
   renderAfterMessage,
   editableMessageId,
   onEditMessage,
+  editingMessageId,
+  renderEditContent,
 }: {
   messages: AiTranscriptMessage[];
   conversationKey: string;
@@ -47,8 +49,16 @@ export function AiConversationTranscript({
   renderAfterMessage?: (message: AiTranscriptMessage, index: number) => ReactNode;
   /** Id of the one message that can be edited (the last user message); others show no button. */
   editableMessageId?: Key | null;
-  /** Enter edit mode for that message (the caller pre-fills the composer). */
+  /** Enter edit mode for that message. */
   onEditMessage?: (message: AiTranscriptMessage) => void;
+  /**
+   * Id of the message currently being edited **in place**. While set, that message's
+   * bubble is replaced by `renderEditContent` (the composer) instead of showing text,
+   * so the user edits the original message where it sits (matching the TUI's `/rewind`).
+   */
+  editingMessageId?: Key | null;
+  /** Inline editor rendered in place of the message whose id equals `editingMessageId`. */
+  renderEditContent?: (message: AiTranscriptMessage, index: number) => ReactNode;
 }) {
   const contentKey = messages
     .map(
@@ -78,6 +88,8 @@ export function AiConversationTranscript({
               !isAssistant &&
               editableMessageId != null &&
               String(message.id) === String(editableMessageId);
+            const editing =
+              editingMessageId != null && String(message.id) === String(editingMessageId);
             return (
               <div
                 key={message.id}
@@ -90,7 +102,7 @@ export function AiConversationTranscript({
                   className={isAssistant ? "flex-col items-start gap-2" : undefined}
                 >
                   {isAssistant && <AiAssistantAvatar responding={message.status === "streaming"} />}
-                  {!isAssistant && canEdit ? (
+                  {!isAssistant && canEdit && !editing ? (
                     // The edit affordance sits next to the bubble, appears only on hover /
                     // focus-within, and reserves no layout space (hidden -> flex).
                     <button
@@ -103,6 +115,9 @@ export function AiConversationTranscript({
                       <Pencil className="size-3.5" />
                     </button>
                   ) : null}
+                  {editing && renderEditContent ? (
+                    renderEditContent(message, index)
+                  ) : (
                   <Bubble
                     variant={isAssistant ? "ghost" : "default"}
                     className={isAssistant ? undefined : "whitespace-pre-wrap"}
@@ -122,6 +137,7 @@ export function AiConversationTranscript({
                       <span className="shimmer">Working...</span>
                     ) : null}
                   </Bubble>
+                  )}
                 </Message>
                 {renderAfterMessage?.(message, index)}
               </div>
