@@ -2,12 +2,12 @@
 //!
 //! The desktop interface lets users register **multiple workspaces** as "projects", each with its own sessions.
 //! This module handles exactly one thing: **which directories are projects** -- one global registry across workspaces,
-//! persisted at `<config_dir>/shirley/projects.json` (same root as global memory, see `docs/memory.md`).
+//! persisted at `~/.shirley/projects.json` (same root as global memory, see `docs/memory.md`).
 //!
 //! **This is an application-layer concern, not in the SDK**: the SDK only knows a single `working_dir`; "which projects
 //! I have open at once" is desktop-interface orchestration, not a base capability.
 //!
-//! Session logs still land in **each project's own** `<config_dir>/shirley/workspaces/<workspace-id>/sessions/` (stored globally, isolated by canonical workspace path) -- the registry only records "where the project is", runtime state is resolved by `crate::storage`.
+//! Session logs still land in **each project's own** `~/.shirley/workspaces/<workspace-id>/sessions/` (stored globally, isolated by canonical workspace path) -- the registry only records "where the project is", runtime state is resolved by `crate::storage`.
 //!
 //! # Archive semantics
 //!

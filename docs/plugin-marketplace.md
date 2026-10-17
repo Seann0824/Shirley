@@ -277,7 +277,7 @@ tool) are highly consistent across all three** -- so the adapter layer is **thin
 
 **6.2 Enable state and locking**
 
-- Enable/disable state lands in `<config_dir>/shirley/plugins.json` (the same family as
+- Enable/disable state lands in `~/.shirley/plugins.json` (the same family as
   `projects.json`).
 - `version` + `source` + a **content hash** land in a lock (to prevent content drift under the same
   version number).

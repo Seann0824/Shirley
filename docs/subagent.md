@@ -433,7 +433,8 @@ changes.
   `SubagentSummaryWire[]` (reads `index.jsonl`); `agent_load_subagent { project, session, id }`
   returns the child transcript's `HistoryMessageWire[]` (same style as the existing
   `agent_load_history`); `agent_subscribe_subagent` / `agent_unsubscribe_subagent` subscribe to the
-  real-time stream. The sidebar renders the subagent list, and clicking expands the transcript.
+  real-time stream. The **session page** renders the subagent list inline (not as a separate
+  sidebar panel), and clicking a row expands the child transcript.
 - **Cancel**: the preview panel can `cancel` (`agent_cancel_subagent` / a TUI key) ->
   `SubagentManager::cancel(id)` (`AbortHandle::abort`), consistent with the cancellability in
   decision 7.
@@ -470,7 +471,7 @@ Ok(BuiltAgent { agent, todo, memory, skills, subagents })      // BuiltAgent gai
 | --- | --- | --- |
 | **P0 · skeleton** | `SubagentTool` (`spawn`/`fork` blocking + `list`/`status`) + `SubagentManager` (registry/state machine/`tokio::spawn`) + the three caps + recursion guard; **child tool-table control (`tools`/`deny_tools` + `build_agent`'s `tool_filter`)**; `AgentFactory` creates the child; tool card reused | none (pure application layer) |
 | **P1 · convergence and persistence** | `wait` + `detach` + `timeout_ms`; `SubagentStore` (`index.jsonl` + per-agent log); `cancel` (`AbortHandle`); `[subagent]` configuration (including `default_tools`); `SubagentContextProvider` (optional); **child transcript `load()` + TUI click-to-preview (overlay)** | P0 |
-| **P2 · presentation** | child event bubbling (application-layer channel, path 2); desktop sidebar subagent list + click to expand transcript (`agent_list_subagents` / `agent_load_subagent` / `agent_subscribe_subagent`) + cancel; TUI nested view | P1 |
+| **P2 · presentation** | child event bubbling (application-layer channel, path 2); desktop session-page inline subagent list + click to expand transcript (`agent_list_subagents` / `agent_load_subagent` / `agent_subscribe_subagent`) + cancel; TUI nested view | P1 |
 | **P3 (not doing / to be discussed)** | resume in-flight subagents after a process restart; subagent marketplace / templates; cross-workspace subagents | — |
 
 ---

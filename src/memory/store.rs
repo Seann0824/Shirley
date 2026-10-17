@@ -3,14 +3,14 @@
 //! Layout (two levels: global personal memory + workspace project memory):
 //!
 //! ```text
-//! <config_dir>/shirley/memory/   # global (cross-project)
+//! ~/.shirley/memory/   # global (cross-project)
 //! |-- core.md                    # resident layer: profile + explicit preferences + active projects
 //! |-- index.md                   # program-maintained index page (see index.rs)
 //! |-- episodic/                  # episodic memory (events)
 //! |-- preferences/               # preferences / habits
 //! |-- procedures/                # procedural memory (behavior flows)
 //! |-- facts/                     # facts
-//! <config_dir>/shirley/workspaces/<workspace-id>/memory/        # workspace level (stored globally)
+//! ~/.shirley/workspaces/<workspace-id>/memory/        # workspace level (stored globally)
 //! ```
 //!
 //! **Writes only land in the primary root** (`roots[0]`, usually global); **reads merge all roots**, and for the same `id` a later one
@@ -81,7 +81,7 @@ impl MemoryStore {
     }
 
     /// Select the storage root by **owning domain**: `Personal` -> global root (`roots[0]`), `Project` -> workspace root
-    /// (`roots[1]`, i.e. `<config_dir>/shirley/workspaces/<workspace-id>/memory`). With a single-root store (tests), `Project` falls back to the primary root.
+    /// (`roots[1]`, i.e. `~/.shirley/workspaces/<workspace-id>/memory`). With a single-root store (tests), `Project` falls back to the primary root.
     pub fn root_for_domain(&self, domain: Domain) -> &Path {
         match domain {
             Domain::Personal => self.primary_root(),

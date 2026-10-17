@@ -1,4 +1,10 @@
-# 便捷别名：`cargo desktop` = 带 desktop feature 启动桌面界面。
-# （`--features` 是 cargo 参数，程序参数要放在 `--` 之后，否则程序看不到 `--desktop`。）
+# 便捷别名：与 `cargo desktop` 保持同一风格。
+# （`--features` 是 cargo 参数，程序参数要放在 `--` 之后，否则程序看不到 `--desktop` / `--server`。）
+
 [alias]
+# 桌面界面（Tauri 2）
 desktop = "run --features desktop -- --desktop"
+# 云端 web 界面（HTTP + SSE，浏览器访问）
+web = "run --features server -- --server"
+# 终端 TUI 界面（默认模式，无需任何参数）
+tui = "run"

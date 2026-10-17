@@ -1,11 +1,12 @@
 # Global application storage
 
 All Shirley runtime state lives under one global application directory:
-`<config_dir>/shirley` (`~/Library/Application Support/shirley` on macOS).
-Source workspaces no longer contain an active `.shirley` directory.
+`~/.shirley` (an explicit home path, identical across platforms and interfaces).
+Desktop / TUI / cloud-server all share this single root; there is no per-interface
+split. Source workspaces no longer contain an active `.shirley` directory.
 
 ```text
-shirley/
+~/.shirley/
   config.toml                  # shared provider, memory, compression and runtime settings
   projects.json                # project registry
   memory/                      # personal / cross-project memory and vectors
@@ -26,6 +27,15 @@ the same workspace uses the same namespace. Source working directories and proje
 associations remain intact. Personal and project memory keep their semantic domains;
 both are physically stored globally.
 
+For cloud deployment, `~` is the home directory of the server process's OS user.
+Keep that user's `~/.shirley` on persistent storage (mount it as a volume in a
+container), and back up this whole directory. A separate server has its own data;
+sharing the directory convention does not synchronize machines. Source projects
+remain outside this state directory and must also be deployed or backed up as needed.
+Workspace IDs depend on canonical absolute paths: copying state to a server with
+different project paths does not automatically rebind existing sessions. Preserve
+project paths when migrating until explicit path-rebinding support is implemented.
+
 Settings use `defaults < global config < explicit environment overrides`. Project
 configuration is imported once during migration, never consulted as an override layer.
 Existing global settings take precedence over imported values. `/login` writes the
@@ -37,6 +47,11 @@ visits the current workspace, ordinary Chat and registered projects (including a
 projects). Projects not registered yet migrate when opened. Missing/removed registered
 directories are skipped; their global state is retained. `--migrate-data` performs only
 this migration and exits. It does not query a model or curate memories.
+
+Startup also merges the former OS configuration root when `~/.shirley` already exists,
+retaining current project registry entries and importing missing projects. The former
+Chat workspace namespace is rebound to `~/.shirley/chat`, including session titles and
+subagent files. Desktop and web both support this same Chat namespace.
 
 A global file lock serializes migrations. Directory/file renames preserve existing
 content; cross-filesystem moves copy and compare bytes before deleting originals.

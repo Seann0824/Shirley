@@ -1,25 +1,42 @@
 **Shirley technical design · Cloud server (multi-project HTTP + SSE)**
 
-This document designs the "cloud server" interface: running the whole Shirley Agent **on a server**
-and reaching it from a browser, while the browser runs the **same desktop React build**
+This document describes the "cloud server" interface: running the whole Shirley Agent **on a
+server** and reaching it from a browser, while the browser runs the **same desktop React build**
 (`src/interface/desktop/web/dist`). It is a **sibling** of `desktop-interface.md` /
-`multi-session.md`: the desktop already has every shape the cloud needs (`ProjectRegistry` +
-lazy per-project runtimes + per-project `SessionManager`), and the current `server.rs` is only a
-**degenerate, single-project copy** of it. The core move here is to lift the desktop orchestration
+`multi-session.md`. The desktop already had every shape the cloud needed (`ProjectRegistry` +
+lazy per-project runtimes + per-project `SessionManager`), and the original `server.rs` was only a
+**degenerate, single-project copy** of it; the core move was to lift the desktop orchestration
 into one transport-agnostic core and make both `shell.rs` (Tauri) and `server.rs` (HTTP) thin
-transport layers over it.
+transport layers over it — which is now the landed state (see the status block below).
 
-> **Status: design, not landed.** This document specifies the target architecture and the
-> `P0..P2` landing order; none of the `ProjectRuntimeManager` extraction, the `index.json` session
-> catalog, cloud project creation, or the `bridge.ts` fourth state exists in the code today. Every
-> claim about *current* behaviour below is backed by a real file/line reference; every claim about
-> the *target* is explicitly marked as a proposal.
+> **Status: landed (P0 + P1 + SSE).** The `ProjectRuntimeManager` core, the `index.json` session
+> catalog, cloud project creation (server-side path), the `bridge.ts` fourth state, and the SSE
+> event transport all exist in the code today. Landing map:
+>
+> | Piece | Where it lives |
+> | --- | --- |
+> | Transport-agnostic core `ProjectRuntimeManager` | `src/interface/runtime.rs` (~966 lines: registry + lazy `runtimes` + `cancels` + `EventSink`; all project / session / run / model / file / skill / subagent commands + wire DTOs) |
+> | Thin Tauri transport | `src/interface/desktop/shell.rs` (~474 lines: 27 `#[tauri::command]`s delegate to the core; per-session `publish` pump) |
+> | Thin HTTP + SSE transport | `src/interface/server.rs` (~437 lines: `POST /api/cmd/{name}`, `GET /api/events` via `Sse` + `stream::unfold`, `ServeDir` SPA fallback; default `127.0.0.1:8787`) |
+> | `index.json` session catalog | `src/session.rs` (`FileSessionCatalog` lazy load: one read + temp+rename atomic write, mtime-hit reuse) |
+> | `bridge.ts` fourth state | `isTauri && configuredServerUrl → createHttpBridge(serverUrl)`; `EventSource` listening on `agent_event` |
+> | Convenience launchers | `.cargo/config.toml`: `cargo desktop` / `cargo web` / `cargo tui` |
+>
+> The sections below keep their original "current state vs target" framing as **design rationale**.
+> Where they describe `server.rs` as a "partial copy" of the desktop, that describes the
+> **pre-landing** state and has since been superseded by the shared core. Still open (**P2**):
+> SSE auth middleware + `SHIRLEY_ALLOWED_ROOTS` allow-list, `agent_browse_dirs`, runtime LRU /
+> idle unload, `load_tail(n)` paging — see §8–§9.
 
 > **User requirement (verbatim, Chinese)**: 「云端 web 版直接复用 desktop 的 React 前端（设计风格完全对齐），不要另造一套 UI。」
 
 ---
 
-**1. Where we are: the desktop already has the shape, the server is a partial copy**
+**1. Where we started: the desktop already had the shape, the server was a partial copy**
+
+> The table below records the **pre-landing** state (before the shared core existed); it is kept as
+the rationale for *why* the extraction was done. The landed state is the shared `ProjectRuntimeManager`
+described in §2.
 
 Both interfaces already share the same LCA: `bootstrap::AgentFactory` + `interface::session::SessionManager`
 + the `AgentEventWire` contract (`src/interface/desktop/wire.rs`). The difference is **how many
@@ -168,7 +185,7 @@ Replace the per-file scan with **one metadata index per workspace directory**, w
 and read in a single pass.
 
 ```
-<config_dir>/shirley/workspaces/<workspace-id>/sessions/
+~/.shirley/workspaces/<workspace-id>/sessions/
 ├── index.json          <- NEW: session metadata index (one read)
 ├── 2024-06-01-a.jsonl  <- full raw Message log (source of truth)
 ├── 2024-06-01-a.title  <- title sidecar (unchanged)
@@ -351,6 +368,24 @@ tool calls, and files live on the server.
 
 ---
 
+**6.4 Storage root (shared, no per-interface split)**
+
+There is **no** separate storage root per interface: desktop / TUI / cloud server all resolve
+`storage::global_root()` to the same `~/.shirley` directory. Running them on the same machine
+under the same OS user intentionally means they see the same `projects.json`, sessions, memory
+and `config.toml`. The earlier idea of an isolated cloud root (`home_cloud_root()` /
+`set_root_override()` / a process-level `OnceLock` override) was **dropped** — it does not exist
+in the code, and keeping the cloud on its own root only ever produced "the web can't see my
+desktop data" confusion. If a deployment genuinely needs isolation, run it as a different OS
+user / container so the whole `~/.shirley` is separate; the app itself keeps one root.
+
+`storage::global_root()` remains the single derivation point for `projects.json`,
+`workspaces/<id>/sessions`, and `config.toml`. Legacy state that used to live under
+`<config_dir>/shirley` is migrated into `~/.shirley` once by `storage::migrate_legacy_root()`
+at startup.
+
+---
+
 **7. Deployment and security**
 
 The current server is **127.0.0.1, single-user, self-hosted, no auth**. That is fine for local use
@@ -405,12 +440,11 @@ These remain **undecided** and are called out so the next agent does not silentl
 
 **10. Summary**
 
-The desktop already contains everything the cloud server needs: a `ProjectRegistry`
-(`project.rs`), lazy per-project runtimes (`shell.rs:83-198`), per-project `SessionManager`
-(`shell.rs:71`), and a transport-agnostic `AgentEventWire` contract (`wire.rs`). The server is a
-partial copy that hard-codes a single `__chat__` project (`server.rs:448`) and eagerly loads one
-session at boot (`server.rs:96-140`). The path forward is **not** to build a second UI or a second
-backend — it is to **extract the shared core once** (`ProjectRuntimeManager`) and let `shell.rs` and
-`server.rs` differ only in transport (Tauri `emit` vs SSE). That single move makes multi-project
-cloud, cloud project creation, and desktop-to-remote-server all fall out of the same machinery, and
-keeps the frontend `AgentBridge` contract untouched.
+The desktop already contained everything the cloud server needs: a `ProjectRegistry`
+(`project.rs`), lazy per-project runtimes, per-project `SessionManager`, and a transport-agnostic
+`AgentEventWire` contract (`wire.rs`). That extraction is now **done**: `ProjectRuntimeManager`
+(`runtime.rs`) is the single core, and `shell.rs` (Tauri `emit`) and `server.rs` (HTTP + SSE) are
+thin transports over it, differing only in transport. Multi-project cloud, cloud project creation,
+and desktop-to-remote-server all fall out of the same machinery, and the frontend `AgentBridge`
+contract is untouched. What remains is P2 hardening (auth, path allow-list, runtime eviction,
+paging) — see §8–§9.

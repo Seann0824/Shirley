@@ -146,7 +146,7 @@ in (`store.rs::write_entry` -> `root_for_domain`): `personal` lands in the globa
 lands in the workspace root. Each root has the same directory structure.
 
 ```
-<config_dir>/shirley/memory/        # personal domain: user profile / preferences / cross-project facts
+~/.shirley/memory/        # personal domain: user profile / preferences / cross-project facts
 ├── core.md                         # * always-resident layer: projection of this root's active entries (<= 2000 chars)
 ├── index.md                        # the program-maintained index page (one line each: id / type / summary / path)
 ├── vectors.json                    # semantic vector sidecar (V2.5, one per root)
@@ -155,10 +155,10 @@ lands in the workspace root. Each root has the same directory structure.
 ├── procedures/                     # procedural memory: behavior flows ("X first, then Y")
 └── facts/                          # semantic facts (profile / cross-project knowledge)
 
-<config_dir>/shirley/workspaces/<workspace-id>/memory/             # project domain: specific to the current workspace (stored globally, isolated per workspace)
+~/.shirley/workspaces/<workspace-id>/memory/             # project domain: specific to the current workspace (stored globally, isolated per workspace)
 ├── core.md / index.md / vectors.json
 ├── episodic/ preferences/ procedures/ facts/
-<config_dir>/shirley/workspaces/<workspace-id>/sessions/*.jsonl    # raw evidence layer (already present, append-only)
+~/.shirley/workspaces/<workspace-id>/sessions/*.jsonl    # raw evidence layer (already present, append-only)
 ```
 
 The semantic types align with chapter 3's three cognitive-science memory classes (episodic /

@@ -22,7 +22,6 @@ import { ScrollArea } from "@/ui/scroll-area";
 import { HoverScrollLabel } from "@/ui/hover-scroll-label";
 import { cn } from "@/ui/utils";
 import type { ProjectEntry, SessionEntry } from "@/lib/bridge";
-import { SubagentSection } from "@/components/ai/SubagentSection";
 
 /**
  * Left sidebar: multi-project + session navigation.
@@ -672,15 +671,6 @@ export function SessionSidebar({
           </section>
         )}
 
-        {/* Subagents of the current session (docs/subagent.md decision 10): click to expand the
-            child transcript. Self-contained (fetches via the bridge), keyed by project::session. */}
-        {activeProject && current && (
-          <SubagentSection
-            key={`${activeProject}::${current}`}
-            project={activeProject}
-            session={current}
-          />
-        )}
       </ScrollArea>
     </aside>
   );

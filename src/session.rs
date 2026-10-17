@@ -263,7 +263,7 @@ impl SessionEntry {
 /// database backend, neither the commands nor the picker UI need to change.
 ///
 /// **The TUI and desktop share the same implementation**: both sides' session list / switch / rename / delete
-/// land in this layer, so they naturally share the same `<config_dir>/shirley/workspaces/<workspace-id>/sessions` data.
+/// land in this layer, so they naturally share the same `~/.shirley/workspaces/<workspace-id>/sessions` data.
 pub trait SessionCatalog: Send + Sync {
     /// List all sessions, **sorted by last-modified time descending** (newest first).
     fn list(&self) -> Result<Vec<SessionEntry>, SessionError>;
@@ -322,7 +322,7 @@ pub trait SessionCatalog: Send + Sync {
     /// Move a session (along with its title) from the current directory to `dest_dir`.
     ///
     /// Used for "move a session to another project" -- each project has its own
-    /// `<config_dir>/shirley/workspaces/<workspace-id>/sessions` directory, so a move is copying `<name>.jsonl` and
+    /// `~/.shirley/workspaces/<workspace-id>/sessions` directory, so a move is copying `<name>.jsonl` and
     /// `<name>.title` into the target directory. If the target already has a same-named session it **errors**
     /// (no silent overwrite, to avoid data loss). The default implementation errors.
     fn move_to(&self, _name: &str, _dest_dir: &Path) -> Result<(), SessionError> {

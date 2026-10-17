@@ -7,11 +7,108 @@ use std::path::{Path, PathBuf};
 
 use uuid::Uuid;
 
+/// The single, interface-agnostic state root: `~/.shirley`.
+///
+/// Both the desktop/TUI and the cloud/server share this one directory — running them on
+/// the same machine under the same OS user means they intentionally see the same
+/// `projects.json`, sessions, memory and `config.toml`. (This replaced the earlier
+/// `<config_dir>/shirley` root, which was also per-user and therefore already shared;
+/// the explicit home path just makes it predictable and identical across platforms.)
 pub fn global_root() -> PathBuf {
-    dirs::config_dir()
-        .map(|path| path.join("shirley"))
-        .or_else(|| dirs::home_dir().map(|path| path.join(".shirley")))
+    dirs::home_dir()
+        .map(|path| path.join(".shirley"))
         .unwrap_or_else(|| std::env::temp_dir().join("shirley"))
+}
+
+/// One-time migration of the legacy state root (`<config_dir>/shirley`) into the unified
+/// root (`~/.shirley`). The desktop's real data used to live at the legacy path; on the
+/// first run after the switch we move it over so nothing appears "lost".
+///
+/// Safe to call on every startup, including when the unified root already exists.
+/// Existing project entries win; missing entries and legacy state are merged without
+/// overwriting divergent files. Returns whether any data was migrated.
+pub fn migrate_legacy_root() -> io::Result<bool> {
+    let Some(legacy) = dirs::config_dir().map(|path| path.join("shirley")) else {
+        return Ok(false);
+    };
+    let global = global_root();
+    merge_legacy_root(&legacy, &global)
+}
+
+fn merge_legacy_root(legacy: &Path, global: &Path) -> io::Result<bool> {
+    if !global.exists() {
+        return migrate_root_from(legacy, global);
+    }
+    if !legacy.is_dir() || legacy == global {
+        return Ok(false);
+    }
+    // An already-created destination must not hide older application data.
+    let mut migrated = false;
+    for entry in fs::read_dir(legacy)? {
+        let entry = entry?;
+        let source = entry.path();
+        let target = global.join(entry.file_name());
+        if entry.file_name() == "projects.json" && target.exists() {
+            let mut current: serde_json::Value = serde_json::from_slice(&fs::read(&target)?)?;
+            let old: serde_json::Value = serde_json::from_slice(&fs::read(&source)?)?;
+            let projects = current.get_mut("projects").and_then(|v| v.as_array_mut())
+                .ok_or_else(|| io::Error::other("invalid current project registry"))?;
+            let old_projects = old.get("projects").and_then(|v| v.as_array())
+                .ok_or_else(|| io::Error::other("invalid legacy project registry"))?;
+            let before = projects.len();
+            for project in old_projects {
+                if !projects.iter().any(|p| p.get("id") == project.get("id")) {
+                    projects.push(project.clone());
+                }
+            }
+            if before != projects.len() {
+                let temp = target.with_extension("migration.tmp");
+                fs::write(&temp, serde_json::to_vec_pretty(&current)?)?;
+                fs::rename(temp, target)?;
+                migrated = true;
+            }
+            // Keep the old registry as evidence; current entries take precedence.
+            continue;
+        }
+        preflight(&source, &target)?;
+        merge_move(&source, &target)?;
+        migrated = true;
+    }
+    Ok(migrated)
+}
+
+/// Move `legacy` onto `target` when the target does not exist yet. Falls back to a
+/// recursive copy (cross-device) without deleting the source. Testable core of
+/// [`migrate_legacy_root`].
+fn migrate_root_from(legacy: &Path, target: &Path) -> io::Result<bool> {
+    if legacy == target || !legacy.is_dir() || target.exists() {
+        return Ok(false);
+    }
+    if let Some(parent) = target.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    match fs::rename(legacy, target) {
+        Ok(()) => Ok(true),
+        Err(_) => {
+            copy_tree(legacy, target)?;
+            Ok(true)
+        }
+    }
+}
+
+fn copy_tree(source: &Path, target: &Path) -> io::Result<()> {
+    fs::create_dir_all(target)?;
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = target.join(entry.file_name());
+        if from.is_dir() {
+            copy_tree(&from, &to)?;
+        } else {
+            fs::copy(&from, &to)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn config_path() -> PathBuf {
@@ -110,6 +207,7 @@ impl StoragePaths {
 /// Move the active workspace, Chat, and all registered projects (including archived ones).
 pub fn migrate_all(current: &Path) -> io::Result<usize> {
     let global = global_root();
+    migrate_chat_namespace(&global)?;
     let mut workspaces = vec![current.to_path_buf(), global.join("chat")];
     let registry = global.join("projects.json");
     if registry.exists() {
@@ -134,6 +232,42 @@ pub fn migrate_all(current: &Path) -> io::Result<usize> {
         }
     }
     Ok(migrated)
+}
+
+/// Chat changed its absolute working path when the global root moved. Rebind its
+/// existing namespace as well as its files, otherwise the new Chat appears empty.
+fn migrate_chat_namespace(global: &Path) -> io::Result<()> {
+    let chat = global.join("chat");
+    fs::create_dir_all(&chat)?;
+    let destination = StoragePaths::new(global.to_path_buf(), &chat)?;
+    let Some(old_chat) = dirs::config_dir().map(|p| p.join("shirley/chat")) else {
+        return Ok(());
+    };
+    let workspaces = global.join("workspaces");
+    if !workspaces.is_dir() { return Ok(()); }
+    for entry in fs::read_dir(&workspaces)? {
+        let source = entry?.path();
+        if source == destination.state { continue; }
+        let manifest = source.join("workspace.json");
+        if !manifest.is_file() { continue; }
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&manifest)?)?;
+        if value.get("workspace").and_then(|v| v.as_str()) != old_chat.to_str() { continue; }
+        for entry in fs::read_dir(&source)? {
+            let entry = entry?;
+            if entry.file_name() != "workspace.json" {
+                preflight(&entry.path(), &destination.state.join(entry.file_name()))?;
+            }
+        }
+        destination.migrate()?;
+        for entry in fs::read_dir(&source)? {
+            let entry = entry?;
+            if entry.file_name() != "workspace.json" {
+                merge_move(&entry.path(), &destination.state.join(entry.file_name()))?;
+            }
+        }
+        // Retain the old manifest for provenance; all active data now lives at destination.
+    }
+    Ok(())
 }
 
 fn promote_config(legacy: &Path, target: &Path) -> io::Result<()> {
@@ -372,6 +506,32 @@ mod tests {
     }
 
     #[test]
+    fn migrate_legacy_root_moves_tree_once_and_is_idempotent() {
+        let dir = fixture();
+        let legacy = dir.join("legacy-shirley");
+        let target = dir.join("home/.shirley");
+        write(&legacy.join("projects.json"), "{\"version\":1}");
+        write(&legacy.join("workspaces/abc/sessions/s.jsonl"), "hi");
+        write(&legacy.join("config.toml"), "[provider]\nmodel='m'\n");
+
+        assert!(migrate_root_from(&legacy, &target).unwrap());
+        assert!(!legacy.exists(), "legacy tree should be moved away");
+        assert_eq!(
+            fs::read_to_string(target.join("projects.json")).unwrap(),
+            "{\"version\":1}"
+        );
+        assert_eq!(
+            fs::read_to_string(target.join("workspaces/abc/sessions/s.jsonl")).unwrap(),
+            "hi"
+        );
+        assert!(target.join("config.toml").exists());
+
+        // Second run is a no-op (target already exists).
+        assert!(!migrate_root_from(&legacy, &target).unwrap());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn conflicting_sessions_are_never_overwritten() {
         let dir = fixture();
         let workspace = dir.join("repo");
@@ -393,6 +553,43 @@ mod tests {
             fs::read_to_string(paths.sessions().join("a.jsonl")).unwrap(),
             "target"
         );
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn rebinds_legacy_chat_namespace_and_keeps_session_sidecars() {
+        let dir = fixture();
+        let old_chat = dirs::config_dir().unwrap().join("shirley/chat");
+        let old_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, old_chat.as_os_str().as_encoded_bytes());
+        let old = dir.join("workspaces").join(old_id.to_string());
+        write(&old.join("workspace.json"), &serde_json::json!({"version":1,"workspace":old_chat}).to_string());
+        write(&old.join("sessions/old.jsonl"), "history");
+        write(&old.join("sessions/old.title"), "title");
+        write(&old.join("sessions/old.agents/child.jsonl"), "child");
+        migrate_chat_namespace(&dir).unwrap();
+        let paths = StoragePaths::new(dir.clone(), &dir.join("chat")).unwrap();
+        assert_eq!(fs::read_to_string(paths.sessions().join("old.jsonl")).unwrap(), "history");
+        assert_eq!(fs::read_to_string(paths.sessions().join("old.title")).unwrap(), "title");
+        assert_eq!(fs::read_to_string(paths.sessions().join("old.agents/child.jsonl")).unwrap(), "child");
+        migrate_chat_namespace(&dir).unwrap();
+        assert!(!old.join("sessions").exists());
+        fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn merges_legacy_root_even_when_destination_exists() {
+        let dir = fixture();
+        let legacy = dir.join("old");
+        let global = dir.join("new");
+        write(&legacy.join("projects.json"), r#"{"version":1,"projects":[{"id":"a","name":"old"},{"id":"b"}]}"#);
+        write(&global.join("projects.json"), r#"{"version":1,"projects":[{"id":"a","name":"current"}]}"#);
+        write(&legacy.join("workspaces/id/sessions/old.jsonl"), "history");
+        assert!(merge_legacy_root(&legacy, &global).unwrap());
+        let registry: serde_json::Value = serde_json::from_slice(&fs::read(global.join("projects.json")).unwrap()).unwrap();
+        assert_eq!(registry["projects"].as_array().unwrap().len(), 2);
+        assert_eq!(registry["projects"][0]["name"], "current");
+        assert_eq!(fs::read_to_string(global.join("workspaces/id/sessions/old.jsonl")).unwrap(), "history");
+        assert!(!merge_legacy_root(&legacy, &global).unwrap());
         fs::remove_dir_all(dir).unwrap();
     }
 }

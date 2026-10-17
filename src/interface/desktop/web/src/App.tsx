@@ -12,6 +12,7 @@ import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
 import { NewChatControls } from "@/components/ai/NewChatControls";
+import { SubagentSection } from "@/components/ai/SubagentSection";
 import { AiConversationSkeleton } from "@/components/ai/AiConversationSkeleton";
 import { AiConversationMinimap } from "@/components/ai/AiConversationMinimap";
 import { InlineReferences } from "@/lib/file-mentions/FileChips";
@@ -1254,6 +1255,16 @@ export function App() {
             )
           }
         />
+        )}
+        {!isNewChat && activeProject && sessionName && (
+          // Subagents dispatched in this session (docs/subagent.md decision 10): shown inline
+          // in the session page (not as a separate sidebar panel). Click a row to expand the
+          // child transcript; a running child can be cancelled from its row.
+          <SubagentSection
+            key={`${activeProject}::${sessionName}`}
+            project={activeProject}
+            session={sessionName}
+          />
         )}
         {!isNewChat && (
           <>

@@ -3,7 +3,7 @@
 //! A session's subagents are persisted **alongside** the session log, never inside it:
 //!
 //! ```text
-//! <config_dir>/shirley/workspaces/<workspace-id>/sessions/
+//! ~/.shirley/workspaces/<workspace-id>/sessions/
 //!   <session>.jsonl                 # the parent log -- still pure `Message`, untouched
 //!   <session>.agents/
 //!     index.jsonl                   # one JSON record per started/finished subagent

@@ -35,7 +35,7 @@ use shirley_agent_sdk::AgentEvent;
 /// The single event name the webview listens on.
 const EVENT_NAME: &str = "agent://event";
 
-/// Chat mode workspace root: `<config_dir>/shirley/chat`.
+/// Chat mode workspace root: `~/.shirley/chat`.
 fn chat_root() -> PathBuf {
     crate::storage::global_root().join("chat")
 }

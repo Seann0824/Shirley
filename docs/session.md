@@ -299,7 +299,7 @@ The previous seven sections solve "how one session is persisted and recovered". 
 **Decision 1: one session = one independent log; the directory is the index.**
 
 The single file `<root>/.shirley/session.jsonl` is upgraded to a directory
-`<config_dir>/shirley/workspaces/<workspace-id>/sessions/<name>.jsonl`, where each session is still a complete JSONL log (reusing
+`~/.shirley/workspaces/<workspace-id>/sessions/<name>.jsonl`, where each session is still a complete JSONL log (reusing
 `JsonlSessionStore`, semantics unchanged). The name defaults to the creation timestamp
 (`YYYYMMDD-HHMMSS`), and **scanning the directory is "listing the sessions"** -- no extra index file is
 needed, and there is no consistency problem of "the index and the log disagreeing" (continuing
@@ -388,7 +388,7 @@ old inode". `delete(name)` deletes the log and best-effort deletes the title sid
 **Decision 7: desktop and TUI share the same session data.**
 
 The two interfaces **share the directory described by the same `FileSessionCatalog` instance**
-(`<config_dir>/shirley/workspaces/<workspace-id>/sessions`) -- this is the landing point of "sharing one copy of data": complete the
+(`~/.shirley/workspaces/<workspace-id>/sessions`) -- this is the landing point of "sharing one copy of data": complete the
 operations at the catalog layer, and the two interfaces automatically share them. The desktop side
 puts the factory's `session_catalog` (previously TUI-only) into `DesktopState` as well, adding
 commands:

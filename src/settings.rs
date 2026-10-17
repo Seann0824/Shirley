@@ -11,7 +11,7 @@
 //!
 //! 1. Built-in defaults (protocol `ChatCompletions`, model `deepseek-v4.1-flash`,
 //!    context window `104858 >> 1`) -- consistent with the old `main.rs` behavior.
-//! 2. Global config: `<config_dir>/shirley/config.toml`.
+//! 2. Global config: `~/.shirley/config.toml`.
 //! 3. Env vars: `LOCAL_API_KEY` / `LOCAL_BASE_URL` / `LOCAL_MODELS_URL` /
 //!    `LOCAL_MODEL` / `LOCAL_PROTOCOL` / `LOCAL_CONTEXT_WINDOW_TOKENS`.
 //!

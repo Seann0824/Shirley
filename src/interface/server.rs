@@ -87,10 +87,10 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         }
     });
 
-    // Server mode has no `__chat__` pseudo project: only real registered projects.
+    // Chat uses the same persistent workspace as the desktop interface.
     let manager = Arc::new(ProjectRuntimeManager::new(
         Arc::new(tokio::sync::Mutex::new(registry)),
-        None,
+        Some(crate::storage::global_root().join("chat")),
         sink,
     ));
     // Register the server's default workspace so the UI always has a project to show.

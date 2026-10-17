@@ -1,6 +1,6 @@
 # Cloud web interface (only-chat)
 
-> ⚠️ This document describes the **single-project transport implementation** that shipped first. The multi-project / lazy-loading / remote-desktop design supersedes the "one workspace" premise below — see [`cloud-server.md`](./cloud-server.md). Where the two disagree, `cloud-server.md` is the target.
+> ℹ️ This document covers the **transport contract** (`POST /api/cmd/{name}` + `GET /api/events`) and the `spawn_turn` lifecycle, which are still accurate. The **orchestration** it once described as "one workspace" has since been unified with the desktop: the server now runs the same `ProjectRuntimeManager` core (`src/interface/runtime.rs`) as the Tauri shell, so multi-project / lazy per-project runtimes / `ProjectRegistry` **are** in effect. For the architecture and landing map see [`cloud-server.md`](./cloud-server.md); where the two disagree, `cloud-server.md` wins.
 
 ## What it is
 
@@ -8,10 +8,11 @@ A **server-side** web version of Shirley: the Agent runs on the server (its tool
 `bash` / `read` / `grep` / `todo` / memory / skills / subagent — execute in the
 **server's** environment), and the browser is the **desktop frontend**, unchanged.
 
-> "only chat" describes the **UI shape**, not a reduced tool set. There is **no project
-> or workspace management** — exactly one workspace (the server process's working
-> directory) and a flat list of sessions. The Agent keeps its full tool set; the tools
-> simply run on the server.
+> "only chat" describes the **UI shape**, not a reduced tool set. The Agent keeps its
+> full tool set; the tools simply run on the server. (The original first cut had no
+> project layer — one workspace and a flat session list. That has since been unified
+> with the desktop: the server now runs the same multi-project `ProjectRuntimeManager`
+> core, so real projects and per-project sessions are live. See `cloud-server.md`.)
 
 The guiding principle (from the user): *"it's essentially just the web version of the
 desktop app; the only difference is that SDK data is processed on the server instead of
@@ -32,25 +33,21 @@ no `ProjectRegistry`. The target shape is described in
 [`cloud-server.md`](./cloud-server.md), which reuses `ProjectRegistry` + lazy per-project
 runtimes; this document's "one workspace" premise is not the end state.
 
-### The implicit project (`__chat__`)
+### The implicit project (`__chat__`) — historical note
 
-The desktop frontend still speaks a *project* contract (it was written for the
-multi-project desktop app). To reuse it verbatim, the current implementation exposes
-**one implicit project** whose id is `__chat__` (`server.rs::CHAT_PROJECT_ID`, identical
-to the frontend's `CHAT_PROJECT_ID`). The frontend derives `mode === "chat"` from that
-id, so it renders the plain chat surface automatically: no project sidebar,
-`projectName="Chat"`, sessions folded into a single "Recent" list.
+> **Superseded.** The server no longer hard-codes a single `__chat__` project: it reuses
+> the shared `ProjectRuntimeManager` core, so real `ProjectRegistry` entries and lazy
+> per-project runtimes are live (see [`cloud-server.md`](./cloud-server.md)). The
+> paragraph below records the **first-cut, single-project transport** for historical
+> context only.
 
-> **This `__chat__` shim is a stopgap, not the end state.** It exists only because the
-> single-project transport shipped first; it is *not* a design conclusion that the server
-> has no project layer. The target is the multi-project / lazy-runtime design in
-> [`cloud-server.md`](./cloud-server.md), where real `ProjectRegistry` entries replace the
-> single `__chat__` tag. Until then, the id is only a routing tag that makes the shared
-> frontend switch into chat mode — there is no project layer behind it.
->
-> It is also *not* the same as the desktop's `__chat__` pseudo-project
-> (`shell.rs::CHAT_PROJECT_ID`), which still binds to a local directory and still walks
-> the full multi-project command surface.
+The desktop frontend speaks a *project* contract (it was written for the multi-project
+desktop app). The first-cut implementation reused it verbatim by exposing **one implicit
+project** whose id is `__chat__` (`server.rs::CHAT_PROJECT_ID`, identical to the
+frontend's `CHAT_PROJECT_ID`); the frontend derives `mode === "chat"` from that id and
+renders the plain chat surface. That shim was a stopgap, not a design conclusion — the
+landed design replaces it with real `ProjectRegistry` entries, so the frontend switches
+out of chat mode and into the normal multi-project sidebar.
 
 ## Cargo feature
 
@@ -172,11 +169,15 @@ Mirrors the desktop `shell.rs::spawn_turn`:
 ## Known gaps / boundaries
 
 - **Single user, no auth.** `config_dir` is still the single-machine single-user
-  assumption. Multi-user / per-user storage / authentication is **not** implemented.
-- **Session storage** stays `FileSessionCatalog` (local JSONL). No database.
-- The server does not reuse `ProjectRegistry`: there is exactly one workspace and one
-  flat session list. This is a **current-implementation simplification**, not a design
-  conclusion — the target is `ProjectRegistry` + lazy per-project runtimes in
-  [`cloud-server.md`](./cloud-server.md).
+  assumption. Multi-user / per-user storage / authentication is **not** implemented
+  (SSE auth middleware + `SHIRLEY_ALLOWED_ROOTS` allow-list are the P2 items; see
+  [`cloud-server.md`](./cloud-server.md) §7–§8).
+- **Session storage** stays `FileSessionCatalog` (local JSONL, now with an `index.json`
+  lazy-load cache). No database.
+- **Multi-project is in effect.** The server no longer hard-codes a single `__chat__`
+  project: it reuses the same `ProjectRuntimeManager` core as the desktop, so
+  `ProjectRegistry` + lazy per-project runtimes + per-project `SessionManager` are live.
+  Cloud project creation is the server-side **path text box** (`agent_add_project { path,
+  name? }`); the directory browser (`agent_browse_dirs`) is still a P2 gap.
 - Tool-visible behavior is unchanged from the desktop app — the same tools, the same
   workspace constraints, just executed server-side.

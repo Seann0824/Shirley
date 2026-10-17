@@ -44,9 +44,21 @@ impl Mode {
     }
 }
 
-#[tokio::main(flavor = "multi_thread")]
-async fn main() -> Result<(), AgentError> {
+fn main() -> Result<(), AgentError> {
     dotenvy::dotenv().ok();
+
+    // All interfaces (desktop / TUI / cloud server) share one state root: `~/.shirley`.
+    // Running them on the same machine under the same OS user intentionally means they
+    // see the same projects / sessions / config. Move the legacy `<config_dir>/shirley`
+    // root over once so the desktop's existing data does not appear lost.
+    if storage::migrate_legacy_root()
+        .map_err(|error| AgentError::Other(Box::new(error)))?
+    {
+        eprintln!(
+            "[storage] migrated legacy state root into {}",
+            storage::global_root().display()
+        );
+    }
 
     // Workspace root: decides "which project this run is for", and is the source of workspace-level config.
     let working_dir = prompt::workspace_root();
@@ -59,19 +71,30 @@ async fn main() -> Result<(), AgentError> {
         return Ok(());
     }
 
-    // Application assembly (config / model catalog / tools / sessions / Agent) — shared by both interfaces.
-    let factory = bootstrap::AgentFactory::assemble(working_dir)?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| AgentError::Other(Box::new(error)))?;
 
-    // Warm the model catalog in the background so the first `/model` open doesn't wait on a network round trip.
-    factory.prewarm_model_catalog();
+    let factory = runtime.block_on(async {
+        // Assembly and catalog prewarming may spawn background tasks.
+        let factory = bootstrap::AgentFactory::assemble(working_dir)?;
+        factory.prewarm_model_catalog();
+        Ok::<_, AgentError>(factory)
+    })?;
 
     match Mode::from_env_and_args() {
-        Mode::Tui => interface::run(factory).await,
+        Mode::Tui => runtime.block_on(interface::run(factory)),
         // Desktop interface: enter the Tauri event loop (blocks the main thread).
-        Mode::Desktop => interface::desktop::run(factory),
+        Mode::Desktop => {
+            // Share the live runtime, but enter Tauri outside any block_on.
+            #[cfg(feature = "desktop")]
+            tauri::async_runtime::set(runtime.handle().clone());
+            interface::desktop::run(factory)
+        }
         // Cloud web interface: run the HTTP + WebSocket server on the tokio runtime.
         #[cfg(feature = "server")]
-        Mode::Server => interface::server::run(factory).await,
+        Mode::Server => runtime.block_on(interface::server::run(factory)),
         #[cfg(not(feature = "server"))]
         Mode::Server => Err(std::io::Error::other(
             "server mode requires building with `--features server`",

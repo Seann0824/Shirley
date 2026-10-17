@@ -153,14 +153,14 @@ what it can".
 | Level | Path | Description |
 | --- | --- | --- |
 | Project level | `<root>/.shirley/plugins/<name>/` | travels with the repository |
-| User level | `<config_dir>/shirley/plugins/<name>/` | global |
-| git source | `<config_dir>/shirley/plugins/.cache/<name>@<rev>/` | where `/plugin add <url>` lands after fetching |
+| User level | `~/.shirley/plugins/<name>/` | global |
+| git source | `~/.shirley/plugins/.cache/<name>@<rev>/` | where `/plugin add <url>` lands after fetching |
 
 Difference from skills: **skills are "use as soon as scanned", plugins are "only take effect when
 explicitly enabled"** (decision 5). So discovery (scan) and enabling (enabled) are two separate
 things.
 
-### 4.2 Enable registration (`<config_dir>/shirley/plugins.json`)
+### 4.2 Enable registration (`~/.shirley/plugins.json`)
 
 ```json
 {

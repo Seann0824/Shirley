@@ -46,8 +46,7 @@ use crate::subagent::{SubagentInfo, SubagentManager};
 use crate::todo::TaskView;
 
 /// Pseudo project id for Chat mode: a project not in the registry, assembled from a
-/// fixed chat root. Only the desktop transport uses it; the server registers real
-/// projects instead. Kept here so both transports agree on the constant.
+/// fixed chat root shared by desktop and server transports.
 pub const CHAT_PROJECT_ID: &str = "__chat__";
 
 /// Runtime for a single project: one assembled factory + its multi-session orchestrator.
@@ -65,8 +64,8 @@ pub struct ProjectRuntimeManager {
     runtimes: Arc<Mutex<HashMap<String, Arc<Mutex<ProjectRuntime>>>>>,
     cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
     sink: EventSink,
-    /// If `Some`, the `__chat__` pseudo project resolves to this root (desktop). If
-    /// `None`, `__chat__` is rejected (server: real projects only).
+    /// If `Some`, the `__chat__` pseudo project resolves to this root.
+    /// If `None`, `__chat__` is rejected.
     chat_root: Option<PathBuf>,
 }
 
