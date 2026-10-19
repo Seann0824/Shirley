@@ -34,7 +34,7 @@ export function emptyModel(): ModelDefinition {
   return { id: "", name: "", context_window_tokens: 65536, supports_images: false, tool_mode: "native", thinking: false, reasoning_effort: null };
 }
 export function emptyProvider(): ProviderDefinition {
-  return { id: globalThis.crypto?.randomUUID?.() ?? `provider-${Date.now()}-${Math.random().toString(36).slice(2)}`, name: "新服务商", protocol: "chat_completions", base_url: "", models_url: null, api_key: null, default_model: "", models: [emptyModel()], extra_body: null };
+  return { id: globalThis.crypto?.randomUUID?.() ?? `provider-${Date.now()}-${Math.random().toString(36).slice(2)}`, name: "New provider", protocol: "chat_completions", base_url: "", models_url: null, api_key: null, default_model: "", models: [emptyModel()], extra_body: null };
 }
 export function providerBridge(call: <T>(command: string, args?: Record<string, unknown>) => Promise<T>): ProviderBridge {
   const action = <T>(action: string, input: unknown = {}) => call<T>("agent_model_providers", { action, input });
@@ -51,7 +51,7 @@ export function providerBridge(call: <T>(command: string, args?: Record<string, 
 export function mockProviderBridge(): ProviderBridge {
   let state: ProviderRegistry = { revision: "0", providers: [], default_selection: null };
   const snapshot = () => structuredClone(state);
-  const check = (revision: string) => { if (state.revision !== revision) throw new Error("模型配置已改变，请重新加载"); };
+  const check = (revision: string) => { if (state.revision !== revision) throw new Error("Model config changed; please reload"); };
   return {
     async get() { return snapshot(); },
     async save(input) {
@@ -67,7 +67,7 @@ export function mockProviderBridge(): ProviderBridge {
       if (state.default_selection?.startsWith(`provider:${id}:`)) state.default_selection = null;
       return snapshot();
     },
-    async importLegacy() { throw new Error("演示模式没有原有连接可导入"); },
-    async fetchModels() { throw new Error("演示模式不访问真实模型接口，请手动添加模型"); },
+    async importLegacy() { throw new Error("Demo mode has no existing connection to import"); },
+    async fetchModels() { throw new Error("Demo mode does not call real model endpoints; add models manually"); },
   };
 }

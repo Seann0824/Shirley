@@ -628,7 +628,7 @@ export function App() {
       if (caps.nativeFolderPicker) {
         entry = await bridge.addProject();
       } else {
-        const path = window.prompt("输入服务器上的项目目录绝对路径：");
+        const path = window.prompt("Enter the absolute path of the project directory on the server:");
         if (!path) return; // user cancelled
         entry = await bridge.addProjectByPath(path.trim());
       }

@@ -43,7 +43,7 @@ export function ModelSelector({
     return () => { disposed = true; window.removeEventListener("model-providers-updated", load); };
   }, [project, current]);
   const selected = entries.find((entry) => entry.value === current);
-  const currentLabel = selected ? `${selected.provider} / ${selected.label}` : current.startsWith("provider:") ? "选择服务商模型" : current;
+  const currentLabel = selected ? `${selected.provider} / ${selected.label}` : current.startsWith("provider:") ? "Select provider model" : current;
 
   // Close on click outside the component / Esc.
   useEffect(() => {
@@ -149,7 +149,7 @@ export function ModelSelector({
                   </div>
                 );
               })}
-            <button type="button" className="mt-1 flex w-full items-center gap-2 border-t border-line px-3 py-2 text-body-sm text-muted hover:bg-selected hover:text-ink" onClick={() => { setOpen(false); window.dispatchEvent(new Event("open-model-providers")); }}><Settings2 className="size-4" />管理模型服务商</button>
+            <button type="button" className="mt-1 flex w-full items-center gap-2 border-t border-line px-3 py-2 text-body-sm text-muted hover:bg-selected hover:text-ink" onClick={() => { setOpen(false); window.dispatchEvent(new Event("open-model-providers")); }}><Settings2 className="size-4" />Manage model providers</button>
           </div>
         </ScrollArea>
       )}

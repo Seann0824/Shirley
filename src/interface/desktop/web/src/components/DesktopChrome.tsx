@@ -179,7 +179,7 @@ export function DesktopChrome({
             </>
           )}
         </div>
-        <IconButton label="设置" onClick={() => openSettings("general")}><Settings2 className="size-4" /></IconButton>
+        <IconButton label="Settings" onClick={() => openSettings("general")}><Settings2 className="size-4" /></IconButton>
         <ContextMenu menu={
           <>
             <ContextMenuItem icon={<MessageSquarePlus className="size-4" />} onSelect={onNewChat}>New session</ContextMenuItem>
@@ -197,7 +197,7 @@ export function DesktopChrome({
         <nav aria-label="Main navigation" className="hidden md:flex w-14 shrink-0 flex-col items-center gap-2 bg-frame py-3">
           <IconButton label="Home" active className="size-10" onClick={onHome}><House className="size-5" /></IconButton>
           <div className="flex-1" />
-          <IconButton label="设置" className="size-10" onClick={() => openSettings("general")}><Settings2 className="size-5" /></IconButton>
+          <IconButton label="Settings" className="size-10" onClick={() => openSettings("general")}><Settings2 className="size-5" /></IconButton>
           <IconButton label={dark ? "Switch to light appearance" : "Switch to dark appearance"} className="size-10" onClick={toggleTheme}>{dark ? <Sun className="size-5" /> : <Moon className="size-5" />}</IconButton>
           <img src="/brand/shirley-logo.png" alt="Shirley" className="mt-1 size-8 rounded-full object-cover" draggable={false} />
         </nav>

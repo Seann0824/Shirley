@@ -17,10 +17,10 @@ export function openSettings(page: SettingsPage = "general") {
 
 type NavItem = { id: SettingsPage; label: string; icon: ReactNode; group: string; keywords: string };
 const NAV: NavItem[] = [
-  { id: "general", label: "通用", icon: <Settings2 className="size-4" />, group: "个人", keywords: "general 通用 外观 主题 深色 浅色 界面" },
-  { id: "models", label: "模型服务商", icon: <Sparkles className="size-4" />, group: "模型", keywords: "models 模型 服务商 provider api key 接口 上下文" },
-  { id: "connection", label: "连接", icon: <Cloud className="size-4" />, group: "模型", keywords: "connection 连接 云端 本地 同步 remote" },
-  { id: "about", label: "关于", icon: <Info className="size-4" />, group: "其他", keywords: "about 关于 版本 信息" },
+  { id: "general", label: "General", icon: <Settings2 className="size-4" />, group: "Personal", keywords: "general appearance theme dark light interface" },
+  { id: "models", label: "Model Providers", icon: <Sparkles className="size-4" />, group: "Models", keywords: "models provider api key endpoint context" },
+  { id: "connection", label: "Connection", icon: <Cloud className="size-4" />, group: "Models", keywords: "connection cloud local sync remote" },
+  { id: "about", label: "About", icon: <Info className="size-4" />, group: "Other", keywords: "about version info" },
 ];
 
 function GeneralPage() {
@@ -33,22 +33,22 @@ function GeneralPage() {
   const change = (next: ThemeMode) => { setMode(next); setThemeMode(next); };
   return (
     <>
-      <SettingsSection title="外观">
-        <SettingsRow title="主题" description="跟随系统，或固定为浅色 / 深色。">
+      <SettingsSection title="Appearance">
+        <SettingsRow title="Theme" description="Follow the system, or pin light / dark.">
           <SettingsSelect<ThemeMode>
-            label="主题"
+            label="Theme"
             value={mode}
             onChange={change}
             options={[
-              { value: "system", label: "跟随系统" },
-              { value: "light", label: "浅色" },
-              { value: "dark", label: "深色" },
+              { value: "system", label: "System" },
+              { value: "light", label: "Light" },
+              { value: "dark", label: "Dark" },
             ]}
           />
         </SettingsRow>
       </SettingsSection>
-      <SettingsSection title="对话">
-        <SettingsRow title="模型选择" description="在输入框旁的模型选择器中随时切换；此处管理服务商与模型目录。" />
+      <SettingsSection title="Chat">
+        <SettingsRow title="Model selection" description="Switch anytime from the model selector next to the input; manage providers and model catalogs here." />
       </SettingsSection>
     </>
   );
@@ -56,9 +56,9 @@ function GeneralPage() {
 
 function AboutPage() {
   return (
-    <SettingsSection title="关于 Shirley">
-      <SettingsRow title="Shirley" description="基于 Englife-1.0 的编码 Agent 桌面端。" />
-      <SettingsRow title="工作区" description="每个项目对应一个工作区目录，会话与配置按工作区隔离。" />
+    <SettingsSection title="About Shirley">
+      <SettingsRow title="Shirley" description="A coding agent desktop built on Englife-1.0." />
+      <SettingsRow title="Workspace" description="Each project maps to one workspace directory; sessions and config are isolated per workspace." />
     </SettingsSection>
   );
 }
@@ -126,8 +126,8 @@ export function SettingsDialog() {
         {/* Left rail: search + grouped navigation. */}
         <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-surface">
           <div className="flex items-center justify-between px-4 pt-4 pb-2">
-            <h2 id={titleId} className="text-body font-medium">设置</h2>
-            <button type="button" aria-label="关闭设置" onClick={close} className="rounded-control p-1.5 text-muted hover:bg-selected hover:text-ink md:hidden"><X className="size-4" /></button>
+            <h2 id={titleId} className="text-body font-medium">Settings</h2>
+            <button type="button" aria-label="Close settings" onClick={close} className="rounded-control p-1.5 text-muted hover:bg-selected hover:text-ink md:hidden"><X className="size-4" /></button>
           </div>
           <div className="px-3 pb-2">
             <div className="flex items-center gap-2 rounded-control border border-line bg-canvas px-2.5 py-1.5">
@@ -135,14 +135,14 @@ export function SettingsDialog() {
               <input
                 value={query}
                 onChange={(event) => setQuery(event.target.value)}
-                placeholder="搜索设置"
-                aria-label="搜索设置"
+                placeholder="Search settings"
+                aria-label="Search settings"
                 className="min-w-0 flex-1 bg-transparent text-body-sm text-ink outline-none placeholder:text-muted"
               />
             </div>
           </div>
-          <nav aria-label="设置导航" className="min-h-0 flex-1 overflow-auto px-2 pb-4">
-            {groups.length === 0 && <p className="px-3 py-4 text-caption text-muted">没有匹配的设置项。</p>}
+          <nav aria-label="Settings navigation" className="min-h-0 flex-1 overflow-auto px-2 pb-4">
+            {groups.length === 0 && <p className="px-3 py-4 text-caption text-muted">No matching settings.</p>}
             {groups.map(([group, items]) => (
               <div key={group} className="mt-3">
                 <p className="px-3 pb-1 text-caption font-medium text-muted">{group}</p>
@@ -169,7 +169,7 @@ export function SettingsDialog() {
         {/* Right content: fixed reading width, page title + sections. */}
         <div className="flex min-w-0 flex-1 flex-col">
           <div className="flex h-12 shrink-0 items-center justify-end px-4">
-            <Button size="icon-sm" variant="ghost" aria-label="关闭设置" onClick={close}><X className="size-4" /></Button>
+            <Button size="icon-sm" variant="ghost" aria-label="Close settings" onClick={close}><X className="size-4" /></Button>
           </div>
           <div className="min-h-0 flex-1 overflow-auto px-6 pb-12 md:px-12">
             <div className="mx-auto w-full max-w-2xl">

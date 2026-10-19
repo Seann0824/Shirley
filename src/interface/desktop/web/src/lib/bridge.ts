@@ -664,7 +664,7 @@ async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
   await new Promise<void>((resolve, reject) => {
     const cleanup = () => { clearTimeout(timer); es.removeEventListener("open", opened); es.removeEventListener("error", failed); };
     const opened = () => { cleanup(); resolve(); };
-    const failed = () => { cleanup(); es.close(); reject(new Error("云端事件连接失败，请检查连接后重试")); };
+    const failed = () => { cleanup(); es.close(); reject(new Error("Cloud event connection failed; check the connection and retry")); };
     const timer = setTimeout(failed, 10_000);
     es.addEventListener("open", opened);
     es.addEventListener("error", failed);
