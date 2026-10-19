@@ -1,4 +1,5 @@
 import type { ReactNode } from "react";
+import { Select } from "@/ui/select";
 import { cn } from "@/ui/utils";
 
 /** Pill switch matching the Settings reference: neutral track off, brand accent on. */
@@ -38,7 +39,7 @@ export function Switch({
   );
 }
 
-/** Compact select used in a row's trailing control slot. */
+/** Compact select used in a row's trailing control slot. Delegates to the design-system Select. */
 export function SettingsSelect<T extends string>({
   value,
   onChange,
@@ -53,19 +54,13 @@ export function SettingsSelect<T extends string>({
   disabled?: boolean;
 }) {
   return (
-    <select
-      aria-label={label}
+    <Select<T>
       value={value}
+      onChange={onChange}
+      options={options}
+      label={label}
       disabled={disabled}
-      onChange={(event) => onChange(event.target.value as T)}
-      className="h-9 cursor-pointer rounded-control border border-line bg-canvas px-2.5 text-body-sm text-ink focus:outline-2 focus:outline-offset-1 focus:outline-ink disabled:opacity-50"
-    >
-      {options.map((option) => (
-        <option key={option.value} value={option.value}>
-          {option.label}
-        </option>
-      ))}
-    </select>
+    />
   );
 }
 
