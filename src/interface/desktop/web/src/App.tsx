@@ -30,6 +30,7 @@ import { agentBridge, type ProjectEntry, type SessionSubscription } from "@/lib/
 import type { AgentEventWire, SessionSnapshot, TaskViewWire, UsageWire } from "@/types/wire";
 import type { AiSegment, AiToolExecution } from "@/types/ai";
 import { cn } from "@/ui/utils";
+import { MOBILE_LAYOUT_QUERY, useMobileLayout } from "@/lib/use-mobile-layout";
 
 let messageSeq = 0;
 const nextId = () => `m${++messageSeq}`;
@@ -275,8 +276,9 @@ export function App() {
     });
   }, [activeProject, sessionName]);
   // Sidebar collapse: user's manual preference (persisted). Auto-collapsed when the window is too narrow; can still be manually expanded afterward.
+  const mobile = useMobileLayout();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
-    readBool(SIDEBAR_STORAGE_KEY, false),
+    window.matchMedia(MOBILE_LAYOUT_QUERY).matches || readBool(SIDEBAR_STORAGE_KEY, false),
   );
   // UI mode is derived from "whether the foreground is attached to a project": pseudo
   // project `__chat__` => Chat (no associated project), otherwise => Work. There is no
@@ -284,13 +286,14 @@ export function App() {
   // avoiding two sources of truth.
   const mode: AppMode = activeProject === CHAT_PROJECT_ID ? "chat" : "work";
 
+  const closeSidebar = useCallback(() => setSidebarCollapsed(true), []);
   const toggleSidebar = useCallback(() => {
     setSidebarCollapsed((prev) => {
       const next = !prev;
-      writeBool(SIDEBAR_STORAGE_KEY, next);
+      if (!mobile) writeBool(SIDEBAR_STORAGE_KEY, next);
       return next;
     });
-  }, []);
+  }, [mobile]);
 
   // Auto-collapse when the window cannot fit: folds as soon as a narrow viewport is entered (does not auto-expand, respecting the user's later explicit choice).
   useEffect(() => {
@@ -312,6 +315,15 @@ export function App() {
   // The minimap shows only when the left gutter fits it — otherwise it is hidden outright, never overlapping the chat content.
   const mainRef = useRef<HTMLElement>(null);
   const [minimapFits, setMinimapFits] = useState(false);
+  useEffect(() => {
+    const main = mainRef.current;
+    if (!main) return;
+    main.inert = mobile && !sidebarCollapsed;
+    return () => { main.inert = false; };
+  }, [mobile, sidebarCollapsed]);
+  useEffect(() => {
+    if (mobile) setSidebarCollapsed(true);
+  }, [mobile]);
   useEffect(() => {
     const el = mainRef.current;
     if (!el) return;
@@ -1078,7 +1090,7 @@ export function App() {
 
   // Welcome content (empty-session main area): shared by the centered new-chat flow and "switching to a session with no messages".
   const heroNode = (
-    <div className="flex flex-col items-center gap-4 px-4 py-6 text-center sm:py-10">
+    <div className="chat-welcome flex flex-col items-center gap-4 px-4 py-6 text-center sm:py-10">
       <img
         src="/brand/shirley-character.png"
         alt="Shirley Fenette from Code Geass, long orange hair, wearing an Ashford Academy uniform"
@@ -1100,7 +1112,7 @@ export function App() {
   // centered new-chat flow and normal sessions; the popovers use `absolute bottom-full`
   // positioned relative to this container, so both must reuse the same container structure.
   const composerNode = (
-    <div className="relative w-full shrink-0 px-3 pb-3">
+    <div className="chat-composer-shell relative w-full shrink-0 px-3 pb-3">
       {slashSearch.open && (
         <div className="absolute inset-x-3 bottom-full z-30 mb-1">
           <SkillSlashPopover
@@ -1149,7 +1161,7 @@ export function App() {
             value={input}
             references={references}
             placeholder="Message Shirley… (@ to reference files, / to invoke a skill)"
-            autoFocus
+            autoFocus={!mobile}
             search={mentionSearch}
             slash={slashSearch}
             onChange={(text, refs) => {
@@ -1180,11 +1192,15 @@ export function App() {
         setSidebarCollapsed(false);
         writeBool(SIDEBAR_STORAGE_KEY, false);
       }}
-      onNewChat={() => activeProject ? void newSession(activeProject) : void addProject()}
+      onNewChat={() => { if (mobile) setSidebarCollapsed(true); activeProject ? void newSession(activeProject) : void addProject(); }}
       onAddProject={() => void addProject()}
     >
       {/* Left sidebar: NewChat / pinned / projects (multi-project + session navigation). */}
+      {mobile && !sidebarCollapsed && (
+        <button type="button" className="mobile-sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebarCollapsed(true)} />
+      )}
       <SessionSidebar
+        onClose={closeSidebar}
         collapsed={sidebarCollapsed}
         chatProjectId={CHAT_PROJECT_ID}
         onCurrentTitleChange={updateCurrentTitle}
@@ -1194,15 +1210,15 @@ export function App() {
         onAddProject={() => void addProject()}
         onRenameProject={(id, name) => void renameProject(id, name)}
         onArchiveProject={(id) => void archiveProject(id)}
-        onSelect={(project, name) => void switchSession(project, name)}
-        onNew={(project) => void newSession(project)}
+        onSelect={(project, name) => { if (mobile) setSidebarCollapsed(true); void switchSession(project, name); }}
+        onNew={(project) => { if (mobile) setSidebarCollapsed(true); void newSession(project); }}
         onRename={(project, name, title) => void renameSession(project, name, title)}
         onDelete={(project, name) => void deleteSession(project, name)}
         onMove={(project, name, targetProject) => void moveSession(project, name, targetProject)}
       />
       {/* Right main area: fixed-width centered (aligned with shiwen AiConversationSurface's max-w-190 = 760px).
           Neither the chat area nor the input stretches with the window; long text wraps at a comfortable reading width. */}
-      <main ref={mainRef} className="relative flex min-h-0 min-w-0 flex-1 flex-col">
+      <main ref={mainRef} aria-label="Conversation" className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
         {view.loading ? (
           // History snapshot not yet arrived: render a skeleton first, giving the user immediate "loading message history" feedback.
@@ -1213,7 +1229,7 @@ export function App() {
           // Standalone new-chat (Codex-style empty session) flow: welcome content +
           // centered input + Chat/Work and associated-project switching below. It
           // automatically degrades to the normal session layout once the first message is sent.
-          <div className="flex min-h-0 flex-1 flex-col items-center justify-center gap-2 overflow-y-auto">
+          <div className="flex min-h-0 flex-1 flex-col items-center justify-start md:justify-center gap-2 overflow-y-auto">
             {heroNode}
             {composerNode}
             <NewChatControls

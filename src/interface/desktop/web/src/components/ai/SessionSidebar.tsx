@@ -14,6 +14,7 @@ import {
   PinOff,
   Plus,
   Trash2,
+  X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/ui/collapsible";
@@ -21,6 +22,7 @@ import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from "@/ui/context
 import { ScrollArea } from "@/ui/scroll-area";
 import { HoverScrollLabel } from "@/ui/hover-scroll-label";
 import { cn } from "@/ui/utils";
+import { useMobileLayout } from "@/lib/use-mobile-layout";
 import type { ProjectEntry, SessionEntry } from "@/lib/bridge";
 
 /**
@@ -115,6 +117,7 @@ export function SessionSidebar({
   onDelete,
   onMove,
   collapsed = false,
+  onClose,
   chatProjectId,
   onCurrentTitleChange,
   className,
@@ -139,11 +142,26 @@ export function SessionSidebar({
   onMove: (project: string, name: string, targetProject: string) => void;
   /** Collapsed: hidden entirely (width zero), expanded via the top toolbar. */
   collapsed?: boolean;
+  onClose?: () => void;
   /** Pseudo project id hosting the "no associated project" Chat session (aligned with Rust `CHAT_PROJECT_ID`). */
   chatProjectId?: string;
   onCurrentTitleChange: (title: string) => void;
   className?: string;
 }) {
+  const mobile = useMobileLayout();
+  const closeRef = useRef<HTMLButtonElement>(null);
+  useEffect(() => {
+    if (!mobile || collapsed) return;
+    closeRef.current?.focus({ preventScroll: true });
+    const escape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !document.querySelector('[role="menu"]')) onClose?.();
+    };
+    window.addEventListener("keydown", escape);
+    return () => {
+      window.removeEventListener("keydown", escape);
+      document.querySelector<HTMLElement>("[data-sidebar-toggle]")?.focus({ preventScroll: true });
+    };
+  }, [mobile, collapsed, onClose]);
   // Session list per project (cached by project id; App does not hold it). All loaded projects share one poll.
   const [sessionsByProject, setSessionsByProject] = useState<Record<string, SessionEntry[]>>({});
   const aliveRef = useRef(true);
@@ -438,6 +456,7 @@ export function SessionSidebar({
                   className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
                   onClick={() => {
                     if (!active) onSelect(project, entry.name);
+                    else if (mobile) onClose?.();
                   }}
                 >
                   <HoverScrollLabel
@@ -464,15 +483,21 @@ export function SessionSidebar({
 
   return (
     <aside
+      id="session-sidebar"
+      aria-label="Projects and sessions"
+      data-session-sidebar
       aria-hidden={collapsed || undefined}
       className={cn(
-        "flex h-full shrink-0 flex-col overflow-hidden transition-[width] duration-200 ease-product",
+        "session-sidebar flex h-full shrink-0 flex-col overflow-hidden transition-[width] duration-200 ease-product",
         collapsed ? "invisible w-0" : "w-64 border-r border-line",
         className,
       )}
     >
-      <div className="flex h-12 shrink-0 items-center px-4 text-body-sm font-semibold">
+      <div className="flex h-12 shrink-0 items-center justify-between px-4 text-body-sm font-semibold">
         Shirley
+        <button ref={closeRef} type="button" aria-label="Close sidebar" className="flex size-11 items-center justify-center rounded-control text-muted hover:bg-selected md:hidden" onClick={onClose}>
+          <X className="size-5" />
+        </button>
       </div>
       <ScrollArea type="scroll" className="min-h-0 flex-1" viewportClassName="px-2 pb-3">
         <button

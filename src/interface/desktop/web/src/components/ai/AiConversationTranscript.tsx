@@ -110,7 +110,7 @@ export function AiConversationTranscript({
                       aria-label="Edit and resend this message"
                       title="Edit and resend"
                       onClick={() => onEditMessage?.(message)}
-                      className="hidden shrink-0 items-center self-center rounded-md p-1.5 text-muted transition-colors group-hover:flex group-focus-within:flex hover:bg-surface-2 hover:text-ink"
+                      className="message-edit-action hidden shrink-0 items-center self-center rounded-md p-1.5 text-muted transition-colors group-hover:flex group-focus-within:flex hover:bg-surface-2 hover:text-ink"
                     >
                       <Pencil className="size-3.5" />
                     </button>

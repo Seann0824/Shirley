@@ -64,7 +64,7 @@ export function ModelSelector({
   };
 
   return (
-    <div ref={rootRef} className={cn("relative", className)}>
+    <div data-model-selector ref={rootRef} className={cn("relative", className)}>
       <Button
         type="button"
         variant="ghost"

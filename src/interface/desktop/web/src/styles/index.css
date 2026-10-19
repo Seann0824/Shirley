@@ -204,3 +204,64 @@
     transition-duration: 0.01ms !important;
   }
 }
+
+/* Mobile web shares the desktop components, with navigation overlaid rather than
+   consuming conversation width. The visual viewport keeps the composer above IME. */
+@media (max-width: 767px) {
+  html, body { overflow: hidden; overscroll-behavior: none; }
+  .app-shell {
+    height: var(--app-height, 100dvh);
+    padding-top: env(safe-area-inset-top);
+    padding-left: env(safe-area-inset-left);
+    padding-right: env(safe-area-inset-right);
+    padding-bottom: env(safe-area-inset-bottom);
+  }
+  .app-header { height: 3.5rem; padding-right: 0.375rem; }
+  .app-header-navigation { width: auto; padding-left: 0.375rem; overflow: visible; }
+  .app-header button { min-width: 44px; min-height: 44px; }
+  .mobile-sidebar-backdrop {
+    position: absolute;
+    inset: 0;
+    z-index: 30;
+    background: rgb(0 0 0 / 35%);
+  }
+  .session-sidebar:not([aria-hidden="true"]) {
+    position: absolute;
+    inset: 0 auto 0 0;
+    z-index: 40;
+    width: min(20rem, calc(100% - 3rem));
+    background: var(--color-canvas);
+    box-shadow: 8px 0 24px rgb(0 0 0 / 12%);
+    overscroll-behavior: contain;
+  }
+  [data-session-sidebar] .h-8,
+  [data-session-sidebar] .h-9 { height: auto; min-height: 44px; }
+  [data-session-sidebar] button[role="option"] { min-height: 44px; }
+  [data-session-sidebar] input { font-size: 16px; }
+  [data-slot="message-scroller"] { overflow-wrap: anywhere; }
+  [data-ai-markdown] { min-width: 0; max-width: 100%; overflow-wrap: anywhere; }
+  [data-ai-markdown] img { max-width: 100%; height: auto; }
+  [data-model-selector] [role="listbox"] { width: min(16rem, calc(100vw - 5rem)); }
+  [data-model-selector] [data-radix-scroll-area-viewport] { max-height: min(18rem, 45dvh); }
+  .chat-composer-shell { padding: 0 0.5rem 0.5rem; }
+  [data-ai-chat-composer] [contenteditable] {
+    max-height: min(10rem, 28dvh);
+    font-size: 16px;
+  }
+  [data-ai-chat-composer] button { min-height: 40px; }
+  [data-ai-chat-composer] button[type="submit"],
+  [data-ai-chat-composer] button[aria-label="Stop generating"] { min-width: 44px; min-height: 44px; }
+  .chat-welcome { flex-shrink: 0; gap: 0.5rem; padding-block: 1rem; }
+  .chat-welcome img { height: clamp(72px, 20dvh, 160px); }
+  .new-chat-controls { flex-shrink: 0; }
+  .new-chat-controls > div { max-width: 100%; }
+  .new-chat-controls button { min-height: 40px; }
+  [role="menuitem"], [role="option"] { min-height: 40px; }
+}
+
+/* Hover-only controls are otherwise undiscoverable on phones and touch tablets. */
+@media (hover: none) and (pointer: coarse) {
+  [data-session-sidebar] .group > .hidden { display: flex; }
+  [data-session-sidebar] button.hidden { display: flex; min-width: 32px; min-height: 40px; }
+  .message-edit-action { display: flex; min-width: 40px; min-height: 40px; }
+}

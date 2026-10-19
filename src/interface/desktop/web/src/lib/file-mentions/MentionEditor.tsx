@@ -7,6 +7,7 @@ import {
   useState,
 } from "react";
 import { cn } from "@/ui/utils";
+import { shouldSendChatOnEnter } from "@/lib/chat-input";
 import { createChipElement } from "./FileChips";
 import {
   buildEditorContent,
@@ -424,7 +425,7 @@ export const MentionEditor = forwardRef<
           return;
         }
       }
-      if (event.key === "Enter" && !event.shiftKey) {
+      if (shouldSendChatOnEnter(event)) {
         event.preventDefault();
         onSubmit();
       }

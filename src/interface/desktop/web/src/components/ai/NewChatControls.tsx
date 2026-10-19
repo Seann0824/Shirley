@@ -56,7 +56,7 @@ export function NewChatControls({
   }, [open]);
 
   return (
-    <div className="mt-3 flex items-center justify-center gap-2">
+    <div className="new-chat-controls mt-3 flex max-w-full flex-wrap items-center justify-center gap-2 px-3 pb-3">
       {/* Chat / Work segmented toggle */}
       <div
         className="flex items-center gap-0.5 rounded-control bg-inset p-0.5"
