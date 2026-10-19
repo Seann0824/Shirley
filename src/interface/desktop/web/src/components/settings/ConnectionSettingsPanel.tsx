@@ -171,7 +171,6 @@ export function ConnectionSettingsPanel({ canReload }: { canReload: boolean }) {
 
       {info?.status.last_success_ms && <p className="px-1 text-caption text-muted">Last sync: {new Date(info.status.last_success_ms).toLocaleString()} · uploaded {info.status.uploaded} / downloaded {info.status.downloaded}</p>}
       {!!info?.status.excluded && <p className="px-1 text-caption text-muted">{info.status.excluded} memories were excluded (ownership unconfirmed or project-scoped).</p>}
-      {!!info?.status.conflicts && <p className="px-1 text-caption text-danger-ink">{info.status.conflicts} conflicts pending; both versions are kept.</p>}
       {(error || info?.status.error) && <p role="alert" className="px-1 break-words text-body-sm text-danger-ink">{error || info?.status.error}</p>}
     </div>
   );

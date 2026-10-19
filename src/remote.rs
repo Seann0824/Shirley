@@ -168,10 +168,9 @@ pub async fn sync_once(global: &Path) -> Result<SyncStatus, String> {
             status.error = None;
             status.uploaded = report.uploaded;
             status.downloaded = report.downloaded;
-            // Keep unresolved conflicts visible even after a later clean sync.
-            status.conflicts = std::fs::read_dir(global.join("memory/sync-conflicts"))
-                .map(|files| files.filter_map(Result::ok).count())
-                .unwrap_or(report.conflicts);
+            // Cloud is the single source of truth: sync is last-write-wins, so there are no
+            // forked conflict copies to count anymore.
+            status.conflicts = report.conflicts;
             status.excluded = report.excluded;
         }
         Err(e) => {

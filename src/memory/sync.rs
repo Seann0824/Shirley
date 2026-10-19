@@ -1,10 +1,11 @@
 //! Personal-memory synchronization. Only explicitly personal Markdown entries cross the wire.
-//! The cloud is authoritative; clients keep a three-way baseline and an offline working copy.
-//! Conflicts retain both versions, with the competing entry marked unconfirmed.
+//! The cloud is the single source of truth; clients keep a local mirror plus a baseline for
+//! upload diffing. Sync is last-write-wins: a concurrent edit is overwritten by whichever side
+//! wrote last, never forked into a separate "conflict" copy.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
-use super::format::{Domain, Entry, EntryStatus, MemoryError};
+use super::format::{Domain, Entry, MemoryError};
 use super::store::{ENTRY_DIRS, MemoryStore, atomic_write, lock_root, validate_id};
 use serde::{Deserialize, Serialize};
 
@@ -287,16 +288,6 @@ fn apply(root: &Path, id: &str, content: Option<&str>) -> Result<(), MemoryError
     Ok(())
 }
 
-fn save_conflict(root: &Path, conflict: &Conflict) -> Result<(), MemoryError> {
-    reject_symlink(&root.join("sync-conflicts"))?;
-    let bytes = serde_json::to_vec(conflict).map_err(io_error)?;
-    let id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &bytes);
-    write_json(
-        &root.join("sync-conflicts").join(format!("{id}.json")),
-        conflict,
-    )
-}
-
 fn rebuild(root: &Path) -> Result<(), MemoryError> {
     let store = MemoryStore::new(root);
     super::curator::rebuild_index_unlocked(&store)?;
@@ -324,51 +315,14 @@ pub fn exchange(root: &Path, request: SyncRequest) -> Result<SyncResponse, Memor
     }
     // Persist known ids before mutation, so an interrupted deletion still has a tombstone.
     write_json(&root.join(LEDGER), &records)?;
-    let mut conflicts = Vec::new();
+    // The cloud is authoritative: apply every incoming change as last-write-wins. There is no
+    // compare-and-swap and no fork into a separate conflict entry -- whichever write lands last wins.
     for change in request.changes {
         let content = change
             .content
             .as_deref()
             .map(|s| canonical(&change.id, s))
             .transpose()?;
-        let current = records.get(&change.id);
-        if current.map(|r| &r.revision) != change.expected.as_ref()
-            && current.and_then(|r| r.content.as_ref()) != content.as_ref()
-        {
-            let conflict = Conflict {
-                id: change.id.clone(),
-                local: content.clone(),
-                remote: current.and_then(|r| r.content.clone()),
-            };
-            save_conflict(root, &conflict)?;
-            if let Some(content) = content {
-                let mut entry = Entry::parse(&content)?;
-                let suffix = uuid::Uuid::new_v5(
-                    &uuid::Uuid::NAMESPACE_OID,
-                    &serde_json::to_vec(&conflict).map_err(io_error)?,
-                );
-                entry.id = format!("conflict-{suffix}");
-                if excluded.contains(&entry.id) {
-                    return Err(io_error("conflict id collides with an excluded memory"));
-                }
-                entry.status = EntryStatus::Unconfirmed;
-                entry.body = format!(
-                    "Sync conflict for {}. Review both versions before activating.\n\n{}",
-                    change.id, entry.body
-                );
-                let text = entry.render();
-                apply(root, &entry.id, Some(&text))?;
-                records.insert(
-                    entry.id,
-                    Record {
-                        revision: revision(Some(&text)),
-                        content: Some(text),
-                    },
-                );
-            }
-            conflicts.push(conflict);
-            continue;
-        }
         apply(root, &change.id, content.as_deref())?;
         records.insert(
             change.id,
@@ -382,7 +336,7 @@ pub fn exchange(root: &Path, request: SyncRequest) -> Result<SyncResponse, Memor
     rebuild(root)?;
     Ok(SyncResponse {
         records,
-        conflicts,
+        conflicts: Vec::new(),
         excluded: excluded.len(),
     })
 }
@@ -455,9 +409,6 @@ pub async fn synchronize(
                 downloaded += 1;
             }
         }
-        for conflict in &response.conflicts {
-            save_conflict(&root, conflict).map_err(|e| e.to_string())?;
-        }
         // Remember both local and cloud ids so future hard deletes propagate.
         let (mut ledger, _) = snapshot(&root).map_err(|e| e.to_string())?;
         for (id, record) in &response.records {
@@ -478,7 +429,7 @@ pub async fn synchronize(
 
 #[cfg(test)]
 mod tests {
-    use super::super::format::{Confidence, EntryType};
+    use super::super::format::{Confidence, EntryStatus, EntryType};
     use super::*;
     use std::path::PathBuf;
 
@@ -566,7 +517,7 @@ mod tests {
     }
 
     #[test]
-    fn concurrent_updates_keep_canonical_and_unconfirmed_conflict_idempotently() {
+    fn concurrent_updates_are_last_write_wins_without_conflict_copies() {
         let root = Temp::new();
         let original = entry("language", "Chinese");
         let first = exchange(&root.0, request(vec![change(&original, None)])).unwrap();
@@ -577,31 +528,25 @@ mod tests {
             request(vec![change(&cloud_edit, Some(base.clone()))]),
         )
         .unwrap();
+        // A stale client writes with an outdated `expected`: the cloud is authoritative and
+        // last-write-wins, so the newer value simply replaces the old one -- no conflict copy.
         let offline = entry("language", "Japanese");
         let result =
-            exchange(&root.0, request(vec![change(&offline, Some(base.clone()))])).unwrap();
-        assert_eq!(result.conflicts.len(), 1);
+            exchange(&root.0, request(vec![change(&offline, Some(base))])).unwrap();
+        assert!(result.conflicts.is_empty());
         assert_eq!(
             Entry::parse(result.records["language"].content.as_ref().unwrap())
                 .unwrap()
                 .body,
-            "English"
+            "Japanese"
         );
-        let competitor = result
-            .records
-            .iter()
-            .find(|(id, _)| id.starts_with("conflict-"))
-            .unwrap()
-            .1;
-        let competitor = Entry::parse(competitor.content.as_ref().unwrap()).unwrap();
-        assert_eq!(competitor.status, EntryStatus::Unconfirmed);
-        assert!(competitor.body.contains("Japanese"));
-        let retry = exchange(&root.0, request(vec![change(&offline, Some(base))])).unwrap();
-        assert_eq!(retry.records, result.records);
+        // Exactly one entry remains for the id; no forked `conflict-*` record is created.
+        assert_eq!(result.records.len(), 1);
+        assert!(!result.records.keys().any(|id| id.starts_with("conflict-")));
     }
 
     #[test]
-    fn deletion_tombstone_prevents_stale_offline_edit_from_resurrecting_entry() {
+    fn stale_offline_edit_wins_over_earlier_deletion_last_write_wins() {
         let root = Temp::new();
         let original = entry("language", "Chinese");
         let first = exchange(&root.0, request(vec![change(&original, None)])).unwrap();
@@ -616,13 +561,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(deleted.records["language"].content, None);
+        // Last-write-wins: the later offline edit is applied even though it was based on a
+        // now-deleted revision -- no tombstone veto and no conflict copy.
         let offline = entry("language", "English");
         let result = exchange(&root.0, request(vec![change(&offline, Some(base))])).unwrap();
-        assert_eq!(result.records["language"].content, None);
-        assert_eq!(result.conflicts[0].remote, None);
-        assert!(result.records.keys().any(|id| id.starts_with("conflict-")));
+        assert!(result.conflicts.is_empty());
+        assert_eq!(
+            Entry::parse(result.records["language"].content.as_ref().unwrap())
+                .unwrap()
+                .body,
+            "English"
+        );
+        assert!(!result.records.keys().any(|id| id.starts_with("conflict-")));
         let again = exchange(&root.0, request(vec![])).unwrap();
-        assert_eq!(again.records["language"].content, None);
+        assert!(again.records["language"].content.is_some());
     }
 
     #[test]
@@ -740,14 +692,15 @@ mod tests {
                 })
             })
             .collect::<Vec<_>>();
+        // Last-write-wins under the OS lock: no conflicts, exactly one surviving revision.
         assert_eq!(
             threads
                 .into_iter()
                 .map(|t| t.join().unwrap())
                 .sum::<usize>(),
-            1
+            0
         );
-        assert_eq!(exchange(&root.0, request(vec![])).unwrap().records.len(), 2);
+        assert_eq!(exchange(&root.0, request(vec![])).unwrap().records.len(), 1);
     }
 
     #[test]
@@ -867,14 +820,15 @@ mod tests {
         a_store.write_entry(&entry("language", "English")).unwrap();
         b_store.write_entry(&entry("language", "Japanese")).unwrap();
         synchronize(&a.0, &remote).await.unwrap();
-        assert_eq!(synchronize(&b.0, &remote).await.unwrap().conflicts, 1);
+        // Last-write-wins: b's stale edit simply overwrites the cloud, no conflict copy is forked.
+        assert_eq!(synchronize(&b.0, &remote).await.unwrap().conflicts, 0);
         synchronize(&a.0, &remote).await.unwrap();
         assert_eq!(
             a_store
                 .list_entries_in(a_store.primary_root())
                 .unwrap()
                 .len(),
-            2
+            1
         );
         assert_eq!(std::fs::read(project_path).unwrap(), project_before);
         std::fs::remove_file(a_store.entry_path(&original)).unwrap();

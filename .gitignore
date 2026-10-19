@@ -14,3 +14,5 @@ crates/*/Cargo.lock
 # Tauri 构建产物（桌面界面，见 docs/desktop-interface.md）
 /gen
 outputs
+# 本地构建/zig 缓存（交叉编译临时目录）
+.tmp
