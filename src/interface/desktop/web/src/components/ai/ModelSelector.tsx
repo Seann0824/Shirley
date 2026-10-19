@@ -1,4 +1,4 @@
-import { Check, ChevronDown } from "lucide-react";
+import { Check, ChevronDown, Settings2 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/ui/button";
 import { ScrollArea } from "@/ui/scroll-area";
@@ -28,6 +28,22 @@ export function ModelSelector({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
   const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    let disposed = false;
+    const load = async () => {
+      try {
+        const { agentBridge } = await import("@/lib/bridge");
+        const entries = await (await agentBridge()).listModels(project);
+        if (!disposed) setEntries(entries);
+      } catch { /* Opening the menu reports connection errors. */ }
+    };
+    if (current.startsWith("provider:")) void load();
+    window.addEventListener("model-providers-updated", load);
+    return () => { disposed = true; window.removeEventListener("model-providers-updated", load); };
+  }, [project, current]);
+  const selected = entries.find((entry) => entry.value === current);
+  const currentLabel = selected ? `${selected.provider} / ${selected.label}` : current.startsWith("provider:") ? "选择服务商模型" : current;
 
   // Close on click outside the component / Esc.
   useEffect(() => {
@@ -75,7 +91,7 @@ export function ModelSelector({
         className="max-w-[12rem] gap-1 px-2 text-muted"
         onClick={() => void toggle()}
       >
-        <span className="truncate">{current || "No model selected"}</span>
+        <span className="truncate">{currentLabel || "No model selected"}</span>
         <ChevronDown className="size-3.5 shrink-0" />
       </Button>
       {open && (
@@ -101,9 +117,11 @@ export function ModelSelector({
               <p className="px-3 py-2 text-caption text-muted">No models available.</p>
             )}
             {!loading &&
-              entries.map((entry) => {
+              entries.map((entry, index) => {
                 const active = entry.value === current;
                 return (
+                  <div key={entry.value}>
+                  {(index === 0 || entries[index - 1].provider !== entry.provider) && <p className="px-3 pt-2 pb-1 text-caption font-medium text-muted">{entry.provider}</p>}
                   <button
                     key={entry.value}
                     type="button"
@@ -116,7 +134,7 @@ export function ModelSelector({
                     )}
                     onClick={() => {
                       setOpen(false);
-                      if (!active) onSelect(entry.value);
+                      onSelect(entry.value);
                     }}
                   >
                     <span className="min-w-0 flex-1 truncate">{entry.label}</span>
@@ -128,8 +146,10 @@ export function ModelSelector({
                       )
                     )}
                   </button>
+                  </div>
                 );
               })}
+            <button type="button" className="mt-1 flex w-full items-center gap-2 border-t border-line px-3 py-2 text-body-sm text-muted hover:bg-selected hover:text-ink" onClick={() => { setOpen(false); window.dispatchEvent(new Event("open-model-providers")); }}><Settings2 className="size-4" />管理模型服务商</button>
           </div>
         </ScrollArea>
       )}

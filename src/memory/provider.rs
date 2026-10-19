@@ -88,6 +88,15 @@ impl MemoryRuntime {
     /// When embedding is not configured / the query is empty / the call fails, it is `Ok(())` -- the relevant leg falls back to pure BM25,
     /// **never letting an embedding failure interrupt the conversation** (honest degradation: no pretending there is a semantic leg).
     pub async fn prefetch_query_vector(&self) -> Result<(), EmbedError> {
+        if let Some(global) = self.store.primary_root().parent() {
+            if global.join("remote.json").exists() {
+                match tokio::time::timeout(std::time::Duration::from_secs(3), crate::remote::sync_once(global)).await {
+                    Ok(Ok(_)) => {},
+                    Ok(Err(error)) => eprintln!("[memory:sync] using offline memory: {error}"),
+                    Err(_) => eprintln!("[memory:sync] pre-turn sync timed out; using offline memory"),
+                }
+            }
+        }
         let Some(embedder) = self.embedder.as_ref() else {
             return Ok(());
         };
@@ -114,36 +123,35 @@ impl MemoryRuntime {
         let Some(embedder) = self.embedder.as_ref() else {
             return Ok(0);
         };
-        let entries = self.store.list_entries().unwrap_or_default();
-        let mut vectors = VectorStore::load_merged(self.store.roots(), embedder.model());
-
-        // cleanup: keep only the ids of entries that still exist.
-        let ids: Vec<String> = entries.iter().map(|(_, entry)| entry.id.clone()).collect();
-        let pruned = vectors.retain_ids(ids.iter().map(String::as_str));
-
-        let missing: Vec<(String, String)> = entries
-            .iter()
-            .filter(|(_, entry)| vectors.get(&entry.id).is_none())
-            .map(|(_, entry)| (entry.id.clone(), embed_text(entry)))
-            .collect();
-
-        if missing.is_empty() {
-            if pruned > 0 {
-                vectors
-                    .save(self.store.primary_root())
-                    .map_err(|error| EmbedError::Transport(error.to_string()))?;
+        let mut count = 0;
+        for root in self.store.roots() {
+            let entries = self.store.list_entries_in(root)
+                .map_err(|error| EmbedError::Transport(error.to_string()))?;
+            let vectors = VectorStore::load_merged(std::slice::from_ref(root), embedder.model());
+            let missing: Vec<(String, String)> = entries.iter()
+                .filter(|(_, entry)| vectors.get(&entry.id).is_none())
+                .map(|(_, entry)| (entry.id.clone(), embed_text(entry))).collect();
+            let embedded = if missing.is_empty() { Vec::new() } else {
+                embedder.embed(&missing.iter().map(|(_, text)| text.clone()).collect::<Vec<_>>()).await?
+            };
+            // Sync may update entries during the embedding request. Re-read under the same
+            // OS lock and install vectors only for unchanged text, into the correct domain root.
+            let _lock = super::store::lock_root(root)
+                .map_err(|error| EmbedError::Transport(error.to_string()))?;
+            let current: HashMap<String, Entry> = self.store.list_entries_in(root)
+                .map_err(|error| EmbedError::Transport(error.to_string()))?.into_iter()
+                .map(|(_, entry)| (entry.id.clone(), entry)).collect();
+            let mut latest = VectorStore::load_merged(std::slice::from_ref(root), embedder.model());
+            let mut changed = latest.retain_ids(current.keys().map(String::as_str)) > 0;
+            for ((id, text), vector) in missing.into_iter().zip(embedded) {
+                if current.get(&id).is_some_and(|entry| embed_text(entry) == text) {
+                    latest.upsert(id, vector);
+                    count += 1;
+                    changed = true;
+                }
             }
-            return Ok(0);
+            if changed { latest.save(root).map_err(|error| EmbedError::Transport(error.to_string()))?; }
         }
-        let texts: Vec<String> = missing.iter().map(|(_, text)| text.clone()).collect();
-        let embedded = embedder.embed(&texts).await?;
-        let count = missing.len();
-        for ((id, _), vector) in missing.into_iter().zip(embedded.into_iter()) {
-            vectors.upsert(id, vector);
-        }
-        vectors
-            .save(self.store.primary_root())
-            .map_err(|error| EmbedError::Transport(error.to_string()))?;
         Ok(count)
     }
 
@@ -279,6 +287,7 @@ impl MemoryRuntime {
             }
             std::mem::take(&mut *usage)
         };
+        let _locks = self.store.lock_roots()?;
         let mut by_id: HashMap<String, Entry> = self
             .store
             .list_entries()?
@@ -295,7 +304,7 @@ impl MemoryRuntime {
             if entry.utility.is_none() {
                 entry.utility = Some(utility_from_usage(entry.usage_count.unwrap_or(0)));
             }
-            self.store.write_entry(entry)?;
+            self.store.write_entry_unlocked(entry)?;
             updated += 1;
         }
         Ok(updated)

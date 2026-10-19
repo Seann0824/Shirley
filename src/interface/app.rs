@@ -641,6 +641,11 @@ impl App {
     }
 
     pub fn take_agent(&mut self) -> Option<Agent> {
+        if let Err(error) = self.sessions.active().model_availability() {
+            self.add_system_message(error);
+            self.sessions.active_mut().finish_turn();
+            return None;
+        }
         self.sessions.active_mut().agent.take()
     }
 
@@ -885,15 +890,12 @@ impl App {
                 model.clone(),
             )
         });
-        if let Some(agent) = self.agent.as_mut() {
-            match config {
-                Some(config) => agent.set_model_config(config),
-                None => {
-                    agent.set_provider(flow.base_url.clone(), flow.api_key.clone());
-                    if let Some(model) = model.clone() {
-                        agent.set_model(model);
-                    }
-                }
+        if let Some(config) = config {
+            if let Err(error) = self.sessions.active_mut().select_model(config, None) { self.add_system_message(error); return; }
+        } else if let Some(agent) = self.agent.as_mut() {
+            agent.set_provider(flow.base_url.clone(), flow.api_key.clone());
+            if let Some(model) = model.clone() {
+                agent.set_model(model);
             }
         }
 
@@ -1121,11 +1123,11 @@ impl App {
             .sessions
             .factory()
             .map(|factory| factory.model_config_for(&entry));
-        if let Some(agent) = self.agent.as_mut() {
-            match config {
-                Some(config) => agent.set_model_config(config),
-                None => agent.set_model(entry.value.clone()),
-            }
+        if let Some(config) = config {
+            let key = entry.configured.as_ref().map(|_| entry.value.clone());
+            if let Err(error) = self.sessions.active_mut().select_model(config, key) { self.add_system_message(error); return None; }
+        } else if let Some(agent) = self.agent.as_mut() {
+            agent.set_model(entry.value.clone());
         }
         self.add_system_message(format!("switched model: {}", entry.label));
         Some(entry.value)

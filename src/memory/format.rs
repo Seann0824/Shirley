@@ -308,6 +308,12 @@ impl Entry {
     }
 }
 
+pub(crate) fn has_explicit_domain(text: &str) -> bool {
+    split_frontmatter(text).is_ok_and(|(front, _)| front.lines().any(|line| {
+        line.split_once(':').is_some_and(|(key, _)| key.trim() == "domain")
+    }))
+}
+
 /// One index line (used by `index.md`): the minimal retrieval info projected from an entry.
 #[derive(Debug, Clone, PartialEq)]
 pub struct IndexLine {

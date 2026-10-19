@@ -95,8 +95,22 @@ impl VectorStore {
     pub fn save(&self, root: &Path) -> Result<(), std::io::Error> {
         std::fs::create_dir_all(root)?;
         let text = serde_json::to_string_pretty(self).unwrap_or_default();
-        std::fs::write(root.join(VECTORS_FILE), text)
+        super::store::atomic_write(&root.join(VECTORS_FILE), text.as_bytes())
+            .map_err(|error| std::io::Error::other(error.to_string()))
     }
+}
+
+/// Called with the memory root's write lock held, before changing/removing an entry.
+pub(super) fn invalidate(root: &Path, id: &str) -> Result<(), std::io::Error> {
+    let path = root.join(VECTORS_FILE);
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    let Ok(mut store) = serde_json::from_str::<VectorStore>(&text) else { return Ok(()); };
+    if store.vectors.remove(id).is_some() { store.save(root)?; }
+    Ok(())
 }
 
 /// Cosine similarity. Returns `0.0` when either vector is a zero vector / dimensions differ (treated as dissimilar, no panic).

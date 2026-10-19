@@ -640,6 +640,7 @@ impl SessionCatalog for FileSessionCatalog {
             return Err(SessionError::Backend(format!("session does not exist: {name}")));
         }
         std::fs::remove_file(&log)?;
+        let _ = std::fs::remove_file(self.dir.join(format!("{name}.model.json")));
         // The title sidecar is subordinate to the log: without the log it is meaningless, so delete it too (best-effort).
         let _ = std::fs::remove_file(self.title_path_for(name));
         Ok(())
@@ -660,7 +661,17 @@ impl SessionCatalog for FileSessionCatalog {
         }
         std::fs::create_dir_all(dest_dir)?;
         // Move the log first (source of truth), then the title sidecar (subordinate; missing is not an error).
-        std::fs::rename(&log, &dest_log)?;
+        let model = self.dir.join(format!("{name}.model.json"));
+        let dest_model = dest_dir.join(format!("{name}.model.json"));
+        let has_model = model.exists();
+        if has_model {
+            if dest_model.exists() { return Err(SessionError::Backend("target already has model selection metadata".into())); }
+            std::fs::rename(&model, &dest_model)?;
+        }
+        if let Err(error) = std::fs::rename(&log, &dest_log) {
+            if has_model { let _ = std::fs::rename(&dest_model, &model); }
+            return Err(error.into());
+        }
         let title = self.title_path_for(name);
         if title.exists() {
             let _ = std::fs::rename(&title, dest_dir.join(format!("{name}.title")));

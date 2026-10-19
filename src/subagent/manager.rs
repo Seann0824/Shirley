@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use futures::StreamExt;
-use shirley_agent_sdk::{AgentError, AgentEvent, Message, RunResult, Usage};
+use shirley_agent_sdk::{AgentError, AgentEvent, Message, ModelConfig, RunResult, Usage};
 use tokio::sync::broadcast;
 
 use crate::bootstrap::AgentFactory;
@@ -242,6 +242,7 @@ pub struct SubagentManager {
     /// source (the SDK exposes no mid-run message handle to a `Tool`). Seeded from
     /// `Agent::messages()` and kept current by `Session::apply_event` on every `MessageAdded`.
     parent_view: Mutex<Vec<Message>>,
+    parent_model: Mutex<Option<ModelConfig>>,
     /// The names the parent may hand to a child (used to reject unknown tool names outright,
     /// decision 5). `subagent` is never in this list.
     available_tools: Vec<String>,
@@ -260,6 +261,7 @@ pub struct SubagentManager {
 }
 
 impl SubagentManager {
+    pub fn set_parent_model(&self, config: ModelConfig) { *self.parent_model.lock().unwrap() = Some(config); }
     pub fn new(
         factory: Arc<AgentFactory>,
         limits: SubagentLimits,
@@ -283,6 +285,7 @@ impl SubagentManager {
             limits,
             next_seq: AtomicU64::new(0),
             parent_view: Mutex::new(Vec::new()),
+            parent_model: Mutex::new(None),
             available_tools,
             default_tools: None,
             default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
@@ -392,6 +395,7 @@ impl SubagentManager {
             .factory
             .build_agent_with(messages, Some(&selection), Some(self.limits.per_task_max_steps))
             .map_err(|error| SubagentError::Build(error.to_string()))?;
+        if let Some(config) = self.parent_model.lock().unwrap().clone() { built.agent.set_model_config(config); }
 
         let id = format!("sa_{:x}", self.next_seq.fetch_add(1, Ordering::Relaxed) + 1);
         let started_ms = now_ms();

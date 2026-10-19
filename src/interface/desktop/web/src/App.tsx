@@ -339,6 +339,7 @@ export function App() {
   }, []);
   // Current subscription handle (unsubscribed when switching away).
   const subRef = useRef<SessionSubscription | null>(null);
+  const openEpochRef = useRef(0);
   // The assistant turn id currently running for each session (events land on it), keyed by `project::session`.
   const turnRef = useRef<Map<string, string>>(new Map());
   // Start timestamp of this turn for each session (to compute "Worked for Ns"), keyed by `project::session`.
@@ -477,9 +478,16 @@ export function App() {
   // Subscribe to a session: unsubscribe the old one, rebuild the view from the snapshot, then layer on subsequent events.
   const openSession = useCallback(
     async (project: string, session: string, silent = false) => {
+      const epoch = ++openEpochRef.current;
       const key = viewKey(project, session);
       beginSessionLoad(project, session, silent);
-      const bridge = await agentBridge();
+      const bridge = await agentBridge().catch((error) => {
+        if (epoch === openEpochRef.current) setViews((prev) => ({
+          ...prev, [key]: { ...(prev[key] ?? emptyView()), loading: false, error: String(error) },
+        }));
+        throw error;
+      });
+      if (epoch !== openEpochRef.current) return;
       subRef.current?.unsubscribe();
       subRef.current = null;
       readyRef.current.delete(key);
@@ -498,6 +506,7 @@ export function App() {
           applyEvent(key, event);
         });
       } catch (e) {
+        if (epoch !== openEpochRef.current) return;
         // Subscription failed: exit the loading state and report the error truthfully, instead of letting the skeleton spin forever.
         const message = e instanceof Error ? e.message : String(e);
         setViews((prev) => ({
@@ -506,6 +515,7 @@ export function App() {
         }));
         return;
       }
+      if (epoch !== openEpochRef.current) { sub.unsubscribe(); return; }
       subRef.current = sub;
       const { view, lastAssistantId } = viewFromSnapshot(sub.snapshot);
       if (lastAssistantId) turnRef.current.set(key, lastAssistantId);
@@ -557,18 +567,33 @@ export function App() {
   );
 
   // Select a project: switch foreground + open its current session.
+  useEffect(() => {
+    const recover = (event: Event) => {
+      if ((event as CustomEvent<boolean>).detail && activeProject && sessionName) {
+        void openSession(activeProject, sessionName);
+      }
+    };
+    window.addEventListener("shirley-remote-connection", recover);
+    return () => window.removeEventListener("shirley-remote-connection", recover);
+  }, [activeProject, sessionName, openSession]);
+
   const selectProject = useCallback(
     async (project: string) => {
       try {
         setUiError("");
         if (project === activeProject) return;
+        const epoch = ++openEpochRef.current;
         const bridge = await agentBridge();
+        if (epoch !== openEpochRef.current) return;
         subRef.current?.unsubscribe();
         subRef.current = null;
         setSessionName(null);
         setActiveProject(project);
-        await bridge.modelName(project).then(setModel).catch(() => setModel(""));
+        const model = await bridge.modelName(project).catch(() => "");
+        if (epoch !== openEpochRef.current) return;
+        setModel(model);
         const name = await bridge.currentSession(project).catch(() => null);
+        if (epoch !== openEpochRef.current) return;
         if (name) await openSession(project, name).catch(() => {});
       } catch (e) {
         setUiError(e instanceof Error ? e.message : String(e));
@@ -1055,15 +1080,16 @@ export function App() {
   const switchModel = useCallback(
     async (value: string) => {
       if (!activeProject) return;
+      const epoch = openEpochRef.current;
       try {
         const bridge = await agentBridge();
-        await bridge.setModel(activeProject, value);
-        setModel(value);
+        await bridge.setModel(activeProject, value, sessionName ?? undefined);
+        if (epoch === openEpochRef.current) setModel(value);
       } catch (e) {
-        setUiError(e instanceof Error ? e.message : String(e));
+        if (epoch === openEpochRef.current) setUiError(e instanceof Error ? e.message : String(e));
       }
     },
-    [activeProject],
+    [activeProject, sessionName],
   );
 
   const view =
@@ -1180,6 +1206,7 @@ export function App() {
       <ImageHoverPreview />
       <DesktopChrome
       title={(activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
+      canReloadConnection={!input.trim() && references.length === 0 && !Object.values(views).some((view) => view.pending.length > 0)}
       projectName={mode === "chat" ? "Chat" : projects.find((entry) => entry.id === activeProject)?.name}
       sidebarCollapsed={sidebarCollapsed}
       canGoBack={navigationHistory.index > 0}

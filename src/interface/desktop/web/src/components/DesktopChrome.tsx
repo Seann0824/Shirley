@@ -1,15 +1,16 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
   ArrowLeft, ArrowRight, Folder, FolderPlus, House,
-  MessageSquarePlus, Moon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, SquarePen, Sun,
+  MessageSquarePlus, Moon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Settings2, SquarePen, Sun,
 } from "lucide-react";
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from "@/ui/context-menu";
 import { cn } from "@/ui/utils";
 import { useMobileLayout } from "@/lib/use-mobile-layout";
+import { SettingsDialog, openSettings } from "@/components/settings/SettingsDialog";
+import { getThemeMode, resolveTheme, setThemeMode, THEME_CHANGE_EVENT, type ThemeMode } from "@/lib/theme";
 
 const isDesktop = "__TAURI_INTERNALS__" in window;
 const isMacDesktop = isDesktop && /Mac/i.test(navigator.platform);
-const THEME_KEY = "shirley.desktop.theme";
 
 function IconButton({ label, children, active, className, ...props }: {
   label: string;
@@ -37,7 +38,7 @@ function IconButton({ label, children, active, className, ...props }: {
 export function DesktopChrome({
   title, projectName, sidebarCollapsed, canGoBack, canGoForward,
   navigationBusy, onBack, onForward, onToggleSidebar, onHome,
-  onNewChat, onAddProject, topContent, children,
+  onNewChat, onAddProject, topContent, canReloadConnection = true, children,
 }: {
   title: string;
   projectName?: string;
@@ -55,6 +56,7 @@ export function DesktopChrome({
    *  "folder icon + title + project name". Lets different pages (Home / sessions)
    *  customize the top-bar right area. */
   topContent?: ReactNode;
+  canReloadConnection?: boolean;
   children: ReactNode;
 }) {
   const mobile = useMobileLayout();
@@ -72,12 +74,18 @@ export function DesktopChrome({
       document.documentElement.style.removeProperty("--app-height");
     };
   }, [mobile]);
-  const [dark, setDark] = useState(() => document.documentElement.dataset.theme === "dark");
+  // Theme lives in the shared module so the Settings dialog and this chrome stay in sync.
+  const [mode, setMode] = useState<ThemeMode>(() => getThemeMode());
+  useEffect(() => {
+    const sync = () => setMode(getThemeMode());
+    window.addEventListener(THEME_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, sync);
+  }, []);
+  const dark = resolveTheme(mode) === "dark";
   const toggleTheme = () => {
-    const next = !dark;
-    setDark(next);
-    document.documentElement.dataset.theme = next ? "dark" : "light";
-    try { localStorage.setItem(THEME_KEY, next ? "dark" : "light"); } catch { /* valid for this session */ }
+    const next: ThemeMode = dark ? "light" : "dark";
+    setMode(next);
+    setThemeMode(next);
   };
 
   useEffect(() => {
@@ -171,6 +179,7 @@ export function DesktopChrome({
             </>
           )}
         </div>
+        <IconButton label="设置" onClick={() => openSettings("general")}><Settings2 className="size-4" /></IconButton>
         <ContextMenu menu={
           <>
             <ContextMenuItem icon={<MessageSquarePlus className="size-4" />} onSelect={onNewChat}>New session</ContextMenuItem>
@@ -188,6 +197,7 @@ export function DesktopChrome({
         <nav aria-label="Main navigation" className="hidden md:flex w-14 shrink-0 flex-col items-center gap-2 bg-frame py-3">
           <IconButton label="Home" active className="size-10" onClick={onHome}><House className="size-5" /></IconButton>
           <div className="flex-1" />
+          <IconButton label="设置" className="size-10" onClick={() => openSettings("general")}><Settings2 className="size-5" /></IconButton>
           <IconButton label={dark ? "Switch to light appearance" : "Switch to dark appearance"} className="size-10" onClick={toggleTheme}>{dark ? <Sun className="size-5" /> : <Moon className="size-5" />}</IconButton>
           <img src="/brand/shirley-logo.png" alt="Shirley" className="mt-1 size-8 rounded-full object-cover" draggable={false} />
         </nav>
@@ -198,6 +208,7 @@ export function DesktopChrome({
           {children}
         </div>
       </div>
+      <SettingsDialog />
     </div>
   );
 }

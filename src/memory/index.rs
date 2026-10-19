@@ -109,7 +109,7 @@ pub fn write_index(root: &Path, entries: &[(String, Entry)]) -> Result<(), Memor
             ));
         }
     }
-    std::fs::write(root.join(INDEX_FILE), text)?;
+    super::store::atomic_write(&root.join(INDEX_FILE), text.as_bytes())?;
     Ok(())
 }
 

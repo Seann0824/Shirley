@@ -1,5 +1,8 @@
 **Shirley technical design · Cloud server (multi-project HTTP + SSE)**
 
+> Current connection/sync behavior: [Personal memory sync and remote chats](./memory-sync.md). Desktop uses a native authenticated HTTP/SSE proxy selected from the top-bar connection dialog. API authentication is implemented with `SHIRLEY_SERVER_TOKEN`; non-loopback listening requires a token. The older `serverUrl` selection and “no auth” descriptions below are historical. Project path allow-lists remain unimplemented.
+
+
 This document describes the "cloud server" interface: running the whole Shirley Agent **on a
 server** and reaching it from a browser, while the browser runs the **same desktop React build**
 (`src/interface/desktop/web/dist`). It is a **sibling** of `desktop-interface.md` /

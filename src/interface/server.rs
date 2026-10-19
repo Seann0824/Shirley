@@ -36,9 +36,11 @@
 use std::convert::Infallible;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::Bytes;
-use axum::extract::{Path, State};
+use axum::extract::{DefaultBodyLimit, Path, Request, State};
+use axum::middleware::{self, Next};
 use axum::http::StatusCode;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -67,6 +69,9 @@ struct ServerState {
     manager: Arc<ProjectRuntimeManager>,
     /// Global fan-out of serialized wire events to every connected SSE client.
     events: broadcast::Sender<String>,
+    token: Option<String>,
+    memory_root: PathBuf,
+    sequence: Arc<AtomicU64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -81,9 +86,12 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
 
     // The event sink the core calls for every wire event: serialise + fan out.
     let sink_tx = events.clone();
+    let sequence = Arc::new(AtomicU64::new(0));
+    let sink_sequence = sequence.clone();
     let sink: EventSink = Arc::new(move |wire: AgentEventWire| {
-        if let Ok(json) = serde_json::to_string(&wire) {
-            let _ = sink_tx.send(json);
+        if let Ok(mut json) = serde_json::to_value(&wire) {
+            json["sequence"] = sink_sequence.fetch_add(1, Ordering::SeqCst).saturating_add(1).into();
+            let _ = sink_tx.send(json.to_string());
         }
     });
 
@@ -99,7 +107,11 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         .await
         .map_err(std::io::Error::other)?;
 
-    let state = Arc::new(ServerState { manager, events });
+    let token = std::env::var("SHIRLEY_SERVER_TOKEN").ok().filter(|s| !s.trim().is_empty());
+    let state = Arc::new(ServerState {
+        manager, events, token, sequence,
+        memory_root: crate::storage::global_root().join("memory"),
+    });
 
     // Serve the desktop React build. `dist` is produced by
     // `cd src/interface/desktop/web && npm run build`; override with `SHIRLEY_WEB_DIST`.
@@ -114,17 +126,74 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
     let app = Router::new()
         .route("/api/cmd/{cmd}", post(dispatch))
         .route("/api/events", get(events_handler))
+        .route("/api/memory/sync", post(memory_sync))
+        .route("/api/memory/review", post(memory_review))
+        .route("/api/memory/confirm-personal", post(memory_confirm_personal))
+        .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .fallback_service(static_files)
-        .with_state(state);
+        .with_state(state.clone());
 
     let addr = std::env::var("SHIRLEY_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_owned());
     let listener = tokio::net::TcpListener::bind(&addr)
         .await
         .map_err(|e| std::io::Error::other(format!("failed to bind {addr}: {e}")))?;
+    if !listener.local_addr()?.ip().is_loopback() && state.token.is_none() {
+        return Err(std::io::Error::other("SHIRLEY_SERVER_TOKEN is required when listening outside loopback"));
+    }
     eprintln!("[server] cloud web listening on http://{addr} (dist: {})", dist.display());
     axum::serve(listener, app)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))
+}
+
+async fn authorize(State(state): State<Arc<ServerState>>, request: Request, next: Next) -> Response {
+    let Some(expected) = state.token.as_deref() else { return next.run(request).await; };
+    let bearer = request.headers().get("authorization").and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer ")).map(str::to_owned);
+    // Browser EventSource cannot attach headers. Native clients always use Bearer headers.
+    let supplied = bearer.or_else(|| {
+        (request.uri().path() == "/api/events").then(|| {
+            url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
+                .find(|(key, _)| key == "token").map(|(_, value)| value.into_owned())
+        }).flatten()
+    });
+    let valid = supplied.as_deref().is_some_and(|value| {
+        let mut difference = value.len() ^ expected.len();
+        for (a, b) in value.bytes().zip(expected.bytes()) { difference |= (a ^ b) as usize; }
+        difference == 0
+    });
+    if !valid { return (StatusCode::UNAUTHORIZED, "Cloud access token required").into_response(); }
+    next.run(request).await
+}
+
+async fn memory_sync(State(state): State<Arc<ServerState>>, Json(request): Json<crate::memory::sync::SyncRequest>)
+    -> Result<Response, ApiError>
+{
+    let root = state.memory_root.clone();
+    let result = tokio::task::spawn_blocking(move || crate::memory::sync::exchange(&root, request))
+        .await.map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    ok_json(result)
+}
+
+async fn memory_review(State(state): State<Arc<ServerState>>) -> Result<Response, ApiError> {
+    let root = state.memory_root.clone();
+    let entries = tokio::task::spawn_blocking(move || crate::memory::sync::review_legacy(&root))
+        .await.map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    ok_json(entries)
+}
+
+#[derive(Deserialize)]
+struct ConfirmMemories { approvals: Vec<crate::memory::sync::MemoryApproval> }
+
+async fn memory_confirm_personal(State(state): State<Arc<ServerState>>, Json(args): Json<ConfirmMemories>) -> Result<Response, ApiError> {
+    let root = state.memory_root.clone();
+    tokio::task::spawn_blocking(move || crate::memory::sync::confirm_personal(&root, &args.approvals))
+        .await.map_err(|e| ApiError::internal(e.to_string()))?
+        .map_err(|e| ApiError::bad(e.to_string()))?;
+    no_content()
 }
 
 // ---------------------------------------------------------------------------
@@ -172,6 +241,8 @@ fn no_content() -> Result<Response, ApiError> {
 #[derive(Deserialize, Default)]
 #[serde(default)]
 struct CmdArgs {
+    action: Option<String>,
+    input: Option<serde_json::Value>,
     project: Option<String>,
     session: Option<String>,
     name: Option<String>,
@@ -221,6 +292,12 @@ async fn dispatch(
     };
     let manager = &state.manager;
     match cmd.as_str() {
+        "agent_model_providers" => {
+            let action = args.action.ok_or_else(|| ApiError::bad("missing action"))?;
+            let global = state.memory_root.parent().ok_or_else(|| ApiError::internal("missing application root"))?;
+            let result = crate::model_providers::command(global, &action, args.input.unwrap_or_default()).await?;
+            ok_json(result)
+        }
         // -- projects ----------------------------------------------------------------
         "agent_list_projects" => {
             ok_json(manager.list_projects(args.archived.unwrap_or(false)).await)
@@ -293,8 +370,11 @@ async fn dispatch(
             // The global SSE stream carries every event; the frontend buffers until this
             // snapshot lands, so a snapshot under the session lock is enough. We drop the
             // per-session receiver — SSE does not need the desktop pump channel.
-            let (_rx, snapshot) = manager.subscribe(&project, &session).await?;
-            ok_json(snapshot)
+            let (_rx, snapshot, cursor) = manager.subscribe_with_cursor(&project, &session,
+                || state.sequence.load(Ordering::SeqCst)).await?;
+            let mut value = serde_json::to_value(snapshot).map_err(|e| ApiError::internal(e.to_string()))?;
+            value["sequence"] = cursor.into();
+            ok_json(value)
         }
         "agent_unsubscribe" => no_content(),
 
@@ -310,7 +390,7 @@ async fn dispatch(
         "agent_set_model" => {
             let project = args.project()?;
             let model = args.model.ok_or_else(|| ApiError::bad("missing model"))?;
-            manager.set_model(&project, &model).await?;
+            manager.set_model(&project, &model, args.session.as_deref()).await?;
             no_content()
         }
 
@@ -428,10 +508,53 @@ async fn events_handler(
                     let event = Event::default().event("agent_event").data(json);
                     return Some((Ok::<_, Infallible>(event), rx));
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {
+                    return Some((Ok(Event::default().event("resync").data("{}")), rx));
+                }
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
         }
     });
     Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn bearer_auth_covers_commands_memory_and_sse_query_tokens_only_on_events() {
+        let dir = std::env::temp_dir().join(format!("shirley-cloud-auth-{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        let manager = Arc::new(ProjectRuntimeManager::new(
+            Arc::new(tokio::sync::Mutex::new(ProjectRegistry::load(dir.join("projects.json")).unwrap())), None, Arc::new(|_| {})));
+        let (events, _) = broadcast::channel(8);
+        let state = Arc::new(ServerState { manager, events, token: Some("secret".into()), memory_root: dir.join("memory"), sequence: Arc::new(AtomicU64::new(0)) });
+        let app = Router::new()
+            .route("/api/cmd/{cmd}", post(dispatch))
+            .route("/api/memory/sync", post(memory_sync))
+            .route("/api/memory/review", post(memory_review))
+            .route("/api/memory/confirm-personal", post(memory_confirm_personal))
+            .route("/api/events", get(events_handler))
+            .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap(); });
+        let client = reqwest::Client::new();
+        for path in ["api/cmd/agent_list_projects", "api/cmd/agent_model_providers", "api/memory/sync", "api/memory/review"] {
+            let endpoint = format!("{base}/{path}");
+            let body = if path.ends_with("agent_model_providers") { serde_json::json!({"action":"get"}) } else { serde_json::json!({}) };
+            assert_eq!(client.post(&endpoint).json(&body).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(client.post(format!("{endpoint}?token=secret")).json(&body).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+            assert_eq!(client.post(endpoint).bearer_auth("secret").json(&body).send().await.unwrap().status(), StatusCode::OK);
+        }
+        let endpoint = format!("{base}/api/memory/confirm-personal");
+        let body = serde_json::json!({"approvals": []});
+        assert_eq!(client.post(&endpoint).json(&body).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(client.post(&endpoint).bearer_auth("secret").json(&body).send().await.unwrap().status(), StatusCode::NO_CONTENT);
+        assert_eq!(client.get(format!("{base}/api/events")).send().await.unwrap().status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(client.get(format!("{base}/api/events?token=secret")).send().await.unwrap().status(), StatusCode::OK);
+        task.abort();
+        let _ = std::fs::remove_dir_all(dir);
+    }
 }

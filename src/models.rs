@@ -20,6 +20,8 @@ use serde::Deserialize;
 /// `label` is for humans, `value` is for the request, `provider` marks the source.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ModelEntry {
+    /// Full connection for a host-local configured provider; never serialized to the UI.
+    pub configured: Option<crate::model_providers::ConfiguredModel>,
     /// Display name (shown to humans in the UI).
     pub label: String,
     /// The model identifier passed to the provider at request time (lands in `ModelConfig::model`).
@@ -47,6 +49,7 @@ impl ModelEntry {
         provider: impl Into<String>,
     ) -> Self {
         Self {
+            configured: None,
             label: label.into(),
             value: value.into(),
             provider: provider.into(),
@@ -125,7 +128,7 @@ impl ModelCatalog for StaticCatalog {
 /// Figma Make's model catalog does not yet declare tool capability; fill it in as `content` based on its provider / model-name
 /// prefix -- **this is data normalization, not a parsing branch** (`docs/tool-calling-refactor.md`
 /// Step 3: capability declarations belong to catalog data; parsing logic does not know about providers).
-fn normalize_tool_mode(id: &str, provider: &str, declared: Option<String>) -> Option<String> {
+pub(crate) fn normalize_tool_mode(id: &str, provider: &str, declared: Option<String>) -> Option<String> {
     if let Some(mode) = declared
         .map(|mode| mode.trim().to_ascii_lowercase())
         .filter(|mode| !mode.is_empty())

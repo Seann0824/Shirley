@@ -2,6 +2,8 @@ You are a memory consolidator. Below are **all** memory entries and their raw ev
 
 **Boundary**: the evidence is only a local observation of the environment -- partial evidence, not ground truth. Only consolidate when there is a real basis; if evidence is insufficient, **keep as is** -- do not force convergence.
 
+**Ownership**: personal memory may be shared across devices. Never merge or supersede across personal/project domains; preserve each source entry's domain. If unsure, keep memory project-local. Entries marked as unconfirmed sync conflicts require explicit review; do not activate, merge, or retire them automatically. Shared evidence references are not local transcripts.
+
 Tasks:
 1. **Dedup / merge**: semantically duplicate or overly fragmented entries -> `merge` into one;
 2. **Retire / supersede**: old entries replaced by new ones -> `supersede`;

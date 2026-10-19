@@ -70,8 +70,8 @@ pub struct Candidate {
     pub id: String,
     #[serde(rename = "type")]
     pub entry_type: EntryType,
-    /// Owning domain: `personal` (default, personal/global) | `project` (project/workspace). Defaults to personal.
-    #[serde(default)]
+    /// Missing ownership is kept project-local; personal sharing requires an explicit classification.
+    #[serde(default = "default_candidate_domain")]
     pub domain: Domain,
     pub subject: String,
     #[serde(default)]
@@ -89,6 +89,8 @@ pub struct Candidate {
     #[serde(default)]
     pub body: String,
 }
+
+fn default_candidate_domain() -> Domain { Domain::Project }
 
 /// Extract the candidate array from the model text (tolerates ```json code fences and surrounding chatter).
 pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, CuratorError> {
@@ -136,6 +138,12 @@ pub fn vet(
     if candidate.body.trim().is_empty() {
         return Err("empty body".into());
     }
+    if let Some(old) = existing.get(id) {
+        if old.domain != candidate.domain { return Err("cannot change a memory's ownership domain".into()); }
+        if old.id.starts_with("conflict-") && old.status == EntryStatus::Unconfirmed {
+            return Err("sync conflicts require explicit review".into());
+        }
+    }
 
     let created_at = candidate
         .created_at
@@ -170,7 +178,7 @@ pub fn vet(
     if let Some(dir) = sessions_dir {
         for ref_ in &source {
             let file = ref_.split('#').next().unwrap_or(ref_);
-            if !dir.join(file).exists() {
+            if !local_evidence_reference(file) || !dir.join(file).exists() {
                 return Err(format!("source `{ref_}` does not resolve to an existing file"));
             }
         }
@@ -186,6 +194,12 @@ pub fn vet(
         }
         if !existing.contains_key(supersedes) {
             return Err(format!("supersedes `{supersedes}` does not exist"));
+        }
+        if existing[supersedes].domain != candidate.domain {
+            return Err("cannot supersede a memory in another ownership domain".into());
+        }
+        if supersedes.starts_with("conflict-") && existing[supersedes].status == EntryStatus::Unconfirmed {
+            return Err("sync conflicts require explicit review".into());
         }
     }
 
@@ -278,8 +292,9 @@ pub fn build_prompt(transcript: &str, existing: &[(String, Entry)], session_ref:
         let mut entries = String::new();
         for (_, entry) in existing {
             entries.push_str(&format!(
-                "- [{}] {} — {}\n",
+                "- [{}] ({:?}) {} — {}\n",
                 entry.id,
+                entry.domain,
                 entry.subject,
                 entry.summary()
             ));
@@ -340,6 +355,11 @@ pub async fn curate(
         .map_err(|err| CuratorError::Model(err.to_string()))?;
     let candidates = parse_candidates(&raw)?;
 
+    let _locks = store.lock_roots()?;
+    if !store.matches_snapshot(&existing_by_id)? {
+        return Err(CuratorError::Parse("memory changed during curation; stale proposals discarded".into()));
+    }
+
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
     let mut outcome = CurateOutcome {
         empty: candidates.is_empty(),
@@ -363,10 +383,10 @@ pub async fn curate(
                     let mut old = old.clone();
                     if old.status != EntryStatus::Superseded {
                         old.status = EntryStatus::Superseded;
-                        store.write_entry(&old)?;
+                        store.write_entry_unlocked(&old)?;
                     }
                 }
-                store.write_entry(&entry)?;
+                store.write_entry_unlocked(&entry)?;
                 outcome.written.push(entry.id.clone());
             }
             Err(reason) => outcome.rejected.push(Rejected {
@@ -376,13 +396,18 @@ pub async fn curate(
         }
     }
 
-    rebuild_index(store)?;
-    rebuild_core(store)?;
+    rebuild_index_unlocked(store)?;
+    rebuild_core_unlocked(store)?;
     Ok(outcome)
 }
 
 /// Rebuild `index.md` from all current entries (called after the curator merges in).
 pub fn rebuild_index(store: &MemoryStore) -> Result<(), MemoryError> {
+    let _locks = store.lock_roots()?;
+    rebuild_index_unlocked(store)
+}
+
+pub(super) fn rebuild_index_unlocked(store: &MemoryStore) -> Result<(), MemoryError> {
     // **Rebuild per root**: global (personal) and workspace (project) each write their own `index.md` --
     // the index only includes entries of this root; it does not mix project entries into the global index (or vice versa).
     for root in store.roots() {
@@ -411,6 +436,11 @@ pub const MAX_CORE_CHARS: usize = 2000;
 ///
 /// When the store is empty, delete the old `core.md` (avoids a stale profile being injected further).
 pub fn rebuild_core(store: &MemoryStore) -> Result<(), MemoryError> {
+    let _locks = store.lock_roots()?;
+    rebuild_core_unlocked(store)
+}
+
+pub(super) fn rebuild_core_unlocked(store: &MemoryStore) -> Result<(), MemoryError> {
     // **Rebuild per root**: each root only projects the active entries **within that root**. The global `core.md` contains only personal
     // memory, the workspace `core.md` only project memory -- at injection time [`MemoryStore::read_core`] concatenates in
     // global->workspace order, so the two resident layers do not pollute each other.
@@ -550,8 +580,12 @@ pub fn collect_evidence(entries: &[(String, Entry)], sessions_dir: &Path, budget
 
 /// Extract the session snippet corresponding to one evidence reference.
 fn evidence_snippet(ref_: &str, sessions_dir: &Path) -> String {
+    if ref_.starts_with("shared-evidence:") {
+        return "[shared memory; original evidence is on its originating device/project]".into();
+    }
     let mut parts = ref_.splitn(2, '#');
     let file = parts.next().unwrap_or(ref_).trim();
+    if !local_evidence_reference(file) { return "[invalid evidence reference]".into(); }
     let turn = parts
         .next()
         .and_then(|t| t.strip_prefix("turn:"))
@@ -570,6 +604,11 @@ fn evidence_snippet(ref_: &str, sessions_dir: &Path) -> String {
     }
 }
 
+fn local_evidence_reference(file: &str) -> bool {
+    !file.starts_with("shared-evidence:") && !Path::new(file).is_absolute()
+        && Path::new(file).components().all(|part| matches!(part, std::path::Component::Normal(_)))
+}
+
 fn truncate(text: &str, max: usize) -> String {
     if text.chars().count() <= max {
         text.to_string()
@@ -585,9 +624,10 @@ pub fn build_consolidate_prompt(entries: &[(String, Entry)], evidence: &str) -> 
     let mut entries_text = String::new();
     for (_, entry) in entries {
         entries_text.push_str(&format!(
-            "- [{}] ({}) {} — {}（{}）\n",
+            "- [{}] ({}, {:?}) {} — {}（{}）\n",
             entry.id,
             entry.entry_type,
+            entry.domain,
             entry.subject,
             entry.summary(),
             entry.timeline_date()
@@ -616,6 +656,10 @@ pub fn apply_consolidate_ops(
     existing: &HashMap<String, Entry>,
     today: &str,
 ) -> Result<ConsolidateOutcome, CuratorError> {
+    let _locks = store.lock_roots()?;
+    if !store.matches_snapshot(existing)? {
+        return Err(CuratorError::Parse("memory changed during consolidation; stale proposals discarded".into()));
+    }
     let mut working = existing.clone();
     let mut outcome = ConsolidateOutcome {
         empty: ops.is_empty(),
@@ -645,6 +689,11 @@ pub fn apply_consolidate_ops(
                     });
                     continue;
                 }
+                if sources.iter().any(|id| working[id].domain != target.domain
+                    || (id.starts_with("conflict-") && working[id].status == EntryStatus::Unconfirmed)) {
+                    outcome.rejected.push(Rejected { id: Some(target_id), reason: "merge cannot cross ownership domains or resolve an unreviewed sync conflict".into() });
+                    continue;
+                }
                 // Evidence inheritance: if the new entry gives no source, union the old entries' sources (real sources, not fabricated).
                 if target.source.is_empty() {
                     target.source = union_sources(&sources, &working);
@@ -660,12 +709,12 @@ pub fn apply_consolidate_ops(
                             {
                                 let mut old = old;
                                 old.status = EntryStatus::Superseded;
-                                store.write_entry(&old)?;
+                                store.write_entry_unlocked(&old)?;
                                 working.insert(id.clone(), old);
                                 outcome.superseded += 1;
                             }
                         }
-                        store.write_entry(&entry)?;
+                        store.write_entry_unlocked(&entry)?;
                         working.insert(entry.id.clone(), entry);
                         outcome.merged += 1;
                     }
@@ -693,11 +742,11 @@ pub fn apply_consolidate_ops(
                         if old.status != EntryStatus::Superseded {
                             let mut old = old;
                             old.status = EntryStatus::Superseded;
-                            store.write_entry(&old)?;
+                            store.write_entry_unlocked(&old)?;
                             working.insert(id.clone(), old);
                             outcome.superseded += 1;
                         }
-                        store.write_entry(&entry)?;
+                        store.write_entry_unlocked(&entry)?;
                         working.insert(entry.id.clone(), entry);
                     }
                     Err(reason) => outcome.rejected.push(Rejected {
@@ -715,6 +764,10 @@ pub fn apply_consolidate_ops(
                     });
                     continue;
                 };
+                if id.starts_with("conflict-") && old.status == EntryStatus::Unconfirmed {
+                    outcome.rejected.push(Rejected { id: Some(id), reason: "sync conflicts require explicit review".into() });
+                    continue;
+                }
                 if old.status == EntryStatus::Superseded {
                     outcome.rejected.push(Rejected {
                         id: Some(id),
@@ -752,7 +805,7 @@ pub fn apply_consolidate_ops(
                     });
                     continue;
                 }
-                store.write_entry(&entry)?;
+                store.write_entry_unlocked(&entry)?;
                 working.insert(id, entry);
                 outcome.requalified += 1;
             }
@@ -1195,4 +1248,52 @@ mod tests {
         assert!(store.read_core().is_none());
         let _ = std::fs::remove_dir_all(&root);
     }
+    #[test]
+    fn consolidation_cannot_overwrite_a_newly_synced_revision() {
+        let root = tmpdir("stale_cloud_revision");
+        let store = MemoryStore::new(&root);
+        let old = write_entry(&store, "topic", EntryStatus::Active);
+        let existing = [(old.id.clone(), old.clone())].into_iter().collect();
+        let mut fresh = old;
+        fresh.body = "New content received from cloud".into();
+        store.write_entry(&fresh).unwrap();
+        let op = ConsolidateOp::Requalify { id: "topic".into(), scope: Some("stale scope".into()), body: Some("stale body".into()) };
+        assert!(apply_consolidate_ops(&store, vec![op], &existing, "2026-10-19").is_err());
+        assert_eq!(store.list_entries().unwrap()[0].1.body, fresh.body);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn shared_evidence_cannot_read_a_same_named_local_conversation() {
+        let root = tmpdir("shared_evidence");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("same.jsonl"), "PRIVATE LOCAL TRANSCRIPT").unwrap();
+        let snippet = evidence_snippet("shared-evidence:same.jsonl#turn:1", &root);
+        assert!(!snippet.contains("PRIVATE LOCAL TRANSCRIPT"));
+        assert!(snippet.contains("originating device"));
+        assert!(!local_evidence_reference("../outside.jsonl"));
+        assert!(!local_evidence_reference("/etc/passwd"));
+        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn missing_candidate_domain_defaults_to_project_and_cross_domain_merges_are_rejected() {
+        let parsed = parse_candidates(r#"[{"id":"unknown","type":"fact","subject":"s","body":"b","source":["s.jsonl"]}]"#).unwrap();
+        assert_eq!(parsed[0].domain, Domain::Project);
+        let root = tmpdir("domain_isolation");
+        let store = MemoryStore::with_roots(vec![root.join("personal"), root.join("project")]);
+        let personal = write_entry(&store, "personal", EntryStatus::Active);
+        let mut project = candidate("project");
+        project.domain = Domain::Project;
+        let project = vet(project, &HashMap::new(), "2026-10-19", None, None).unwrap();
+        store.write_entry(&project).unwrap();
+        let existing = [(personal.id.clone(), personal), (project.id.clone(), project)].into_iter().collect();
+        let op = ConsolidateOp::Merge { sources: vec!["personal".into(), "project".into()], target: candidate("merged") };
+        let outcome = apply_consolidate_ops(&store, vec![op], &existing, "2026-10-19").unwrap();
+        assert_eq!(outcome.merged, 0);
+        assert_eq!(outcome.rejected.len(), 1);
+        assert_eq!(store.list_entries().unwrap().len(), 2);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
 }

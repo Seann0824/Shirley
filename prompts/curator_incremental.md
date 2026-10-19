@@ -5,7 +5,7 @@ You are a memory curator. Read the conversation transcript below and produce **a
 Output only a JSON array (may be empty `[]`), each element with fields:
 - `id`: stable slug (lowercase alphanumerics and `-`), e.g. `pref-rust-error-style`
 - `type`: `preference` | `fact` | `event` | `procedure`
-- `domain`: `personal` | `project` -- **whose is this**: `personal` = the user's own profile / preferences / cross-project facts (lands in global memory); `project` = architecture, conventions, facts specific to the current workspace / codebase (lands in project memory, travels with the repo). If unsure, use `personal`.
+- `domain`: `personal` | `project` -- **whose is this**: `personal` = the user's own profile / preferences / cross-project facts (shared across devices when enabled); `project` = architecture, conventions, facts specific to the current workspace / codebase (stays on the project's execution host). If unsure, use `project`. Never put project details into personal memory. Preserve the domain of existing entries; do not resolve unreviewed sync conflicts automatically.
 - `subject`: topic (for retrieval), e.g. `rust-error-handling`
 - `created_at`: `YYYY-MM-DD` (optional, defaults to today)
 - `valid_from`: `YYYY-MM-DD` (optional)

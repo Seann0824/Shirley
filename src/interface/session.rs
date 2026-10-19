@@ -46,6 +46,10 @@ fn proxy_session_id(workspace: &Path, name: Option<&str>) -> Option<String> {
 /// scroll position / usage / this-turn state ...). Switching the foreground only moves the [`SessionManager::active`]
 /// pointer onto it -- **without rebuilding the `Agent`** (rebuilding would lose background context).
 pub struct Session {
+    pub model_selection: Option<String>,
+    model_selection_path: Option<std::path::PathBuf>,
+    model_providers_root: Option<std::path::PathBuf>,
+    model_binding_error: Option<String>,
     /// Session name (reuses [`crate::session::SessionEntry::name`]); `None` means an in-memory session not yet persisted
     /// (lazy new, before materialization).
     pub name: Option<String>,
@@ -137,8 +141,13 @@ impl Session {
         // snapshot strips the leading `System` when it is actually used).
         if let Some(manager) = &subagents {
             manager.set_parent_view(agent.messages().to_vec());
+            manager.set_parent_model(agent.model_config().clone());
         }
         Self {
+            model_selection: None,
+            model_selection_path: None,
+            model_providers_root: None,
+            model_binding_error: None,
             name,
             agent: Some(agent),
             model,
@@ -185,7 +194,56 @@ impl Session {
     pub fn remember_model(&mut self) {
         if let Some(agent) = self.agent.as_ref() {
             self.model = Some(agent.model_config().model.clone());
+            if let Some(manager) = &self.subagents { manager.set_parent_model(agent.model_config().clone()); }
         }
+    }
+
+    fn attach_model_profile(&mut self, global: &Path, dir: Option<std::path::PathBuf>) {
+        self.model_providers_root = Some(global.to_path_buf());
+        self.model_selection_path = dir.zip(self.name.as_ref()).map(|(dir, name)| dir.join(format!("{name}.model.json")));
+        let saved = self.model_selection_path.as_ref().filter(|p| p.exists()).map(|path| {
+            std::fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| serde_json::from_slice::<String>(&bytes).map_err(|e| e.to_string()))
+        });
+        match saved {
+            Some(Ok(key)) => {
+                self.model_selection = Some(key.clone());
+                match crate::model_providers::resolve(global, &key) {
+                    Ok(Some(model)) => { if let Some(agent) = &mut self.agent { agent.set_model_config(model.config()); } self.remember_model(); },
+                    Ok(None) => self.model_binding_error = Some("此聊天使用的服务商或模型已被移除，请重新选择模型".into()),
+                    Err(error) => self.model_binding_error = Some(error),
+                }
+            }
+            Some(Err(error)) => self.model_binding_error = Some(format!("聊天模型配置损坏：{error}")),
+            None => {
+                self.model_selection = self.agent.as_ref().and_then(|agent| crate::model_providers::key_for_config(global, agent.model_config()));
+                if let (Some(path), Some(key)) = (&self.model_selection_path, &self.model_selection) {
+                    if let Err(error) = crate::memory::store::atomic_write(path, &serde_json::to_vec(key).unwrap()) { self.model_binding_error = Some(error.to_string()); }
+                }
+            },
+        }
+    }
+
+    pub fn model_availability(&self) -> Result<(), String> {
+        if let Some(error) = &self.model_binding_error { return Err(error.clone()); }
+        if let (Some(global), Some(key)) = (&self.model_providers_root, &self.model_selection) {
+            if crate::model_providers::resolve(global, key)?.is_none() { return Err("此聊天使用的服务商或模型已被移除，请重新选择模型".into()); }
+        }
+        Ok(())
+    }
+
+    pub fn select_model(&mut self, config: shirley_agent_sdk::ModelConfig, key: Option<String>) -> Result<(), String> {
+        if self.agent.is_none() { return Err("对话正在执行，请结束后再切换模型".into()); }
+        if let Some(path) = &self.model_selection_path {
+            match &key {
+                Some(key) => crate::memory::store::atomic_write(path, &serde_json::to_vec(key).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?,
+                None => match std::fs::remove_file(path) { Ok(()) => {}, Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}, Err(e) => return Err(e.to_string()) },
+            }
+        }
+        self.agent.as_mut().unwrap().set_model_config(config);
+        self.model_selection = key;
+        self.model_binding_error = None;
+        self.remember_model();
+        Ok(())
     }
 
     /// Subscribe to this session's event stream (multi-session: the UI subscribes when switching to this session, and drops the handle to unsubscribe when switching away).
@@ -515,6 +573,7 @@ impl ItemWire {
 /// multi-session (such as `App::new`).
 /// All inputs for one curation (shared by `spawn_curation` and `finish`).
 struct CurationInputs {
+    model_config: shirley_agent_sdk::ModelConfig,
     factory: Arc<AgentFactory>,
     memory: Arc<MemoryRuntime>,
     messages: Vec<Message>,
@@ -593,6 +652,7 @@ impl SessionManager {
             0,
             Session::new(agent, name, request_session_id, store, memory, skills, todo, subagents),
         );
+        sessions.get_mut(&0).unwrap().attach_model_profile(factory.model_providers_root(), catalog.storage_dir());
         Self {
             sessions,
             active: 0,
@@ -682,6 +742,9 @@ impl SessionManager {
             id,
             Session::new(agent, name, request_session_id, store, memory, skills, todo, subagents),
         );
+        if let Some(factory) = &self.factory {
+            self.sessions.get_mut(&id).unwrap().attach_model_profile(factory.model_providers_root(), self.catalog.storage_dir());
+        }
         id
     }
 
@@ -696,7 +759,8 @@ impl SessionManager {
         let previous = self.active().name.clone();
         // Use the session-level query (live Agent first, mirror fallback) -- if the departing session is running, its `Agent`
         // has already been `take`n away, so reading `agent` directly would not get the model.
-        let selected_model = self.active().model_name().map(str::to_owned);
+        let use_profile_default = self.factory.as_ref().is_some_and(|f| crate::model_providers::default_config(f.model_providers_root()).ok().flatten().is_some());
+        let selected_model = (!use_profile_default).then(|| self.active().model_name().map(str::to_owned)).flatten();
         if let Some(id) = self.id_of_name(name) {
             self.active = id;
             if let Some(previous) = previous.filter(|p| p != name) {
@@ -744,7 +808,8 @@ impl SessionManager {
         // Same as `switch_to`: creating and switching away = the old session's turn ended, triggering one curation.
         let previous = self.active().name.clone();
         // Same as `switch_to`: session-level query, so the model is available even during a run.
-        let selected_model = self.active().model_name().map(str::to_owned);
+        let use_profile_default = self.factory.as_ref().is_some_and(|f| crate::model_providers::default_config(f.model_providers_root()).ok().flatten().is_some());
+        let selected_model = (!use_profile_default).then(|| self.active().model_name().map(str::to_owned)).flatten();
         let factory = self
             .factory
             .as_ref()
@@ -970,6 +1035,7 @@ impl SessionManager {
     fn curation_inputs(&self, name: &str) -> Option<CurationInputs> {
         let factory = self.factory.clone()?;
         let session = self.session(name)?;
+        if session.model_availability().is_err() { return None; }
         // Only distill sessions "with content" (user + assistant turns); empty / single-message ones do not warrant a pointless model call.
         let messages: Vec<Message> = session
             .agent
@@ -980,6 +1046,7 @@ impl SessionManager {
             return None;
         }
         Some(CurationInputs {
+            model_config: session.agent.as_ref()?.model_config().clone(),
             factory,
             // A session without a memory config is not distilled (no store to write to).
             memory: session.memory.clone()?,
@@ -994,13 +1061,14 @@ impl SessionManager {
     /// that should not affect the session itself).
     async fn run_curation(inputs: CurationInputs) {
         let CurationInputs {
+            model_config,
             factory,
             memory,
             messages,
             session_ref,
         } = inputs;
 
-        match factory.curate(&messages, &session_ref).await {
+        match factory.curate(&messages, &session_ref, &model_config).await {
             Ok(outcome) if !outcome.empty || !outcome.written.is_empty() => {
                 eprintln!(
                     "[memory] curated `{session_ref}`: {} written, {} rejected",
@@ -1019,7 +1087,7 @@ impl SessionManager {
         }
         // V2-B/C: after incremental curation, trigger periodic consolidation by threshold (sleep learning).
         if factory.should_consolidate() {
-            match factory.consolidate().await {
+            match factory.consolidate(&model_config).await {
                 Ok(outcome) if !outcome.empty => eprintln!(
                     "[memory] consolidated: {} merged, {} superseded, {} requalified, {} rejected",
                     outcome.merged,
@@ -1029,6 +1097,11 @@ impl SessionManager {
                 ),
                 Ok(_) => {}
                 Err(error) => eprintln!("[memory] consolidation failed: {error}"),
+            }
+        }
+        if let Some(global) = factory.memory_store().primary_root().parent() {
+            if let Err(error) = crate::remote::sync_once(global).await {
+                eprintln!("[memory:sync] curation retained locally: {error}");
             }
         }
         // V2.5: after both incremental / consolidation are persisted, embed new entries and clean orphan vectors, so the next hybrid retrieval

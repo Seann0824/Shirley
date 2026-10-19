@@ -49,6 +49,122 @@ fn chat_root() -> PathBuf {
 struct DesktopState {
     manager: Arc<ProjectRuntimeManager>,
     pumps: Arc<Mutex<HashMap<String, tauri::async_runtime::JoinHandle<()>>>>,
+    remote_pump: Mutex<Option<tokio::task::JoinHandle<()>>>,
+}
+
+#[tauri::command]
+async fn agent_model_providers(action: String, input: Option<serde_json::Value>) -> Result<serde_json::Value, String> {
+    crate::model_providers::command(&crate::storage::global_root(), &action, input.unwrap_or_default()).await
+}
+
+#[tauri::command]
+async fn agent_remote_info() -> Result<crate::remote::RemoteInfo, String> {
+    crate::remote::info(&crate::storage::global_root())
+}
+
+#[tauri::command]
+async fn agent_remote_save(
+    state: State<'_, DesktopState>, url: String, token: Option<String>, sync_personal_memory: bool,
+) -> Result<(), String> {
+    let global = crate::storage::global_root();
+    let previous = crate::remote::RemoteConfig::load(&global)?;
+    let url = url.trim().trim_end_matches('/').to_string();
+    let destination_changed = previous.url != url;
+    // Never silently reuse a credential for a different host.
+    let token = token.filter(|s| !s.trim().is_empty())
+        .or_else(|| (previous.url == url).then_some(previous.token)).unwrap_or_default();
+    let remote = crate::remote::RemoteConfig { url, token, sync_personal_memory };
+    // Saving a new destination requires a successful connection, before any memories are sent.
+    if !remote.url.is_empty() {
+        remote.command("agent_list_projects", serde_json::json!({})).await?;
+    }
+    remote.save(&global)?;
+    if destination_changed {
+        crate::memory::store::atomic_write(&global.join("remote-sync-status.json"), b"{}")
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(pump) = state.remote_pump.lock().await.take() { pump.abort(); }
+    Ok(())
+}
+
+#[tauri::command]
+async fn agent_remote_sync() -> Result<crate::remote::SyncStatus, String> {
+    crate::remote::sync_once(&crate::storage::global_root()).await
+}
+
+#[tauri::command]
+async fn agent_memory_review(remote: bool) -> Result<serde_json::Value, String> {
+    let global = crate::storage::global_root();
+    if remote {
+        crate::remote::RemoteConfig::load(&global)?.post("api/memory/review", &serde_json::json!({})).await
+    } else {
+        let records = crate::memory::sync::review_legacy(&global.join("memory")).map_err(|e| e.to_string())?;
+        serde_json::to_value(records).map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+async fn agent_memory_confirm_personal(remote: bool, approvals: Vec<crate::memory::sync::MemoryApproval>) -> Result<(), String> {
+    let global = crate::storage::global_root();
+    if remote {
+        crate::remote::RemoteConfig::load(&global)?.post("api/memory/confirm-personal", &serde_json::json!({"approvals": approvals})).await?;
+        Ok(())
+    } else {
+        crate::memory::sync::confirm_personal(&global.join("memory"), &approvals).map_err(|e| e.to_string())
+    }
+}
+
+#[tauri::command]
+async fn agent_remote_call(command: String, args: serde_json::Value) -> Result<serde_json::Value, String> {
+    let remote = crate::remote::RemoteConfig::load(&crate::storage::global_root())?;
+    remote.command(&command, args).await
+}
+
+async fn connect_remote_events(remote: &crate::remote::RemoteConfig) -> Result<reqwest::Response, String> {
+    let request = remote.client(true)?.get(remote.endpoint("api/events"));
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), remote.authorize(request).send())
+        .await.map_err(|_| "云端事件连接超时".to_string())?
+        .map_err(|e| e.without_url().to_string())?;
+    if !response.status().is_success() { return Err(format!("云端事件连接失败 ({})", response.status())); }
+    Ok(response)
+}
+
+#[tauri::command]
+async fn agent_remote_start_events(app: AppHandle, state: State<'_, DesktopState>) -> Result<(), String> {
+    let mut pump = state.remote_pump.lock().await;
+    if pump.as_ref().is_some_and(|handle| !handle.is_finished()) { return Ok(()); }
+    let remote = crate::remote::RemoteConfig::load(&crate::storage::global_root())?;
+    let initial = connect_remote_events(&remote).await?;
+    *pump = Some(tokio::spawn(async move {
+        let mut response = initial;
+        loop {
+            let mut decoder = crate::remote::EventDecoder::default();
+            loop {
+                let chunk = tokio::time::timeout(std::time::Duration::from_secs(45), response.chunk()).await;
+                let bytes = match chunk { Ok(Ok(Some(bytes))) => bytes, _ => break };
+                match decoder.push(&bytes) {
+                    Ok(events) => for event in events {
+                        if event.get("type").and_then(|v| v.as_str()) == Some("transport_resync") {
+                            let _ = app.emit("agent://remote-connection", true);
+                            continue;
+                        }
+                        let _ = app.emit("agent://remote-event", event);
+                    },
+                    Err(_) => break,
+                }
+            }
+            let _ = app.emit("agent://remote-connection", false);
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                if let Ok(next) = connect_remote_events(&remote).await {
+                    response = next;
+                    let _ = app.emit("agent://remote-connection", true);
+                    break;
+                }
+            }
+        }
+    }));
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -271,8 +387,9 @@ async fn agent_set_model(
     state: State<'_, DesktopState>,
     project: String,
     model: String,
+    session: Option<String>,
 ) -> Result<(), String> {
-    state.manager.set_model(&project, &model).await
+    state.manager.set_model(&project, &model, session.as_deref()).await
 }
 
 #[tauri::command]
@@ -435,12 +552,21 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
     let state = DesktopState {
         manager,
         pumps: Arc::new(Mutex::new(HashMap::new())),
+        remote_pump: Mutex::new(None),
     };
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
         .invoke_handler(tauri::generate_handler![
+            agent_model_providers,
+            agent_remote_info,
+            agent_remote_save,
+            agent_remote_sync,
+            agent_remote_call,
+            agent_remote_start_events,
+            agent_memory_review,
+            agent_memory_confirm_personal,
             agent_list_projects,
             agent_add_project,
             agent_rename_project,

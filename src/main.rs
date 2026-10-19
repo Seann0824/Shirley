@@ -4,7 +4,9 @@ mod bootstrap;
 mod interface;
 mod memory;
 mod models;
+mod model_providers;
 mod project;
+mod remote;
 mod prompt;
 mod prompt_template;
 mod session;
@@ -80,6 +82,8 @@ fn main() -> Result<(), AgentError> {
         // Assembly and catalog prewarming may spawn background tasks.
         let factory = bootstrap::AgentFactory::assemble(working_dir)?;
         factory.prewarm_model_catalog();
+        // A local offline copy is used by every interface. The worker shares only personal entries.
+        remote::start_sync_worker(storage::global_root());
         Ok::<_, AgentError>(factory)
     })?;
 

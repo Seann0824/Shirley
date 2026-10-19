@@ -374,6 +374,7 @@ impl ProjectRuntimeManager {
                     .map(str::to_owned)
                     .ok_or_else(|| "current session is not yet persisted".to_owned())?,
             };
+            guard.sessions.session(&session_name).ok_or("session not found")?.model_availability()?;
             let agent = guard
                 .sessions
                 .begin_turn(&session_name, text.clone())
@@ -423,14 +424,12 @@ impl ProjectRuntimeManager {
                             {
                                 let mut rt = runtime_for_task.lock().await;
                                 rt.sessions.apply_event(&session_name, Ok(event.clone()));
-                            }
-                            sink_event(&sink, &project_owned, &session_name, event);
-                            if is_todo {
-                                let todo = {
-                                    let rt = runtime_for_task.lock().await;
-                                    rt.sessions.session(&session_name).and_then(|s| s.todo_view())
-                                };
-                                sink_todo(&sink, &project_owned, &session_name, todo);
+                                // The cloud cursor and view must advance under the same lock.
+                                sink_event(&sink, &project_owned, &session_name, event);
+                                if is_todo {
+                                    let todo = rt.sessions.session(&session_name).and_then(|s| s.todo_view());
+                                    sink_todo(&sink, &project_owned, &session_name, todo);
+                                }
                             }
                         }
                     }
@@ -446,10 +445,6 @@ impl ProjectRuntimeManager {
             let messages = agent.finish_interrupted_turn();
             cancels.lock().await.remove(&key);
 
-            match &terminal {
-                Ok(event) => sink_event(&sink, &project_owned, &session_name, event.clone()),
-                Err(message) => sink_error(&sink, &project_owned, &session_name, message),
-            }
             {
                 let mut rt = runtime_for_task.lock().await;
                 for message in messages {
@@ -457,7 +452,11 @@ impl ProjectRuntimeManager {
                         .apply_event(&session_name, Ok(AgentEvent::MessageAdded(message)));
                 }
                 rt.sessions.restore_agent(&session_name, agent);
-                rt.sessions.apply_event(&session_name, terminal);
+                rt.sessions.apply_event(&session_name, terminal.clone());
+                match &terminal {
+                    Ok(event) => sink_event(&sink, &project_owned, &session_name, event.clone()),
+                    Err(message) => sink_error(&sink, &project_owned, &session_name, message),
+                }
             }
 
             if let Some((config, first)) = title_input {
@@ -492,6 +491,12 @@ impl ProjectRuntimeManager {
         project: &str,
         session: &str,
     ) -> Result<(broadcast::Receiver<Result<AgentEvent, String>>, SessionSnapshotWire), String> {
+        self.subscribe_with_cursor(project, session, || 0).await.map(|(rx, snapshot, _)| (rx, snapshot))
+    }
+
+    pub async fn subscribe_with_cursor(
+        &self, project: &str, session: &str, cursor: impl FnOnce() -> u64,
+    ) -> Result<(broadcast::Receiver<Result<AgentEvent, String>>, SessionSnapshotWire, u64), String> {
         let runtime = self.ensure_runtime(project).await?;
         let guard = runtime.lock().await;
         let rx = guard
@@ -508,7 +513,7 @@ impl ProjectRuntimeManager {
             .session(session)
             .and_then(|s| s.todo_view());
         let snapshot = SessionSnapshotWire::new(session.to_owned(), items, running, todo);
-        Ok((rx, snapshot))
+        Ok((rx, snapshot, cursor()))
     }
 
     // -----------------------------------------------------------------------
@@ -518,6 +523,7 @@ impl ProjectRuntimeManager {
     pub async fn model_name(&self, project: &str) -> Result<String, String> {
         let runtime = self.ensure_runtime(project).await?;
         let guard = runtime.lock().await;
+        if let Some(key) = &guard.sessions.active().model_selection { return Ok(key.clone()); }
         Ok(guard
             .sessions
             .active_model_name()
@@ -539,29 +545,38 @@ impl ProjectRuntimeManager {
             .collect())
     }
 
-    pub async fn set_model(&self, project: &str, model: &str) -> Result<(), String> {
+    pub async fn set_model(&self, project: &str, model: &str, target_session: Option<&str>) -> Result<(), String> {
         let runtime = self.ensure_runtime(project).await?;
-        let factory = runtime.lock().await.factory.clone();
+        let (factory, session_name) = {
+            let guard = runtime.lock().await;
+            (guard.factory.clone(), target_session.map(str::to_string)
+                .or_else(|| guard.sessions.active_name().map(str::to_string)).ok_or("no active session")?)
+        };
         let entry = factory
             .model_catalog
             .list()
             .await
             .into_iter()
             .find(|entry| entry.value == model);
+        if model.starts_with("provider:") && entry.is_none() { return Err("服务商或模型已被移除，请刷新列表".into()); }
         // Resolve the full model config through the project factory (tool protocol etc.).
         let config = entry.as_ref().map(|entry| factory.model_config_for(entry));
         let mut guard = runtime.lock().await;
-        let session = guard.sessions.active_mut();
+        let session = guard.sessions.session_mut(&session_name).ok_or("session no longer exists")?;
         let agent = session
             .agent
-            .as_mut()
+            .as_ref()
             .ok_or_else(|| "agent is currently running".to_owned())?;
-        match config {
-            Some(config) => agent.set_model_config(config),
-            None => agent.set_model(model),
-        }
-        session.remember_model();
-        Ok(())
+        let config = match config {
+            Some(config) => config,
+            None => {
+                let mut config = agent.model_config().clone();
+                config.model = model.into();
+                config
+            },
+        };
+        let key = entry.as_ref().filter(|e| e.configured.is_some()).map(|e| e.value.clone());
+        session.select_model(config, key)
     }
 
     // -----------------------------------------------------------------------

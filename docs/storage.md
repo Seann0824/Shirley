@@ -8,6 +8,9 @@ split. Source workspaces no longer contain an active `.shirley` directory.
 ```text
 ~/.shirley/
   config.toml                  # shared provider, memory, compression and runtime settings
+  model-providers.json         # host-local provider profiles and model lists (includes credentials)
+  remote.json                  # native cloud connection + optional personal-memory sync
+  remote-sync-status.json      # sync status, no credential echo
   projects.json                # project registry
   memory/                      # personal / cross-project memory and vectors
   chat/                        # ordinary Chat working directory
@@ -15,6 +18,7 @@ split. Source workspaces no longer contain an active `.shirley` directory.
     workspace.json             # canonical source workspace path
     sessions/*.jsonl           # conversation logs
     sessions/*.title           # titles
+    sessions/*.model.json      # provider/model binding, no credentials
     sessions/*.agents/         # subagent index and transcripts
     memory/                    # project memory and vectors
     legacy-config.toml         # archived former local config; never loaded as settings
@@ -69,3 +73,5 @@ its title/history and subagent transcript, then send a message. Expected: histor
 available, the new message is saved under global workspace state, and the source repo
 does not acquire a `.shirley` directory. Test `/login` in the TUI when changing provider
 settings: expected persistence is the single global `config.toml`.
+
+Across different machines, only explicitly personal memory entries synchronize when enabled. Projects, project memories and sessions remain host-local; desktop can load remote sessions through the authenticated remote connection. See [memory-sync.md](./memory-sync.md).

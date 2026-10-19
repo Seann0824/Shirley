@@ -1,5 +1,8 @@
 **Shirley technical design · Memory system**
 
+> Optional cross-device personal-memory sync and legacy-entry review are implemented; see [memory-sync.md](./memory-sync.md). Project memory stays on the execution host. The original local-only privacy assumptions below no longer apply when sharing is enabled.
+
+
 This document lands a plan for "remembering the user across sessions". It is the **cross-session
 extension** of `compaction.md` / `todo.md`: compaction solves "a round does not fit", todo solves
 "forgot where it got to after compaction", and memory solves **"a new session starts from zero and
@@ -570,8 +573,7 @@ src/memory/
    runtime may be shut down first). A more precise determination (idle timeout / explicit end /
    flush before exit) is left for later. The trigger is best-effort: it is silently skipped when
    there is no memory, no messages, or not in a tokio runtime (unit tests).
-5. **Privacy**: chapter 3 suggests PII redaction before storing; V1 does not do it (memory is local,
-   so the risk is low but present).
+5. **Privacy**: chapter 3 suggests PII redaction before storing; automatic PII redaction is not implemented. Optional cloud sync sends explicitly personal entries; legacy entries require review first (see `memory-sync.md`).
 6. **Injection loses the prefix cache**: the same cost as `todo.md` -- when `core.md` changes, the
    prefix after it is invalidated, minimized by "put it at the end + stable content".
 7. **Limited coverage of environment probing** (paper 2609.11060): V1's "environment" is only the

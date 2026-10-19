@@ -11,6 +11,7 @@
 // one project hosts multiple sessions.
 
 import type { AgentEventWire, SessionSnapshot } from "@/types/wire";
+import { providerBridge, mockProviderBridge, selectionKey, type ProviderBridge } from "@/lib/model-providers";
 
 /** Subscription handle for one session: snapshot + unsubscribe. */
 export type SessionSubscription = {
@@ -98,11 +99,13 @@ export type SubagentSummary = {
 
 /** Bridge capability description (lets the UI adapt to native vs. cloud transports). */
 export type BridgeCapabilities = {
+  configurationScope: "local" | "remote" | "demo";
   /** Whether a native folder picker exists (Tauri desktop = true; cloud HTTP = false, use manual path input). */
   nativeFolderPicker: boolean;
 };
 
 export type AgentBridge = {
+  providers: ProviderBridge;
   /** List projects. `archived = true` includes archived projects (for the archive list). */
   listProjects: (archived?: boolean) => Promise<ProjectEntry[]>;
   /**
@@ -170,7 +173,7 @@ export type AgentBridge = {
   /** List the models available from the current project's endpoint. */
   listModels: (project: string) => Promise<ModelEntry[]>;
   /** Hot-swap the model: no Agent rebuild, only `ModelConfig::model`. */
-  setModel: (project: string, value: string) => Promise<void>;
+  setModel: (project: string, value: string, session?: string) => Promise<void>;
   /** Search workspace files by keyword (for `@` references, pure application layer). */
   searchFiles: (project: string, query: string) => Promise<FileEntry[]>;
   /** List the skills visible to a project's current session (for `/` candidates). */
@@ -210,30 +213,78 @@ function routeKey(project: string, session: string): string {
   return `${project}::${session}`;
 }
 
-async function createTauriBridge(): Promise<AgentBridge> {
-  const { invoke } = await import("@tauri-apps/api/core");
+/** Buffer until the snapshot arrives, then discard cloud events already included in its cursor. */
+function eventRouter() {
+  type Route = { onEvent: (event: AgentEventWire) => void; buffer: AgentEventWire[] | null; sequence: number };
+  const routes = new Map<string, Route>();
+  const deliver = (route: Route, event: AgentEventWire) => {
+    const sequence = (event as AgentEventWire & { sequence?: number }).sequence;
+    if (sequence !== undefined) {
+      if (sequence <= route.sequence) return;
+      route.sequence = sequence;
+    }
+    route.onEvent(event);
+  };
+  return {
+    push(event: AgentEventWire) {
+      if (event.project == null || event.session == null) return;
+      const route = routes.get(routeKey(event.project, event.session));
+      if (!route) return;
+      if (route.buffer) route.buffer.push(event);
+      else deliver(route, event);
+    },
+    begin(project: string, session: string, onEvent: Route["onEvent"]) {
+      const key = routeKey(project, session);
+      const route: Route = { onEvent, buffer: [], sequence: 0 };
+      routes.set(key, route);
+      return {
+        finish(snapshot: SessionSnapshot) {
+          if (routes.get(key) !== route) return;
+          route.sequence = (snapshot as SessionSnapshot & { sequence?: number }).sequence ?? 0;
+          const buffer = route.buffer ?? [];
+          route.buffer = null;
+          for (const event of buffer) deliver(route, event);
+        },
+        remove() { if (routes.get(key) !== route) return false; routes.delete(key); return true; },
+      };
+    },
+  };
+}
+
+async function createTauriBridge(remote = false): Promise<AgentBridge> {
+  const { invoke: nativeInvoke } = await import("@tauri-apps/api/core");
+  const invoke = <T>(command: string, args?: Record<string, unknown>): Promise<T> => remote
+    ? nativeInvoke<T>("agent_remote_call", { command, args: args ?? {} })
+    : nativeInvoke<T>(command, args);
   const { listen } = await import("@tauri-apps/api/event");
   // One handler per session, routed by the event's `project` + `session`. `listen` is
   // registered only once — registering a new listener every turn would leave old ones
   // un-unregistered and consume events multiple times (a past bug).
-  const handlers = new Map<string, (event: AgentEventWire) => void>();
-  await listen<AgentEventWire>("agent://event", (event) => {
-    const wire = event.payload;
-    if (wire.project == null || wire.session == null) return;
-    handlers.get(routeKey(wire.project, wire.session))?.(wire);
-  });
+  const router = eventRouter();
+  const unlisten = await listen<AgentEventWire>(remote ? "agent://remote-event" : "agent://event", (event) => router.push(event.payload));
+  if (remote) {
+    const stopConnection = await listen<boolean>("agent://remote-connection", ({ payload: connected }) => {
+      window.dispatchEvent(new CustomEvent("shirley-remote-connection", { detail: connected }));
+    });
+    // Start the stream before requesting any snapshot, so subsequent events can be buffered.
+    try { await nativeInvoke("agent_remote_start_events"); }
+    catch (error) { unlisten(); stopConnection(); throw error; }
+  }
   return {
+    providers: providerBridge(invoke),
     async listProjects(archived) {
       return invoke<ProjectEntry[]>("agent_list_projects", { archived: archived ?? false });
     },
     async addProject() {
+      if (remote) return null;
       return invoke<ProjectEntry | null>("agent_add_project");
     },
-    async addProjectByPath() {
-      throw new Error("addProjectByPath is only available in server mode");
+    async addProjectByPath(path, name) {
+      if (!remote) throw new Error("addProjectByPath is only available in server mode");
+      return invoke<ProjectEntry | null>("agent_add_project", { path, name });
     },
     capabilities() {
-      return { nativeFolderPicker: true };
+      return { nativeFolderPicker: !remote, configurationScope: remote ? "remote" : "local" };
     },
     async renameProject(project, name) {
       await invoke("agent_rename_project", { project, name });
@@ -254,14 +305,15 @@ async function createTauriBridge(): Promise<AgentBridge> {
       await invoke("agent_cancel", { project, session });
     },
     async openSession(project, session, onEvent) {
-      const key = routeKey(project, session);
-      handlers.set(key, onEvent);
-      const snapshot = await invoke<SessionSnapshot>("agent_subscribe", { project, session });
+      const route = router.begin(project, session, onEvent);
+      let snapshot: SessionSnapshot;
+      try { snapshot = await invoke<SessionSnapshot>("agent_subscribe", { project, session }); }
+      catch (error) { route.remove(); throw error; }
+      route.finish(snapshot);
       return {
         snapshot,
         unsubscribe: () => {
-          handlers.delete(key);
-          void invoke("agent_unsubscribe", { project, session });
+          if (route.remove()) void invoke("agent_unsubscribe", { project, session }).catch(() => {});
         },
       };
     },
@@ -271,8 +323,8 @@ async function createTauriBridge(): Promise<AgentBridge> {
     async listModels(project) {
       return invoke<ModelEntry[]>("agent_list_models", { project });
     },
-    async setModel(project, value) {
-      await invoke("agent_set_model", { project, model: value });
+    async setModel(project, value, session) {
+      await invoke("agent_set_model", { project, model: value, session });
     },
     async searchFiles(project, query) {
       return invoke<FileEntry[]>("agent_search_files", { project, query });
@@ -322,7 +374,9 @@ async function createTauriBridge(): Promise<AgentBridge> {
 function createMockBridge(): AgentBridge {
   const handlers = new Map<string, (event: AgentEventWire) => void>();
   const cancelled = new Set<string>();
+  const providers = mockProviderBridge();
   return {
+    providers,
     async listProjects(archived) {
       return mockProjects
         .filter((p) => (archived ?? false) || !p.archived)
@@ -346,7 +400,7 @@ function createMockBridge(): AgentBridge {
       throw new Error("addProjectByPath is only available in server mode");
     },
     capabilities() {
-      return { nativeFolderPicker: true };
+      return { nativeFolderPicker: true, configurationScope: "demo" };
     },
     async renameProject(project, name) {
       const entry = mockProjects.find((p) => p.id === project);
@@ -407,6 +461,10 @@ function createMockBridge(): AgentBridge {
       return "mock-model";
     },
     async listModels() {
+      const registry = await providers.get();
+      if (registry.providers.length) return registry.providers.flatMap((provider) => provider.models.map((model) => ({
+        value: selectionKey(provider.id, model.id), label: model.name || model.id, provider: provider.name,
+      })));
       return [
         { label: "mock-model", value: "mock-model", provider: "mock" },
         { label: "mock-model-mini", value: "mock-model-mini", provider: "mock" },
@@ -567,9 +625,10 @@ function mockSessions(project: string): SessionEntry[] {
 
 /** POST a command to the server; throws with the server's error text on non-2xx. */
 async function httpCall<T>(baseUrl: string, name: string, args?: unknown): Promise<T> {
+  const token = sessionStorage.getItem("shirley.cloudToken");
   const res = await fetch(`${baseUrl}/api/cmd/${name}`, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
     body: JSON.stringify(args ?? {}),
   });
   const text = await res.text();
@@ -577,13 +636,21 @@ async function httpCall<T>(baseUrl: string, name: string, args?: unknown): Promi
   return (text ? JSON.parse(text) : null) as T;
 }
 
-function createHttpBridge(baseUrl: string = ""): AgentBridge {
-  const handlers = new Map<string, (event: AgentEventWire) => void>();
+async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
+  const router = eventRouter();
 
   // One SSE stream for the whole app; events are routed by `project::session` to the
   // per-session handler registered by `openSession`. `EventSource` reconnects on drop
   // by itself, so there is no manual reconnect loop here.
-  const es = new EventSource(`${baseUrl}/api/events`);
+  const token = sessionStorage.getItem("shirley.cloudToken");
+  const es = new EventSource(`${baseUrl}/api/events${token ? `?token=${encodeURIComponent(token)}` : ""}`);
+  let previouslyOpened = false;
+  es.addEventListener("open", () => {
+    if (previouslyOpened) window.dispatchEvent(new CustomEvent("shirley-remote-connection", { detail: true }));
+    previouslyOpened = true;
+  });
+  es.addEventListener("error", () => window.dispatchEvent(new CustomEvent("shirley-remote-connection", { detail: false })));
+  es.addEventListener("resync", () => window.dispatchEvent(new CustomEvent("shirley-remote-connection", { detail: true })));
   es.addEventListener("agent_event", (ev) => {
     let wire: AgentEventWire;
     try {
@@ -591,11 +658,20 @@ function createHttpBridge(baseUrl: string = ""): AgentBridge {
     } catch {
       return;
     }
-    if (wire.project == null || wire.session == null) return;
-    handlers.get(routeKey(wire.project, wire.session))?.(wire);
+    router.push(wire);
+  });
+  // No snapshot may be requested before the event stream is actually subscribed.
+  await new Promise<void>((resolve, reject) => {
+    const cleanup = () => { clearTimeout(timer); es.removeEventListener("open", opened); es.removeEventListener("error", failed); };
+    const opened = () => { cleanup(); resolve(); };
+    const failed = () => { cleanup(); es.close(); reject(new Error("云端事件连接失败，请检查连接后重试")); };
+    const timer = setTimeout(failed, 10_000);
+    es.addEventListener("open", opened);
+    es.addEventListener("error", failed);
   });
 
   return {
+    providers: providerBridge((name, args) => httpCall(baseUrl, name, args)),
     async listProjects(archived) {
       return httpCall<ProjectEntry[]>(baseUrl, "agent_list_projects", { archived: archived ?? false });
     },
@@ -607,7 +683,7 @@ function createHttpBridge(baseUrl: string = ""): AgentBridge {
       return httpCall<ProjectEntry | null>(baseUrl, "agent_add_project", { path, name });
     },
     capabilities() {
-      return { nativeFolderPicker: false };
+      return { nativeFolderPicker: false, configurationScope: "remote" };
     },
     async renameProject(project, name) {
       await httpCall(baseUrl, "agent_rename_project", { project, name });
@@ -628,14 +704,15 @@ function createHttpBridge(baseUrl: string = ""): AgentBridge {
       await httpCall(baseUrl, "agent_cancel", { project, session });
     },
     async openSession(project, session, onEvent) {
-      const key = routeKey(project, session);
-      handlers.set(key, onEvent);
-      const snapshot = await httpCall<SessionSnapshot>(baseUrl, "agent_subscribe", { project, session });
+      const route = router.begin(project, session, onEvent);
+      let snapshot: SessionSnapshot;
+      try { snapshot = await httpCall<SessionSnapshot>(baseUrl, "agent_subscribe", { project, session }); }
+      catch (error) { route.remove(); throw error; }
+      route.finish(snapshot);
       return {
         snapshot,
         unsubscribe: () => {
-          handlers.delete(key);
-          void httpCall(baseUrl, "agent_unsubscribe", { project, session }).catch(() => {});
+          if (route.remove()) void httpCall(baseUrl, "agent_unsubscribe", { project, session }).catch(() => {});
         },
       };
     },
@@ -645,8 +722,8 @@ function createHttpBridge(baseUrl: string = ""): AgentBridge {
     async listModels(project) {
       return httpCall<ModelEntry[]>(baseUrl, "agent_list_models", { project });
     },
-    async setModel(project, value) {
-      await httpCall(baseUrl, "agent_set_model", { project, model: value });
+    async setModel(project, value, session) {
+      await httpCall(baseUrl, "agent_set_model", { project, model: value, session });
     },
     async searchFiles(project, query) {
       return httpCall<FileEntry[]>(baseUrl, "agent_search_files", { project, query });
@@ -697,21 +774,19 @@ let cached: Promise<AgentBridge> | null = null;
 
 export function agentBridge(): Promise<AgentBridge> {
   // Transport selection (four states):
-  // - inside Tauri + remote server URL -> HTTP/SSE to the cloud server
+  // - inside Tauri + remote source     -> native authenticated HTTP/SSE proxy to the cloud
   // - inside Tauri                     -> native invoke / listen
   // - plain browser dev                -> mock (debug the UI standalone with `npm run dev`)
   // - plain browser prod               -> HTTP/SSE (same-origin, the cloud web build served by the Rust server)
   const dev = Boolean((import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV);
-  const remoteUrl =
-    (typeof localStorage !== "undefined" && localStorage.getItem("shirley.serverUrl")) ||
-    (window as unknown as { __SHIRLEY_SERVER__?: string }).__SHIRLEY_SERVER__ ||
-    "";
+  const remote = localStorage.getItem("shirley.connectionSource") === "remote";
   cached ??= isTauri
-    ? remoteUrl
-      ? Promise.resolve(createHttpBridge(remoteUrl))
-      : createTauriBridge()
+    ? createTauriBridge(remote)
     : dev
       ? Promise.resolve(createMockBridge())
-      : Promise.resolve(createHttpBridge());
-  return cached;
+      : createHttpBridge();
+  // A failed first connection must be retryable when the server comes back.
+  const pending = cached;
+  void pending.catch(() => { if (cached === pending) cached = null; });
+  return pending;
 }

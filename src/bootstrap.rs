@@ -70,7 +70,7 @@ pub struct AgentFactory {
     memory_roots: Vec<PathBuf>,
     /// The curator's separate model config (V2-C, `docs/memory.md` §10): used when the `[memory]` table configures
     /// `curator_*`, otherwise `None` -- the curator falls back to the main model (honest fallback, does not pretend to be cross-source).
-    curator_model_config: Option<ModelConfig>,
+    curator_settings: crate::settings::MemorySettings,
     /// When the entry count reaches this threshold, trigger a periodic consolidation after curation (sleep learning). `0` = do not auto-trigger.
     consolidate_after_entries: usize,
     /// **V2.5** embedding client: constructed only when `[memory]` configures both `embedding_base_url` +
@@ -103,7 +103,8 @@ impl AgentFactory {
         paths.migrate().map_err(|error| AgentError::Other(Box::new(error)))?;
         let settings = Settings::load(Some(&paths.global.join("config.toml")), &|key| std::env::var(key).ok())
             .map_err(|error| AgentError::Other(Box::new(error)))?;
-        let needs_login = !settings.is_configured();
+        let needs_login = !settings.is_configured() && crate::model_providers::default_config(&paths.global)
+            .map_err(|error| AgentError::Other(Box::new(std::io::Error::other(error))))?.is_none();
 
         // Model catalog: by default derives `/v1/models` from the chat completions base_url,
         // but can be overridden with `models_url` in config. On fetch failure falls back to the built-in static list.
@@ -111,11 +112,14 @@ impl AgentFactory {
             .models_url
             .clone()
             .unwrap_or_else(|| models::models_endpoint(&settings.base_url));
-        let model_catalog: Arc<dyn ModelCatalog> = Arc::new(models::RemoteCatalog::new(
+        let legacy_catalog: Arc<dyn ModelCatalog> = Arc::new(models::RemoteCatalog::new(
             models_url,
             settings.api_key.clone(),
             models::StaticCatalog::builtin().entries(),
         ));
+        let model_catalog: Arc<dyn ModelCatalog> = Arc::new(crate::model_providers::ConfiguredCatalog {
+            global: paths.global.clone(), fallback: legacy_catalog,
+        });
 
         let mut model_config = ModelConfig::builder()
             .protocol(settings.protocol)
@@ -145,7 +149,7 @@ impl AgentFactory {
 
         // The curator's separate model (V2-C): only if `[memory]` configures curator_* do we build a separate config,
         // otherwise `None` (falls back to the main model). Defaults inherit the main config's stream / thinking fields.
-        let curator_model_config = build_curator_config(&settings, &model_config);
+        let curator_settings = settings.memory.clone();
 
         // The embedding client for memory hybrid retrieval (V2.5): the semantic leg is enabled only with both endpoint + model;
         // otherwise `None` (retrieval degrades to pure BM25, never pretends there is a semantic leg).
@@ -192,7 +196,7 @@ impl AgentFactory {
             session_catalog,
             needs_login,
             memory_roots: paths.memory_roots(),
-            curator_model_config,
+            curator_settings,
             consolidate_after_entries: settings.memory.consolidate_after_entries.unwrap_or(0),
             embedder,
             skill_catalog,
@@ -333,7 +337,7 @@ impl AgentFactory {
         };
 
         let agent = Agent::builder()
-            .model_config(self.model_config.clone())
+            .model_config(self.default_model_config()?)
             .system_prompt(system_prompt)
             .working_dir(self.working_dir.clone())
             .compression_instruction(COMPRESSION_INSTRUCTION)
@@ -359,6 +363,7 @@ impl AgentFactory {
     /// "first `set_model`, then `set_tool_calling`". The protocol is chosen by the model-declared `tool_mode`,
     /// falling back to the config-layer default (`self.model_config.tool_calling`) when undeclared.
     pub fn model_config_for(&self, entry: &ModelEntry) -> ModelConfig {
+        if let Some(configured) = &entry.configured { return configured.config(); }
         let mut config = self.model_config.clone();
         config.model = entry.value.clone();
         config.tool_calling =
@@ -370,6 +375,16 @@ impl AgentFactory {
             config.supports_images = supports_images;
         }
         config
+    }
+
+    pub fn model_providers_root(&self) -> &std::path::Path {
+        self.memory_roots[0].parent().expect("memory root has a parent")
+    }
+
+    pub fn default_model_config(&self) -> Result<ModelConfig, AgentError> {
+        crate::model_providers::default_config(self.model_providers_root())
+            .map(|config| config.unwrap_or_else(|| self.model_config.clone()))
+            .map_err(|error| AgentError::Other(Box::new(std::io::Error::other(error))))
     }
 
     /// For `/login`: after changing the endpoint / key, recompute the model config (keep the current `model` if not filled).
@@ -422,8 +437,9 @@ impl AgentFactory {
         &self,
         messages: &[Message],
         session_ref: &str,
+        session_model: &ModelConfig,
     ) -> Result<CurateOutcome, CuratorError> {
-        let agent = self.curator_agent()?;
+        let agent = self.curator_agent(session_model)?;
         let store = self.memory_store();
         let sessions_dir = self.sessions_dir();
         memory::curate(
@@ -440,8 +456,8 @@ impl AgentFactory {
     ///
     /// Shares the curator model with [`AgentFactory::curate`] (if `[memory]` configures one, use the separate model).
     /// When `sessions_dir` exists, does **verification against original evidence**.
-    pub async fn consolidate(&self) -> Result<memory::ConsolidateOutcome, CuratorError> {
-        let agent = self.curator_agent()?;
+    pub async fn consolidate(&self, session_model: &ModelConfig) -> Result<memory::ConsolidateOutcome, CuratorError> {
+        let agent = self.curator_agent(session_model)?;
         let store = self.memory_store();
         let sessions_dir = self.sessions_dir();
         let sessions_dir = sessions_dir.exists().then_some(sessions_dir.as_path());
@@ -462,11 +478,9 @@ impl AgentFactory {
     }
 
     /// Build the **minimal `Agent`** used by the curator: only borrows the model config, without tools / system prompt / memory injection.
-    fn curator_agent(&self) -> Result<Agent, CuratorError> {
-        let config = self
-            .curator_model_config
-            .clone()
-            .unwrap_or_else(|| self.model_config.clone());
+    fn curator_agent(&self, session_model: &ModelConfig) -> Result<Agent, CuratorError> {
+        let config = build_curator_config(&self.curator_settings, session_model)
+            .unwrap_or_else(|| session_model.clone());
         Agent::builder()
             .model_config(config)
             .build()
@@ -519,8 +533,7 @@ pub fn resolve_tool_calling_for(
 /// Inherits the main config's `stream` / `thinking` / `reasoning_effort` / `context_window_tokens`
 /// and other fields, overriding only the endpoint / key / model / protocol explicitly given by the curator -- avoiding "configured a curator model
 /// but lost the main config's other fields".
-fn build_curator_config(settings: &Settings, main: &ModelConfig) -> Option<ModelConfig> {
-    let mem = &settings.memory;
+fn build_curator_config(mem: &crate::settings::MemorySettings, main: &ModelConfig) -> Option<ModelConfig> {
     // If no curator key is configured at all, do not build a separate config.
     if mem.curator_model.is_none()
         && mem.curator_base_url.is_none()
@@ -534,6 +547,10 @@ fn build_curator_config(settings: &Settings, main: &ModelConfig) -> Option<Model
         config.model = model.clone();
     }
     if let Some(base_url) = mem.curator_base_url.as_ref().filter(|u| !u.trim().is_empty()) {
+        if mem.curator_api_key.is_none() && url::Url::parse(base_url).ok().map(|u| u.origin())
+            != url::Url::parse(&main.base_url).ok().map(|u| u.origin()) {
+            config.api_key = None;
+        }
         config.base_url = base_url.clone();
     }
     if let Some(api_key) = mem.curator_api_key.clone() {
@@ -700,7 +717,7 @@ pub(crate) mod test_support {
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
             needs_login: false,
             memory_roots: vec![root.join("memory")],
-            curator_model_config: None,
+            curator_settings: crate::settings::MemorySettings::default(),
             consolidate_after_entries: 0,
             embedder: None,
             skill_catalog: SkillCatalog::new(Vec::new()),
@@ -748,7 +765,7 @@ mod tests {
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
             needs_login: false,
             memory_roots: vec![root.join("memory")],
-            curator_model_config: None,
+            curator_settings: crate::settings::MemorySettings::default(),
             consolidate_after_entries: 0,
             embedder: None,
             skill_catalog: SkillCatalog::new(Vec::new()),
@@ -1062,4 +1079,17 @@ mod tests {
 
         let _ = std::fs::remove_dir_all(&root);
     }
+    #[test]
+    fn memory_curator_follows_session_provider_and_does_not_reuse_key_for_another_host() {
+        let root = std::env::temp_dir().join(format!("shirley-curator-provider-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        let mut factory = super::test_support::test_factory(root.clone());
+        let session = ModelConfig::builder().protocol(shirley_agent_sdk::ModelProtocol::Responses).base_url("https://selected.example/v1/responses").model("chosen").api_key("selected-key").build();
+        let curator = factory.curator_agent(&session).unwrap();
+        assert_eq!(curator.model_config().base_url, session.base_url);
+        assert_eq!(curator.model_config().api_key, session.api_key);
+        factory.curator_settings.curator_base_url = Some("https://different.example/v1/responses".into());
+        assert_eq!(factory.curator_agent(&session).unwrap().model_config().api_key, None);
+        let _ = std::fs::remove_dir_all(root);
+    }
+
 }
