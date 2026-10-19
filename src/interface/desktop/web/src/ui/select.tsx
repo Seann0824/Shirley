@@ -53,6 +53,11 @@ export function Select<T extends string>({
   placeholder?: string;
 }) {
   const [open, setOpen] = useState(false);
+  // Portal target. A modal `<dialog>` lives in the browser's top layer, and top-layer
+  // content always paints above `document.body` — so portalling the menu to body makes it
+  // render *behind* the dialog (the menu exists but is invisible). Mount the menu inside the
+  // nearest dialog instead, which keeps it in the same top-layer stacking context.
+  const [container, setContainer] = useState<HTMLElement | null>(null);
   const [placement, setPlacement] = useState<Placement>("bottom");
   const [activeIndex, setActiveIndex] = useState(-1);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -161,7 +166,10 @@ export function Select<T extends string>({
         aria-expanded={open}
         aria-controls={open ? listId : undefined}
         disabled={disabled}
-        onClick={() => setOpen((prev) => !prev)}
+        onClick={() => {
+          if (!open) setContainer(triggerRef.current?.closest("dialog") ?? document.body);
+          setOpen((prev) => !prev);
+        }}
         onKeyDown={onTriggerKeyDown}
         className={cn(
           "flex h-9 min-w-[8rem] max-w-[16rem] items-center justify-between gap-2 rounded-control border border-line bg-canvas px-2.5 text-body-sm text-ink transition-colors",
@@ -222,7 +230,7 @@ export function Select<T extends string>({
               })}
             </ScrollArea>
           </div>,
-          document.body,
+          container ?? document.body,
         )}
     </>
   );
