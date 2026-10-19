@@ -515,6 +515,9 @@ pub struct ConsolidateOutcome {
     pub rejected: Vec<Rejected>,
     /// Nothing to consolidate (too few entries or the model produced no operations).
     pub empty: bool,
+    /// Ids of entries this run wrote (merged targets, replacements, requalified entries, and the
+    /// old entries it flipped to superseded). The caller pushes exactly these to the cloud.
+    pub written: Vec<String>,
 }
 
 /// One consolidation operation (proposed by the model, executed after the program's self-check). **Never deletes history** -- only sets `superseded`.
@@ -665,6 +668,14 @@ pub fn apply_consolidate_ops(
         empty: ops.is_empty(),
         ..Default::default()
     };
+    // Records an entry that was just persisted so the caller can upload it immediately.
+    macro_rules! persist {
+        ($entry:expr) => {{
+            store.write_entry_unlocked(&$entry)?;
+            outcome.written.push($entry.id.clone());
+            working.insert($entry.id.clone(), $entry.clone());
+        }};
+    }
 
     for op in ops {
         match op {
@@ -709,13 +720,11 @@ pub fn apply_consolidate_ops(
                             {
                                 let mut old = old;
                                 old.status = EntryStatus::Superseded;
-                                store.write_entry_unlocked(&old)?;
-                                working.insert(id.clone(), old);
+                                persist!(old);
                                 outcome.superseded += 1;
                             }
                         }
-                        store.write_entry_unlocked(&entry)?;
-                        working.insert(entry.id.clone(), entry);
+                        persist!(entry);
                         outcome.merged += 1;
                     }
                     Err(reason) => outcome.rejected.push(Rejected {
@@ -742,12 +751,10 @@ pub fn apply_consolidate_ops(
                         if old.status != EntryStatus::Superseded {
                             let mut old = old;
                             old.status = EntryStatus::Superseded;
-                            store.write_entry_unlocked(&old)?;
-                            working.insert(id.clone(), old);
+                            persist!(old);
                             outcome.superseded += 1;
                         }
-                        store.write_entry_unlocked(&entry)?;
-                        working.insert(entry.id.clone(), entry);
+                        persist!(entry);
                     }
                     Err(reason) => outcome.rejected.push(Rejected {
                         id: Some(id),
@@ -805,8 +812,7 @@ pub fn apply_consolidate_ops(
                     });
                     continue;
                 }
-                store.write_entry_unlocked(&entry)?;
-                working.insert(id, entry);
+                persist!(entry);
                 outcome.requalified += 1;
             }
         }

@@ -1068,6 +1068,8 @@ impl SessionManager {
             session_ref,
         } = inputs;
 
+        // Every id the curator persisted this round, uploaded to the cloud in one batch below.
+        let mut written: Vec<String> = Vec::new();
         match factory.curate(&messages, &session_ref, &model_config).await {
             Ok(outcome) if !outcome.empty || !outcome.written.is_empty() => {
                 eprintln!(
@@ -1075,6 +1077,7 @@ impl SessionManager {
                     outcome.written.len(),
                     outcome.rejected.len()
                 );
+                written.extend(outcome.written);
             }
             Ok(_) => {}
             Err(error) => eprintln!("[memory] curation for `{session_ref}` failed: {error}"),
@@ -1088,20 +1091,36 @@ impl SessionManager {
         // V2-B/C: after incremental curation, trigger periodic consolidation by threshold (sleep learning).
         if factory.should_consolidate() {
             match factory.consolidate(&model_config).await {
-                Ok(outcome) if !outcome.empty => eprintln!(
-                    "[memory] consolidated: {} merged, {} superseded, {} requalified, {} rejected",
-                    outcome.merged,
-                    outcome.superseded,
-                    outcome.requalified,
-                    outcome.rejected.len()
-                ),
+                Ok(outcome) if !outcome.empty => {
+                    eprintln!(
+                        "[memory] consolidated: {} merged, {} superseded, {} requalified, {} rejected",
+                        outcome.merged,
+                        outcome.superseded,
+                        outcome.requalified,
+                        outcome.rejected.len()
+                    );
+                    written.extend(outcome.written);
+                }
                 Ok(_) => {}
                 Err(error) => eprintln!("[memory] consolidation failed: {error}"),
             }
         }
+        // The cloud owns memory: upload what we just wrote, then the cloud's authoritative record
+        // set is installed back over the local mirror. A failed upload leaves the local copy in
+        // place only as a transient cache; the next pull overwrites it either way.
         if let Some(global) = factory.memory_store().primary_root().parent() {
-            if let Err(error) = crate::remote::sync_once(global).await {
-                eprintln!("[memory:sync] curation retained locally: {error}");
+            match crate::remote::RemoteConfig::load(global) {
+                Ok(remote) if !remote.url.is_empty() && remote.sync_personal_memory => {
+                    match crate::memory::sync::push_written(global, &remote, &written).await {
+                        Ok(report) => eprintln!(
+                            "[memory:sync] pushed {} entr(y/ies) to the cloud, {} reconciled locally",
+                            report.uploaded, report.downloaded
+                        ),
+                        Err(error) => eprintln!("[memory:sync] push failed: {error}"),
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => eprintln!("[memory:sync] cloud config unreadable: {error}"),
             }
         }
         // V2.5: after both incremental / consolidation are persisted, embed new entries and clean orphan vectors, so the next hybrid retrieval

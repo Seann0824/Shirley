@@ -1,7 +1,11 @@
 //! Personal-memory synchronization. Only explicitly personal Markdown entries cross the wire.
-//! The cloud is the single source of truth; clients keep a local mirror plus a baseline for
-//! upload diffing. Sync is last-write-wins: a concurrent edit is overwritten by whichever side
-//! wrote last, never forked into a separate "conflict" copy.
+//!
+//! The cloud is the single source of truth and the only place memory is *authored*. A local
+//! directory is a disposable mirror: curator output is uploaded immediately ([`push_written`])
+//! and the cloud's full record set is then installed over the local copy ([`install_cloud`]).
+//! Periodic sync is pull-only -- the remote always overwrites local, including deletions, and
+//! any local edit made while offline is discarded on the next pull. Nothing is ever forked into
+//! a separate "conflict" copy.
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
@@ -294,6 +298,46 @@ fn rebuild(root: &Path) -> Result<(), MemoryError> {
     super::curator::rebuild_core_unlocked(&store)
 }
 
+/// Install the cloud's full record set as the local mirror. The cloud is authoritative: every
+/// record overwrites the local copy, and any local personal entry absent from `records` is removed
+/// (a local edit made offline is simply dropped). Project/legacy entries are never touched.
+/// Called with the root's OS write lock held. Returns `(changed, excluded)`.
+fn install_cloud(root: &Path, records: &Records) -> Result<(usize, usize), MemoryError> {
+    let (current, excluded) = snapshot(root)?;
+    // Validate the whole batch before touching disk.
+    for (id, record) in records {
+        validate_id(id)?;
+        if excluded.contains(id) {
+            return Err(io_error(format!(
+                "remote memory {id} collides with an excluded local entry"
+            )));
+        }
+        if let Some(content) = &record.content {
+            canonical(id, content)?;
+        }
+        if record.revision != revision(record.content.as_deref()) {
+            return Err(io_error("invalid remote memory revision"));
+        }
+    }
+    let mut changed = 0;
+    for (id, record) in records {
+        if current.get(id) != Some(record) {
+            apply(root, id, record.content.as_deref())?;
+            changed += 1;
+        }
+    }
+    // Cloud is the single source of truth: drop local entries the cloud no longer has.
+    for id in current.keys() {
+        if !records.contains_key(id) && !excluded.contains(id) {
+            apply(root, id, None)?;
+            changed += 1;
+        }
+    }
+    write_json(&root.join(LEDGER), records)?;
+    rebuild(root)?;
+    Ok((changed, excluded.len()))
+}
+
 /// Cloud transaction: validate the entire batch before touching disk, then compare-and-swap.
 /// Each file is atomic; ledger state can be reconstructed after an interrupted response.
 pub fn exchange(root: &Path, request: SyncRequest) -> Result<SyncResponse, MemoryError> {
@@ -344,86 +388,81 @@ pub fn exchange(root: &Path, request: SyncRequest) -> Result<SyncResponse, Memor
 /// Serializes syncs in this process; the OS lock additionally coordinates disk writes across processes.
 static CLIENT_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-pub async fn synchronize(
+/// Upload freshly written entries, then install the cloud's authoritative record set back over the
+/// local mirror. This is the *only* write path to the cloud: memory is authored on the cloud, and
+/// the local directory is just the cache the model reads from. Entries outside `ids` are not sent;
+/// they are still overwritten/removed by the returned cloud snapshot.
+pub async fn push_written(
     global: &Path,
     remote: &crate::remote::RemoteConfig,
+    ids: &[String],
 ) -> Result<SyncReport, String> {
+    if ids.is_empty() {
+        return Ok(SyncReport::default());
+    }
     let _client = CLIENT_LOCK.lock().await;
     let root = global.join("memory");
-    let baseline_path = root.join(format!(
-        ".sync-client-{}.json",
-        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, remote.url.as_bytes())
-    ));
-    let (sent, baseline, excluded) = {
+    let changes = {
         let _lock = lock_root(&root).map_err(|e| e.to_string())?;
         let (current, excluded) = snapshot(&root).map_err(|e| e.to_string())?;
-        let baseline: Records = read_json(&baseline_path).map_err(|e| e.to_string())?;
-        (current, baseline, excluded)
+        let mut seen = BTreeSet::new();
+        let mut changes = Vec::new();
+        for id in ids {
+            if excluded.contains(id) || !seen.insert(id.clone()) {
+                continue;
+            }
+            if let Some(record) = current.get(id) {
+                changes.push(Change {
+                    id: id.clone(),
+                    expected: None,
+                    content: record.content.clone(),
+                });
+            }
+        }
+        changes
     };
-    let mut changes = Vec::new();
-    for id in sent.keys().chain(baseline.keys()).collect::<BTreeSet<_>>() {
-        if excluded.contains(id) {
-            continue;
-        }
-        let content = sent.get(id).and_then(|r| r.content.clone());
-        let old = baseline.get(id);
-        if content.as_ref() != old.and_then(|r| r.content.as_ref()) {
-            changes.push(Change {
-                id: id.clone(),
-                expected: old.map(|r| r.revision.clone()),
-                content,
-            });
-        }
+    if changes.is_empty() {
+        return Ok(SyncReport::default());
     }
     let uploaded = changes.len();
     let response = remote
         .post("api/memory/sync", &SyncRequest { changes })
         .await?;
     let response: SyncResponse = serde_json::from_value(response).map_err(|e| e.to_string())?;
-    // Validate the full response before installing any remote content.
-    for (id, record) in &response.records {
-        validate_id(id).map_err(|e| e.to_string())?;
-        if let Some(content) = &record.content {
-            canonical(id, content).map_err(|e| e.to_string())?;
-        }
-        if record.revision != revision(record.content.as_deref()) {
-            return Err("invalid remote memory revision".into());
-        }
-    }
-    let downloaded = {
+    let (downloaded, excluded) = {
         let _lock = lock_root(&root).map_err(|e| e.to_string())?;
-        let (now, protected) = snapshot(&root).map_err(|e| e.to_string())?;
-        if let Some(id) = response.records.keys().find(|id| protected.contains(*id)) {
-            return Err(format!(
-                "remote memory {id} collides with an excluded local entry"
-            ));
-        }
-        let mut downloaded = 0;
-        for (id, record) in &response.records {
-            // A curator may have written while HTTP was in flight. Leave that edit for the next sync.
-            if now.get(id) != sent.get(id) {
-                continue;
-            }
-            if now.get(id) != Some(record) {
-                apply(&root, id, record.content.as_deref()).map_err(|e| e.to_string())?;
-                downloaded += 1;
-            }
-        }
-        // Remember both local and cloud ids so future hard deletes propagate.
-        let (mut ledger, _) = snapshot(&root).map_err(|e| e.to_string())?;
-        for (id, record) in &response.records {
-            ledger.entry(id.clone()).or_insert_with(|| record.clone());
-        }
-        write_json(&root.join(LEDGER), &ledger).map_err(|e| e.to_string())?;
-        write_json(&baseline_path, &response.records).map_err(|e| e.to_string())?;
-        rebuild(&root).map_err(|e| e.to_string())?;
-        downloaded
+        install_cloud(&root, &response.records).map_err(|e| e.to_string())?
     };
     Ok(SyncReport {
         uploaded,
         downloaded,
-        conflicts: response.conflicts.len(),
-        excluded: excluded.len() + response.excluded,
+        conflicts: 0,
+        excluded,
+    })
+}
+
+/// Periodic pull. The cloud is the single source of truth, so this never uploads: it fetches the
+/// cloud's full record set and installs it over the local mirror, deletions included. Offline local
+/// edits are discarded by design.
+pub async fn synchronize(
+    global: &Path,
+    remote: &crate::remote::RemoteConfig,
+) -> Result<SyncReport, String> {
+    let _client = CLIENT_LOCK.lock().await;
+    let root = global.join("memory");
+    let response = remote
+        .post("api/memory/sync", &SyncRequest { changes: Vec::new() })
+        .await?;
+    let response: SyncResponse = serde_json::from_value(response).map_err(|e| e.to_string())?;
+    let (downloaded, excluded) = {
+        let _lock = lock_root(&root).map_err(|e| e.to_string())?;
+        install_cloud(&root, &response.records).map_err(|e| e.to_string())?
+    };
+    Ok(SyncReport {
+        uploaded: 0,
+        downloaded,
+        conflicts: 0,
+        excluded,
     })
 }
 
@@ -763,25 +802,13 @@ mod tests {
     }
 
     #[cfg(feature = "server")]
-    async fn cloud(
-        root: PathBuf,
-        mutate_client: Option<PathBuf>,
-    ) -> (crate::remote::RemoteConfig, tokio::task::JoinHandle<()>) {
+    async fn cloud(root: PathBuf) -> (crate::remote::RemoteConfig, tokio::task::JoinHandle<()>) {
         use axum::{Json, Router, routing::post};
         let app = Router::new().route(
             "/api/memory/sync",
             post(move |Json(input): Json<SyncRequest>| {
                 let root = root.clone();
-                let client = mutate_client.clone();
-                async move {
-                    let result = exchange(&root, input).unwrap();
-                    if let Some(client) = client {
-                        MemoryStore::new(client.join("memory"))
-                            .write_entry(&entry("language", "Written during HTTP"))
-                            .unwrap();
-                    }
-                    Json(result)
-                }
+                async move { Json(exchange(&root, input).unwrap()) }
             }),
         );
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -799,64 +826,123 @@ mod tests {
         )
     }
 
+    /// The only write path: upload the named entries, then the cloud's record set is installed back.
     #[cfg(feature = "server")]
     #[tokio::test]
-    async fn two_devices_share_personal_memory_with_offline_edits_and_deletions() {
+    async fn push_written_uploads_then_mirrors_the_cloud() {
+        let server = Temp::new();
+        let client = Temp::new();
+        let (remote, task) = cloud(server.0.join("memory")).await;
+        let store = MemoryStore::new(client.0.join("memory"));
+        store.write_entry(&entry("language", "Chinese")).unwrap();
+        let report = push_written(
+            &client.0,
+            &remote,
+            &["language".to_string()],
+        )
+        .await
+        .unwrap();
+        assert_eq!(report.uploaded, 1);
+        // The cloud now owns the entry and it was installed back locally.
+        assert!(
+            MemoryStore::new(server.0.join("memory"))
+                .list_entries()
+                .unwrap()
+                .iter()
+                .any(|(_, e)| e.id == "language" && e.body == "Chinese")
+        );
+        assert_eq!(
+            Entry::parse(&std::fs::read_to_string(store.entry_path(&entry("language", ""))).unwrap())
+                .unwrap()
+                .body,
+            "Chinese"
+        );
+        task.abort();
+    }
+
+    /// Pull is authoritative: a local-only entry the cloud does not have is removed, and an offline
+    /// local edit is overwritten by the cloud's value.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn pull_overwrites_local_and_drops_offline_edits() {
+        let server = Temp::new();
+        let client = Temp::new();
+        let server_store = MemoryStore::new(server.0.join("memory"));
+        server_store
+            .write_entry(&entry("language", "Cloud English"))
+            .unwrap();
+        let (remote, task) = cloud(server.0.join("memory")).await;
+        let store = MemoryStore::new(client.0.join("memory"));
+        // Local-only entry: the cloud has never heard of it.
+        store.write_entry(&entry("local-only", "Should be dropped")).unwrap();
+        // Offline edit of an entry the cloud owns.
+        store.write_entry(&entry("language", "Offline Japanese")).unwrap();
+        let report = synchronize(&client.0, &remote).await.unwrap();
+        assert_eq!(report.uploaded, 0);
+        let listed = store.list_entries().unwrap();
+        assert_eq!(listed.len(), 1, "local-only entry must be dropped");
+        assert_eq!(listed[0].1.id, "language");
+        assert_eq!(listed[0].1.body, "Cloud English", "remote overwrites local");
+        task.abort();
+    }
+
+    /// A failed pull leaves the local mirror readable (it is only a cache); the next pull reconciles.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn offline_pull_keeps_local_mirror_readable() {
+        let server = Temp::new();
+        let client = Temp::new();
+        let (remote, task) = cloud(server.0.join("memory")).await;
+        let store = MemoryStore::new(client.0.join("memory"));
+        store.write_entry(&entry("language", "Chinese")).unwrap();
+        task.abort();
+        assert!(synchronize(&client.0, &remote).await.is_err());
+        assert!(store.entry_path(&entry("language", "")).exists());
+    }
+
+    /// Two devices converge because writes go through the cloud, not through local uploads.
+    #[cfg(feature = "server")]
+    #[tokio::test]
+    async fn two_devices_converge_through_cloud_writes() {
         let server = Temp::new();
         let a = Temp::new();
         let b = Temp::new();
-        let (remote, task) = cloud(server.0.join("memory"), None).await;
-        let original = entry("language", "Chinese");
-        let a_store = MemoryStore::with_roots(vec![a.0.join("memory"), a.0.join("project/memory")]);
-        a_store.write_entry(&original).unwrap();
+        let (remote, task) = cloud(server.0.join("memory")).await;
+        let a_store =
+            MemoryStore::with_roots(vec![a.0.join("memory"), a.0.join("project/memory")]);
         let mut project = entry("project", "Local secret");
         project.domain = Domain::Project;
         let project_path = a_store.write_entry(&project).unwrap();
         let project_before = std::fs::read(&project_path).unwrap();
-        synchronize(&a.0, &remote).await.unwrap();
+
+        a_store.write_entry(&entry("language", "Chinese")).unwrap();
+        push_written(&a.0, &remote, &["language".to_string()])
+            .await
+            .unwrap();
+        // Device B pulls the cloud and sees the entry.
         synchronize(&b.0, &remote).await.unwrap();
         let b_store = MemoryStore::new(b.0.join("memory"));
         assert_eq!(b_store.list_entries().unwrap().len(), 1);
-        a_store.write_entry(&entry("language", "English")).unwrap();
-        b_store.write_entry(&entry("language", "Japanese")).unwrap();
-        synchronize(&a.0, &remote).await.unwrap();
-        // Last-write-wins: b's stale edit simply overwrites the cloud, no conflict copy is forked.
-        assert_eq!(synchronize(&b.0, &remote).await.unwrap().conflicts, 0);
+
+        // B edits and pushes; A's next pull reflects it.
+        b_store.write_entry(&entry("language", "English")).unwrap();
+        push_written(&b.0, &remote, &["language".to_string()])
+            .await
+            .unwrap();
         synchronize(&a.0, &remote).await.unwrap();
         assert_eq!(
             a_store
                 .list_entries_in(a_store.primary_root())
                 .unwrap()
-                .len(),
-            1
+                .iter()
+                .find(|(_, e)| e.id == "language")
+                .unwrap()
+                .1
+                .body,
+            "English"
         );
+        // Project-domain memory never leaves the device.
         assert_eq!(std::fs::read(project_path).unwrap(), project_before);
-        std::fs::remove_file(a_store.entry_path(&original)).unwrap();
-        synchronize(&a.0, &remote).await.unwrap();
-        synchronize(&b.0, &remote).await.unwrap();
-        assert!(!b_store.entry_path(&original).exists());
-        task.abort();
-        b_store
-            .write_entry(&entry("offline", "Offline stays readable"))
-            .unwrap();
-        assert!(synchronize(&b.0, &remote).await.is_err());
-        assert!(b_store.entry_path(&entry("offline", "")).exists());
-    }
-
-    #[cfg(feature = "server")]
-    #[tokio::test]
-    async fn local_write_during_http_is_retained_for_next_sync() {
-        let server = Temp::new();
-        let client = Temp::new();
-        let server_store = MemoryStore::new(server.0.join("memory"));
-        server_store
-            .write_entry(&entry("language", "Cloud content"))
-            .unwrap();
-        let (remote, task) = cloud(server.0.join("memory"), Some(client.0.clone())).await;
-        synchronize(&client.0, &remote).await.unwrap();
-        let content =
-            std::fs::read_to_string(client.0.join("memory/preferences/language.md")).unwrap();
-        assert_eq!(Entry::parse(&content).unwrap().body, "Written during HTTP");
         task.abort();
     }
 }
