@@ -23,6 +23,7 @@ pub struct RemoteInfo {
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
 pub struct SyncStatus {
     pub last_attempt_ms: Option<i64>,
     pub last_success_ms: Option<i64>,

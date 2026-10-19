@@ -80,7 +80,11 @@ async fn agent_remote_save(
     }
     remote.save(&global)?;
     if destination_changed {
-        crate::memory::store::atomic_write(&global.join("remote-sync-status.json"), b"{}")
+        // Reset stale sync counters, but write a well-formed status: a bare `{}` is not a
+        // valid `SyncStatus` and would make the next `remote::info` fail to deserialize.
+        let reset = serde_json::to_vec(&crate::remote::SyncStatus::default())
+            .map_err(|e| e.to_string())?;
+        crate::memory::store::atomic_write(&global.join("remote-sync-status.json"), &reset)
             .map_err(|e| e.to_string())?;
     }
     if let Some(pump) = state.remote_pump.lock().await.take() { pump.abort(); }
