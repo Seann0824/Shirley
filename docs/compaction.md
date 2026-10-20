@@ -79,7 +79,7 @@ The model is left with only a summary, so it can only live on the summary. **Thi
 
 **Root cause B -- the compression instruction asks the model to invent a "next step".**
 
-`src/main.rs`'s `compression_instruction` explicitly wrote "... unresolved questions, next step". If you ask it to output a next step, it will, even if the user never mentioned it.
+`crates/shirley/src/main.rs`'s `compression_instruction` explicitly wrote "... unresolved questions, next step". If you ask it to output a next step, it will, even if the user never mentioned it.
 At the same time the instruction did not emphasize "faithfully preserve the user's original instructions", so the summary had an over-reaching tendency.
 
 **Conclusion**: the cut itself must change, not the prompt.
@@ -325,7 +325,7 @@ Based on section 6.1 of `runtime-hardening.md` and `plan.md`'s "retrying a faile
 
 **6. Landing point and change list**
 
-Mainly lands in `crates/shirley-agent-sdk/src/runtime/mod.rs`, adding a `token` module, plus the compaction instruction copy in `src/main.rs`.
+Mainly lands in `crates/shirley-agent-sdk/src/runtime/mod.rs`, adding a `token` module, plus the compaction instruction copy in `crates/shirley/src/main.rs`.
 
 | Change | Location | Description |
 | --- | --- | --- |
@@ -335,7 +335,7 @@ Mainly lands in `crates/shirley-agent-sdk/src/runtime/mod.rs`, adding a `token` 
 | calibration state | `runtime/mod.rs` | update `factor` with `input_tokens` after each response |
 | `active_messages()` simplified/removed | `runtime/mod.rs` | messages are already rebuilt on compaction, the request side no longer needs slicing |
 | summary template | `runtime/mod.rs` (where the compaction instruction is built) | XML tag structure |
-| compaction instruction copy | `src/main.rs` | delete "next step", add "faithfully preserve the user's instructions" "do not extrapolate" |
+| compaction instruction copy | `crates/shirley/src/main.rs` | delete "next step", add "faithfully preserve the user's instructions" "do not extrapolate" |
 | compaction retry + degradation | `runtime/mod.rs` | see 5.4 |
 | `AgentEvent::CompressionFailed` | `runtime/mod.rs` | a new event, consumed by the UI |
 | `CompressionConfig` (strategy config) | `runtime/compaction.rs` | `trigger_ratio` (default 0.80) / `retain_ratio` (default 0.20) / `template` (default `COMPACTION_TEMPLATE`), passed in via the `Agent` builder's `compression_config` |
@@ -355,7 +355,7 @@ The "when to compact, how much to retain, what the summary looks like" of compac
 
 - The SDK only provides the **strategy parameters**; the domain-related trade-offs (which facts to keep) remain in
   the `Agent`'s `compression_instruction` (passed in by the application layer).
-- The application layer overrides via the `[compression]` table (`src/settings.rs`):
+- The application layer overrides via the `[compression]` table (`crates/shirley/src/settings.rs`):
   `trigger_ratio` / `retain_ratio` / `template`, defaulting to the SDK defaults when absent.
 - Invalid `trigger_ratio` / `retain_ratio` are **clamped back to the default** in `CompressionSettings::to_sdk()`
   (without blocking startup): compaction is a background capability, and a misconfiguration should not prevent the program from starting.

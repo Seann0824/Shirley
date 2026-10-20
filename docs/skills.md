@@ -14,7 +14,7 @@ Code's private extension fields -- only absorb the intuitive, cross-client-commo
 **Scope statement**: the plan follows the existing paradigm (todo / memory): **the application layer
 holds state + `ContextProvider` injection + companion tools, with zero SDK changes**.
 
-> **Implementation status**: **P0+P1+P2(slash) are landed** (`src/skills/`: `parse` / `discovery` /
+> **Implementation status**: **P0+P1+P2(slash) are landed** (`crates/shirley/src/skills/`: `parse` / `discovery` /
 > `catalog` / `provider` / `runtime` / `tool`). P0 injects the Tier1 catalog via
 > `bootstrap::build_agent`; P1 adds `activate_skill` (`name` limited to an enum) + `SkillRuntime`
 > (the activated set, sharing the same `Arc` with the provider) + **appending** the activated body at
@@ -36,9 +36,9 @@ things**":
 | Capability | Problem solved | Form | Ownership |
 | --- | --- | --- | --- |
 | Compaction | A round does not fit | Summary rebuild | SDK runtime |
-| Task ledger (todo) | Forgot where it got to after compaction | A system injected at the end of each round | Application layer `src/todo.rs` |
-| Memory | Forgot who the user is in a new session | A system injected at the end of each round + the `recall` tool | Application layer `src/memory/` |
-| **Skills** | **The model does not know how to do a certain class of task** | **An always-resident catalog + on-demand-activated instruction / resource pack** | **Application layer `src/skills/` (this document)** |
+| Task ledger (todo) | Forgot where it got to after compaction | A system injected at the end of each round | Application layer `crates/shirley/src/todo.rs` |
+| Memory | Forgot who the user is in a new session | A system injected at the end of each round + the `recall` tool | Application layer `crates/shirley/src/memory/` |
+| **Skills** | **The model does not know how to do a certain class of task** | **An always-resident catalog + on-demand-activated instruction / resource pack** | **Application layer `crates/shirley/src/skills/` (this document)** |
 
 A skill is **a directory**, whose minimal form contains only a `SKILL.md` (YAML frontmatter +
 Markdown body). It can carry: procedures, domain knowledge, executable scripts (`scripts/`), on-demand
@@ -51,7 +51,7 @@ third-party `.claude/skills/`). Embracing the standard means Shirley **does not 
 capability-pack format** and can directly consume existing skills in the ecosystem; at the same time
 it gives its own users an extension point to "write a repeatedly-used project procedure as a skill".
 
-The current Shirley has no corresponding concept: the system prompt (`src/prompt.rs`) statically
+The current Shirley has no corresponding concept: the system prompt (`crates/shirley/src/prompt.rs`) statically
 inlines `Agent.md`, and the toolset is fixed (`bash` / `read` / `web_search`). **There is no seam
 for a "pluggable capability pack"** -- this is exactly what this document adds.
 
@@ -232,10 +232,10 @@ semantics).
 
 **5.1 Directory layout and modules**
 
-Add an application-layer module `src/skills/`, at the same level as `src/todo.rs` / `src/memory/`:
+Add an application-layer module `crates/shirley/src/skills/`, at the same level as `crates/shirley/src/todo.rs` / `crates/shirley/src/memory/`:
 
 ```
-src/skills/
+crates/shirley/src/skills/
 ├── mod.rs         # facade: re-export SkillCatalog / SkillRuntime / SkillContextProvider / tools
 ├── discovery.rs   # scan discovery locations, name collisions and conflict handling, noise-directory filtering
 ├── parse.rs       # fault-tolerant parsing of SKILL.md frontmatter (reusing memory's frontmatter split)
@@ -256,8 +256,8 @@ src/skills/
 - **Validation**: if `name` does not match the parent directory name -> use the **directory name**
   (to avoid the model seeing a name that does not line up with the path).
 - **Reuse**: `memory/format.rs` already has a fault-tolerant `split_frontmatter(text) -> (&str, &str)`
-  implementation. **Promote it to a shared utility function** (e.g. `src/skills/parse.rs` calls it
-  directly, or extract it to `src/util/`), avoiding a new YAML dependency (the repository currently
+  implementation. **Promote it to a shared utility function** (e.g. `crates/shirley/src/skills/parse.rs` calls it
+  directly, or extract it to `crates/shirley/src/util/`), avoiding a new YAML dependency (the repository currently
   has no `serde_yaml`; the frontmatter is a hand-written key:value parse, which suffices).
 
 **5.3 Runtime and data flow**
@@ -289,7 +289,7 @@ flowchart TD
   2. **activated bodies** (`<active_skill name="...">body</active_skill>`).
   Empty catalog and no activation -> return `None` (do not inject).
 
-**5.4 Seam wiring (`src/bootstrap.rs`)**
+**5.4 Seam wiring (`crates/shirley/src/bootstrap.rs`)**
 
 Add a third provider in `build_agent`, into the existing `CompositeContextProvider`:
 
@@ -342,7 +342,7 @@ harness to **activate directly** -- a deterministic entry that skips the model's
   `/<skill-name> <text>` = activate and then send `<text>` as this round's prompt; a failed activation
   (unknown skill / file-read failure) errors locally and does not send to the model. If a skill name is
   not in the catalog, treat it as ordinary text (a lenient strategy, not interrupting input).
-- **Boundary**: purely application-layer (`src/interface/tui/command.rs` + `app.rs` wiring), **zero SDK
+- **Boundary**: purely application-layer (`crates/shirley/src/interface/tui/command.rs` + `app.rs` wiring), **zero SDK
   changes**.
 
 ---

@@ -32,8 +32,8 @@ directly reports "agent is running"). This document develops **A**.
 
 > **Landing status (current code in this repository)**: **the P1 + P2 event-channel part is landed**
 > (decisions 4 / 5 / 9, and decision 2's "one channel per session").
-> The application layer `src/interface/session/mod.rs` already has `SessionManager` + `Session` (each
-> session holds its own independent `Agent`); `src/bootstrap.rs` has changed from `Bootstrap`
+> The application layer `crates/shirley/src/interface/session/mod.rs` already has `SessionManager` + `Session` (each
+> session holds its own independent `Agent`); `crates/shirley/src/bootstrap.rs` has changed from `Bootstrap`
 > (producing a single `Agent`) to `AgentFactory` (a `build_agent(messages)` factory); on the SDK side
 > `Agent::switch_session` has been removed, and both the TUI and desktop now switch through the
 > `SessionManager.active` pointer.
@@ -74,7 +74,7 @@ The conclusion after an on-the-ground check: **the SDK layer hardly needs to cha
 
 - `Agent` can be constructed independently, has no global state, and is `Send`;
 - `todo` is isolated per instance (`Arc::new` inside `Agent::new`), no crossing under parallelism;
-- `trait SessionStore: Send + Sync` (**now owned by the application layer `src/session.rs`**),
+- `trait SessionStore: Send + Sync` (**now owned by the application layer `crates/shirley/src/session.rs`**),
   `JsonlSessionStore` internally `Mutex<File>`, so a single instance's `append` / `load` / `truncate`
   are mutually exclusive;
 - `ToolManager` / `ToolContext` are constructed with the `Agent`; `ToolContext` is
@@ -134,7 +134,7 @@ request, and ends this round with `Cancelled`.
 
 Both interfaces hard-wire "a single `Agent` + a single copy of UI state":
 
-**TUI** (`App` in `src/interface/tui/app.rs`):
+**TUI** (`App` in `crates/shirley/src/interface/tui/app.rs`):
 
 ```
 agent: Option<Agent>              // a single Agent
@@ -149,7 +149,7 @@ ui_turn_start / turn_prompt       // a single "this round" state
 The `tui.rs` main loop uses the **serial** technique of `take_agent()` -> `tokio::spawn(run_agent(...))`
 -> `restore_agent()`, and the `run_agent` result is sent back via a **single** `mpsc`.
 
-**Desktop** (`DesktopState` in `src/interface/desktop/shell.rs`):
+**Desktop** (`DesktopState` in `crates/shirley/src/interface/desktop/shell.rs`):
 
 ```
 agent: Arc<Mutex<Option<Agent>>>
@@ -235,7 +235,7 @@ on the `manager.active` session".
 **Decision 5: `Bootstrap` changes from "produce one Agent" to "produce an Agent factory".**
 (**landed**)
 
-The original `Bootstrap::assemble` produced only a single `Agent` (`src/bootstrap.rs`); it is now
+The original `Bootstrap::assemble` produced only a single `Agent` (`crates/shirley/src/bootstrap.rs`); it is now
 renamed `AgentFactory::assemble`, and its product is **a factory + a shared `session_catalog`**, with
 multiple sessions **creating multiple `Agent`s per session**. The `build_agent(messages) -> Agent`
 factory reuses the same `ModelConfig` / tool registration / system prompt / working directory /
@@ -260,7 +260,7 @@ compression instruction:
 **B (multiple drivers on the same session)**: when two `JsonlSessionStore` instances point at the same
 file, **each holds an independent `File` handle and an independent `Mutex`, with no cross-instance
 mutual exclusion** -> risk of interleaved writes; and `truncate`'s "write tmp -> rename -> reopen the
-append handle" will overwrite each other under concurrency (`src/session.rs`'s `rewrite_locked`).
+append handle" will overwrite each other under concurrency (`crates/shirley/src/session.rs`'s `rewrite_locked`).
 
 **Decision 6: this round only guarantees tier A safety; tier B is recorded as a follow-up, and when
 needed, add a "per-session-name in-process lock table" to `FileSessionCatalog`

@@ -12,7 +12,9 @@
 crates/*/Cargo.lock
 
 # Tauri 构建产物（桌面界面，见 docs/desktop-interface.md）
+# `/gen` 是 Tauri 2 在应用 crate 根（`crates/shirley/`）生成的 schema 目录。
 /gen
+/crates/shirley/gen
 outputs
 # 本地构建/zig 缓存（交叉编译临时目录）
 .tmp

@@ -29,7 +29,7 @@ jobs:
       - name: Build (default features)
         run: cargo build --workspace --locked
 
-      # `server` feature is required for tests: src/model_providers.rs references
+      # `server` feature is required for tests: crates/shirley/src/model_providers.rs references
       # crate::interface::runtime, which is cfg-gated behind desktop/server.
       - name: Build (server feature)
         run: cargo build --workspace --features server --locked

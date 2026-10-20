@@ -30,7 +30,7 @@ instructions -- **once this is through, the marketplace is just its UI**.
 **Layers (following the repository's existing paradigm)**:
 
 ```
-application layer src/plugins/ (new in this document, at the same level as src/skills/)
+application layer crates/shirley/src/plugins/ (new in this document, at the same level as crates/shirley/src/skills/)
 ├── mod.rs          # facade: PluginHost / re-exports
 ├── manifest.rs     # shirley-plugin.json parsing (lenient)
 ├── model.rs        # the normalized Plugin model (kind enum)
@@ -46,7 +46,7 @@ seams: `ToolManager::register` (tools) and `SkillCatalog` / `SkillContextProvide
 
 ---
 
-## 2. Normalized model (`src/plugins/model.rs`)
+## 2. Normalized model (`crates/shirley/src/plugins/model.rs`)
 
 ```rust
 /// An imported plugin (after normalization). Every kind is a "declaration"; registration happens later.
@@ -108,7 +108,7 @@ pub enum McpTransport {
 
 ---
 
-## 3. Manifest (`src/plugins/manifest.rs`)
+## 3. Manifest (`crates/shirley/src/plugins/manifest.rs`)
 
 **File**: `shirley-plugin.json` (the plugin root).
 
@@ -201,7 +201,7 @@ producing a `PluginHost` (read-only, shared across sessions). **But MCP connecti
 
 ---
 
-## 5. Adapter layer: importers (`src/plugins/importer/`)
+## 5. Adapter layer: importers (`crates/shirley/src/plugins/importer/`)
 
 ```rust
 /// Translate a source into a normalized Plugin. Only does mapping; does not register, execute, or start processes.
@@ -270,7 +270,7 @@ let importers: Vec<Box<dyn PluginImporter>> = vec![
 
 ---
 
-## 6. MCP subsystem (`src/plugins/mcp/`) -- the heaviest part
+## 6. MCP subsystem (`crates/shirley/src/plugins/mcp/`) -- the heaviest part
 
 MCP is the only proper way to "add tools at runtime". Three things to design: **transport / client /
 tool wrapping**.
@@ -452,7 +452,7 @@ capabilities"**.
 ### 8.1 Add a `CommandOutcome` branch + `Builtin`
 
 ```rust
-// src/interface/tui/command.rs
+// crates/shirley/src/interface/tui/command.rs
 enum Builtin { Init, Model, Rewind, Session, Login, Plugin }  // add Plugin
 
 pub enum CommandOutcome {
@@ -648,33 +648,33 @@ connect** to an MCP server.
 **Created (application layer)**:
 
 ```
-src/plugins/mod.rs
-src/plugins/manifest.rs
-src/plugins/model.rs
-src/plugins/discovery.rs
-src/plugins/registry.rs
-src/plugins/importer/mod.rs
-src/plugins/importer/native.rs
-src/plugins/importer/claude_code.rs   # P2
-src/plugins/importer/codex.rs         # P2
-src/plugins/mcp/mod.rs
-src/plugins/mcp/transport.rs
-src/plugins/mcp/client.rs
-src/plugins/mcp/tool.rs
-src/plugins/wire.rs
+crates/shirley/src/plugins/mod.rs
+crates/shirley/src/plugins/manifest.rs
+crates/shirley/src/plugins/model.rs
+crates/shirley/src/plugins/discovery.rs
+crates/shirley/src/plugins/registry.rs
+crates/shirley/src/plugins/importer/mod.rs
+crates/shirley/src/plugins/importer/native.rs
+crates/shirley/src/plugins/importer/claude_code.rs   # P2
+crates/shirley/src/plugins/importer/codex.rs         # P2
+crates/shirley/src/plugins/mcp/mod.rs
+crates/shirley/src/plugins/mcp/transport.rs
+crates/shirley/src/plugins/mcp/client.rs
+crates/shirley/src/plugins/mcp/tool.rs
+crates/shirley/src/plugins/wire.rs
 ```
 
 **Changed (application layer)**:
 
 | File | Change |
 | --- | --- |
-| `src/main.rs` | `mod plugins;` |
-| `src/bootstrap.rs` | `assemble` adds `PluginHost::load`; `build_agent` merges skills + registers MCP tools; `AgentFactory` adds a `plugin_host` field |
-| `src/interface/tui/command.rs` | `Builtin::Plugin` + `CommandOutcome::PluginManager` |
-| `src/interface/tui/app.rs` | plugin panel state + operation wiring |
-| `src/interface/tui/ui.rs` | plugin panel rendering |
-| `src/interface/desktop/*` | `agent_list_plugins` / `agent_add_plugin` / ... commands |
-| `src/skills/catalog.rs` | `SkillCatalog::with_plugin_skills` (union + collision rules) |
+| `crates/shirley/src/main.rs` | `mod plugins;` |
+| `crates/shirley/src/bootstrap.rs` | `assemble` adds `PluginHost::load`; `build_agent` merges skills + registers MCP tools; `AgentFactory` adds a `plugin_host` field |
+| `crates/shirley/src/interface/tui/command.rs` | `Builtin::Plugin` + `CommandOutcome::PluginManager` |
+| `crates/shirley/src/interface/tui/app.rs` | plugin panel state + operation wiring |
+| `crates/shirley/src/interface/tui/ui.rs` | plugin panel rendering |
+| `crates/shirley/src/interface/desktop/*` | `agent_list_plugins` / `agent_add_plugin` / ... commands |
+| `crates/shirley/src/skills/catalog.rs` | `SkillCatalog::with_plugin_skills` (union + collision rules) |
 | `Cargo.toml` | MCP needs tokio's process/io feature (`tokio` already present); HTTP uses `reqwest` (already present) |
 
 **Zero SDK changes** (hard constraint). If 9.2 finds a seam must be added (e.g. tool hot registration),

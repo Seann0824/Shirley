@@ -1,6 +1,6 @@
 # Cloud web interface (only-chat)
 
-> ℹ️ This document covers the **transport contract** (`POST /api/cmd/{name}` + `GET /api/events`) and the `spawn_turn` lifecycle, which are still accurate. The **orchestration** it once described as "one workspace" has since been unified with the desktop: the server now runs the same `ProjectRuntimeManager` core (`src/interface/runtime/mod.rs`) as the Tauri shell, so multi-project / lazy per-project runtimes / `ProjectRegistry` **are** in effect. For the architecture and landing map see [`cloud-server.md`](./cloud-server.md); where the two disagree, `cloud-server.md` wins.
+> ℹ️ This document covers the **transport contract** (`POST /api/cmd/{name}` + `GET /api/events`) and the `spawn_turn` lifecycle, which are still accurate. The **orchestration** it once described as "one workspace" has since been unified with the desktop: the server now runs the same `ProjectRuntimeManager` core (`crates/shirley/src/interface/runtime/mod.rs`) as the Tauri shell, so multi-project / lazy per-project runtimes / `ProjectRegistry` **are** in effect. For the architecture and landing map see [`cloud-server.md`](./cloud-server.md); where the two disagree, `cloud-server.md` wins.
 
 ## What it is
 
@@ -17,7 +17,7 @@ A **server-side** web version of Shirley: the Agent runs on the server (its tool
 The guiding principle (from the user): *"it's essentially just the web version of the
 desktop app; the only difference is that SDK data is processed on the server instead of
 the client."* So this module does **not** ship a second UI — it serves the **same React
-build** (`src/interface/desktop/web/dist`) and only swaps the **transport** in
+build** (`crates/shirley/src/interface/desktop/web/dist`) and only swaps the **transport** in
 `bridge.ts` from Tauri `invoke` / `listen` to HTTP + SSE.
 
 ## Why it is a sibling interface (not "a web layer on the TUI")
@@ -64,11 +64,11 @@ Without the feature, `--server` returns a clear "build with `--features server`"
 
 | Path | Responsibility |
 | --- | --- |
-| `src/interface/server/mod.rs` | axum router; `ServerState`; single `POST /api/cmd/{name}` dispatcher; per-turn driver (`spawn_turn`); SSE fan-out; static hosting of the desktop build. |
-| `src/interface/desktop/web/` | the **unchanged** React frontend. Only `src/lib/bridge.ts` gained a third transport (`createHttpBridge`). |
-| `src/interface/desktop/web/dist/` | the build output served by the server (`npm run build`). |
-| `src/main.rs` | `Mode::Server` selection (`--server` / `SHIRLEY_INTERFACE=server`). |
-| `src/interface/mod.rs` | `#[cfg(feature = "server")] pub mod server;` |
+| `crates/shirley/src/interface/server/mod.rs` | axum router; `ServerState`; single `POST /api/cmd/{name}` dispatcher; per-turn driver (`spawn_turn`); SSE fan-out; static hosting of the desktop build. |
+| `crates/shirley/src/interface/desktop/web/` | the **unchanged** React frontend. Only `crates/shirley/src/lib/bridge.ts` gained a third transport (`createHttpBridge`). |
+| `crates/shirley/src/interface/desktop/web/dist/` | the build output served by the server (`npm run build`). |
+| `crates/shirley/src/main.rs` | `Mode::Server` selection (`--server` / `SHIRLEY_INTERFACE=server`). |
+| `crates/shirley/src/interface/mod.rs` | `#[cfg(feature = "server")] pub mod server;` |
 
 ### Static hosting
 
@@ -76,7 +76,7 @@ The server serves `desktop/web/dist` at `/` via `tower_http::ServeDir`, with
 `ServeFile(index.html)` as the SPA fallback (so deep links work). The dist directory is
 resolved at startup: `SHIRLEY_WEB_DIST` if set, otherwise
 `<CARGO_MANIFEST_DIR>/src/interface/desktop/web/dist`. It is read from disk at runtime —
-rebuild the frontend (`cd src/interface/desktop/web && npm run build`) and reload the
+rebuild the frontend (`cd crates/shirley/src/interface/desktop/web && npm run build`) and reload the
 page; no Rust rebuild needed.
 
 ## Transport contract

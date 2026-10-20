@@ -15,7 +15,7 @@ This set of documents is a technical design proposal for the current repository 
 | `sandbox.md` | Process sandbox: spec / backend / degraded / timeout / ownership of the execution strategy | P0 |
 | `runtime-hardening.md` | max_steps, retry, timeout, cancellation, compaction robustness | P0 |
 | `compaction.md` | Context compaction optimization: cut-point compaction + layered retention | P0 |
-| `todo.md` | Task ledger `todo`: model self-maintained, task state that survives compaction / injected at the end of each round (**implemented**; the ledger lives in the application layer `src/todo.rs`, the SDK only keeps the generic seam `ContextProvider`) | P0 |
+| `todo.md` | Task ledger `todo`: model self-maintained, task state that survives compaction / injected at the end of each round (**implemented**; the ledger lives in the application layer `crates/shirley/src/todo.rs`, the SDK only keeps the generic seam `ContextProvider`) | P0 |
 | `session.md` | Session persistence and restore: application-layer SessionStore contract / rewind semantics / event-driven persistence | P0 |
 | `multi-session.md` | Multi-session parallelism: multiple Agents each running their own / events isolated per session (the channel is held by each Session) / per-session spawn + limit / remove `switch_session` (orchestration goes to the application layer) / same-session multiple drivers not supported (**P1 landed**: SessionManager + AgentFactory + SDK removal of switch_session; P2/P3 not landed) | P1 |
 | `streaming.md` | Streaming output and reasoning streaming | P1 |

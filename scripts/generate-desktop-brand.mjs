@@ -11,9 +11,9 @@ if (process.platform !== "darwin") {
 }
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const source = join(root, "src/interface/desktop/assets");
-const brand = join(root, "src/interface/desktop/web/public/brand");
-const icons = join(root, "icons");
+const source = join(root, "crates/shirley/src/interface/desktop/assets");
+const brand = join(root, "crates/shirley/src/interface/desktop/web/public/brand");
+const icons = join(root, "crates/shirley/icons");
 const temporary = mkdtempSync(join(tmpdir(), "shirley-brand-"));
 mkdirSync(brand, { recursive: true });
 mkdirSync(icons, { recursive: true });

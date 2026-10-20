@@ -12,7 +12,7 @@ categories = ["development-tools", "api-bindings"]
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
-shirley-agent-sdk-macros = { version = "0.0.2", path = "../shirley-agent-sdk-macros" }
+shirley-agent-sdk-macros.workspace = true
 schemars = { version = "1.2.2", features = ["derive"] }
 bon = "3.10.1"
 reqwest = { version = "0.13.5", features = ["json", "stream"] }

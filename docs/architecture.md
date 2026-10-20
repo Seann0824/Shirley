@@ -16,7 +16,7 @@ This document answers two questions: how the project is layered (structure), and
 
 ```mermaid
 graph TD
-    subgraph App["Application layer src/"]
+    subgraph App["Application layer crates/shirley/src/"]
         MAIN["main.rs<br/>read .env / build ModelConfig<br/>register bash + read"]
         IFACE["interface/<br/>TUI state machine and rendering"]
         TOOLS["tools/<br/>bash / read"]
@@ -196,7 +196,7 @@ This table is the core of this document: which point in the architecture each fe
 | Feature | Main placement | Files involved | Status |
 | --- | --- | --- | --- |
 | ReAct loop | `runtime` | `runtime/agent.rs` | implemented |
-| System prompt (static/function) | `runtime` + application layer | `runtime/prompt.rs`, `src/prompt.rs` | implemented |
+| System prompt (static/function) | `runtime` + application layer | `runtime/prompt.rs`, `crates/shirley/src/prompt.rs` | implemented |
 | Message model / serialization | `message` | `message/mod.rs` | implemented |
 | Tool registration and concurrent calls | `tool` + `runtime` | `tool/mod.rs`, `runtime/mod.rs` | implemented |
 | `#[tool]` macro and argument schema | macro layer | `shirley-agent-sdk-macros/src/tool.rs` | implemented |
@@ -215,7 +215,7 @@ This table is the core of this document: which point in the architecture each fe
 | Retry / timeout | `adapter` + `runtime` | `request_timeout` not wired | not done |
 | Memory system | new module + `runtime` | none | not done |
 | Task planning | new module + `runtime` | none | not done |
-| Session persistence | application layer `session.rs` + `interface/session/mod.rs` | the `SessionStore` contract (`src/session.rs`) + `JsonlSessionStore` + `SessionManager` orchestration; the SDK does not hold a session | implemented (JSONL backend) |
+| Session persistence | application layer `session.rs` + `interface/session/mod.rs` | the `SessionStore` contract (`crates/shirley/src/session.rs`) + `JsonlSessionStore` + `SessionManager` orchestration; the SDK does not hold a session | implemented (JSONL backend) |
 
 **9. Dependency graph of features and architecture nodes**
 
@@ -276,6 +276,6 @@ Scheduling is not maintained in this document, to avoid drifting in two places -
 - Change the request body / add protocol parameters -> `encode_request` in `adapter/chat_completions/mod.rs`; be careful not to break prefix stability.
 - Change message semantics -> `message/mod.rs`; first add the Usage unit tests from `testing.md`.
 - Change loop behavior -> `runtime/mod.rs`; at the same time check whether `StopReason` has a corresponding production point.
-- Add a tool -> write only one `#[tool]` function in `src/tools/*.rs` and register it in `main.rs`.
+- Add a tool -> write only one `#[tool]` function in `crates/shirley/src/tools/*.rs` and register it in `main.rs`.
 - Change rendering -> `interface/tui/ui.rs`; pay attention to `MessageCache`'s invalidation logic and `row_offsets`'s line-wrap estimation.
 - Change Markdown styling / add syntax -> `interface/tui/markdown.rs`; parsing (`parse` -> `Block`) and rendering (`render` -> `Line`) are separate, so adding syntax touches only the `parse` side and styling touches only the `render` side.

@@ -5,7 +5,7 @@
 The current `bash` tool is equivalent to "handing the shell to the model". The blacklist is decorative:
 
 ```rust
-// src/tools/bash.rs current
+// crates/shirley/src/tools/bash.rs current
 let args: Vec<&str> = command.split_whitespace().collect();
 let is_blacklisted = args.iter().any(|arg| BLACKLIST.contains(arg));
 // ...
@@ -40,7 +40,7 @@ LOCAL_BASE_URL=http://127.0.0.1:8788/v1/chat/completions
 LOCAL_CONTEXT_WINDOW_TOKENS=104858
 ```
 
-3. Add default redaction on the `read` tool side: reject when it matches patterns such as `.env`, `*.pem`, `id_rsa*`, `*.key` (**implemented**, see `src/tools/read.rs::is_secret_file`).
+3. Add default redaction on the `read` tool side: reject when it matches patterns such as `.env`, `*.pem`, `id_rsa*`, `*.key` (**implemented**, see `crates/shirley/src/tools/read.rs::is_secret_file`).
 4. Long term: do not persist secrets to disk; inject them at startup from the environment or the system keychain.
 
 **4. Workspace isolation**

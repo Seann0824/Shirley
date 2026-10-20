@@ -57,7 +57,7 @@ session must be reset to look like messages".
 
 > After the multi-session refactor, session persistence is **entirely owned by the application
 > layer**: `SessionStore` / `SessionError` and the concrete implementation both live in
-> `src/session.rs`, and the SDK no longer holds any session concept (the `Agent` has no `session`
+> `crates/shirley/src/session.rs`, and the SDK no longer holds any session concept (the `Agent` has no `session`
 > field, no recovery / persistence / truncation logic, and only emits `MessageAdded`). The following
 > section records the **shape** of the contract (the content is unchanged, the ownership changed to
 > the application layer); for the historical ownership see section 7.
@@ -65,7 +65,7 @@ session must be reset to look like messages".
 **2.1 The `SessionStore` trait**
 
 ```rust
-// src/session.rs (application layer)
+// crates/shirley/src/session.rs (application layer)
 pub trait SessionStore: Send + Sync {
     /// Append a message to the tail of the log. A ContextSummary produced by compaction also goes here.
     fn append(&self, message: &Message) -> Result<(), SessionError>;
@@ -92,7 +92,7 @@ There is **deliberately no** `delete` / `update` / `search` -- they are not need
   from going async. If the storage backend is async-driven, the implementation absorbs it internally
   (a synchronous driver like `rusqlite` is the least trouble). **Contract synchronous, implementation
   free.**
-- **`SessionError` stays in `src/session.rs`** (living with the implementation), defined with
+- **`SessionError` stays in `crates/shirley/src/session.rs`** (living with the implementation), defined with
   `thiserror`, display format `[prefix]: detail` (two variants `Io` / `Backend`). The application
   layer no longer funnels it into `AgentError` via `#[from]` -- it no longer crosses the SDK boundary.
 
@@ -258,9 +258,9 @@ in-memory derived (not persisted):
 > **extracted wholesale to the application layer**: the SDK deleted the `session` module / field /
 > `SessionError` variant, the atomic capability `truncate_messages` only rolls back memory and returns
 > the new length; the business method `Session::rewind_last_user_turn` lives with the contract in
-> `src/session.rs`, and persistence is changed to application-layer event-driven.
+> `crates/shirley/src/session.rs`, and persistence is changed to application-layer event-driven.
 
-1. ~~**`SessionStore` + `SessionError`**~~ -- landed, **owned by `src/session.rs`** (defined with
+1. ~~**`SessionStore` + `SessionError`**~~ -- landed, **owned by `crates/shirley/src/session.rs`** (defined with
    `thiserror`, two variants `Io` / `Backend`); no longer exported by the SDK.
 2. ~~**Persistence wiring**~~ -- landed: the SDK only `yield MessageAdded`; the application layer's
    `Session::apply_event` does `store.append` on receipt (a path shared by TUI / desktop).
@@ -272,7 +272,7 @@ in-memory derived (not persisted):
    last user, take the original text), then `store.truncate` according to the post-rollback
    `agent.messages()` length (minus system).
 
-**Application-layer backend**: `JsonlSessionStore` in `src/session.rs` is a real `SessionStore`
+**Application-layer backend**: `JsonlSessionStore` in `crates/shirley/src/session.rs` is a real `SessionStore`
 implementation -- one `Message` per line persisted as JSONL. `Session` holds
 `Arc<dyn SessionStore>`, so a session is therefore **visible across process restarts** (recovery
 happens when `SessionManager` switches / creates). `truncate` first writes a temp file then atomically
@@ -317,7 +317,7 @@ the application layer**)
 > `store.load()` then `build_agent(log)`, and persistence is changed to application-layer event-driven
 > (see sections 2 / 3). The following paragraph is the **transitional semantics of the single-session
 > era**, kept as a historical record; for the current implementation see `SessionManager::switch_to`
-> in `src/interface/session/mod.rs`.
+> in `crates/shirley/src/interface/session/mod.rs`.
 
 `Agent::switch_session(Arc<dyn SessionStore>)` was once the only newly added SDK public method,
 symmetric with `/model`'s `set_model`: the model config, system prompt, working directory, tools, and
@@ -330,7 +330,7 @@ set recovered by a cold start".
 **Decision 3: the session catalog (`SessionCatalog`) converges "where sessions come from", symmetric
 with `ModelCatalog`.**
 
-`src/session.rs` defines the `SessionCatalog` trait (`list` / `open` / `create` / `create_named` /
+`crates/shirley/src/session.rs` defines the `SessionCatalog` trait (`list` / `open` / `create` / `create_named` /
 `create_lazy` / `rename` / `delete`) and the local implementation `FileSessionCatalog`. The `/session`
 command and the picker UI depend only on the interface, so if a remote / database backend is wanted in
 the future, the UI does not need to change. The last four methods have default implementations

@@ -18,7 +18,7 @@
 The user likes shiwen's **chat interaction and UI** (not its business), and wants to add an interface
 to Shirley, migrating shiwen's chat UI over with Tauri and stripping out shiwen's custom logic.
 
-Shirley currently has only one interface: the ratatui TUI under `src/interface/`. This design adds a
+Shirley currently has only one interface: the ratatui TUI under `crates/shirley/src/interface/`. This design adds a
 second interface -- a Tauri desktop window + React frontend -- that **coexists** with the TUI, the
 two **sharing the same underlying layer (LCA)**.
 
@@ -70,11 +70,11 @@ to the same event stream, not the same rendering.**
 
 | Layer | Ownership | Notes |
 | --- | --- | --- |
-| `src/settings.rs` / `session.rs` / `models.rs` / `prompt.rs` / `tools/` | **shared** | modules at the crate root, interface-independent, used by both interfaces |
-| `src/main.rs`'s assembly | **shared, needs a small change** | currently "assemble then directly `interface::run`"; extract into `Bootstrap` and dispatch by mode |
+| `crates/shirley/src/settings.rs` / `session.rs` / `models.rs` / `prompt.rs` / `tools/` | **shared** | modules at the crate root, interface-independent, used by both interfaces |
+| `crates/shirley/src/main.rs`'s assembly | **shared, needs a small change** | currently "assemble then directly `interface::run`"; extract into `Bootstrap` and dispatch by mode |
 | `shirley-agent-sdk` (`Agent` / `AgentEvent`) | **shared** | untouched |
-| `src/interface/` (tui/ui/app/update/event/selection/markdown/command) | **TUI-specific** | kept as-is |
-| `src/interface/desktop/` (Tauri shell + `web/`) | **desktop-specific** | new |
+| `crates/shirley/src/interface/` (tui/ui/app/update/event/selection/markdown/command) | **TUI-specific** | kept as-is |
+| `crates/shirley/src/interface/desktop/` (Tauri shell + `web/`) | **desktop-specific** | new |
 
 **Two refactors needed first**
 
@@ -90,7 +90,7 @@ to the same event stream, not the same rendering.**
    }
    ```
 2. **Slash-command ownership** (`/login` `/model` `/session` `/rewind` in
-   `src/interface/tui/command.rs`). These are application-level behaviors that the desktop also needs.
+   `crates/shirley/src/interface/tui/command.rs`). These are application-level behaviors that the desktop also needs.
    **Do not share them in the first step**: the desktop first does only rendering and send/receive,
    and the commands are sunk into a shared `commands` module in a later milestone.
 
@@ -156,7 +156,7 @@ copied:
 | `lib/entity-mentions/useEntityMentions.ts` | `web/src/lib/file-mentions/useFileMentionSearch.ts` | the object becomes `FileReference`; search goes through the Rust side `agent_search_files` (local filesystem), no more paging / cursor; **keep only the headless search controller** (popover state + async search), the input area DOM is managed by the editor |
 | `lib/entity-mentions/EntityChips.tsx` | `web/src/lib/file-mentions/FileChips.tsx` | icons converge to file / directory; drop material OCR / delete-material; `FileChip` (single, inlineable) + `InlineReferences` (body interleaves placeholders and references) |
 | `lib/entity-mentions/EntityMentionPopover.tsx` | `web/src/lib/file-mentions/FileMentionPopover.tsx` | drop grouping (article/space/...), OCR badges, paging "load more"; keep only the result list + keyboard selection (the search box is carried by the editor, `showSearch=false`) |
-| `lib/entity-mentions/entityLoader.ts` | Rust `src/workspace_search.rs` + `agent_search_files` | search lands in the application layer (workspace traversal + keyword ranking), not through the SDK |
+| `lib/entity-mentions/entityLoader.ts` | Rust `crates/shirley/src/workspace_search.rs` + `agent_search_files` | search lands in the application layer (workspace traversal + keyword ranking), not through the SDK |
 
 - **How a reference enters the model**: `@` only acts on the interface -- after selection an inline
   chip is inserted at the cursor, and on send `shell.rs::compose_prompt` splices the reference path
@@ -207,7 +207,7 @@ the input area for `contenteditable` rich input:
 - **Implementation landing**: under `web/src/lib/file-mentions/`, `editor-dom.ts` (serialization /
   caret / DOM rebuild), `MentionEditor.tsx` (rich input), `useFileMentionSearch.ts` (headless
   search), `FileChips.tsx` (`FileChip` / `InlineReferences`). `AiChatComposer` gains an `inputSlot`
-  which, when passed, replaces the built-in textarea. `src/App.tsx` wires it with the two states
+  which, when passed, replaces the built-in textarea. `crates/shirley/src/App.tsx` wires it with the two states
   `input` + `references`, and `send()` uses `stripTokens` for the emptiness check.
 
 ### 4.3.1 Markdown render alignment (**fixed**)
@@ -257,7 +257,7 @@ code, `my-4`/`space-y-4` large spacing), and it depends on a set of **shadcn-sty
 Shirley's `tokens.css` does not fully provide. So "desktop markdown is less elegant than the TUI" is
 a **two-layer problem**, and 4.3.1 only fixed the first layer. This subsection fixes the second
 layer: **no longer chasing pixel-for-pixel parity with shiwen, but directly benchmarking the TUI's
-(`src/interface/tui/markdown.rs`) typography and color scheme.**
+(`crates/shirley/src/interface/tui/markdown.rs`) typography and color scheme.**
 
 Three concrete bugs (all fixed):
 
@@ -423,7 +423,7 @@ workspaces as "projects"**, each with its own sessions:
 open a new session directly under that project), and all other operations are tucked into a
 right-click menu** (hidden by default, not taking layout space) -- so the left sidebar stays clean
 and is not flooded by a row of hover buttons even when operation density is high. The right-click
-menu is a self-built lightweight primitive (`src/ui/context-menu.tsx`, `react-dom` portal, **no new
+menu is a self-built lightweight primitive (`crates/shirley/src/ui/context-menu.tsx`, `react-dom` portal, **no new
 dependency**), closing on Esc / clicking blank / scroll / resize, and auto-recovering into the
 viewport when near an edge. Destructive operations in menu items (archive / delete) are **confirmed
 a second time inside the menu**.
@@ -540,11 +540,11 @@ a per-session pump task that pushes that session's events to the frontend via `a
 corresponding session view by `AgentEventWire`'s `project` + `session` (key = `project::session`, see
 `web/src/lib/bridge.ts`).
 
-**Tauri commands at a glance** (`src/interface/desktop/shell.rs`):
+**Tauri commands at a glance** (`crates/shirley/src/interface/desktop/shell.rs`):
 
 **Multi-project multi-session**: as a standalone app Shirley is not bound to a single directory and
 can register **multiple workspaces** as "projects". The project registry `ProjectRegistry`
-(`src/project.rs`) only records "where the project is", persisted to
+(`crates/shirley/src/project.rs`) only records "where the project is", persisted to
 `~/.shirley/projects.json`; each project has an `AgentFactory` (each reads that project's
 `<root>/.shirley/config.toml`), and session logs still land in each project's own
 `~/.shirley/workspaces/<workspace-id>/sessions/` (stored globally). **Project id = canonical path** (globally
@@ -618,7 +618,7 @@ from the `runtimes` table), with on-disk data untouched, lazily loaded again nex
 > `broadcast` channel to reuse events), and **does not derive `Serialize`**. The bridge layer needs a
 > `to_wire` to map `AgentEvent` / `Message` into frontend DTOs (not adding `Serialize` to the SDK
 > directly, keeping the SDK contract small and protocol differences converging at the boundary --
-> consistent with `docs/README.md` principle 1). Landed as `src/interface/desktop/wire.rs`.
+> consistent with `docs/README.md` principle 1). Landed as `crates/shirley/src/interface/desktop/wire.rs`.
 >
 > To support tool cards, the two existing variants `ToolStarted` / `ToolFinished` **had fields
 > appended** (`arguments` / `ok` / `output` / `elapsed_ms`). This is a small change to the SDK's
@@ -637,14 +637,14 @@ from the `runtimes` table), with on-disk data untouched, lazily loaded again nex
 
 **M1 · minimal migration: render static fake data** (done)
 - [x] Extract `Bootstrap` + `Mode` dispatch in `main.rs` (TUI behavior unchanged)
-- [x] Create `src/interface/desktop/` (Tauri 2 shell) + `src/interface/desktop/web/` (React+TS+Vite+Tailwind 4)
+- [x] Create `crates/shirley/src/interface/desktop/` (Tauri 2 shell) + `crates/shirley/src/interface/desktop/web/` (React+TS+Vite+Tailwind 4)
 - [x] copy the components from 4.1 and `tokens.css`, removing the shiwen import (`@shiwen/ui` -> local)
 - [x] Delete the custom logic from 4.2 (keep the approval-path code, do not render it in phase one)
 - [x] Frontend `npm run dev` renders a fake conversation with a mock bridge (not depending on the Tauri shell)
 
 **M2 · integrate the SDK: send message -> streaming reply loop** (done)
-- [x] `to_wire(AgentEvent) -> DTO` (`src/interface/desktop/wire.rs`)
-- [x] Tauri command `agent_send` + event `agent://event` (`src/interface/desktop/shell.rs`)
+- [x] `to_wire(AgentEvent) -> DTO` (`crates/shirley/src/interface/desktop/wire.rs`)
+- [x] Tauri command `agent_send` + event `agent://event` (`crates/shirley/src/interface/desktop/shell.rs`)
 - [x] Frontend `lib/bridge.ts` consumes events (Tauri / mock dual mode), replacing shiwen's SSE consumption
 - [x] `ToolStarted` / `ToolFinished` events extended to carry `arguments` / `ok` / `output` / `elapsed_ms`
 

@@ -98,7 +98,7 @@ We keep three dimensions. `floor` and `governance` are dropped (§1); `task` is 
 existing `TodoStore`** rather than duplicated.
 
 ```rust
-// src/status.rs  (new)
+// crates/shirley/src/status.rs  (new)
 
 /// How alive the turn is. Server/judge-assigned, never self-reported by the model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -264,13 +264,13 @@ turn's state as live. (The desktop already has panic recovery that emits a termi
 
 | File | Change | Risk |
 | --- | --- | --- |
-| `src/status.rs` **(new)** | `Liveness` / `Health` / `Activity` / `StateSnapshot` / `StateKeeper` + unit tests | none (new module) |
-| `src/bootstrap.rs` | `BuiltAgent` gains `pub status: Arc<StateKeeper>`; `build_agent` creates one per session — **exactly the existing `todo` / `memory` / `skills` pattern** | low, mechanical |
-| `src/interface/session/mod.rs` | `Session` gains `pub status: Option<Arc<StateKeeper>>`; `Session::apply_event` forwards to `keeper.on_event` **before** matching. **Retire the four hand-maintained flags** (see §6.1) | low; single call site shared by all three interfaces |
-| `src/interface/tui/mod.rs` | `tokio::select!` gains the heartbeat arm; footer reads `keeper.snapshot()` | low |
-| `src/interface/runtime/mod.rs` (`spawn_turn`) | same heartbeat arm; publish snapshot on the **status** channel | medium — second channel to wire |
-| `src/interface/desktop/wire.rs` | new `StateSnapshotWire` + `status://event` event, **separate from `agent://event`** | low if separate; **do not** add a variant to `AgentEventWire` |
-| `src/interface/desktop/web/` | footer / status pill subscribes to `status://event` | frontend only |
+| `crates/shirley/src/status.rs` **(new)** | `Liveness` / `Health` / `Activity` / `StateSnapshot` / `StateKeeper` + unit tests | none (new module) |
+| `crates/shirley/src/bootstrap.rs` | `BuiltAgent` gains `pub status: Arc<StateKeeper>`; `build_agent` creates one per session — **exactly the existing `todo` / `memory` / `skills` pattern** | low, mechanical |
+| `crates/shirley/src/interface/session/mod.rs` | `Session` gains `pub status: Option<Arc<StateKeeper>>`; `Session::apply_event` forwards to `keeper.on_event` **before** matching. **Retire the four hand-maintained flags** (see §6.1) | low; single call site shared by all three interfaces |
+| `crates/shirley/src/interface/tui/mod.rs` | `tokio::select!` gains the heartbeat arm; footer reads `keeper.snapshot()` | low |
+| `crates/shirley/src/interface/runtime/mod.rs` (`spawn_turn`) | same heartbeat arm; publish snapshot on the **status** channel | medium — second channel to wire |
+| `crates/shirley/src/interface/desktop/wire.rs` | new `StateSnapshotWire` + `status://event` event, **separate from `agent://event`** | low if separate; **do not** add a variant to `AgentEventWire` |
+| `crates/shirley/src/interface/desktop/web/` | footer / status pill subscribes to `status://event` | frontend only |
 | `crates/shirley-agent-sdk/` | **nothing** | — |
 
 ### 6.1 This is a state-machine consolidation, not a new state machine
@@ -304,7 +304,7 @@ than today. The consolidation only pays off if the old writers are deleted.
 **Measurable acceptance for this part:**
 
 ```sh
-grep -rn '\.running = \|\.waiting = \|\.waiting_since = \|\.compressing = ' src/
+grep -rn '\.running = \|\.waiting = \|\.waiting_since = \|\.compressing = ' crates/shirley/src/
 # expected: no output
 ```
 
@@ -328,7 +328,7 @@ them would force the render channel to carry heartbeats and would violate A5.
 
 | Phase | Scope | Acceptance |
 | --- | --- | --- |
-| **P0** | `src/status.rs` + `StateKeeper` reducer + unit tests; `Session.status`; **retire `running` / `waiting` / `waiting_since` / `compressing` (§6.1)**; TUI footer reads the snapshot | (a) reducer test: deltas do **not** bump `progress_seq`; `Usage`/`ToolFinished` do; `stall_after` flips `Running -> Stalled`; a by-design wait never stalls. (b) `grep -rn '\.running = \|\.waiting = \|\.waiting_since = \|\.compressing = ' src/` returns **nothing**. |
+| **P0** | `crates/shirley/src/status.rs` + `StateKeeper` reducer + unit tests; `Session.status`; **retire `running` / `waiting` / `waiting_since` / `compressing` (§6.1)**; TUI footer reads the snapshot | (a) reducer test: deltas do **not** bump `progress_seq`; `Usage`/`ToolFinished` do; `stall_after` flips `Running -> Stalled`; a by-design wait never stalls. (b) `grep -rn '\.running = \|\.waiting = \|\.waiting_since = \|\.compressing = ' crates/shirley/src/` returns **nothing**. |
 | **P1** | Heartbeat arm in TUI + `spawn_turn`; `Unreachable` on driver drop; stale rendering | Kill a turn's task mid-run → UI shows "stale", not "working". |
 | **P2** | Desktop/web `status://event` channel + status pill; "Worked for Ns" derived from `last_progress_at` | Same snapshot visible in TUI and web; content-free payload verified by a serialization test. |
 | **P3 (gated)** | Promote `RateLimited` / `QuotaExhausted` to `Health` from `ErrorKind`; wire `Cancelled` once SDK gap 9 lands | Only after `StopReason::Cancelled` is actually produced. |

@@ -185,7 +185,7 @@ accordingly, rather than making the user configure it manually every time they s
 
 1. **Provider declaration**: the model-list interface (`GET /v1/models`) carries **one extra field** on
    each model entry as an identifier, conventionally `tool_mode` (`"native" | "content"`, optional).
-   `src/models.rs`'s `ModelDto` reads it, and `ModelEntry` carries it (a new `tool_mode: Option<String>`,
+   `crates/shirley/src/models.rs`'s `ModelDto` reads it, and `ModelEntry` carries it (a new `tool_mode: Option<String>`,
    absent = undeclared).
 2. **Selection rule** (**model-first**, priority from high to low):
    - read the **model entry** declaration: `content` -> `ToolCalling::Content`, `native` -> `ToolCalling::Native`;
@@ -268,7 +268,7 @@ Shirley's tool execution:
 > codecs do not change a single line, consistent with "protocol differences converge in the adapter
 > layer".
 
-**Application layer (`src/`)**
+**Application layer (`crates/shirley/src/`)**
 
 | Location | Change |
 | --- | --- |

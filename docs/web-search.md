@@ -1,6 +1,6 @@
 # Web search tool (`web_search`)
 
-**Status: implemented** (application-layer tool, `src/tools/web_search.rs`).
+**Status: implemented** (application-layer tool, `crates/shirley/src/tools/web_search.rs`).
 
 ## 1. What it is
 
@@ -24,7 +24,7 @@ For the criterion, see item 4 of section 8 of `Agent.md`: the SDK only accumulat
   and does not require a new SDK contract.
 - Analogy: `bash` / `read` are also in the application layer, because they are bound to "this machine / this workspace".
 
-So it lands in `src/tools/web_search.rs`, using the `#[tool]` macro + a **registration hook (`on_register`)**:
+So it lands in `crates/shirley/src/tools/web_search.rs`, using the `#[tool]` macro + a **registration hook (`on_register`)**:
 
 - The tool function `web_search(ctx: &ToolContext, query: String)` **is itself stateless** -- the macro-generated
   `GenerateTool` only holds `definition`.
@@ -103,7 +103,7 @@ so the model will not see a tool that always fails.
 
 ## 7. Tests
 
-11 unit tests inside `src/tools/web_search.rs`: response mapping (citation merging / dedup / URL filtering /
+11 unit tests inside `crates/shirley/src/tools/web_search.rs`: response mapping (citation merging / dedup / URL filtering /
 truncation), error on a missing structured block, base_url validation, the request body carrying the server tool, **the macro-generated schema
 being correct** (only `query`; `ctx` does not enter the schema), empty-query rejection, unknown-argument rejection, **missing state reported as uninitialized**,
 **the registration hook injecting state / the unregistration hook cleaning state**, **not following redirects**, **the overall timeout taking effect** (the latter two start a fake server with a local

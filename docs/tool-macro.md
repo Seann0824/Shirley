@@ -3,7 +3,7 @@
 > **Status: implemented.** The `#[tool]` function macro now supports optional companion hooks
 > `on_register = fn_name` / `on_unregister = fn_name`, and the macro wires the hooks into the generated `impl Tool`.
 > Contract tests are in `crates/shirley-agent-sdk/tests/tool_lifecycle.rs` (SDK side) and
-> `src/tools/web_search.rs` (application side). For the trait-side mechanism, see `docs/tool-lifecycle.md`.
+> `crates/shirley/src/tools/web_search.rs` (application side). For the trait-side mechanism, see `docs/tool-lifecycle.md`.
 >
 > The body of this document preserves the reasoning from the planning phase and the **rejected alternatives**; **the wording in the "final plan" section below is authoritative**.
 

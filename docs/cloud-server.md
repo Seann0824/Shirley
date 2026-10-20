@@ -5,7 +5,7 @@
 
 This document describes the "cloud server" interface: running the whole Shirley Agent **on a
 server** and reaching it from a browser, while the browser runs the **same desktop React build**
-(`src/interface/desktop/web/dist`). It is a **sibling** of `desktop-interface.md` /
+(`crates/shirley/src/interface/desktop/web/dist`). It is a **sibling** of `desktop-interface.md` /
 `multi-session.md`. The desktop already had every shape the cloud needed (`ProjectRegistry` +
 lazy per-project runtimes + per-project `SessionManager`), and the original `server.rs` was only a
 **degenerate, single-project copy** of it; the core move was to lift the desktop orchestration
@@ -18,10 +18,10 @@ transport layers over it — which is now the landed state (see the status block
 >
 > | Piece | Where it lives |
 > | --- | --- |
-> | Transport-agnostic core `ProjectRuntimeManager` | `src/interface/runtime/mod.rs` (~966 lines: registry + lazy `runtimes` + `cancels` + `EventSink`; all project / session / run / model / file / skill / subagent commands + wire DTOs) |
-> | Thin Tauri transport | `src/interface/desktop/shell.rs` (~474 lines: 27 `#[tauri::command]`s delegate to the core; per-session `publish` pump) |
-> | Thin HTTP + SSE transport | `src/interface/server/mod.rs` (~437 lines: `POST /api/cmd/{name}`, `GET /api/events` via `Sse` + `stream::unfold`, `ServeDir` SPA fallback; default `127.0.0.1:8787`) |
-> | `index.json` session catalog | `src/session.rs` (`FileSessionCatalog` lazy load: one read + temp+rename atomic write, mtime-hit reuse) |
+> | Transport-agnostic core `ProjectRuntimeManager` | `crates/shirley/src/interface/runtime/mod.rs` (~966 lines: registry + lazy `runtimes` + `cancels` + `EventSink`; all project / session / run / model / file / skill / subagent commands + wire DTOs) |
+> | Thin Tauri transport | `crates/shirley/src/interface/desktop/shell.rs` (~474 lines: 27 `#[tauri::command]`s delegate to the core; per-session `publish` pump) |
+> | Thin HTTP + SSE transport | `crates/shirley/src/interface/server/mod.rs` (~437 lines: `POST /api/cmd/{name}`, `GET /api/events` via `Sse` + `stream::unfold`, `ServeDir` SPA fallback; default `127.0.0.1:8787`) |
+> | `index.json` session catalog | `crates/shirley/src/session.rs` (`FileSessionCatalog` lazy load: one read + temp+rename atomic write, mtime-hit reuse) |
 > | `bridge.ts` fourth state | `isTauri && configuredServerUrl → createHttpBridge(serverUrl)`; `EventSource` listening on `agent_event` |
 > | Convenience launchers | `.cargo/config.toml`: `cargo desktop` / `cargo web` / `cargo tui` |
 >
@@ -42,7 +42,7 @@ the rationale for *why* the extraction was done. The landed state is the shared 
 described in §2.
 
 Both interfaces already share the same LCA: `bootstrap::AgentFactory` + `interface::session::SessionManager`
-+ the `AgentEventWire` contract (`src/interface/desktop/wire.rs`). The difference is **how many
++ the `AgentEventWire` contract (`crates/shirley/src/interface/desktop/wire.rs`). The difference is **how many
 projects** each one knows about.
 
 | Concern | Desktop (`shell.rs`, Tauri) | Server (`server.rs`, HTTP) |

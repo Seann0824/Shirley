@@ -7,7 +7,7 @@ The repository is organized in three layers:
 
 | Layer | Location | Responsibility |
 | --- | --- | --- |
-| Application | `src/` | A runnable TUI chat agent: registers tools and drives the interface |
+| Application | `crates/shirley/src/` | A runnable TUI chat agent: registers tools and drives the interface |
 | SDK | `crates/shirley-agent-sdk/` | Business-agnostic Agent primitives (published to crates.io) |
 | Macros | `crates/shirley-agent-sdk-macros/` | The `#[tool]` attribute macro |
 

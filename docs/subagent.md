@@ -14,7 +14,7 @@ subagent (`spawn` / `fork` / sleep-wakeup / management / persistence); it introd
 process or remote executor.
 
 **Ownership statement (set the tone first)**: subagent **belongs to the application layer**
-(`src/subagent/`), for the same reason as `todo.rs` / `memory/` / `skills/` -- "what counts as a
+(`crates/shirley/src/subagent/`), for the same reason as `todo.rs` / `memory/` / `skills/` -- "what counts as a
 subtask, how to dispatch, how to present, how to persist" is a trade-off of the coding-agent
 product, not a generic fundamental capability. **SDK zero changes**: subagent fully reuses the SDK's
 three existing seams -- `Tool` (dispatch entry), `Agent` (child executor), `ContextProvider`
@@ -251,7 +251,7 @@ find out immediately; `subagent` itself can never enter the allowlist (recursion
 subagents.**
 
 ```rust
-// src/subagent/manager.rs (application layer)
+// crates/shirley/src/subagent/manager.rs (application layer)
 pub struct SubagentManager {
     registry: Mutex<HashMap<SubagentId, SubagentHandle>>, // single source of truth
     factory: Arc<AgentFactory>,                            // the ability to create child Agents
@@ -326,7 +326,7 @@ which is the P0 default. The child can still use bash / read / todo etc.
 **Decision 9: the parent session JSONL format is **unchanged**; subagent goes to an independent
 sidecar.**
 
-Status quo (`src/session.rs`): `<state>/sessions/<name>.jsonl` has one `Message` per line
+Status quo (`crates/shirley/src/session.rs`): `<state>/sessions/<name>.jsonl` has one `Message` per line
 (`serde(tag="role")`), and `load()` does **line-by-line `serde_json::from_str::<Message>`**.
 
 If subagent events were stuffed into the same line stream as the parent JSONL, it would **break

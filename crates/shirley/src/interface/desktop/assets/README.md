@@ -30,7 +30,7 @@ Re-export on macOS from the repository root: `node scripts/generate-desktop-bran
 
 ## Manual acceptance — pending user verification
 
-1. Run `npm --prefix src/interface/desktop/web run build`, then `cargo desktop`. Expect the corrected portrait in the header, with both eyes visible, no green border, and no background holes.
+1. Run `npm --prefix crates/shirley/src/interface/desktop/web run build`, then `cargo desktop`. Expect the corrected portrait in the header, with both eyes visible, no green border, and no background holes.
 2. Create a conversation. Expect the original solid light background and welcome illustration. Chat and input remain centered, capped at the original 760px width. At the 480 × 360 minimum window size, input and scrolled content should remain accessible. There should be no wallpaper or new panel, blur, border or shadow.
 3. Send a message. Expect the corrected avatar. While streaming, a small neutral status dot should pulse at its bottom right, with no green spinning ring; the dot should disappear on completion.
 4. Build and restart the relevant native app bundle; inspect Dock/Finder or Explorer/taskbar. Expect a rounded portrait on the standard macOS grid, matching the size and corner shape of the neighbouring icons. UI appearance and native platform effects require user verification.

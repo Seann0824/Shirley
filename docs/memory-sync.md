@@ -8,7 +8,7 @@
 2. 构建云端前端和服务：
 
    ```sh
-   cd src/interface/desktop/web
+   cd crates/shirley/src/interface/desktop/web
    npm ci
    npm run build
    cd ../../../..

@@ -64,7 +64,7 @@ is app-layer work. Section 2 is the full split.
 | Encode the image per protocol (ChatCompletions / Responses / Anthropic) | **SDK** | The three `encode_*` functions live *inside* the SDK and are not reachable from the app. This is exactly the "protocol differences converge in the adapter" rule. |
 | The capability fact "this model accepts images" | **SDK** (the field) | `ModelConfig` is an SDK type, and the fact is the same kind of thing as `context_window_tokens`. The SDK needs it to fail fast *before* sending. |
 | Fail fast when an image is present but the model is text-only | **SDK** | The guard belongs next to the request assembly, returning a classified error (`Unsupported` / `BadRequest`), not an HTTP 400 from the wire. |
-| Fill the capability fact (which model supports what) | **App layer** | The model catalog (`src/models.rs` `RemoteCatalog` / `StaticCatalog`) and `settings` are app-layer; the SDK must not hard-code a model table. |
+| Fill the capability fact (which model supports what) | **App layer** | The model catalog (`crates/shirley/src/models.rs` `RemoteCatalog` / `StaticCatalog`) and `settings` are app-layer; the SDK must not hard-code a model table. |
 | UI: whether to show an "attach image" entry, file picker, preview, `@`-referencing an image | **App layer** | Pure product policy. |
 | Where image bytes live (upload / cache / session log) | **App layer** | Persistence and storage are app concerns (`docs/session.md`). |
 
@@ -211,7 +211,7 @@ pub supports_images: bool,
 
 **7. Application layer**
 
-- **Where the capability fact comes from**: extend `ModelEntry` (`src/models.rs`) with a modality /
+- **Where the capability fact comes from**: extend `ModelEntry` (`crates/shirley/src/models.rs`) with a modality /
   `supports_images` field. `RemoteCatalog` reads it from the OpenAI-compatible `GET /v1/models` when
   the endpoint reports it (OpenRouter does; a bare DeepSeek endpoint may not), `StaticCatalog` carries
   it in the fallback list. When the endpoint does not report it, fall back to a small built-in name

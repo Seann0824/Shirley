@@ -15,7 +15,7 @@
 2. **Registration and injection drift**. Registering a tool (`tool_manager.register`) and injecting a dependency (`tool_context.with(state)`) were **two manual steps**. Doing only the former and forgetting the latter does not fail to compile, and only blows up at runtime when `ctx.get` returns `None`.
 3. **No registration-time self-check**. Missing / wrong configuration could only be exposed on the first call.
 
-The application-layer status quo (`src/main.rs`):
+The application-layer status quo (`crates/shirley/src/main.rs`):
 
 ```rust
 let mut tool_context = ToolContext::new();

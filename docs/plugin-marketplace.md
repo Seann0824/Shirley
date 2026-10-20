@@ -15,9 +15,9 @@ discovered on their own, each injected on their own**:
 
 | Existing capability | Landing point | Discovery | Injection seam |
 | --- | --- | --- | --- |
-| skill (`docs/skills.md`) | `src/skills/` | scan `.agents/skills` / `.claude/skills` | `SkillCatalog` + `SkillRuntime` + `ContextProvider` |
-| memory / ledger | `src/memory/` `src/todo.rs` | fixed | `ContextProvider` |
-| tools | `src/tools/` | **hard-coded at compile time** (`bootstrap::assemble_tools`) | `ToolManager::register` |
+| skill (`docs/skills.md`) | `crates/shirley/src/skills/` | scan `.agents/skills` / `.claude/skills` | `SkillCatalog` + `SkillRuntime` + `ContextProvider` |
+| memory / ledger | `crates/shirley/src/memory/` `crates/shirley/src/todo.rs` | fixed | `ContextProvider` |
+| tools | `crates/shirley/src/tools/` | **hard-coded at compile time** (`bootstrap::assemble_tools`) | `ToolManager::register` |
 
 There are three layers to the problem:
 

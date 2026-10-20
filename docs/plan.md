@@ -133,7 +133,7 @@ Added `crates/shirley-agent-sdk/tests/error_contract.rs`, 6 cases, locking **cla
 - The `Display` output of the 11 variants across the four error layers (`Tool` / `Adapter` / `Sandbox` / `Workspace`) was checked one by one, all in the `[prefix]: detail` format.
 - `cargo test --workspace` has 1 failure: `tools::bash::tests::reports_sandbox_degradation`.
   **This failure existed before the change** (reproduced on clean code with `git stash`); the cause is that the degradation hint in `render()`
-  of `src/tools/bash.rs` is commented out while the test still asserts it. Unrelated to this change, not handled.
+  of `crates/shirley/src/tools/bash.rs` is commented out while the test still asserts it. Unrelated to this change, not handled.
 
 **3.9 Explicitly not done**
 
@@ -157,7 +157,7 @@ Arranged in dependency order. T1 is a prerequisite for the rest -- retry, degrad
 
 - Status quo: `ToolFuture = Future<Output = Result<Value, AgentError>>`, but tool authors write `Result<String, ToolError>`, and the macro hard-converts with `map_err(::shirley_agent_sdk::AgentError::ToolError)?`. The result is that tool authors are forced to be aware of `AgentError` -- which is an SDK boundary type, not something a tool should see.
 - Approach: change `ToolFuture` to `Result<serde_json::Value, ToolError>`; delete the `map_err` in the macro; the runtime converges to `AgentError` with `?` at the call site. This is consistent with sandbox -- `ProcessBackend::execute` only returns `SandboxError`.
-- Blast radius: `crates/shirley-agent-sdk-macros/src/tool.rs`, `crates/shirley-agent-sdk/src/tool/mod.rs`, `src/tools/bash.rs`.
+- Blast radius: `crates/shirley-agent-sdk-macros/src/tool.rs`, `crates/shirley-agent-sdk/src/tool/mod.rs`, `crates/shirley/src/tools/bash.rs`.
 - Acceptance: the tool function signature only needs `Result<_, ToolError>`; the existing 6 bash tests all pass.
 
 **T3 · Retry and exponential backoff** (P0, depends on T1)
@@ -206,7 +206,7 @@ Arranged in dependency order. T1 is a prerequisite for the rest -- retry, degrad
 ```mermaid
 graph LR
     T1["T1 · client/timeout"] --> T3["T3 · retry backoff"]
-    T2["T2 · Tool signature"] --> D2["independent<br/>but touches the macro and src/tools"]
+    T2["T2 · Tool signature"] --> D2["independent<br/>but touches the macro and crates/shirley/src/tools"]
     T4["T4 · dual channel"] --> T7["T7 · auditing"]
     T5["T5 · max_steps"] --> D5["independent"]
     T6["T6 · compaction degradation"] --> D6["independent"]
@@ -221,7 +221,7 @@ without each inventing its own decision logic.
 
 **6. Risks and cautions**
 
-1. **The `Tool` trait signature change (T2) has the largest blast radius**, touching the macro, the SDK, and `src/tools/` at the same time. It is suggested to do it in a separate commit, and not to change tool implementations in parallel before then.
+1. **The `Tool` trait signature change (T2) has the largest blast radius**, touching the macro, the SDK, and `crates/shirley/src/tools/` at the same time. It is suggested to do it in a separate commit, and not to change tool implementations in parallel before then.
 2. **`ErrorKind` is a stable contract**. The wording can change, but the classifications must not be casually added, removed, or have their semantics changed -- the upper layer's retry decisions hang on it. When adding a classification, update `is_retryable` and `error_contract.rs` in sync.
 3. **`AgentError` currently exposes the wrapped types directly** (see 3.5). If the public API is to be narrowed later, it should be done within one version, to avoid a breaking change after downstream already `match`es on it.
 4. **`futures::io` and `std::io`**: `workspace` originally used `futures::io::Error`, which is actually a re-export of `std::io::Error`, a misleading import, now changed back to `std::io`. Similar patterns are worth scanning across the whole repository.

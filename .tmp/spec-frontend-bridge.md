@@ -1,7 +1,7 @@
 # Task F: 前端 bridge.ts SSE + 第四态 + server 模式路径输入框（只改 web/src 下的 TS/TSX）
 
 ## 背景
-Shirley 的 desktop 前端（React+TS）在 `src/interface/desktop/web/`。同一份前端有两个运行形态：
+Shirley 的 desktop 前端（React+TS）在 `crates/shirley/src/interface/desktop/web/`。同一份前端有两个运行形态：
 - Tauri 桌面：`isTauri` 为真 → `createTauriBridge()`（invoke/listen）
 - 浏览器打开云端 server：非 Tauri 生产 → `createHttpBridge()`（现为 POST 命令 + 单条 WebSocket `/ws`）
 
@@ -11,9 +11,9 @@ Shirley 的 desktop 前端（React+TS）在 `src/interface/desktop/web/`。同�
 3. 加**能力探测**：云端模式没有原生文件夹选择器，`addProject` 改为「弹路径输入框 → 调 `agent_add_project { path, name? }`」。
 
 ## 严格边界
-- **只改 `src/interface/desktop/web/src/` 下的 `.ts` / `.tsx`**（主要 `lib/bridge.ts`，其次 `App.tsx` 与相关组件）。不要动任何 Rust 文件、不要动 docs。
+- **只改 `crates/shirley/src/interface/desktop/web/src/` 下的 `.ts` / `.tsx`**（主要 `lib/bridge.ts`，其次 `App.tsx` 与相关组件）。不要动任何 Rust 文件、不要动 docs。
 - 保持 `AgentBridge` 类型对外形态尽量兼容（新增字段/方法是允许的，删除/改签名不允许）。
-- `npm run build`（`cd src/interface/desktop/web && npm run build`）必须通过（tsc + vite）。若本机没装依赖，可只做 `npx tsc --noEmit` 级别的类型校验，并在报告里说明。
+- `npm run build`（`cd crates/shirley/src/interface/desktop/web && npm run build`）必须通过（tsc + vite）。若本机没装依赖，可只做 `npx tsc --noEmit` 级别的类型校验，并在报告里说明。
 
 ## 后端契约（Rust 侧已定，按此实现，勿改）
 - 命令面不变：`POST /api/cmd/{name}`，body JSON，返回 JSON（与原 `httpCall` 一致）。

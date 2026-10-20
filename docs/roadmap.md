@@ -38,7 +38,7 @@ Goal: run a migration task once on a real repository without a disaster in the m
 - Memory system ("distillation-verified" persistence)
 - Task planning and progress tracking
 - ~~Multi-protocol (Responses / Anthropic) truly landed~~ -- landed (all three protocols `ChatCompletions` / `Responses` / `AnthropicMessages` include streaming; Anthropic is in `docs/anthropic-messages-api.md`)
-- ~~Session persistence and restore~~ -- landed (`docs/session.md`; **the `SessionStore` contract and implementation are both in the application layer `src/session.rs`**; the SDK no longer holds a session, and persistence is event-driven by the application layer)
+- ~~Session persistence and restore~~ -- landed (`docs/session.md`; **the `SessionStore` contract and implementation are both in the application layer `crates/shirley/src/session.rs`**; the SDK no longer holds a session, and persistence is event-driven by the application layer)
 
 **3. Dependencies**
 
@@ -66,7 +66,7 @@ Definition of P0 done (testable):
 1. Run one real migration sub-task against the repository, with no human intervention throughout and no infinite loop.
 2. Inject a 429 / 500 once; the Agent can back off, retry, and continue.
 3. When `bash` runs a command that fails to compile, the model receives stderr and the exit code.
-4. Attempting to `read` a file outside the workspace is rejected with a clear error. (**implemented**: `src/tools/read.rs`, validated via `WorkSpace::resolve`)
+4. Attempting to `read` a file outside the workspace is rejected with a clear error. (**implemented**: `crates/shirley/src/tools/read.rs`, validated via `WorkSpace::resolve`)
 5. Switching to an unimplemented protocol returns `Err` rather than panicking.
 
 Definition of P1 done:

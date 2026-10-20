@@ -6,7 +6,7 @@ This document turns "let the model maintain its own task state" into a plan. It 
 
 **Scope statement**: this round only does an in-memory implementation; the persistence layer is left empty.
 
-**Ownership correction (later decision)**: the ledger **has moved from the SDK to the application layer** (`src/todo.rs`).
+**Ownership correction (later decision)**: the ledger **has moved from the SDK to the application layer** (`crates/shirley/src/todo.rs`).
 "What to record, how to nag, what copy to inject" is a trade-off of the coding-agent product, not a generic fundamental
 capability. The SDK keeps only one business-agnostic generic seam -- [`ContextProvider`]: when the `Agent` assembles
 each round's request it calls it and appends the returned text as a system message **at the end**. The ledger is just one
@@ -109,7 +109,7 @@ Shared via `Arc` (the runtime and the `todo` tool each hold one `Arc`); interior
 - [ ] Migrate the user module
 </steps>
 <findings>
-- The auth logic is in src/auth.rs, using JWT
+- The auth logic is in crates/shirley/src/auth.rs, using JWT
 </findings>
 <open_questions>
 - Which crate to use for the DB connection pool?
@@ -169,8 +169,8 @@ The two do not overlap in responsibility:
 
 | File | Responsibility |
 | --- | --- |
-| `src/todo.rs` (**application layer**) | `TodoStore` / `TodoStatus` / `TodoUpdate` / `TodoStep` / `TodoTool` / `TodoContextProvider` / `TASK_STATE_HEADER` / `TODO_NAG_REMINDER` / unit tests |
-| `src/bootstrap.rs` (application layer) | `build_agent` creates a fresh `Arc<TodoStore>` per `Agent`, registers `TodoTool`, and injects `TodoContextProvider` as `context_provider` (the two share the same `Arc`) |
+| `crates/shirley/src/todo.rs` (**application layer**) | `TodoStore` / `TodoStatus` / `TodoUpdate` / `TodoStep` / `TodoTool` / `TodoContextProvider` / `TASK_STATE_HEADER` / `TODO_NAG_REMINDER` / unit tests |
+| `crates/shirley/src/bootstrap.rs` (application layer) | `build_agent` creates a fresh `Arc<TodoStore>` per `Agent`, registers `TodoTool`, and injects `TodoContextProvider` as `context_provider` (the two share the same `Arc`) |
 | `crates/shirley-agent-sdk/src/runtime/context.rs` (SDK) | the generic seam `ContextProvider` (`context() -> Option<String>`); `agent.rs` calls it at the end of `active_messages()` |
 | `crates/shirley-agent-sdk/src/runtime/agent.rs` (SDK) | holds `Option<Arc<dyn ContextProvider>>`, injects the returned text at the end of `active_messages()` |
 

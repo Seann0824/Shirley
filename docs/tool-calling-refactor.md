@@ -240,7 +240,7 @@ and the protocol branch inside `system_message()`.
 
 - **De-special-case the prompt**: the sentences in `render_instructions` aimed at figma-make, such as
   "do not treat the model service's own workspace / files or tools as the user's project environment",
-  move to the **application layer** `src/prompt.rs`; the SDK prompt stays generic. The hard-coded
+  move to the **application layer** `crates/shirley/src/prompt.rs`; the SDK prompt stays generic. The hard-coded
   Chinese could be made configurable (low priority).
 - **Add tests**:
   - `invoke`-level: assert the content-mode request body has **no** `tools` / `tool_choice`, and that
@@ -254,7 +254,7 @@ and the protocol branch inside `system_message()`.
 **4. Acceptance criteria**
 
 1. `crates/shirley-agent-sdk/src/lib.rs` exports only `ToolCallingMode`, with no other protocol types.
-2. Across the whole repository, `rg 'as_content|TaggedToolProtocol|ContentToolProtocol|ParsedDocument' src/`
+2. Across the whole repository, `rg 'as_content|TaggedToolProtocol|ContentToolProtocol|ParsedDocument' crates/shirley/src/`
    has **no** hits in the application layer (only appearing inside `crates/.../adapter`).
 3. `runtime/agent.rs` has **zero** changes relative to HEAD (`git diff HEAD -- .../runtime/agent.rs`
    is empty).
@@ -275,7 +275,7 @@ and the protocol branch inside `system_message()`.
    `models.rs` / `interface/{mod,tui,app}.rs` / `desktop/shell.rs` -- remove the `ToolCalling`
    piercing, change to one-shot dispatch.
 3. **Encoding + parsing fixes** (Step 4+5): one commit for `tool_calling.rs`, including the new tests.
-4. **Replay + prompts** (Step 6+7): one commit for `tool_calling.rs` + `src/prompt.rs`.
+4. **Replay + prompts** (Step 6+7): one commit for `tool_calling.rs` + `crates/shirley/src/prompt.rs`.
 
 > Split commits by theme: SDK protocol containment and application-layer wiring separate, ensuring
 > each commit is self-contained and independently revertible.

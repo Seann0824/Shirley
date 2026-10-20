@@ -25,7 +25,7 @@ split. Source workspaces no longer contain an active `.shirley` directory.
     ...                        # other former .shirley files, including backups
 ```
 
-`src/storage.rs` owns path resolution and migration. The workspace id is UUID v5 over
+`crates/shirley/src/storage.rs` owns path resolution and migration. The workspace id is UUID v5 over
 the canonical path; identically named folders cannot collide, and opening a symlink to
 the same workspace uses the same namespace. Source working directories and project
 associations remain intact. Personal and project memory keep their semantic domains;

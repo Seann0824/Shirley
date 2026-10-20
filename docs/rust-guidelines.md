@@ -136,7 +136,7 @@ redundant_closure_for_method_calls = "deny"
 
 > `large_futures`（19）与 `too_many_lines`（15）**保留 `warn`（advisory），未翻 `deny`**：前者全部落在 examples / tests / `bash.rs` 的 `#[tokio::test]` 上（测试里的大 future 属正常），后者是若干结构性大函数（`runtime/agent.rs`、`interface/runtime/mod.rs`、`tui/app.rs`、`memory/curator.rs` 等），清零需要高风险拆分、收益低于风险，按分级策略留作技术债。
 
-> `undocumented_unsafe_blocks` 命中的 15 处全部是测试里的 `std::env::set_var/remove_var`（`src/tools/read.rs` 9 处，均在 `ENV_LOCK` 串行守卫下；`src/interface/tui/command.rs` 4 处；`src/tools/web_search.rs` 1 处；`crates/shirley-agent-sdk/tests/sandbox_smoke.rs` 1 处）。这些属于「测试间环境隔离」的必要 unsafe，已逐处补 `// SAFETY:` 说明并翻 `deny`。
+> `undocumented_unsafe_blocks` 命中的 15 处全部是测试里的 `std::env::set_var/remove_var`（`crates/shirley/src/tools/read.rs` 9 处，均在 `ENV_LOCK` 串行守卫下；`crates/shirley/src/interface/tui/command.rs` 4 处；`crates/shirley/src/tools/web_search.rs` 1 处；`crates/shirley-agent-sdk/tests/sandbox_smoke.rs` 1 处）。这些属于「测试间环境隔离」的必要 unsafe，已逐处补 `// SAFETY:` 说明并翻 `deny`。
 
 ## 4. 落实位置
 
@@ -149,7 +149,7 @@ redundant_closure_for_method_calls = "deny"
 CI 只把 **Tier 1 当硬门禁**，Tier 2 只展示不阻塞：
 
 - `cargo build --workspace`（默认 feature）
-- `cargo build --workspace --features server` + `cargo test --features server`（**固定带 `server` feature**：默认 feature 下 `src/model_providers.rs` 的 `crate::interface::runtime` 被 `cfg(any(desktop, server))` 门控，无 feature 会编译失败——这是既有问题，非本次引入）
+- `cargo build --workspace --features server` + `cargo test --features server`（**固定带 `server` feature**：默认 feature 下 `crates/shirley/src/model_providers.rs` 的 `crate::interface::runtime` 被 `cfg(any(desktop, server))` 门控，无 feature 会编译失败——这是既有问题，非本次引入）
 - `cargo clippy --workspace --all-targets --features server`：Tier 1 已 `deny`，任何 Tier 1 回归都会让 clippy 非零退出 → 门禁生效；Tier 2 的 warning 只是打印。
 - `cargo fmt --all --check`：**阻塞**。一次性 `cargo fmt --all` 已全量落地（591 处 diff → 0），fmt 现在是硬门禁。
 - `cargo-audit` job：扫 `Cargo.lock` 对照 RustSec 漏洞库，发现已知漏洞即失败（用 `taiki-e/install-action` 装预编译二进制）。

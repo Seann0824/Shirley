@@ -53,13 +53,13 @@ harness2 的"被测对象"是 opencode/codex；**在 Shirley 里，被测对象�
 
 ```
 ┌──────────────────────────────────────────────────────────────┐
-│ Method 层（src/eval/runner.rs, grade.rs, report.rs）           │
+│ Method 层（crates/shirley/src/eval/runner.rs, grade.rs, report.rs）           │
 │   与任务集、被测对象无关：排期、并发、超时、预算、落盘、报告    │
 └───────────────┬──────────────────────────────┬────────────────┘
                 │                              │
    ┌────────────▼───────────┐      ┌───────────▼───────────────┐
    │ Substrate 层            │      │ Benchmark 层               │
-   │ src/eval/substrate.rs   │      │ src/eval/bench/*.rs        │
+   │ crates/shirley/src/eval/substrate.rs   │      │ crates/shirley/src/eval/bench/*.rs        │
    │ ShirleySubstrate：      │      │ BenchmarkAdapter：         │
    │  surface() → HarnessSpec│      │  tasks() / task_prompt() / │
    │  materialise() → Agent  │      │  task_files() / validate() │
@@ -80,7 +80,7 @@ Shirley 目前是**单 bin、无 `lib.rs`**，模块在 `main.rs` 声明，`Mode
 （无法 import `bootstrap` 等模块），必须作为**新增 `Mode::Eval` 分支**接入，复用 `bootstrap::AgentFactory`。
 
 ```
-src/
+crates/shirley/src/
   eval/
     mod.rs           # facade + Mode::Eval 入口（run_eval(args)）
     task.rs          # Task / TaskSuite / TaskFile / Deliverable
@@ -118,7 +118,7 @@ shirley --eval --suite local/coding-v1 --harness prompt-v2 --compare runs/<base-
 ## 5. Harness 注入 seam（本方案最关键的一块）
 
 **约束（已核实）**：
-- system prompt 是 `src/prompt.rs` 里 `include_str!` **编译期嵌入**的（函数形式每次解析，但模板固定）。
+- system prompt 是 `crates/shirley/src/prompt.rs` 里 `include_str!` **编译期嵌入**的（函数形式每次解析，但模板固定）。
 - skills 是**运行时扫描目录**（`SkillCatalog`），可直接指向不同目录。
 - tools / model / max_steps 已能通过 `AgentFactory::build_agent_with(messages, tool_filter, max_steps)` 部分覆盖。
 
@@ -342,7 +342,7 @@ pub trait Grader {
 ## 12. 风险与开放问题
 
 1. **prompt 编译期嵌入**：`HarnessSpec.system_prompt_override` 是唯一可行 seam；若未来 prompt 需大改，
-   考虑把 prompt 也改成运行时加载（但会动 `src/prompt.rs`，需单独评估对缓存前缀的影响）。
+   考虑把 prompt 也改成运行时加载（但会动 `crates/shirley/src/prompt.rs`，需单独评估对缓存前缀的影响）。
 2. **非确定性**：模型温度、工具并发顺序 → 单次结果不可靠。方案用 **k 次重复 + 分布**而非单值；报告给均值 + 通过率。
 3. **judge 可靠性**：LLM judge 有偏差。MVP 以确定性 grader 为主，judge 只做"软指标"，且 None-on-failure。
 4. **沙箱降级**：`ProcessBackend` 无真隔离，eval 里如实标记 degraded；真隔离（sandbox-exec/bwrap）未接入前，

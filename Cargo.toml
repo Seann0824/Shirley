@@ -1,71 +1,30 @@
-[package]
-name = "Shirley"
-version = "0.0.2"
-edition = "2024"
-description = "A coding agent written in Rust: TUI + desktop chat interface over the shirley-agent-sdk"
-license = "MIT OR Apache-2.0"
-repository = "https://github.com/Seann0824/Shirley"
-keywords = ["agent", "ai", "llm", "coding-agent", "cli"]
-categories = ["command-line-utilities", "development-tools"]
-
-[dependencies]
-serde = { version = "1.0.229", features = ["derive"] }
-serde_json = "1.0.151"
-memchr = "2.7"
-ignore = "0.4"
-globset = "0.4"
-regex = "1"
-shirley-agent-sdk = { version = "0.0.2", path = "./crates/shirley-agent-sdk" }
-syn = { version = "3.0.6", features = ["full"] }
-proc-macro2 = "1.0.107"
-quote = "1.0.47"
-schemars = { version = "1.2.2", features = ["derive"] }
-tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "process", "time", "sync", "fs", "io-util", "net"] }
-dotenvy = "0.15.7"
-toml = "0.9"
-dirs = "6"
-thiserror = "2.0.21"
-futures = "0.3.34"
-reqwest = { version = "0.13.5", features = ["json"] }
-url = "2.5.8"
-uuid = { version = "1", features = ["v5"] }
-chrono = "0.4.45"
-ratatui = { version = "0.30.2", features = ["unstable-rendered-line-info"] }
-crossterm = "0.29.0"
-unicode-width = "0.2"
-pulldown-cmark = { version = "0.13.0", default-features = false, features = ["html"] }
-arboard = { version = "3.6.1", default-features = false }
-tauri = { version = "2", optional = true }
-tauri-plugin-dialog = { version = "2.7.1", optional = true }
-# Cloud web server (axum HTTP + WebSocket). Off by default; only pulled in by the `server` feature.
-axum = { version = "0.8", optional = true, features = ["ws"] }
-tower-http = { version = "0.6", optional = true, features = ["fs", "trace"] }
-
-[features]
-default = []
-# Desktop interface (Tauri 2 shell). Off by default, to avoid forcing a TUI-only build to pull in webview deps.
-desktop = ["dep:tauri", "dep:tauri-plugin-dialog"]
-# Cloud web interface (HTTP command API + WebSocket event push + static frontend hosting).
-server = ["dep:axum", "dep:tower-http"]
-
-[build-dependencies]
-tauri-build = { version = "2", default-features = false }
+# Virtual workspace manifest. Every crate lives under `crates/` (MS Rust Guidelines
+# M-CRATES-FLAT-FOLDER) and is listed here as a member (M-CRATES-IN-WORKSPACE).
+# Shared metadata / dependency versions / lint policy are declared once, at the
+# workspace level, and inherited by each member via `*.workspace = true`
+# (M-CARGO-WORKSPACE).
 
 [workspace]
 members = [
+    "crates/shirley",
     "crates/shirley-agent-sdk",
     "crates/shirley-agent-sdk-macros",
 ]
+# `cargo run` / `cargo build` with no `-p` operate on the application crate, so the
+# familiar `cargo run` (TUI) keeps working from the repository root.
+default-members = ["crates/shirley"]
 resolver = "3"
+
+# Intra-workspace dependencies resolve to a single canonical version (M-CRATES-IN-WORKSPACE).
+[workspace.dependencies]
+shirley-agent-sdk = { version = "0.0.2", path = "crates/shirley-agent-sdk" }
+shirley-agent-sdk-macros = { version = "0.0.2", path = "crates/shirley-agent-sdk-macros" }
 
 # ---------------------------------------------------------------------------
 # Lint policy: Microsoft "Pragmatic Rust Guidelines"
 # https://microsoft.github.io/rust-guidelines/
 # See docs/rust-guidelines.md for the adoption plan and the ratchet roadmap.
 # ---------------------------------------------------------------------------
-[lints]
-workspace = true
-
 [workspace.lints.rust]
 # Tier 1 — already clean across the workspace today, enforced as hard errors
 # (a real gate: `cargo build`/`clippy` fails if these regress).
