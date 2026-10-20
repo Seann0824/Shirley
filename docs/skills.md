@@ -342,7 +342,7 @@ harness to **activate directly** -- a deterministic entry that skips the model's
   `/<skill-name> <text>` = activate and then send `<text>` as this round's prompt; a failed activation
   (unknown skill / file-read failure) errors locally and does not send to the model. If a skill name is
   not in the catalog, treat it as ordinary text (a lenient strategy, not interrupting input).
-- **Boundary**: purely application-layer (`src/interface/command.rs` + `app.rs` wiring), **zero SDK
+- **Boundary**: purely application-layer (`src/interface/tui/command.rs` + `app.rs` wiring), **zero SDK
   changes**.
 
 ---

@@ -16,8 +16,12 @@ fn main() {
     println!("'你好世界'   -> {}", count_text("你好世界"));
 
     let messages = vec![
-        Message::System { content: "You are a concise assistant.".into() },
-        Message::User { content: "What is 2 + 3?".into() },
+        Message::System {
+            content: "You are a concise assistant.".into(),
+        },
+        Message::User {
+            content: "What is 2 + 3?".into(),
+        },
         Message::Assistant {
             content: Some("5".into()),
             reasoning_content: None,

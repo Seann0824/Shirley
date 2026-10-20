@@ -90,10 +90,11 @@ pub(crate) fn clip_to_budget(text: &str, budget: usize) -> &str {
 )]
 pub async fn read(
     ctx: &ToolContext,
-    #[param(description = "file path, relative to the workspace root; absolute paths or paths escaping the workspace are not accepted")]
+    #[param(
+        description = "file path, relative to the workspace root; absolute paths or paths escaping the workspace are not accepted"
+    )]
     path: String,
-    #[param(description = "start line, 1-based; defaults to line 1")]
-    start_line: Option<usize>,
+    #[param(description = "start line, 1-based; defaults to line 1")] start_line: Option<usize>,
     #[param(description = "maximum number of lines to read, defaults to 200, hard cap 2000")]
     line_count: Option<usize>,
 ) -> Result<String, ToolError> {
@@ -117,17 +118,22 @@ pub(crate) async fn read_text_range(
 ) -> Result<String, ToolError> {
     let start_line = start_line.unwrap_or(1);
     if start_line == 0 {
-        return Err(ToolError::ArgumentsError("start line must be greater than 0".into()));
+        return Err(ToolError::ArgumentsError(
+            "start line must be greater than 0".into(),
+        ));
     }
     let requested = line_count.unwrap_or(DEFAULT_LINE_COUNT);
     if requested == 0 {
-        return Err(ToolError::ArgumentsError("line count must be greater than 0".into()));
+        return Err(ToolError::ArgumentsError(
+            "line count must be greater than 0".into(),
+        ));
     }
     let count = requested.min(MAX_LINE_COUNT);
 
     // 1. Path first goes through the root constraint: absolute paths and `..` escapes are both rejected here.
-    let workspace = WorkSpace::new(root.to_path_buf())
-        .map_err(|error| ToolError::ExecutionError(format!("workspace initialization failed: {error}")))?;
+    let workspace = WorkSpace::new(root.to_path_buf()).map_err(|error| {
+        ToolError::ExecutionError(format!("workspace initialization failed: {error}"))
+    })?;
     let resolved = workspace.resolve(path).map_err(|error| match error {
         // Escape / invalid path are both request-side problems: the model can succeed by changing the path or its spelling,
         // so classify as an argument error rather than an execution failure.
@@ -147,9 +153,9 @@ pub(crate) async fn read_text_range(
     }
 
     // 3. Directories / special files get clear guidance, rather than a baffling read failure.
-    let metadata = tokio::fs::metadata(&resolved)
-        .await
-        .map_err(|error| ToolError::ExecutionError(format!("failed to read metadata of {display}: {error}")))?;
+    let metadata = tokio::fs::metadata(&resolved).await.map_err(|error| {
+        ToolError::ExecutionError(format!("failed to read metadata of {display}: {error}"))
+    })?;
     if metadata.is_dir() {
         return Err(ToolError::ExecutionError(format!(
             "{display} is a directory; use bash's ls to list a directory, this tool reads files only"
@@ -162,14 +168,13 @@ pub(crate) async fn read_text_range(
     }
 
     // 4. Open and do binary sniffing.
-    let mut file = tokio::fs::File::open(&resolved)
-        .await
-        .map_err(|error| ToolError::ExecutionError(format!("failed to open file {display}: {error}")))?;
+    let mut file = tokio::fs::File::open(&resolved).await.map_err(|error| {
+        ToolError::ExecutionError(format!("failed to open file {display}: {error}"))
+    })?;
     let mut sniff = vec![0u8; BINARY_SNIFF_BYTES];
-    let sniffed = file
-        .read(&mut sniff)
-        .await
-        .map_err(|error| ToolError::ExecutionError(format!("failed to read file {display}: {error}")))?;
+    let sniffed = file.read(&mut sniff).await.map_err(|error| {
+        ToolError::ExecutionError(format!("failed to read file {display}: {error}"))
+    })?;
     if sniff[..sniffed].contains(&0) {
         return Err(ToolError::ExecutionError(format!(
             "{display} looks like a binary file; read refused"
@@ -177,7 +182,9 @@ pub(crate) async fn read_text_range(
     }
     file.seek(std::io::SeekFrom::Start(0))
         .await
-        .map_err(|error| ToolError::ExecutionError(format!("failed to seek in file {display}: {error}")))?;
+        .map_err(|error| {
+            ToolError::ExecutionError(format!("failed to seek in file {display}: {error}"))
+        })?;
 
     // 5. Skip to the start line.
     let mut reader = BufReader::new(file);
@@ -188,7 +195,9 @@ pub(crate) async fn read_text_range(
         let read = reader
             .read_until(b'\n', &mut buffer)
             .await
-            .map_err(|error| ToolError::ExecutionError(format!("failed to read file {display}: {error}")))?;
+            .map_err(|error| {
+                ToolError::ExecutionError(format!("failed to read file {display}: {error}"))
+            })?;
         if read == 0 {
             return Ok(format!(
                 "[{display} ended before line {start_line}; nothing to read]"
@@ -206,9 +215,12 @@ pub(crate) async fn read_text_range(
         if emitted >= count {
             // Line count reached; probe whether there is more content to decide whether to hint continuation.
             buffer.clear();
-            let read = reader.read_until(b'\n', &mut buffer).await.map_err(|error| {
-                ToolError::ExecutionError(format!("failed to read file {display}: {error}"))
-            })?;
+            let read = reader
+                .read_until(b'\n', &mut buffer)
+                .await
+                .map_err(|error| {
+                    ToolError::ExecutionError(format!("failed to read file {display}: {error}"))
+                })?;
             more_lines = read > 0;
             break;
         }
@@ -217,7 +229,9 @@ pub(crate) async fn read_text_range(
         let read = reader
             .read_until(b'\n', &mut buffer)
             .await
-            .map_err(|error| ToolError::ExecutionError(format!("failed to read file {display}: {error}")))?;
+            .map_err(|error| {
+                ToolError::ExecutionError(format!("failed to read file {display}: {error}"))
+            })?;
         if read == 0 {
             break;
         }
@@ -297,11 +311,22 @@ mod tests {
         // SAFETY: env var is changed serially within the test, not concurrently with other threads.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read(&ToolContext::new(), "a.txt".into(), None, None).await.unwrap();
+        let out = read(&ToolContext::new(), "a.txt".into(), None, None)
+            .await
+            .unwrap();
 
-        assert!(out.contains("     1 | first"), "should include line numbers: {out}");
-        assert!(out.contains("     3 | third"), "should read the third line: {out}");
-        assert!(!out.contains("truncated"), "should not hint truncation when content is complete: {out}");
+        assert!(
+            out.contains("     1 | first"),
+            "should include line numbers: {out}"
+        );
+        assert!(
+            out.contains("     3 | third"),
+            "should read the third line: {out}"
+        );
+        assert!(
+            !out.contains("truncated"),
+            "should not hint truncation when content is complete: {out}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -313,12 +338,26 @@ mod tests {
         std::fs::write(dir.join("b.txt"), body).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read(&ToolContext::new(), "b.txt".into(), Some(3), Some(2)).await.unwrap();
+        let out = read(&ToolContext::new(), "b.txt".into(), Some(3), Some(2))
+            .await
+            .unwrap();
 
-        assert!(out.contains("     3 | line3"), "should start at line 3: {out}");
-        assert!(out.contains("     4 | line4"), "should read two lines: {out}");
-        assert!(!out.contains("line5"), "should not exceed the line cap: {out}");
-        assert!(out.contains("start_line=5"), "should hint the continuation position: {out}");
+        assert!(
+            out.contains("     3 | line3"),
+            "should start at line 3: {out}"
+        );
+        assert!(
+            out.contains("     4 | line4"),
+            "should read two lines: {out}"
+        );
+        assert!(
+            !out.contains("line5"),
+            "should not exceed the line cap: {out}"
+        );
+        assert!(
+            out.contains("start_line=5"),
+            "should hint the continuation position: {out}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -335,7 +374,10 @@ mod tests {
             matches!(err, ToolError::ArgumentsError(_)),
             "escape should be an argument error: {err:?}"
         );
-        assert!(err.to_string().contains("outside workspace"), "should explain the escape: {err}");
+        assert!(
+            err.to_string().contains("outside workspace"),
+            "should explain the escape: {err}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -345,7 +387,9 @@ mod tests {
         let dir = temp_workspace("absolute");
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(&ToolContext::new(), "/etc/hosts".into(), None, None).await.unwrap_err();
+        let err = read(&ToolContext::new(), "/etc/hosts".into(), None, None)
+            .await
+            .unwrap_err();
         assert!(
             matches!(err, ToolError::ArgumentsError(_)),
             "absolute path should be rejected: {err:?}"
@@ -360,8 +404,13 @@ mod tests {
         std::fs::write(dir.join(".env"), "LOCAL_API_KEY=leak").unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(&ToolContext::new(), ".env".into(), None, None).await.unwrap_err();
-        assert!(err.to_string().contains("secret"), "should reject secret files: {err}");
+        let err = read(&ToolContext::new(), ".env".into(), None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("secret"),
+            "should reject secret files: {err}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -372,8 +421,13 @@ mod tests {
         std::fs::write(dir.join("bin"), [0u8, 1, 2, 3, 0, 255]).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(&ToolContext::new(), "bin".into(), None, None).await.unwrap_err();
-        assert!(err.to_string().contains("binary"), "should reject binary: {err}");
+        let err = read(&ToolContext::new(), "bin".into(), None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("binary"),
+            "should reject binary: {err}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -384,8 +438,13 @@ mod tests {
         std::fs::create_dir(dir.join("sub")).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(&ToolContext::new(), "sub".into(), None, None).await.unwrap_err();
-        assert!(err.to_string().contains("directory"), "should guide to use ls: {err}");
+        let err = read(&ToolContext::new(), "sub".into(), None, None)
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string().contains("directory"),
+            "should guide to use ls: {err}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -398,8 +457,14 @@ mod tests {
         std::fs::write(dir.join("big.txt"), big).unwrap();
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read(&ToolContext::new(), "big.txt".into(), None, None).await.unwrap();
-        assert!(out.contains("truncated"), "should hint truncation: length {}", out.len());
+        let out = read(&ToolContext::new(), "big.txt".into(), None, None)
+            .await
+            .unwrap();
+        assert!(
+            out.contains("truncated"),
+            "should hint truncation: length {}",
+            out.len()
+        );
         assert!(
             out.len() <= MAX_OUTPUT_BYTES + 200,
             "output should be bounded by the byte cap, actual {}",
@@ -419,14 +484,21 @@ mod tests {
 
         // Use the macro-generated `tool()` to verify the full path of registration + argument deserialization + invocation.
         let mut manager = ToolManager::new();
-        manager.register(read::tool()).expect("registration should succeed");
+        manager
+            .register(read::tool())
+            .expect("registration should succeed");
 
         let definition = manager
             .definitions()
             .into_iter()
             .find(|d| d.name == "read")
             .expect("should get the read definition");
-        assert!(manager.definitions().iter().all(|tool| tool.name != "read_file"));
+        assert!(
+            manager
+                .definitions()
+                .iter()
+                .all(|tool| tool.name != "read_file")
+        );
         assert!(
             definition.description.contains("line"),
             "the description should explain the read semantics: {}",
@@ -444,7 +516,10 @@ mod tests {
             .expect("invocation should succeed");
         let text = output.as_str().unwrap_or_default();
         assert!(text.contains("alpha"), "should read the content: {text}");
-        assert!(!text.contains("beta"), "should be bounded by the line count: {text}");
+        assert!(
+            !text.contains("beta"),
+            "should be bounded by the line count: {text}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -459,12 +534,20 @@ mod tests {
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         // Explicitly request far more lines than the cap; still only read up to the cap.
-        let out = read(&ToolContext::new(), "many.txt".into(), None, Some(MAX_LINE_COUNT * 2))
-            .await
-            .unwrap();
+        let out = read(
+            &ToolContext::new(),
+            "many.txt".into(),
+            None,
+            Some(MAX_LINE_COUNT * 2),
+        )
+        .await
+        .unwrap();
         let lines = out.lines().filter(|l| l.contains(" | ")).count();
         assert_eq!(lines, MAX_LINE_COUNT, "should read exactly the line cap");
-        assert!(out.contains("truncated"), "should hint there is more: {out}");
+        assert!(
+            out.contains("truncated"),
+            "should hint there is more: {out}"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

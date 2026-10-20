@@ -18,7 +18,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-use super::parse::{parse_skill, SkillMeta};
+use super::parse::{SkillMeta, parse_skill};
 
 /// skill directories relative to the project root (in priority order, first scanned wins).
 const PROJECT_SKILL_DIRS: &[&str] = &[".agents/skills", ".claude/skills"];

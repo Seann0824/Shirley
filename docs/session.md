@@ -317,7 +317,7 @@ the application layer**)
 > `store.load()` then `build_agent(log)`, and persistence is changed to application-layer event-driven
 > (see sections 2 / 3). The following paragraph is the **transitional semantics of the single-session
 > era**, kept as a historical record; for the current implementation see `SessionManager::switch_to`
-> in `src/interface/session.rs`.
+> in `src/interface/session/mod.rs`.
 
 `Agent::switch_session(Arc<dyn SessionStore>)` was once the only newly added SDK public method,
 symmetric with `/model`'s `set_model`: the model config, system prompt, working directory, tools, and

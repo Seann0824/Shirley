@@ -122,8 +122,9 @@ pub fn count_content(content: &message::Content) -> u64 {
 /// messages with reasoning would be systematically underestimated.
 pub fn count_message(message: &message::Message) -> u64 {
     match message {
-        message::Message::System { content }
-        | message::Message::ContextSummary { content } => count_text(content) + ROLE_OVERHEAD,
+        message::Message::System { content } | message::Message::ContextSummary { content } => {
+            count_text(content) + ROLE_OVERHEAD
+        }
         message::Message::User { content } => count_content(content),
         message::Message::Assistant {
             content,
@@ -406,7 +407,10 @@ mod tests {
 
         // Repeat the same observation; it keeps approaching 2.0 without overshooting.
         let factor = counter.calibrate(2000, 1000);
-        assert!(factor > 1.3 && factor < 2.0, "should keep rising without overshooting: {factor}");
+        assert!(
+            factor > 1.3 && factor < 2.0,
+            "should keep rising without overshooting: {factor}"
+        );
     }
 
     /// Invalid observations (estimate 0 / real 0) must not pollute `factor`.

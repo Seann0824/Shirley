@@ -90,7 +90,7 @@ to the same event stream, not the same rendering.**
    }
    ```
 2. **Slash-command ownership** (`/login` `/model` `/session` `/rewind` in
-   `src/interface/command.rs`). These are application-level behaviors that the desktop also needs.
+   `src/interface/tui/command.rs`). These are application-level behaviors that the desktop also needs.
    **Do not share them in the first step**: the desktop first does only rendering and send/receive,
    and the commands are sunk into a shared `commands` module in a later milestone.
 
@@ -257,7 +257,7 @@ code, `my-4`/`space-y-4` large spacing), and it depends on a set of **shadcn-sty
 Shirley's `tokens.css` does not fully provide. So "desktop markdown is less elegant than the TUI" is
 a **two-layer problem**, and 4.3.1 only fixed the first layer. This subsection fixes the second
 layer: **no longer chasing pixel-for-pixel parity with shiwen, but directly benchmarking the TUI's
-(`src/interface/markdown.rs`) typography and color scheme.**
+(`src/interface/tui/markdown.rs`) typography and color scheme.**
 
 Three concrete bugs (all fixed):
 

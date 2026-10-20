@@ -17,7 +17,7 @@ use std::sync::Arc;
 use shirley_agent_sdk::{Tool, ToolContext, ToolDefinition, ToolError, ToolFuture};
 
 use crate::memory::index::Scored;
-use crate::memory::provider::{status_label, type_label, MemoryRuntime};
+use crate::memory::provider::{MemoryRuntime, status_label, type_label};
 
 /// Default number of results.
 const DEFAULT_LIMIT: usize = 5;
@@ -104,7 +104,11 @@ fn render_hits(query: &str, hits: &[Scored]) -> String {
     if hits.is_empty() {
         return format!("No memories matched \"{query}\".");
     }
-    let mut out = format!("{} memor{} matched \"{query}\":\n", hits.len(), if hits.len() == 1 { "y" } else { "ies" });
+    let mut out = format!(
+        "{} memor{} matched \"{query}\":\n",
+        hits.len(),
+        if hits.len() == 1 { "y" } else { "ies" }
+    );
     for hit in hits {
         let entry = &hit.entry;
         out.push_str(&format!(
@@ -176,16 +180,30 @@ mod tests {
             ))
             .unwrap();
         store
-            .write_entry(&entry("fact-db", "database", EntryType::Fact, "The project uses Postgres."))
+            .write_entry(&entry(
+                "fact-db",
+                "database",
+                EntryType::Fact,
+                "The project uses Postgres.",
+            ))
             .unwrap();
         let runtime = Arc::new(MemoryRuntime::new(store));
         let tool = RecallTool::new(runtime);
         let input = serde_json::json!({ "query": "rust error style" });
         let out = tool.invoke(input, ToolContext::new()).await.unwrap();
         let text = out.as_str().unwrap();
-        assert!(text.contains("thiserror"), "should contain the matching body: {text}");
-        assert!(text.contains("[preference]"), "should contain the type label: {text}");
-        assert!(!text.contains("Postgres"), "unrelated entries should not appear: {text}");
+        assert!(
+            text.contains("thiserror"),
+            "should contain the matching body: {text}"
+        );
+        assert!(
+            text.contains("[preference]"),
+            "should contain the type label: {text}"
+        );
+        assert!(
+            !text.contains("Postgres"),
+            "unrelated entries should not appear: {text}"
+        );
     }
 
     #[tokio::test]
@@ -203,14 +221,22 @@ mod tests {
         let root = tmp("nomatch");
         let store = MemoryStore::new(&root);
         store
-            .write_entry(&entry("fact-db", "database", EntryType::Fact, "The project uses Postgres."))
+            .write_entry(&entry(
+                "fact-db",
+                "database",
+                EntryType::Fact,
+                "The project uses Postgres.",
+            ))
             .unwrap();
         let runtime = Arc::new(MemoryRuntime::new(store));
         let tool = RecallTool::new(runtime);
         let input = serde_json::json!({ "query": "quantum chromodynamics" });
         let out = tool.invoke(input, ToolContext::new()).await.unwrap();
         let text = out.as_str().unwrap();
-        assert!(text.contains("No memories matched"), "should give an explicit empty-result message: {text}");
+        assert!(
+            text.contains("No memories matched"),
+            "should give an explicit empty-result message: {text}"
+        );
     }
 
     #[tokio::test]
@@ -232,6 +258,9 @@ mod tests {
         let input = serde_json::json!({ "query": "rust", "limit": 2 });
         let out = tool.invoke(input, ToolContext::new()).await.unwrap();
         let text = out.as_str().unwrap();
-        assert!(text.contains("2 memories matched"), "should be capped by limit: {text}");
+        assert!(
+            text.contains("2 memories matched"),
+            "should be capped by limit: {text}"
+        );
     }
 }

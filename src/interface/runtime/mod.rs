@@ -33,7 +33,7 @@ use serde::Serialize;
 use shirley_agent_sdk::{
     Agent, AgentEvent, Content, ContentPart, ImagePart, Message, RunResult, StopReason,
 };
-use tokio::sync::{broadcast, oneshot, Mutex};
+use tokio::sync::{Mutex, broadcast, oneshot};
 
 use super::desktop::wire::{AgentEventWire, SessionSnapshotWire, StateSnapshotWire, TaskViewWire};
 use crate::bootstrap::AgentFactory;
@@ -83,7 +83,11 @@ pub fn route_key(project: &str, session: &str) -> String {
 }
 
 impl ProjectRuntimeManager {
-    pub fn new(registry: Arc<Mutex<ProjectRegistry>>, chat_root: Option<PathBuf>, sink: EventSink) -> Self {
+    pub fn new(
+        registry: Arc<Mutex<ProjectRegistry>>,
+        chat_root: Option<PathBuf>,
+        sink: EventSink,
+    ) -> Self {
         Self {
             registry,
             runtimes: Arc::new(Mutex::new(HashMap::new())),
@@ -113,7 +117,10 @@ impl ProjectRuntimeManager {
 
     /// Get (lazily loading if needed) the given project's runtime and refresh its
     /// `last_opened_ms`.
-    pub async fn ensure_runtime(&self, project: &str) -> Result<Arc<Mutex<ProjectRuntime>>, String> {
+    pub async fn ensure_runtime(
+        &self,
+        project: &str,
+    ) -> Result<Arc<Mutex<ProjectRuntime>>, String> {
         if let Some(rt) = self.runtimes.lock().await.get(project).cloned() {
             if project != CHAT_PROJECT_ID {
                 self.registry.lock().await.touch(project);
@@ -255,7 +262,11 @@ impl ProjectRuntimeManager {
             .ok_or_else(|| "no active session".to_owned())
     }
 
-    pub async fn new_session(&self, project: &str, title: Option<String>) -> Result<String, String> {
+    pub async fn new_session(
+        &self,
+        project: &str,
+        title: Option<String>,
+    ) -> Result<String, String> {
         let runtime = self.ensure_runtime(project).await?;
         let mut guard = runtime.lock().await;
         guard.sessions.create_new(title.as_deref())
@@ -390,7 +401,11 @@ impl ProjectRuntimeManager {
                     .map(str::to_owned)
                     .ok_or_else(|| "current session is not yet persisted".to_owned())?,
             };
-            guard.sessions.session(&session_name).ok_or("session not found")?.model_availability()?;
+            guard
+                .sessions
+                .session(&session_name)
+                .ok_or("session not found")?
+                .model_availability()?;
             let agent = guard
                 .sessions
                 .begin_turn(&session_name, text.clone())
@@ -473,9 +488,9 @@ impl ProjectRuntimeManager {
 
             let title_input = matches!(&terminal, Ok(AgentEvent::Finished(result))
                 if matches!(result.stop_reason, StopReason::Completed))
-                .then(|| first_user_message(agent.messages()))
-                .flatten()
-                .map(|first| (agent.model_config().clone(), first));
+            .then(|| first_user_message(agent.messages()))
+            .flatten()
+            .map(|first| (agent.model_config().clone(), first));
             let messages = agent.finish_interrupted_turn();
             cancels.lock().await.remove(&key);
 
@@ -526,13 +541,31 @@ impl ProjectRuntimeManager {
         &self,
         project: &str,
         session: &str,
-    ) -> Result<(broadcast::Receiver<Result<AgentEvent, String>>, SessionSnapshotWire), String> {
-        self.subscribe_with_cursor(project, session, || 0).await.map(|(rx, snapshot, _)| (rx, snapshot))
+    ) -> Result<
+        (
+            broadcast::Receiver<Result<AgentEvent, String>>,
+            SessionSnapshotWire,
+        ),
+        String,
+    > {
+        self.subscribe_with_cursor(project, session, || 0)
+            .await
+            .map(|(rx, snapshot, _)| (rx, snapshot))
     }
 
     pub async fn subscribe_with_cursor(
-        &self, project: &str, session: &str, cursor: impl FnOnce() -> u64,
-    ) -> Result<(broadcast::Receiver<Result<AgentEvent, String>>, SessionSnapshotWire, u64), String> {
+        &self,
+        project: &str,
+        session: &str,
+        cursor: impl FnOnce() -> u64,
+    ) -> Result<
+        (
+            broadcast::Receiver<Result<AgentEvent, String>>,
+            SessionSnapshotWire,
+            u64,
+        ),
+        String,
+    > {
         let runtime = self.ensure_runtime(project).await?;
         let guard = runtime.lock().await;
         let rx = guard
@@ -544,10 +577,7 @@ impl ProjectRuntimeManager {
             .snapshot(session)
             .ok_or_else(|| format!("session not found: {session}"))?;
         let running = guard.sessions.is_running(session);
-        let todo = guard
-            .sessions
-            .session(session)
-            .and_then(|s| s.todo_view());
+        let todo = guard.sessions.session(session).and_then(|s| s.todo_view());
         let snapshot = SessionSnapshotWire::new(session.to_owned(), items, running, todo);
         Ok((rx, snapshot, cursor()))
     }
@@ -559,7 +589,9 @@ impl ProjectRuntimeManager {
     pub async fn model_name(&self, project: &str) -> Result<String, String> {
         let runtime = self.ensure_runtime(project).await?;
         let guard = runtime.lock().await;
-        if let Some(key) = &guard.sessions.active().model_selection { return Ok(key.clone()); }
+        if let Some(key) = &guard.sessions.active().model_selection {
+            return Ok(key.clone());
+        }
         Ok(guard
             .sessions
             .active_model_name()
@@ -581,12 +613,22 @@ impl ProjectRuntimeManager {
             .collect())
     }
 
-    pub async fn set_model(&self, project: &str, model: &str, target_session: Option<&str>) -> Result<(), String> {
+    pub async fn set_model(
+        &self,
+        project: &str,
+        model: &str,
+        target_session: Option<&str>,
+    ) -> Result<(), String> {
         let runtime = self.ensure_runtime(project).await?;
         let (factory, session_name) = {
             let guard = runtime.lock().await;
-            (guard.factory.clone(), target_session.map(str::to_string)
-                .or_else(|| guard.sessions.active_name().map(str::to_string)).ok_or("no active session")?)
+            (
+                guard.factory.clone(),
+                target_session
+                    .map(str::to_string)
+                    .or_else(|| guard.sessions.active_name().map(str::to_string))
+                    .ok_or("no active session")?,
+            )
         };
         let entry = factory
             .model_catalog
@@ -594,11 +636,16 @@ impl ProjectRuntimeManager {
             .await
             .into_iter()
             .find(|entry| entry.value == model);
-        if model.starts_with("provider:") && entry.is_none() { return Err("服务商或模型已被移除，请刷新列表".into()); }
+        if model.starts_with("provider:") && entry.is_none() {
+            return Err("服务商或模型已被移除，请刷新列表".into());
+        }
         // Resolve the full model config through the project factory (tool protocol etc.).
         let config = entry.as_ref().map(|entry| factory.model_config_for(entry));
         let mut guard = runtime.lock().await;
-        let session = guard.sessions.session_mut(&session_name).ok_or("session no longer exists")?;
+        let session = guard
+            .sessions
+            .session_mut(&session_name)
+            .ok_or("session no longer exists")?;
         let agent = session
             .agent
             .as_ref()
@@ -609,9 +656,12 @@ impl ProjectRuntimeManager {
                 let mut config = agent.model_config().clone();
                 config.model = model.into();
                 config
-            },
+            }
         };
-        let key = entry.as_ref().filter(|e| e.configured.is_some()).map(|e| e.value.clone());
+        let key = entry
+            .as_ref()
+            .filter(|e| e.configured.is_some())
+            .map(|e| e.value.clone());
         session.select_model(config, key)
     }
 
@@ -619,7 +669,11 @@ impl ProjectRuntimeManager {
     // Workspace files / skills
     // -----------------------------------------------------------------------
 
-    pub async fn search_files(&self, project: &str, query: String) -> Result<Vec<FileEntryWire>, String> {
+    pub async fn search_files(
+        &self,
+        project: &str,
+        query: String,
+    ) -> Result<Vec<FileEntryWire>, String> {
         let runtime = self.ensure_runtime(project).await?;
         let root = runtime.lock().await.factory.working_dir.clone();
         let entries = tokio::task::spawn_blocking(move || {
@@ -656,7 +710,12 @@ impl ProjectRuntimeManager {
             .collect())
     }
 
-    pub async fn activate_skill(&self, project: &str, session: &str, name: &str) -> Result<(), String> {
+    pub async fn activate_skill(
+        &self,
+        project: &str,
+        session: &str,
+        name: &str,
+    ) -> Result<(), String> {
         let runtime = self.ensure_runtime(project).await?;
         let guard = runtime.lock().await;
         let session_ref = guard
@@ -692,7 +751,11 @@ impl ProjectRuntimeManager {
         Ok(history_from_messages(agent.messages()))
     }
 
-    async fn subagent_manager(&self, project: &str, session: &str) -> Result<Arc<SubagentManager>, String> {
+    async fn subagent_manager(
+        &self,
+        project: &str,
+        session: &str,
+    ) -> Result<Arc<SubagentManager>, String> {
         let runtime = self.ensure_runtime(project).await?;
         let guard = runtime.lock().await;
         guard
@@ -702,7 +765,11 @@ impl ProjectRuntimeManager {
             .ok_or_else(|| format!("session has no subagents: {session}"))
     }
 
-    pub async fn list_subagents(&self, project: &str, session: &str) -> Result<Vec<SubagentSummaryWire>, String> {
+    pub async fn list_subagents(
+        &self,
+        project: &str,
+        session: &str,
+    ) -> Result<Vec<SubagentSummaryWire>, String> {
         let manager = self.subagent_manager(project, session).await?;
         Ok(manager
             .list()
@@ -711,12 +778,22 @@ impl ProjectRuntimeManager {
             .collect())
     }
 
-    pub async fn load_subagent(&self, project: &str, session: &str, id: &str) -> Result<Vec<HistoryMessageWire>, String> {
+    pub async fn load_subagent(
+        &self,
+        project: &str,
+        session: &str,
+        id: &str,
+    ) -> Result<Vec<HistoryMessageWire>, String> {
         let manager = self.subagent_manager(project, session).await?;
         Ok(history_from_messages(&manager.load_transcript(id)))
     }
 
-    pub async fn cancel_subagent(&self, project: &str, session: &str, id: &str) -> Result<(), String> {
+    pub async fn cancel_subagent(
+        &self,
+        project: &str,
+        session: &str,
+        id: &str,
+    ) -> Result<(), String> {
         let manager = self.subagent_manager(project, session).await?;
         let _ = manager.cancel(id);
         Ok(())

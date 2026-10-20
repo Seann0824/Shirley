@@ -23,7 +23,7 @@ use crate::sandbox::spec::{NetworkPolicy, SandboxSpec};
 
 // Define an empty struct (no fields) — it is just a "marker" and needs to store no data.
 // derive(Default) lets ProcessBackend::default() create it.
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct ProcessBackend;
 
 /// Retain at most 32 KiB from each pipe. A line limit cannot bound minified JS or

@@ -266,11 +266,10 @@ impl FileSettings {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let text = toml::to_string_pretty(self)
-            .map_err(|e| SettingsError::Parse {
-                path: path.to_path_buf(),
-                message: e.to_string(),
-            })?;
+        let text = toml::to_string_pretty(self).map_err(|e| SettingsError::Parse {
+            path: path.to_path_buf(),
+            message: e.to_string(),
+        })?;
         let tmp = path.with_extension("toml.tmp");
         std::fs::write(&tmp, text)?;
         std::fs::rename(&tmp, path)?;
@@ -350,10 +349,7 @@ impl Settings {
         let env_layer = env_layer(env);
 
         // Lowest priority first, overridden layer by layer. The file layers take their `[provider]` table; the env layer is already a table.
-        let merged = merge_all([
-            global.as_ref().map(|s| s.provider.clone()),
-            Some(env_layer),
-        ]);
+        let merged = merge_all([global.as_ref().map(|s| s.provider.clone()), Some(env_layer)]);
 
         // The compression strategy is likewise overridden layer by layer (the env layer has no such key, only the global file layer).
         let mut compression = CompressionSettings::default();
@@ -383,7 +379,8 @@ impl Settings {
 
     /// Convenience entry point: uses the real `config_dir` and process env vars.
     pub fn load_default(workspace_root: &Path) -> Result<Self, SettingsError> {
-        let paths = crate::storage::StoragePaths::new(crate::storage::global_root(), workspace_root)?;
+        let paths =
+            crate::storage::StoragePaths::new(crate::storage::global_root(), workspace_root)?;
         paths.migrate()?;
         Self::load(Some(&crate::storage::config_path()), &|key| {
             std::env::var(key).ok()
@@ -607,7 +604,8 @@ mod tests {
     }
 
     fn temp_root(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("shirley_settings_{tag}_{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("shirley_settings_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -616,14 +614,18 @@ mod tests {
     #[test]
     fn env_supplies_base_url_and_defaults_fill_rest() {
         let root = temp_root("env_only");
-        let settings = Settings::load(Some(&root.join("config.toml")),
+        let settings = Settings::load(
+            Some(&root.join("config.toml")),
             &env_of(&[("LOCAL_BASE_URL", "http://x/v1/chat/completions")]),
         )
         .unwrap();
         assert_eq!(settings.base_url, "http://x/v1/chat/completions");
         assert_eq!(settings.protocol, ModelProtocol::ChatCompletions);
         assert_eq!(settings.model, DEFAULT_MODEL);
-        assert_eq!(settings.context_window_tokens, DEFAULT_CONTEXT_WINDOW_TOKENS);
+        assert_eq!(
+            settings.context_window_tokens,
+            DEFAULT_CONTEXT_WINDOW_TOKENS
+        );
         assert_eq!(settings.api_key, None);
         assert_eq!(settings.max_steps, 64);
     }
@@ -678,8 +680,11 @@ mod tests {
     #[test]
     fn present_base_url_is_configured() {
         let root = temp_root("configured");
-        let settings =
-            Settings::load(Some(&root.join("config.toml")), &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+        let settings = Settings::load(
+            Some(&root.join("config.toml")),
+            &env_of(&[("LOCAL_BASE_URL", "http://x")]),
+        )
+        .unwrap();
         assert!(settings.is_configured());
     }
 
@@ -718,14 +723,18 @@ mod tests {
         )
         .unwrap();
 
-        let settings = Settings::load(Some(&root.join("config.toml")),
+        let settings = Settings::load(
+            Some(&root.join("config.toml")),
             &env_of(&[
                 ("LOCAL_BASE_URL", "http://env"),
                 ("LOCAL_MODEL", "env-model"),
             ]),
         )
         .unwrap();
-        assert_eq!(settings.base_url, "http://env", "env should override the file");
+        assert_eq!(
+            settings.base_url, "http://env",
+            "env should override the file"
+        );
         assert_eq!(settings.model, "env-model");
         // Keys present in the file but not in env should be retained.
         assert_eq!(settings.api_key.as_deref(), Some("file-key"));
@@ -757,13 +766,17 @@ mod tests {
         )
         .unwrap();
         let err = Settings::load(Some(&root.join("config.toml")), &env_of(&[])).unwrap_err();
-        assert!(matches!(err, SettingsError::Parse { .. }), "a typo'd key should error: {err}");
+        assert!(
+            matches!(err, SettingsError::Parse { .. }),
+            "a typo'd key should error: {err}"
+        );
     }
 
     #[test]
     fn zero_context_window_is_rejected() {
         let root = temp_root("zero_ctx");
-        let err = Settings::load(Some(&root.join("config.toml")),
+        let err = Settings::load(
+            Some(&root.join("config.toml")),
             &env_of(&[
                 ("LOCAL_BASE_URL", "http://x"),
                 ("LOCAL_CONTEXT_WINDOW_TOKENS", "0"),
@@ -776,7 +789,8 @@ mod tests {
     #[test]
     fn unknown_protocol_is_rejected() {
         let root = temp_root("bad_proto");
-        let err = Settings::load(Some(&root.join("config.toml")),
+        let err = Settings::load(
+            Some(&root.join("config.toml")),
             &env_of(&[("LOCAL_BASE_URL", "http://x"), ("LOCAL_PROTOCOL", "gemini")]),
         )
         .unwrap_err();
@@ -854,8 +868,11 @@ mod tests {
         let ws_dir = root.clone();
         std::fs::create_dir_all(&ws_dir).unwrap();
         std::fs::write(ws_dir.join("config.toml"), "   \n").unwrap();
-        let settings =
-            Settings::load(Some(&root.join("config.toml")), &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+        let settings = Settings::load(
+            Some(&root.join("config.toml")),
+            &env_of(&[("LOCAL_BASE_URL", "http://x")]),
+        )
+        .unwrap();
         assert_eq!(settings.base_url, "http://x");
     }
 
@@ -921,16 +938,22 @@ mod tests {
     #[test]
     fn memory_table_absent_is_default() {
         let root = temp_root("memory_absent");
-        let settings =
-            Settings::load(Some(&root.join("config.toml")), &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+        let settings = Settings::load(
+            Some(&root.join("config.toml")),
+            &env_of(&[("LOCAL_BASE_URL", "http://x")]),
+        )
+        .unwrap();
         assert_eq!(settings.memory, MemorySettings::default());
     }
 
     #[test]
     fn thinking_defaults_to_true_and_effort_to_low() {
         let root = temp_root("thinking_default");
-        let settings =
-            Settings::load(Some(&root.join("config.toml")), &env_of(&[("LOCAL_BASE_URL", "http://x")])).unwrap();
+        let settings = Settings::load(
+            Some(&root.join("config.toml")),
+            &env_of(&[("LOCAL_BASE_URL", "http://x")]),
+        )
+        .unwrap();
         assert!(settings.thinking, "default should enable thinking");
         assert_eq!(settings.reasoning_effort, "low");
         assert_eq!(settings.extra_body, None);
@@ -955,5 +978,4 @@ mod tests {
             Some(serde_json::json!({ "budget_tokens": 2048 }))
         );
     }
-
 }

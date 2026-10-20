@@ -32,13 +32,26 @@ pub struct ListItem {
 /// TUI block-level AST. The render layer recognizes only these blocks and no longer cares about markdown's raw syntax.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Block {
-    Heading { level: u8, lines: Vec<StyledLine> },
+    Heading {
+        level: u8,
+        lines: Vec<StyledLine>,
+    },
     Paragraph(Vec<StyledLine>),
-    Code { language: Option<String>, lines: Vec<String> },
-    List { ordered: bool, start: u64, items: Vec<ListItem> },
+    Code {
+        language: Option<String>,
+        lines: Vec<String>,
+    },
+    List {
+        ordered: bool,
+        start: u64,
+        items: Vec<ListItem>,
+    },
     Quote(Vec<Block>),
     Rule,
-    Table { alignments: Vec<Alignment>, rows: Vec<Vec<StyledLine>> },
+    Table {
+        alignments: Vec<Alignment>,
+        rows: Vec<Vec<StyledLine>>,
+    },
     Html(String),
 }
 
@@ -149,7 +162,9 @@ where
         while let Some(event) = self.events.next() {
             match event {
                 Event::TaskListMarker(checked) => task = Some(checked),
-                Event::Start(Tag::Paragraph) => blocks.push(Block::Paragraph(self.parse_inline(None))),
+                Event::Start(Tag::Paragraph) => {
+                    blocks.push(Block::Paragraph(self.parse_inline(None)))
+                }
                 Event::Start(Tag::List(start)) => blocks.push(self.parse_list(start)),
                 Event::Start(Tag::CodeBlock(kind)) => blocks.push(self.parse_code_block(kind)),
                 Event::Start(Tag::BlockQuote(_)) => blocks.push(Block::Quote(self.parse_blocks())),
@@ -223,11 +238,7 @@ where
 
     /// Parse inline content. Maintains a style stack to handle nesting like Emphasis/Strong/Link,
     /// returning on a block-level end tag (the end tag is left for the caller to consume).
-    fn parse_inline_with_base(
-        &mut self,
-        first: Option<Event<'a>>,
-        base: Style,
-    ) -> Vec<StyledLine> {
+    fn parse_inline_with_base(&mut self, first: Option<Event<'a>>, base: Style) -> Vec<StyledLine> {
         let mut lines: Vec<StyledLine> = vec![Vec::new()];
         let mut style_stack = vec![base];
         let mut current = base;
@@ -401,7 +412,13 @@ fn heading_level(level: HeadingLevel) -> u8 {
 // Rendering: Block -> ratatui Line
 // ---------------------------------------------------------------------------
 
-fn render_blocks(blocks: &[Block], base: Style, indent: usize, width: usize, out: &mut Vec<Line<'static>>) {
+fn render_blocks(
+    blocks: &[Block],
+    base: Style,
+    indent: usize,
+    width: usize,
+    out: &mut Vec<Line<'static>>,
+) {
     for block in blocks {
         match block {
             Block::Heading { lines, .. } => {
@@ -432,7 +449,11 @@ fn render_blocks(blocks: &[Block], base: Style, indent: usize, width: usize, out
                 }
                 out.push(Line::default());
             }
-            Block::List { ordered, start, items } => {
+            Block::List {
+                ordered,
+                start,
+                items,
+            } => {
                 for (index, item) in items.iter().enumerate() {
                     let marker = list_marker(item.task, *ordered, *start + index as u64);
                     render_list_item(item, &marker, indent, width, base, out);
@@ -443,10 +464,7 @@ fn render_blocks(blocks: &[Block], base: Style, indent: usize, width: usize, out
                 let mut inner_lines = Vec::new();
                 render_blocks(inner, base, 0, width, &mut inner_lines);
                 for line in inner_lines {
-                    let mut spans = vec![
-                        Span::raw(" ".repeat(indent)),
-                        Span::styled("│ ", dim()),
-                    ];
+                    let mut spans = vec![Span::raw(" ".repeat(indent)), Span::styled("│ ", dim())];
                     spans.extend(line.spans.into_iter().map(|mut span| {
                         span.style = span.style.add_modifier(Modifier::ITALIC);
                         span
@@ -491,7 +509,13 @@ fn render_list_item(
     // Render block by block: the first block shares the marker's line, and later blocks (including nested lists) also hang under the hanging indent.
     for block in &item.blocks {
         let mut produced = Vec::new();
-        render_blocks(std::slice::from_ref(block), base, 0, content_width, &mut produced);
+        render_blocks(
+            std::slice::from_ref(block),
+            base,
+            0,
+            content_width,
+            &mut produced,
+        );
         while produced.last().is_some_and(|line| line.spans.is_empty()) {
             produced.pop();
         }
@@ -776,7 +800,10 @@ mod tests {
     fn code_block_keeps_lines_and_language() {
         let text = render_text("```rust\nlet x = 1;\n```\n");
         assert!(text[0].contains("rust"), "{text:?}");
-        assert!(text.iter().any(|line| line.contains("let x = 1;")), "{text:?}");
+        assert!(
+            text.iter().any(|line| line.contains("let x = 1;")),
+            "{text:?}"
+        );
     }
 
     #[test]
@@ -808,11 +835,16 @@ mod tests {
 
     #[test]
     fn ordered_list_wrap_aligns_after_number() {
-        let text = render_text("1. An ordered list wrap alignment test with content long enough to trigger wrapping so the continuation aligns\n");
+        let text = render_text(
+            "1. An ordered list wrap alignment test with content long enough to trigger wrapping so the continuation aligns\n",
+        );
         assert!(text[0].starts_with("1. "), "{text:?}");
         assert!(text.len() > 2, "should wrap: {text:?}");
         for line in text[1..].iter().filter(|line| !line.is_empty()) {
-            assert!(line.starts_with("   "), "continuation should align after number: {text:?}");
+            assert!(
+                line.starts_with("   "),
+                "continuation should align after number: {text:?}"
+            );
         }
     }
 
@@ -828,7 +860,11 @@ mod tests {
     #[test]
     fn blockquote_has_bar() {
         let text = render_text("> quoted content\n");
-        assert!(text.iter().any(|line| line.contains("│") && line.contains("quoted content")), "{text:?}");
+        assert!(
+            text.iter()
+                .any(|line| line.contains("│") && line.contains("quoted content")),
+            "{text:?}"
+        );
     }
 
     #[test]
@@ -847,7 +883,10 @@ mod tests {
     #[test]
     fn table_renders_header_separator() {
         let text = render_text("| A | B |\n|---|---|\n| 1 | 2 |\n");
-        assert!(text.iter().any(|line| line.contains("A") && line.contains("B")));
+        assert!(
+            text.iter()
+                .any(|line| line.contains("A") && line.contains("B"))
+        );
         assert!(text.iter().any(|line| line.contains('┼')));
     }
 }

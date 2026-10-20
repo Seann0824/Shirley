@@ -65,7 +65,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // The provider's text is appended as a system message on every request, without being
     // stored in the conversation history.
-    let result = agent.run("What is the second step in my task list?").await?;
+    let result = agent
+        .run("What is the second step in my task list?")
+        .await?;
     println!("{:?}", result.messages.last());
     Ok(())
 }

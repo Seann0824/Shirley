@@ -21,7 +21,7 @@ pub enum ModelProtocol {
     AnthropicMessages,
 }
 
-#[derive(bon::Builder, Clone)]
+#[derive(bon::Builder, Clone, Debug)]
 pub struct ModelConfig {
     pub protocol: ModelProtocol,
     #[builder(into)]
@@ -76,14 +76,19 @@ pub struct ModelConfig {
 
 #[derive(Debug)]
 pub enum AdapterEvent {
-    Retrying { attempt: usize, reason: String },
+    Retrying {
+        attempt: usize,
+        reason: String,
+    },
     ReasoningDelta(String),
     ContentDelta(String),
     /// The request carried images but they were silently dropped because the model cannot
     /// read them (declared unsupported, or the provider rejected image input). The request is
     /// re-sent as text; the UI turns this into a neutral, human-readable notice. This never
     /// surfaces a "does it support images" capability question to the user.
-    ImagesDropped { reason: String },
+    ImagesDropped {
+        reason: String,
+    },
     Finished(ModelResponse),
 }
 
@@ -186,11 +191,21 @@ mod session_header_tests {
     #[test]
     fn sends_session_identity_only_to_loopback_endpoints() {
         let mut local = HeaderMap::new();
-        attach_local_session_header(&mut local, "http://127.0.0.1:8788/v1/chat/completions", Some("session-1")).unwrap();
+        attach_local_session_header(
+            &mut local,
+            "http://127.0.0.1:8788/v1/chat/completions",
+            Some("session-1"),
+        )
+        .unwrap();
         assert_eq!(local.get("x-shirley-session-id").unwrap(), "session-1");
 
         let mut remote = HeaderMap::new();
-        attach_local_session_header(&mut remote, "https://api.example.com/v1/chat/completions", Some("session-1")).unwrap();
+        attach_local_session_header(
+            &mut remote,
+            "https://api.example.com/v1/chat/completions",
+            Some("session-1"),
+        )
+        .unwrap();
         assert!(remote.get("x-shirley-session-id").is_none());
     }
 }

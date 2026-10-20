@@ -38,16 +38,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AgentEvent::Retrying { attempt, reason } => eprintln!("[retry {attempt}] {reason}"),
             AgentEvent::ReasoningDelta(text) => print!("[reasoning] {text}"),
             AgentEvent::ContentDelta(text) => print!("{text}"),
-            AgentEvent::ToolStarted { name, arguments, .. } => {
+            AgentEvent::ToolStarted {
+                name, arguments, ..
+            } => {
                 println!("\n-> {name}({arguments})");
             }
-            AgentEvent::ToolFinished { name, ok, output, .. } => {
+            AgentEvent::ToolFinished {
+                name, ok, output, ..
+            } => {
                 println!("<- {name} ok={ok}: {output}");
             }
             AgentEvent::Usage(usage) => {
-                println!("\n[usage] in={} out={}", usage.input_tokens, usage.output_tokens);
+                println!(
+                    "\n[usage] in={} out={}",
+                    usage.input_tokens, usage.output_tokens
+                );
             }
-            AgentEvent::ContextUsage { used_tokens, limit_tokens } => {
+            AgentEvent::ContextUsage {
+                used_tokens,
+                limit_tokens,
+            } => {
                 println!("[context] {used_tokens}/{limit_tokens}");
             }
             AgentEvent::Notice(text) => println!("[notice] {text}"),
@@ -55,7 +65,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AgentEvent::CompressionFinished => println!("[compaction] finished"),
             AgentEvent::MessageAdded(_) => {}
             AgentEvent::Finished(result) => {
-                println!("\n[finished] {:?}, {} new messages", result.stop_reason, result.messages.len());
+                println!(
+                    "\n[finished] {:?}, {} new messages",
+                    result.stop_reason,
+                    result.messages.len()
+                );
             }
         }
     }

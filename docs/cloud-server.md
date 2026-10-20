@@ -18,9 +18,9 @@ transport layers over it — which is now the landed state (see the status block
 >
 > | Piece | Where it lives |
 > | --- | --- |
-> | Transport-agnostic core `ProjectRuntimeManager` | `src/interface/runtime.rs` (~966 lines: registry + lazy `runtimes` + `cancels` + `EventSink`; all project / session / run / model / file / skill / subagent commands + wire DTOs) |
+> | Transport-agnostic core `ProjectRuntimeManager` | `src/interface/runtime/mod.rs` (~966 lines: registry + lazy `runtimes` + `cancels` + `EventSink`; all project / session / run / model / file / skill / subagent commands + wire DTOs) |
 > | Thin Tauri transport | `src/interface/desktop/shell.rs` (~474 lines: 27 `#[tauri::command]`s delegate to the core; per-session `publish` pump) |
-> | Thin HTTP + SSE transport | `src/interface/server.rs` (~437 lines: `POST /api/cmd/{name}`, `GET /api/events` via `Sse` + `stream::unfold`, `ServeDir` SPA fallback; default `127.0.0.1:8787`) |
+> | Thin HTTP + SSE transport | `src/interface/server/mod.rs` (~437 lines: `POST /api/cmd/{name}`, `GET /api/events` via `Sse` + `stream::unfold`, `ServeDir` SPA fallback; default `127.0.0.1:8787`) |
 > | `index.json` session catalog | `src/session.rs` (`FileSessionCatalog` lazy load: one read + temp+rename atomic write, mtime-hit reuse) |
 > | `bridge.ts` fourth state | `isTauri && configuredServerUrl → createHttpBridge(serverUrl)`; `EventSource` listening on `agent_event` |
 > | Convenience launchers | `.cargo/config.toml`: `cargo desktop` / `cargo web` / `cargo tui` |

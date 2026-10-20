@@ -32,7 +32,7 @@ directly reports "agent is running"). This document develops **A**.
 
 > **Landing status (current code in this repository)**: **the P1 + P2 event-channel part is landed**
 > (decisions 4 / 5 / 9, and decision 2's "one channel per session").
-> The application layer `src/interface/session.rs` already has `SessionManager` + `Session` (each
+> The application layer `src/interface/session/mod.rs` already has `SessionManager` + `Session` (each
 > session holds its own independent `Agent`); `src/bootstrap.rs` has changed from `Bootstrap`
 > (producing a single `Agent`) to `AgentFactory` (a `build_agent(messages)` factory); on the SDK side
 > `Agent::switch_session` has been removed, and both the TUI and desktop now switch through the
@@ -134,7 +134,7 @@ request, and ends this round with `Cancelled`.
 
 Both interfaces hard-wire "a single `Agent` + a single copy of UI state":
 
-**TUI** (`App` in `src/interface/app.rs`):
+**TUI** (`App` in `src/interface/tui/app.rs`):
 
 ```
 agent: Option<Agent>              // a single Agent

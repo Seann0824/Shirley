@@ -42,21 +42,34 @@ async fn run_one(label: &str, base_url: &str, api_key: &str, model: &str, mode: 
         .build()
         .unwrap();
 
-    let task = "Use the get_weather tool to look up the weather in Hangzhou, then tell me the result.";
+    let task =
+        "Use the get_weather tool to look up the weather in Hangzhou, then tell me the result.";
     let mut stream = agent.run_stream(task);
     while let Some(event) = stream.next().await {
         match event {
-            Ok(AgentEvent::ToolStarted { name, arguments, .. }) => {
+            Ok(AgentEvent::ToolStarted {
+                name, arguments, ..
+            }) => {
                 println!("  -> ToolStarted: {name} args={arguments}");
             }
-            Ok(AgentEvent::ToolFinished { name, ok, output, elapsed_ms, .. }) => {
+            Ok(AgentEvent::ToolFinished {
+                name,
+                ok,
+                output,
+                elapsed_ms,
+                ..
+            }) => {
                 println!("  <- ToolFinished: {name} ok={ok} out={output:?} ({elapsed_ms}ms)");
             }
             Ok(AgentEvent::Finished(result)) => {
                 println!("  Finished: {:?}", result.stop_reason);
                 for message in &result.messages {
                     match message {
-                        Message::Assistant { content, tool_calls, .. } => {
+                        Message::Assistant {
+                            content,
+                            tool_calls,
+                            ..
+                        } => {
                             println!("  [assistant] content={content:?} tool_calls={tool_calls:?}");
                         }
                         Message::Tool { content, .. } => {
@@ -81,8 +94,20 @@ async fn main() {
     // Same model by default: the point is to compare the two *modes*, not two models.
     let tagged = std::env::var("TAGGED_MODEL").unwrap_or_else(|_| native.clone());
 
-    run_one("NATIVE (supports tool calls)", &base_url, &api_key, &native, ToolCallingMode::Native)
-        .await;
-    run_one("TAGGED (text protocol, no native tool calls)", &base_url, &api_key, &tagged, ToolCallingMode::Tagged)
-        .await;
+    run_one(
+        "NATIVE (supports tool calls)",
+        &base_url,
+        &api_key,
+        &native,
+        ToolCallingMode::Native,
+    )
+    .await;
+    run_one(
+        "TAGGED (text protocol, no native tool calls)",
+        &base_url,
+        &api_key,
+        &tagged,
+        ToolCallingMode::Tagged,
+    )
+    .await;
 }

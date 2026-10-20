@@ -163,7 +163,9 @@ pub struct SubagentInfo {
 
 impl SubagentInfo {
     pub fn elapsed_ms(&self) -> u64 {
-        self.finished_ms.unwrap_or_else(now_ms).saturating_sub(self.started_ms)
+        self.finished_ms
+            .unwrap_or_else(now_ms)
+            .saturating_sub(self.started_ms)
     }
 }
 
@@ -221,9 +223,15 @@ impl std::fmt::Display for SubagentError {
             ),
             Self::TaskRequired => write!(f, "`task` is required for spawn/fork"),
             Self::TaskTooLong => write!(f, "`task` exceeds the {MAX_TASK_CHARS}-char cap"),
-            Self::DepthExceeded => write!(f, "max_depth reached: a subagent cannot dispatch a subagent"),
+            Self::DepthExceeded => write!(
+                f,
+                "max_depth reached: a subagent cannot dispatch a subagent"
+            ),
             Self::ConcurrencyExceeded => {
-                write!(f, "too many subagents running at once (max_concurrent); wait for one to finish")
+                write!(
+                    f,
+                    "too many subagents running at once (max_concurrent); wait for one to finish"
+                )
             }
             Self::NotFound(id) => write!(f, "no such subagent: {id}"),
             Self::Build(detail) => write!(f, "failed to create the subagent: {detail}"),
@@ -261,7 +269,9 @@ pub struct SubagentManager {
 }
 
 impl SubagentManager {
-    pub fn set_parent_model(&self, config: ModelConfig) { *self.parent_model.lock().unwrap() = Some(config); }
+    pub fn set_parent_model(&self, config: ModelConfig) {
+        *self.parent_model.lock().unwrap() = Some(config);
+    }
     pub fn new(
         factory: Arc<AgentFactory>,
         limits: SubagentLimits,
@@ -393,9 +403,15 @@ impl SubagentManager {
         };
         let mut built = self
             .factory
-            .build_agent_with(messages, Some(&selection), Some(self.limits.per_task_max_steps))
+            .build_agent_with(
+                messages,
+                Some(&selection),
+                Some(self.limits.per_task_max_steps),
+            )
             .map_err(|error| SubagentError::Build(error.to_string()))?;
-        if let Some(config) = self.parent_model.lock().unwrap().clone() { built.agent.set_model_config(config); }
+        if let Some(config) = self.parent_model.lock().unwrap().clone() {
+            built.agent.set_model_config(config);
+        }
 
         let id = format!("sa_{:x}", self.next_seq.fetch_add(1, Ordering::Relaxed) + 1);
         let started_ms = now_ms();
@@ -437,7 +453,10 @@ impl SubagentManager {
                     match event {
                         Ok(AgentEvent::Finished(result)) => {
                             outcome = Some(Ok(result.clone()));
-                            manager.emit(&child_id, SubagentEvent::Agent(AgentEvent::Finished(result)));
+                            manager.emit(
+                                &child_id,
+                                SubagentEvent::Agent(AgentEvent::Finished(result)),
+                            );
                         }
                         Ok(event) => manager.emit(&child_id, SubagentEvent::Agent(event)),
                         Err(error) => {
@@ -487,7 +506,11 @@ impl SubagentManager {
     /// Uses the per-subagent broadcast channel (not the join handle), so it is **safe to call more
     /// than once** and a timeout does not detach the task from future waits. Returns immediately if
     /// the child already finished; on timeout the child keeps running and `timed_out` is `true`.
-    pub async fn wait(&self, id: &str, timeout: Option<Duration>) -> Result<WaitOutcome, SubagentError> {
+    pub async fn wait(
+        &self,
+        id: &str,
+        timeout: Option<Duration>,
+    ) -> Result<WaitOutcome, SubagentError> {
         // Subscribe **before** checking status, so a terminal transition between the two is not
         // missed (the status check catches it if it already happened; otherwise the event arrives).
         let mut receiver = {
@@ -542,7 +565,11 @@ impl SubagentManager {
 
     /// A snapshot of one subagent.
     pub fn info(&self, id: &str) -> Option<SubagentInfo> {
-        self.registry.lock().unwrap().get(id).map(|h| h.info.clone())
+        self.registry
+            .lock()
+            .unwrap()
+            .get(id)
+            .map(|h| h.info.clone())
     }
 
     /// All subagents, oldest first.
@@ -635,7 +662,14 @@ impl SubagentManager {
     }
 
     /// Append the `started` index record (best-effort).
-    fn record_started(&self, id: &str, kind: SubagentKind, name: &str, task: &str, started_ms: u64) {
+    fn record_started(
+        &self,
+        id: &str,
+        kind: SubagentKind,
+        name: &str,
+        task: &str,
+        started_ms: u64,
+    ) {
         let Some(store) = self.store() else {
             return;
         };
@@ -698,24 +732,23 @@ impl SubagentManager {
                         ..
                     } => {
                         let kind = SubagentKind::from_str(&kind).unwrap_or(SubagentKind::Spawn);
-                        let name = resolve_name(
-                            (!name.is_empty()).then_some(name),
-                            &task,
-                        );
-                        registry.entry(id.clone()).or_insert_with(|| SubagentHandle {
-                            info: SubagentInfo {
-                                id,
-                                kind,
-                                name,
-                                task,
-                                status: SubagentStatus::Running,
-                                started_ms,
-                                finished_ms: None,
-                                result: None,
-                            },
-                            join: None,
-                            abort: None,
-                        });
+                        let name = resolve_name((!name.is_empty()).then_some(name), &task);
+                        registry
+                            .entry(id.clone())
+                            .or_insert_with(|| SubagentHandle {
+                                info: SubagentInfo {
+                                    id,
+                                    kind,
+                                    name,
+                                    task,
+                                    status: SubagentStatus::Running,
+                                    started_ms,
+                                    finished_ms: None,
+                                    result: None,
+                                },
+                                join: None,
+                                abort: None,
+                            });
                     }
                     IndexRecord::Finished {
                         id,

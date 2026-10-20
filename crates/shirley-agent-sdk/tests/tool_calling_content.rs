@@ -237,9 +237,18 @@ async fn request_swaps_native_tools_for_a_system_catalog() {
         "content mode should remove parallel_tool_calls: {request}"
     );
     let system = request["messages"][0]["content"].as_str().unwrap();
-    assert!(system.contains("# Tool-calling protocol"), "the tool-protocol contract is missing: {system}");
-    assert!(system.contains("# Available tools"), "the tool catalog is missing: {system}");
-    assert!(system.contains("echo"), "the tool name is missing: {system}");
+    assert!(
+        system.contains("# Tool-calling protocol"),
+        "the tool-protocol contract is missing: {system}"
+    );
+    assert!(
+        system.contains("# Available tools"),
+        "the tool catalog is missing: {system}"
+    );
+    assert!(
+        system.contains("echo"),
+        "the tool name is missing: {system}"
+    );
 }
 
 /// Full chain (non-streaming): the model initiates a call via the text protocol -> the runtime
@@ -262,7 +271,11 @@ async fn content_text_is_parsed_into_a_real_tool_call_and_loops_to_completion() 
     // The final answer is plain text with the XML shell stripped off.
     let last = result.messages.last().unwrap();
     match last {
-        Message::Assistant { content, tool_calls, .. } => {
+        Message::Assistant {
+            content,
+            tool_calls,
+            ..
+        } => {
             assert_eq!(content.as_deref(), Some("done"));
             assert!(tool_calls.is_empty());
         }
@@ -294,7 +307,10 @@ async fn content_text_is_parsed_into_a_real_tool_call_and_loops_to_completion() 
         content.contains(r#"{"tool":"echo"}"#),
         "the tool result is missing the protocol feedback header: {content}"
     );
-    assert!(content.contains("echo: hi"), "the tool result was not fed back: {content}");
+    assert!(
+        content.contains("echo: hi"),
+        "the tool result was not fed back: {content}"
+    );
 }
 
 /// Event layer (non-streaming): consuming `AgentEvent` should show `echo`'s ToolStarted / ToolFinished.
@@ -319,7 +335,9 @@ async fn content_mode_emits_the_same_agent_events_as_native() {
                 assert_eq!(name, "echo");
                 saw_start = true;
             }
-            AgentEvent::ToolFinished { name, ok, output, .. } => {
+            AgentEvent::ToolFinished {
+                name, ok, output, ..
+            } => {
                 assert_eq!(name, "echo");
                 assert!(ok);
                 // The tool returns a `String`; the runtime stores it via `Value::to_string()` -> wrapped in JSON quotes.
@@ -373,8 +391,14 @@ async fn streaming_hides_the_tool_block_and_surfaces_thinking_and_text() {
             _ => {}
         }
     }
-    assert_eq!(reasoning, "let me think", "thinking should map to a reasoning delta");
-    assert_eq!(content, "processingok", "the body should be the concatenation of the two rounds of description");
+    assert_eq!(
+        reasoning, "let me think",
+        "thinking should map to a reasoning delta"
+    );
+    assert_eq!(
+        content, "processingok",
+        "the body should be the concatenation of the two rounds of description"
+    );
     assert!(
         !content.contains("<tool>") && !content.contains("<name>"),
         "the tool block must not leak into ContentDelta: {content}"
@@ -402,8 +426,15 @@ async fn malformed_tool_block_is_recovered_through_the_protocol_tool() {
             }
         }
     }
-    assert!(saw_protocol_tool, "a parse failure should be fed back as a __protocol__ call");
-    assert_eq!(server.count(), 2, "after feedback it should continue to the next round, not abort");
+    assert!(
+        saw_protocol_tool,
+        "a parse failure should be fed back as a __protocol__ call"
+    );
+    assert_eq!(
+        server.count(),
+        2,
+        "after feedback it should continue to the next round, not abort"
+    );
 
     let second = server.request(1);
     let serialized = second["messages"].to_string();

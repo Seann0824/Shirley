@@ -266,9 +266,9 @@ turn's state as live. (The desktop already has panic recovery that emits a termi
 | --- | --- | --- |
 | `src/status.rs` **(new)** | `Liveness` / `Health` / `Activity` / `StateSnapshot` / `StateKeeper` + unit tests | none (new module) |
 | `src/bootstrap.rs` | `BuiltAgent` gains `pub status: Arc<StateKeeper>`; `build_agent` creates one per session — **exactly the existing `todo` / `memory` / `skills` pattern** | low, mechanical |
-| `src/interface/session.rs` | `Session` gains `pub status: Option<Arc<StateKeeper>>`; `Session::apply_event` forwards to `keeper.on_event` **before** matching. **Retire the four hand-maintained flags** (see §6.1) | low; single call site shared by all three interfaces |
-| `src/interface/tui.rs` | `tokio::select!` gains the heartbeat arm; footer reads `keeper.snapshot()` | low |
-| `src/interface/runtime.rs` (`spawn_turn`) | same heartbeat arm; publish snapshot on the **status** channel | medium — second channel to wire |
+| `src/interface/session/mod.rs` | `Session` gains `pub status: Option<Arc<StateKeeper>>`; `Session::apply_event` forwards to `keeper.on_event` **before** matching. **Retire the four hand-maintained flags** (see §6.1) | low; single call site shared by all three interfaces |
+| `src/interface/tui/mod.rs` | `tokio::select!` gains the heartbeat arm; footer reads `keeper.snapshot()` | low |
+| `src/interface/runtime/mod.rs` (`spawn_turn`) | same heartbeat arm; publish snapshot on the **status** channel | medium — second channel to wire |
 | `src/interface/desktop/wire.rs` | new `StateSnapshotWire` + `status://event` event, **separate from `agent://event`** | low if separate; **do not** add a variant to `AgentEventWire` |
 | `src/interface/desktop/web/` | footer / status pill subscribes to `status://event` | frontend only |
 | `crates/shirley-agent-sdk/` | **nothing** | — |

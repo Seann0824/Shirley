@@ -33,7 +33,10 @@ pub fn render(template: &str, vars: &[(&str, &str)]) -> String {
             }
         }
         // Emit one character as-is (advance on UTF-8 boundaries to avoid splitting a multibyte char).
-        let ch = template[i..].chars().next().expect("i is on a char boundary");
+        let ch = template[i..]
+            .chars()
+            .next()
+            .expect("i is on a char boundary");
         out.push(ch);
         i += ch.len_utf8();
     }

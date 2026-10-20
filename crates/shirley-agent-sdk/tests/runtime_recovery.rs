@@ -119,7 +119,9 @@ impl Server {
                 let _ = socket.write_all(header.as_bytes());
                 for chunk in response.body.split_inclusive("\n\n") {
                     thread::sleep(response.chunk_delay);
-                    if socket.write_all(chunk.as_bytes()).is_err() { break; }
+                    if socket.write_all(chunk.as_bytes()).is_err() {
+                        break;
+                    }
                     let _ = socket.flush();
                 }
             }
@@ -245,13 +247,21 @@ async fn retries_response_body_transport_errors_before_any_delta() {
 
 #[tokio::test]
 async fn transport_failure_after_delta_continues_from_partial_context() {
-    let partial = sse(json!({"content": "half", "reasoning_content": "reason"}), false);
-    let server = Server::new(vec![Response::truncated(&partial), Response::new(200, sse(json!({"content": "done"}), true))]);
+    let partial = sse(
+        json!({"content": "half", "reasoning_content": "reason"}),
+        false,
+    );
+    let server = Server::new(vec![
+        Response::truncated(&partial),
+        Response::new(200, sse(json!({"content": "done"}), true)),
+    ]);
     let mut agent = server.agent(true);
     let mut stream = agent.run_stream("first");
     let mut retried = false;
     while let Some(event) = stream.next().await {
-        if matches!(event.unwrap(), AgentEvent::Retrying { .. }) { retried = true; }
+        if matches!(event.unwrap(), AgentEvent::Retrying { .. }) {
+            retried = true;
+        }
     }
     drop(stream);
     assert!(retried);
@@ -263,7 +273,14 @@ async fn transport_failure_after_delta_continues_from_partial_context() {
     assert_eq!(messages[1]["content"], "half");
     assert_eq!(messages[1]["reasoning_content"], "reason");
     assert_eq!(messages[2]["role"], "system");
-    assert_eq!(agent.messages().iter().filter(|m| matches!(m, Message::User { .. })).count(), 1);
+    assert_eq!(
+        agent
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, Message::User { .. }))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -273,7 +290,9 @@ async fn continuation_keeps_completed_tool_results_without_replaying_tools() {
         calls: Arc<AtomicUsize>,
     }
     impl Tool for CountingTool {
-        fn definition(&self) -> &ToolDefinition { &self.definition }
+        fn definition(&self) -> &ToolDefinition {
+            &self.definition
+        }
         fn invoke(&self, _: Value, _: ToolContext) -> ToolFuture<'_> {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Box::pin(async { Ok(json!("saved evidence")) })
@@ -281,39 +300,77 @@ async fn continuation_keeps_completed_tool_results_without_replaying_tools() {
     }
     let calls = Arc::new(AtomicUsize::new(0));
     let mut tools = ToolManager::new();
-    tools.register(CountingTool {
-        definition: ToolDefinition { name: "evidence".into(), description: "fixture".into(), parameters: json!({"type": "object"}) },
-        calls: calls.clone(),
-    }).unwrap();
+    tools
+        .register(CountingTool {
+            definition: ToolDefinition {
+                name: "evidence".into(),
+                description: "fixture".into(),
+                parameters: json!({"type": "object"}),
+            },
+            calls: calls.clone(),
+        })
+        .unwrap();
     let server = Server::new(vec![
-        Response::new(200, sse(json!({"tool_calls": [{"index": 0, "id": "completed", "type": "function", "function": {"name": "evidence", "arguments": "{}"}}]}), true)),
-        Response::truncated(&sse(json!({"content": "working", "tool_calls": [{"index": 0, "id": "incomplete", "type": "function", "function": {"name": "evidence", "arguments": "{"}}]}), false)),
+        Response::new(
+            200,
+            sse(
+                json!({"tool_calls": [{"index": 0, "id": "completed", "type": "function", "function": {"name": "evidence", "arguments": "{}"}}]}),
+                true,
+            ),
+        ),
+        Response::truncated(&sse(
+            json!({"content": "working", "tool_calls": [{"index": 0, "id": "incomplete", "type": "function", "function": {"name": "evidence", "arguments": "{"}}]}),
+            false,
+        )),
         Response::new(200, sse(json!({"content": "done"}), true)),
     ]);
-    let mut agent = Agent::builder().model_config(config(&server.url, true)).tools(tools).build().unwrap();
+    let mut agent = Agent::builder()
+        .model_config(config(&server.url, true))
+        .tools(tools)
+        .build()
+        .unwrap();
     agent.run("first").await.unwrap();
     assert_eq!(calls.load(Ordering::SeqCst), 1);
     assert_eq!(server.count(), 3);
     let requests = server.requests.lock().unwrap();
     let messages = requests[2]["messages"].as_array().unwrap();
-    assert!(messages.iter().any(|m| m["role"] == "tool" && m["tool_call_id"] == "completed" && m["content"].as_str().unwrap().contains("saved evidence")));
-    assert!(!messages.iter().any(|m| m["tool_calls"].as_array().is_some_and(|calls| calls.iter().any(|c| c["id"] == "incomplete"))));
+    assert!(messages.iter().any(|m| m["role"] == "tool"
+        && m["tool_call_id"] == "completed"
+        && m["content"].as_str().unwrap().contains("saved evidence")));
+    assert!(!messages.iter().any(|m| {
+        m["tool_calls"]
+            .as_array()
+            .is_some_and(|calls| calls.iter().any(|c| c["id"] == "incomplete"))
+    }));
 }
 
 #[tokio::test]
 async fn repeated_partial_disconnects_exhaust_a_bounded_recovery_budget() {
-    let server = Server::new(vec![Response::truncated(&sse(json!({"content": "partial"}), false))]);
+    let server = Server::new(vec![Response::truncated(&sse(
+        json!({"content": "partial"}),
+        false,
+    ))]);
     let mut agent = server.agent(true);
     let error = agent.run("first").await.unwrap_err();
     assert_eq!(error.kind(), ErrorKind::Transport);
     assert_eq!(server.count(), 3);
     assert_eq!(agent.finish_interrupted_turn().len(), 1);
-    assert_eq!(agent.messages().iter().filter(|m| matches!(m, Message::User { .. })).count(), 1);
+    assert_eq!(
+        agent
+            .messages()
+            .iter()
+            .filter(|m| matches!(m, Message::User { .. }))
+            .count(),
+        1
+    );
 }
 
 #[tokio::test]
 async fn a_clean_eof_without_completion_is_recovered() {
-    let server = Server::new(vec![Response::new(200, ": keepalive\n\n"), Response::new(200, sse(json!({"content": "done"}), true))]);
+    let server = Server::new(vec![
+        Response::new(200, ": keepalive\n\n"),
+        Response::new(200, sse(json!({"content": "done"}), true)),
+    ]);
     server.agent(true).run("first").await.unwrap();
     assert_eq!(server.count(), 2);
 }
@@ -321,7 +378,11 @@ async fn a_clean_eof_without_completion_is_recovered() {
 #[tokio::test]
 async fn stalled_headers_or_body_time_out_and_retry() {
     for (streaming, headers) in [(true, true), (true, false), (false, false)] {
-        let done = if streaming { Response::new(200, sse(json!({"content": "done"}), true)) } else { success() };
+        let done = if streaming {
+            Response::new(200, sse(json!({"content": "done"}), true))
+        } else {
+            success()
+        };
         let mut slow = Response::new(200, done.body.clone());
         if headers {
             slow.header_delay = Duration::from_millis(150);
@@ -332,19 +393,33 @@ async fn stalled_headers_or_body_time_out_and_retry() {
         let mut model = config(&server.url, streaming);
         model.request_timeout = Duration::from_millis(80);
         let mut agent = Agent::builder().model_config(model).build().unwrap();
-        tokio::time::timeout(Duration::from_secs(3), agent.run("first")).await.unwrap().unwrap();
+        tokio::time::timeout(Duration::from_secs(3), agent.run("first"))
+            .await
+            .unwrap()
+            .unwrap();
         assert_eq!(server.count(), 2);
     }
 }
 
 #[tokio::test]
 async fn healthy_stream_resets_the_progress_deadline() {
-    let mut response = Response::new(200, (0..8).map(|i| sse(json!({"content": "a"}), i == 7)).collect::<String>());
+    let mut response = Response::new(
+        200,
+        (0..8)
+            .map(|i| sse(json!({"content": "a"}), i == 7))
+            .collect::<String>(),
+    );
     response.chunk_delay = Duration::from_millis(30);
     let server = Server::new(vec![response]);
     let mut model = config(&server.url, true);
     model.request_timeout = Duration::from_millis(150);
-    Agent::builder().model_config(model).build().unwrap().run("first").await.unwrap();
+    Agent::builder()
+        .model_config(model)
+        .build()
+        .unwrap()
+        .run("first")
+        .await
+        .unwrap();
     assert_eq!(server.count(), 1);
 }
 
@@ -496,7 +571,11 @@ async fn successive_compactions_inherit_findings_evidence_and_ledger() {
         Message::Tool {
             tool_call_id: "history".into(),
             content: Some(
-                format!("modelName returned empty; {}", "code evidence ".repeat(1000)).into(),
+                format!(
+                    "modelName returned empty; {}",
+                    "code evidence ".repeat(1000)
+                )
+                .into(),
             ),
         },
     ];

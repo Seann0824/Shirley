@@ -155,19 +155,24 @@ fn is_tool_context_type(ty: &Type) -> bool {
 }
 
 // Read the parameters. Returns (parameters that go into the schema, actual call arguments in original order).
-fn extract_parameters(function: &mut ItemFn) -> syn::Result<(Vec<ToolParameter>, Vec<CallArgument>)> {
+fn extract_parameters(
+    function: &mut ItemFn,
+) -> syn::Result<(Vec<ToolParameter>, Vec<CallArgument>)> {
     let mut parameters = vec![];
     let mut call_arguments = vec![];
     let mut has_context = false;
 
     // sig is the function signature, inputs is the parameter list
     for input in &mut function.sig.inputs {
-    // self and ordinary parameters Typed location: String
+        // self and ordinary parameters Typed location: String
         let FnArg::Typed(parameter) = input else {
-            return Err(syn::Error::new_spanned(input, "tools do not support self methods"));
+            return Err(syn::Error::new_spanned(
+                input,
+                "tools do not support self methods",
+            ));
         };
 
-    // Possibly a destructured tuple; only simple forms are supported for now
+        // Possibly a destructured tuple; only simple forms are supported for now
         let Pat::Ident(pattern) = parameter.pat.as_ref() else {
             return Err(syn::Error::new_spanned(
                 &parameter.pat,
@@ -175,8 +180,8 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<(Vec<ToolParameter>,
             ));
         };
 
-    // Exclude complex bindings such as `ref name` and `name @ pattern`
-    // `mut name` may be kept; it does not affect parameter-name extraction
+        // Exclude complex bindings such as `ref name` and `name @ pattern`
+        // `mut name` may be kept; it does not affect parameter-name extraction
         if pattern.by_ref.is_some() || pattern.subpat.is_some() {
             return Err(syn::Error::new_spanned(
                 pattern,
@@ -218,14 +223,20 @@ fn extract_parameters(function: &mut ItemFn) -> syn::Result<(Vec<ToolParameter>,
 
             // Must not be repeated
             if description.is_some() {
-                return Err(syn::Error::new_spanned(attribute, "#[param] must not be repeated"));
+                return Err(syn::Error::new_spanned(
+                    attribute,
+                    "#[param] must not be repeated",
+                ));
             }
 
             description = Some(parse_parameter_description(attribute)?);
         }
 
         let description = description.ok_or_else(|| {
-            syn::Error::new_spanned(&parameter.pat, "missing #[param(description = \"parameter description\")]")
+            syn::Error::new_spanned(
+                &parameter.pat,
+                "missing #[param(description = \"parameter description\")]",
+            )
         })?;
 
         call_arguments.push(CallArgument::Field(pattern.ident.clone()));
@@ -261,7 +272,10 @@ fn read_description(
 
     // Check whether the value is empty
     if value.value().trim().is_empty() {
-        return Err(syn::Error::new(value.span(), "description must not be empty"));
+        return Err(syn::Error::new(
+            value.span(),
+            "description must not be empty",
+        ));
     }
 
     *description = Some(value);

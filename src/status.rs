@@ -47,13 +47,22 @@ pub enum Liveness {
 pub enum Health {
     Healthy,
     /// One tool call has been outstanding longer than `slow_tool_after`.
-    SlowTool { name: String, elapsed_ms: u64 },
+    SlowTool {
+        name: String,
+        elapsed_ms: u64,
+    },
     /// The model call is retrying (driven by `AgentEvent::Retrying`).
-    Retrying { attempt: usize, reason: String },
+    Retrying {
+        attempt: usize,
+        reason: String,
+    },
     /// Context compaction is in flight.
     Compacting,
     /// The last turn ended in a failure.
-    Failed { kind: Option<ErrorKind>, message: String },
+    Failed {
+        kind: Option<ErrorKind>,
+        message: String,
+    },
 }
 
 /// Where the current step is spending time. A hint only — it never changes `Liveness`.
@@ -146,7 +155,9 @@ impl StateKeeper {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
-        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+        self.inner
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// A new turn begins. Resets the per-turn progress counter.
@@ -277,8 +288,7 @@ impl StateKeeper {
 
         if s.liveness == Liveness::Running
             && s.activity != Some(Activity::WaitingInput)
-            && s
-                .last_event_at
+            && s.last_event_at
                 .is_some_and(|t| now.duration_since(t) >= self.stall_after)
         {
             s.liveness = Liveness::Stalled;
@@ -342,7 +352,10 @@ pub struct TurnGuard {
 
 impl TurnGuard {
     pub fn new(keeper: Arc<StateKeeper>) -> Self {
-        Self { keeper, armed: true }
+        Self {
+            keeper,
+            armed: true,
+        }
     }
 
     /// The turn ended through the normal path; do not mark it unreachable on drop.
@@ -384,7 +397,7 @@ fn finish(s: &mut Inner, stop: &StopReason) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shirley_agent_sdk::{AgentEvent, RunResult, StopReason};
+    use shirley_agent_sdk::RunResult;
 
     fn keeper() -> StateKeeper {
         // Tiny thresholds so the time-based paths are reachable without sleeping for minutes.
@@ -407,7 +420,11 @@ mod tests {
             k.on_event(&AgentEvent::ContentDelta("x".repeat(64)));
             k.on_event(&AgentEvent::ReasoningDelta("y".repeat(64)));
         }
-        assert_eq!(k.snapshot().progress_seq, 0, "deltas must never count as progress");
+        assert_eq!(
+            k.snapshot().progress_seq,
+            0,
+            "deltas must never count as progress"
+        );
         assert_eq!(k.snapshot().activity, Some(Activity::ModelCall));
     }
 
@@ -484,7 +501,11 @@ mod tests {
         k.tick();
         let snap = k.snapshot();
         assert!(matches!(snap.health, Health::SlowTool { .. }));
-        assert_eq!(snap.liveness, Liveness::Running, "slow tool does not change liveness");
+        assert_eq!(
+            snap.liveness,
+            Liveness::Running,
+            "slow tool does not change liveness"
+        );
 
         // Finishing the tool clears the slow-tool health and bumps progress.
         k.on_event(&AgentEvent::ToolFinished {
@@ -542,7 +563,10 @@ mod tests {
         }
         let snap = k.snapshot();
         assert_eq!(snap.liveness, Liveness::Unreachable);
-        assert!(snap.stale, "a vanished driver must render as stale, never as live");
+        assert!(
+            snap.stale,
+            "a vanished driver must render as stale, never as live"
+        );
     }
 
     #[test]
@@ -554,7 +578,11 @@ mod tests {
         guard.disarm();
         drop(guard);
         let snap = k.snapshot();
-        assert_eq!(snap.liveness, Liveness::Idle, "a clean end must not be overwritten by the guard");
+        assert_eq!(
+            snap.liveness,
+            Liveness::Idle,
+            "a clean end must not be overwritten by the guard"
+        );
         assert!(!snap.stale);
     }
 

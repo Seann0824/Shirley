@@ -21,13 +21,13 @@ use shirley_agent_sdk::{Agent, AgentEvent, Message, Usage};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
-use super::app::{ChatMessage, Item, Role, ToolCallView};
 use crate::bootstrap::AgentFactory;
+use crate::interface::view::{ChatMessage, Item, Role, ToolCallView, ToolGroup};
 use crate::memory::MemoryRuntime;
 use crate::session::{SessionCatalog, SessionStore};
+use crate::skills::SkillRuntime;
 use crate::status::StateKeeper;
 use crate::subagent::{SubagentManager, SubagentStore};
-use crate::skills::SkillRuntime;
 use crate::todo::{TaskView, TodoStore};
 
 /// Event fan-out channel capacity. A running subscriber that falls more than this far behind gets `Lagged`, and the subscriber (desktop
@@ -189,49 +189,96 @@ impl Session {
     pub fn remember_model(&mut self) {
         if let Some(agent) = self.agent.as_ref() {
             self.model = Some(agent.model_config().model.clone());
-            if let Some(manager) = &self.subagents { manager.set_parent_model(agent.model_config().clone()); }
+            if let Some(manager) = &self.subagents {
+                manager.set_parent_model(agent.model_config().clone());
+            }
         }
     }
 
     fn attach_model_profile(&mut self, global: &Path, dir: Option<std::path::PathBuf>) {
         self.model_providers_root = Some(global.to_path_buf());
-        self.model_selection_path = dir.zip(self.name.as_ref()).map(|(dir, name)| dir.join(format!("{name}.model.json")));
-        let saved = self.model_selection_path.as_ref().filter(|p| p.exists()).map(|path| {
-            std::fs::read(path).map_err(|e| e.to_string()).and_then(|bytes| serde_json::from_slice::<String>(&bytes).map_err(|e| e.to_string()))
-        });
+        self.model_selection_path = dir
+            .zip(self.name.as_ref())
+            .map(|(dir, name)| dir.join(format!("{name}.model.json")));
+        let saved = self
+            .model_selection_path
+            .as_ref()
+            .filter(|p| p.exists())
+            .map(|path| {
+                std::fs::read(path)
+                    .map_err(|e| e.to_string())
+                    .and_then(|bytes| {
+                        serde_json::from_slice::<String>(&bytes).map_err(|e| e.to_string())
+                    })
+            });
         match saved {
             Some(Ok(key)) => {
                 self.model_selection = Some(key.clone());
                 match crate::model_providers::resolve(global, &key) {
-                    Ok(Some(model)) => { if let Some(agent) = &mut self.agent { agent.set_model_config(model.config()); } self.remember_model(); },
-                    Ok(None) => self.model_binding_error = Some("此聊天使用的服务商或模型已被移除，请重新选择模型".into()),
+                    Ok(Some(model)) => {
+                        if let Some(agent) = &mut self.agent {
+                            agent.set_model_config(model.config());
+                        }
+                        self.remember_model();
+                    }
+                    Ok(None) => {
+                        self.model_binding_error =
+                            Some("此聊天使用的服务商或模型已被移除，请重新选择模型".into())
+                    }
                     Err(error) => self.model_binding_error = Some(error),
                 }
             }
-            Some(Err(error)) => self.model_binding_error = Some(format!("聊天模型配置损坏：{error}")),
+            Some(Err(error)) => {
+                self.model_binding_error = Some(format!("聊天模型配置损坏：{error}"))
+            }
             None => {
-                self.model_selection = self.agent.as_ref().and_then(|agent| crate::model_providers::key_for_config(global, agent.model_config()));
-                if let (Some(path), Some(key)) = (&self.model_selection_path, &self.model_selection) {
-                    if let Err(error) = crate::memory::store::atomic_write(path, &serde_json::to_vec(key).unwrap()) { self.model_binding_error = Some(error.to_string()); }
+                self.model_selection = self.agent.as_ref().and_then(|agent| {
+                    crate::model_providers::key_for_config(global, agent.model_config())
+                });
+                if let (Some(path), Some(key)) = (&self.model_selection_path, &self.model_selection)
+                {
+                    if let Err(error) =
+                        crate::memory::store::atomic_write(path, &serde_json::to_vec(key).unwrap())
+                    {
+                        self.model_binding_error = Some(error.to_string());
+                    }
                 }
-            },
+            }
         }
     }
 
     pub fn model_availability(&self) -> Result<(), String> {
-        if let Some(error) = &self.model_binding_error { return Err(error.clone()); }
+        if let Some(error) = &self.model_binding_error {
+            return Err(error.clone());
+        }
         if let (Some(global), Some(key)) = (&self.model_providers_root, &self.model_selection) {
-            if crate::model_providers::resolve(global, key)?.is_none() { return Err("此聊天使用的服务商或模型已被移除，请重新选择模型".into()); }
+            if crate::model_providers::resolve(global, key)?.is_none() {
+                return Err("此聊天使用的服务商或模型已被移除，请重新选择模型".into());
+            }
         }
         Ok(())
     }
 
-    pub fn select_model(&mut self, config: shirley_agent_sdk::ModelConfig, key: Option<String>) -> Result<(), String> {
-        if self.agent.is_none() { return Err("对话正在执行，请结束后再切换模型".into()); }
+    pub fn select_model(
+        &mut self,
+        config: shirley_agent_sdk::ModelConfig,
+        key: Option<String>,
+    ) -> Result<(), String> {
+        if self.agent.is_none() {
+            return Err("对话正在执行，请结束后再切换模型".into());
+        }
         if let Some(path) = &self.model_selection_path {
             match &key {
-                Some(key) => crate::memory::store::atomic_write(path, &serde_json::to_vec(key).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?,
-                None => match std::fs::remove_file(path) { Ok(()) => {}, Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}, Err(e) => return Err(e.to_string()) },
+                Some(key) => crate::memory::store::atomic_write(
+                    path,
+                    &serde_json::to_vec(key).map_err(|e| e.to_string())?,
+                )
+                .map_err(|e| e.to_string())?,
+                None => match std::fs::remove_file(path) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.to_string()),
+                },
             }
         }
         self.agent.as_mut().unwrap().set_model_config(config);
@@ -360,7 +407,7 @@ impl Session {
                         }));
                     }
                     if !tool_calls.is_empty() {
-                        items.push(Item::Tools(super::app::ToolGroup {
+                        items.push(Item::Tools(ToolGroup {
                             calls: tool_calls
                                 .iter()
                                 .map(|call| ToolCallView {
@@ -414,8 +461,7 @@ impl Session {
         if calls.is_empty() {
             return;
         }
-        self.items
-            .push(Item::Tools(super::app::ToolGroup { calls }));
+        self.items.push(Item::Tools(ToolGroup { calls }));
     }
 
     pub(crate) fn add_message(&mut self, message: Message) {
@@ -653,9 +699,21 @@ impl SessionManager {
         }
         sessions.insert(
             0,
-            Session::new(agent, name, request_session_id, store, memory, skills, todo, subagents),
+            Session::new(
+                agent,
+                name,
+                request_session_id,
+                store,
+                memory,
+                skills,
+                todo,
+                subagents,
+            ),
         );
-        sessions.get_mut(&0).unwrap().attach_model_profile(factory.model_providers_root(), catalog.storage_dir());
+        sessions
+            .get_mut(&0)
+            .unwrap()
+            .attach_model_profile(factory.model_providers_root(), catalog.storage_dir());
         Self {
             sessions,
             active: 0,
@@ -668,11 +726,7 @@ impl SessionManager {
     /// Attach a `SubagentStore` (the session's `.agents/` sidecar) to a freshly built manager, so
     /// `subagent` persistence and the child-transcript preview work. No-op when the session has no
     /// name or the catalog has no storage directory (tests / single-session fallback).
-    fn attach_subagent_store(
-        &self,
-        subagents: &Option<Arc<SubagentManager>>,
-        name: Option<&str>,
-    ) {
+    fn attach_subagent_store(&self, subagents: &Option<Arc<SubagentManager>>, name: Option<&str>) {
         let (Some(manager), Some(name), Some(dir)) =
             (subagents.as_ref(), name, self.catalog.storage_dir())
         else {
@@ -743,10 +797,22 @@ impl SessionManager {
         self.attach_subagent_store(&subagents, name.as_deref());
         self.sessions.insert(
             id,
-            Session::new(agent, name, request_session_id, store, memory, skills, todo, subagents),
+            Session::new(
+                agent,
+                name,
+                request_session_id,
+                store,
+                memory,
+                skills,
+                todo,
+                subagents,
+            ),
         );
         if let Some(factory) = &self.factory {
-            self.sessions.get_mut(&id).unwrap().attach_model_profile(factory.model_providers_root(), self.catalog.storage_dir());
+            self.sessions
+                .get_mut(&id)
+                .unwrap()
+                .attach_model_profile(factory.model_providers_root(), self.catalog.storage_dir());
         }
         id
     }
@@ -762,8 +828,15 @@ impl SessionManager {
         let previous = self.active().name.clone();
         // Use the session-level query (live Agent first, mirror fallback) -- if the departing session is running, its `Agent`
         // has already been `take`n away, so reading `agent` directly would not get the model.
-        let use_profile_default = self.factory.as_ref().is_some_and(|f| crate::model_providers::default_config(f.model_providers_root()).ok().flatten().is_some());
-        let selected_model = (!use_profile_default).then(|| self.active().model_name().map(str::to_owned)).flatten();
+        let use_profile_default = self.factory.as_ref().is_some_and(|f| {
+            crate::model_providers::default_config(f.model_providers_root())
+                .ok()
+                .flatten()
+                .is_some()
+        });
+        let selected_model = (!use_profile_default)
+            .then(|| self.active().model_name().map(str::to_owned))
+            .flatten();
         if let Some(id) = self.id_of_name(name) {
             self.active = id;
             if let Some(previous) = previous.filter(|p| p != name) {
@@ -811,8 +884,15 @@ impl SessionManager {
         // Same as `switch_to`: creating and switching away = the old session's turn ended, triggering one curation.
         let previous = self.active().name.clone();
         // Same as `switch_to`: session-level query, so the model is available even during a run.
-        let use_profile_default = self.factory.as_ref().is_some_and(|f| crate::model_providers::default_config(f.model_providers_root()).ok().flatten().is_some());
-        let selected_model = (!use_profile_default).then(|| self.active().model_name().map(str::to_owned)).flatten();
+        let use_profile_default = self.factory.as_ref().is_some_and(|f| {
+            crate::model_providers::default_config(f.model_providers_root())
+                .ok()
+                .flatten()
+                .is_some()
+        });
+        let selected_model = (!use_profile_default)
+            .then(|| self.active().model_name().map(str::to_owned))
+            .flatten();
         let factory = self
             .factory
             .as_ref()
@@ -1037,7 +1117,9 @@ impl SessionManager {
     fn curation_inputs(&self, name: &str) -> Option<CurationInputs> {
         let factory = self.factory.clone()?;
         let session = self.session(name)?;
-        if session.model_availability().is_err() { return None; }
+        if session.model_availability().is_err() {
+            return None;
+        }
         // Only distill sessions "with content" (user + assistant turns); empty / single-message ones do not warrant a pointless model call.
         let messages: Vec<Message> = session
             .agent
@@ -1165,9 +1247,18 @@ mod tests {
     #[test]
     fn proxy_session_identity_is_stable_and_project_scoped() {
         let first = proxy_session_id(Path::new("/repo/first"), Some("chat-1"));
-        assert_eq!(first, proxy_session_id(Path::new("/repo/first"), Some("chat-1")));
-        assert_ne!(first, proxy_session_id(Path::new("/repo/second"), Some("chat-1")));
-        assert_ne!(first, proxy_session_id(Path::new("/repo/first"), Some("chat-2")));
+        assert_eq!(
+            first,
+            proxy_session_id(Path::new("/repo/first"), Some("chat-1"))
+        );
+        assert_ne!(
+            first,
+            proxy_session_id(Path::new("/repo/second"), Some("chat-1"))
+        );
+        assert_ne!(
+            first,
+            proxy_session_id(Path::new("/repo/first"), Some("chat-2"))
+        );
     }
 
     fn test_agent() -> Agent {
@@ -1202,11 +1293,21 @@ mod tests {
     fn begin_turn_records_user_message_into_snapshot() {
         let mut manager = manager();
         let agent = manager.begin_turn("s", "hello".into());
-        assert!(agent.is_some(), "the first turn should be able to take the Agent");
-        assert!(manager.is_running("s"), "the session should be marked running after the Agent is taken");
+        assert!(
+            agent.is_some(),
+            "the first turn should be able to take the Agent"
+        );
+        assert!(
+            manager.is_running("s"),
+            "the session should be marked running after the Agent is taken"
+        );
 
         let snapshot = manager.snapshot("s").unwrap();
-        assert_eq!(snapshot.len(), 1, "the snapshot should contain the just-recorded user message");
+        assert_eq!(
+            snapshot.len(),
+            1,
+            "the snapshot should contain the just-recorded user message"
+        );
         match &snapshot[0] {
             ItemWire::Message { role, content, .. } => {
                 assert_eq!(*role, Role::User);

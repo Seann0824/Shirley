@@ -90,7 +90,9 @@ pub struct Candidate {
     pub body: String,
 }
 
-fn default_candidate_domain() -> Domain { Domain::Project }
+fn default_candidate_domain() -> Domain {
+    Domain::Project
+}
 
 /// Extract the candidate array from the model text (tolerates ```json code fences and surrounding chatter).
 pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, CuratorError> {
@@ -103,8 +105,7 @@ pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, CuratorError> {
     if end < start {
         return Err(CuratorError::Parse("malformed JSON array".into()));
     }
-    serde_json::from_str(&text[start..=end])
-        .map_err(|err| CuratorError::Parse(err.to_string()))
+    serde_json::from_str(&text[start..=end]).map_err(|err| CuratorError::Parse(err.to_string()))
 }
 
 /// Deterministic self-check + filling in default fields. On pass returns an [`Entry`], otherwise returns the rejection reason.
@@ -139,7 +140,9 @@ pub fn vet(
         return Err("empty body".into());
     }
     if let Some(old) = existing.get(id) {
-        if old.domain != candidate.domain { return Err("cannot change a memory's ownership domain".into()); }
+        if old.domain != candidate.domain {
+            return Err("cannot change a memory's ownership domain".into());
+        }
         if old.id.starts_with("conflict-") && old.status == EntryStatus::Unconfirmed {
             return Err("sync conflicts require explicit review".into());
         }
@@ -179,7 +182,9 @@ pub fn vet(
         for ref_ in &source {
             let file = ref_.split('#').next().unwrap_or(ref_);
             if !local_evidence_reference(file) || !dir.join(file).exists() {
-                return Err(format!("source `{ref_}` does not resolve to an existing file"));
+                return Err(format!(
+                    "source `{ref_}` does not resolve to an existing file"
+                ));
             }
         }
     }
@@ -198,7 +203,9 @@ pub fn vet(
         if existing[supersedes].domain != candidate.domain {
             return Err("cannot supersede a memory in another ownership domain".into());
         }
-        if supersedes.starts_with("conflict-") && existing[supersedes].status == EntryStatus::Unconfirmed {
+        if supersedes.starts_with("conflict-")
+            && existing[supersedes].status == EntryStatus::Unconfirmed
+        {
             return Err("sync conflicts require explicit review".into());
         }
     }
@@ -255,7 +262,10 @@ pub fn render_transcript(messages: &[Message]) -> String {
                     out.push_str("\n\n");
                 }
                 for call in tool_calls {
-                    out.push_str(&format!("## Tool call: {}\n{}\n\n", call.name, call.arguments));
+                    out.push_str(&format!(
+                        "## Tool call: {}\n{}\n\n",
+                        call.name, call.arguments
+                    ));
                 }
             }
             Message::Tool {
@@ -357,7 +367,9 @@ pub async fn curate(
 
     let _locks = store.lock_roots()?;
     if !store.matches_snapshot(&existing_by_id)? {
-        return Err(CuratorError::Parse("memory changed during curation; stale proposals discarded".into()));
+        return Err(CuratorError::Parse(
+            "memory changed during curation; stale proposals discarded".into(),
+        ));
     }
 
     let today = chrono::Local::now().format("%Y-%m-%d").to_string();
@@ -472,7 +484,9 @@ pub(super) fn rebuild_core_unlocked(store: &MemoryStore) -> Result<(), MemoryErr
                 .then_with(|| a.id.cmp(&b.id))
         });
 
-        let mut text = String::from("# Memory Core\n\n> Maintained by the program (projection of active entries); do not edit by hand.\n\n");
+        let mut text = String::from(
+            "# Memory Core\n\n> Maintained by the program (projection of active entries); do not edit by hand.\n\n",
+        );
         let mut truncated = false;
         for entry in &entries {
             let line = format!(
@@ -530,10 +544,7 @@ pub enum ConsolidateOp {
         sources: Vec<String>,
     },
     /// Supersede `id` with `replacement` (set `id` to superseded).
-    Supersede {
-        id: String,
-        replacement: Candidate,
-    },
+    Supersede { id: String, replacement: Candidate },
     /// Change only one entry's applicable scenario / body (add qualification), without creating a new entry.
     Requalify {
         id: String,
@@ -588,7 +599,9 @@ fn evidence_snippet(ref_: &str, sessions_dir: &Path) -> String {
     }
     let mut parts = ref_.splitn(2, '#');
     let file = parts.next().unwrap_or(ref_).trim();
-    if !local_evidence_reference(file) { return "[invalid evidence reference]".into(); }
+    if !local_evidence_reference(file) {
+        return "[invalid evidence reference]".into();
+    }
     let turn = parts
         .next()
         .and_then(|t| t.strip_prefix("turn:"))
@@ -608,8 +621,11 @@ fn evidence_snippet(ref_: &str, sessions_dir: &Path) -> String {
 }
 
 fn local_evidence_reference(file: &str) -> bool {
-    !file.starts_with("shared-evidence:") && !Path::new(file).is_absolute()
-        && Path::new(file).components().all(|part| matches!(part, std::path::Component::Normal(_)))
+    !file.starts_with("shared-evidence:")
+        && !Path::new(file).is_absolute()
+        && Path::new(file)
+            .components()
+            .all(|part| matches!(part, std::path::Component::Normal(_)))
 }
 
 fn truncate(text: &str, max: usize) -> String {
@@ -645,7 +661,10 @@ pub fn build_consolidate_prompt(entries: &[(String, Entry)], evidence: &str) -> 
 
     render(
         CURATOR_CONSOLIDATE_TEMPLATE,
-        &[("entries", &entries_text), ("evidence_section", &evidence_section)],
+        &[
+            ("entries", &entries_text),
+            ("evidence_section", &evidence_section),
+        ],
     )
 }
 
@@ -661,7 +680,9 @@ pub fn apply_consolidate_ops(
 ) -> Result<ConsolidateOutcome, CuratorError> {
     let _locks = store.lock_roots()?;
     if !store.matches_snapshot(existing)? {
-        return Err(CuratorError::Parse("memory changed during consolidation; stale proposals discarded".into()));
+        return Err(CuratorError::Parse(
+            "memory changed during consolidation; stale proposals discarded".into(),
+        ));
     }
     let mut working = existing.clone();
     let mut outcome = ConsolidateOutcome {
@@ -679,7 +700,10 @@ pub fn apply_consolidate_ops(
 
     for op in ops {
         match op {
-            ConsolidateOp::Merge { mut target, sources } => {
+            ConsolidateOp::Merge {
+                mut target,
+                sources,
+            } => {
                 let target_id = target.id.clone();
                 let sources: Vec<String> = sources
                     .into_iter()
@@ -700,8 +724,11 @@ pub fn apply_consolidate_ops(
                     });
                     continue;
                 }
-                if sources.iter().any(|id| working[id].domain != target.domain
-                    || (id.starts_with("conflict-") && working[id].status == EntryStatus::Unconfirmed)) {
+                if sources.iter().any(|id| {
+                    working[id].domain != target.domain
+                        || (id.starts_with("conflict-")
+                            && working[id].status == EntryStatus::Unconfirmed)
+                }) {
                     outcome.rejected.push(Rejected { id: Some(target_id), reason: "merge cannot cross ownership domains or resolve an unreviewed sync conflict".into() });
                     continue;
                 }
@@ -733,7 +760,10 @@ pub fn apply_consolidate_ops(
                     }),
                 }
             }
-            ConsolidateOp::Supersede { id, mut replacement } => {
+            ConsolidateOp::Supersede {
+                id,
+                mut replacement,
+            } => {
                 let id = id.trim().to_string();
                 let Some(old) = working.get(&id).cloned() else {
                     outcome.rejected.push(Rejected {
@@ -772,7 +802,10 @@ pub fn apply_consolidate_ops(
                     continue;
                 };
                 if id.starts_with("conflict-") && old.status == EntryStatus::Unconfirmed {
-                    outcome.rejected.push(Rejected { id: Some(id), reason: "sync conflicts require explicit review".into() });
+                    outcome.rejected.push(Rejected {
+                        id: Some(id),
+                        reason: "sync conflicts require explicit review".into(),
+                    });
                     continue;
                 }
                 if old.status == EntryStatus::Superseded {
@@ -919,7 +952,14 @@ mod tests {
 
     #[test]
     fn vet_accepts_valid_candidate() {
-        let entry = vet(candidate("pref-rust"), &HashMap::new(), "2026-05-12", None, None).unwrap();
+        let entry = vet(
+            candidate("pref-rust"),
+            &HashMap::new(),
+            "2026-05-12",
+            None,
+            None,
+        )
+        .unwrap();
         assert_eq!(entry.id, "pref-rust");
         assert_eq!(entry.status, EntryStatus::Active);
         assert_eq!(entry.source, vec!["sessions/abc.jsonl#turn:2"]);
@@ -970,7 +1010,14 @@ mod tests {
 
     #[test]
     fn vet_accepts_existing_supersedes() {
-        let old = vet(candidate("pref-old"), &HashMap::new(), "2026-05-12", None, None).unwrap();
+        let old = vet(
+            candidate("pref-old"),
+            &HashMap::new(),
+            "2026-05-12",
+            None,
+            None,
+        )
+        .unwrap();
         let mut existing = HashMap::new();
         existing.insert(old.id.clone(), old);
         let mut c = candidate("pref-new");
@@ -1016,7 +1063,14 @@ mod tests {
     fn build_prompt_mentions_existing_and_boundary() {
         let existing = vec![(
             "preferences/a.md".into(),
-            vet(candidate("pref-a"), &HashMap::new(), "2026-05-12", None, None).unwrap(),
+            vet(
+                candidate("pref-a"),
+                &HashMap::new(),
+                "2026-05-12",
+                None,
+                None,
+            )
+            .unwrap(),
         )];
         let prompt = build_prompt("## User\nhi\n", &existing, "sessions/x.jsonl");
         assert!(prompt.contains("partial evidence"));
@@ -1029,8 +1083,14 @@ mod tests {
         // Regression: body is no longer required to be compressed into one sentence -- first-line summary + blank line + concrete details,
         // otherwise the L2 "on-demand detail layer" would be empty and details could not be retrieved across sessions (travel-planning scenario).
         let prompt = build_prompt("## User\nhi\n", &[], "sessions/x.jsonl");
-        assert!(prompt.contains("one-sentence summary"), "should require the first line to be a summary: {prompt}");
-        assert!(prompt.contains("concrete details"), "should require the body to write concrete details: {prompt}");
+        assert!(
+            prompt.contains("one-sentence summary"),
+            "should require the first line to be a summary: {prompt}"
+        );
+        assert!(
+            prompt.contains("concrete details"),
+            "should require the body to write concrete details: {prompt}"
+        );
         assert!(
             !prompt.contains("sum it up in one sentence"),
             "should no longer compress the body into one sentence: {prompt}"
@@ -1073,8 +1133,9 @@ mod tests {
         let store = MemoryStore::new(&root);
         let a = write_entry(&store, "a", EntryStatus::Active);
         let b = write_entry(&store, "b", EntryStatus::Active);
-        let existing: HashMap<String, Entry> =
-            [("a".to_string(), a), ("b".to_string(), b)].into_iter().collect();
+        let existing: HashMap<String, Entry> = [("a".to_string(), a), ("b".to_string(), b)]
+            .into_iter()
+            .collect();
 
         let mut target = candidate("ab-merged");
         target.source.clear(); // trigger evidence inheritance from sources
@@ -1096,7 +1157,10 @@ mod tests {
         assert_eq!(by_id["a"].status, EntryStatus::Superseded);
         assert_eq!(by_id["b"].status, EntryStatus::Superseded);
         assert_eq!(by_id["ab-merged"].status, EntryStatus::Active);
-        assert!(!by_id["ab-merged"].source.is_empty(), "evidence should be inherited from the old entries");
+        assert!(
+            !by_id["ab-merged"].source.is_empty(),
+            "evidence should be inherited from the old entries"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -1188,13 +1252,19 @@ mod tests {
 
     #[test]
     fn build_consolidate_prompt_lists_entries_and_evidence() {
-        let entry = vet(candidate("pref-a"), &HashMap::new(), "2026-05-10", None, None).unwrap();
+        let entry = vet(
+            candidate("pref-a"),
+            &HashMap::new(),
+            "2026-05-10",
+            None,
+            None,
+        )
+        .unwrap();
         let prompt = build_consolidate_prompt(&[("preferences/a.md".into(), entry)], "EVIDENCE");
         assert!(prompt.contains("pref-a"));
         assert!(prompt.contains("EVIDENCE"));
         assert!(prompt.contains("Never delete history"));
     }
-
 
     // ---- V2.5: deterministic rebuild of core.md -----------------------
 
@@ -1209,17 +1279,28 @@ mod tests {
     fn rebuild_core_projects_active_entries_in_type_order() {
         let root = tmpdir("core_build");
         let store = MemoryStore::new(&root);
-        store.write_entry(&active_entry("evt", EntryType::Event, "2026-05-12")).unwrap();
-        store.write_entry(&active_entry("fact", EntryType::Fact, "2026-05-11")).unwrap();
-        store.write_entry(&active_entry("pref", EntryType::Preference, "2026-05-10")).unwrap();
+        store
+            .write_entry(&active_entry("evt", EntryType::Event, "2026-05-12"))
+            .unwrap();
+        store
+            .write_entry(&active_entry("fact", EntryType::Fact, "2026-05-11"))
+            .unwrap();
+        store
+            .write_entry(&active_entry("pref", EntryType::Preference, "2026-05-10"))
+            .unwrap();
 
         rebuild_core(&store).unwrap();
         let core = store.read_core().expect("core should have been generated");
         // Type order: preference -> fact -> event (profile / preferences first).
-        let p = core.find("[preference]").expect("should contain a preference");
+        let p = core
+            .find("[preference]")
+            .expect("should contain a preference");
         let f = core.find("[fact]").expect("should contain a fact");
         let e = core.find("[event]").expect("should contain an event");
-        assert!(p < f && f < e, "core type order should be preference < fact < event");
+        assert!(
+            p < f && f < e,
+            "core type order should be preference < fact < event"
+        );
         // One line per entry, containing the summary (first line of the body).
         assert!(core.contains("Prefers thiserror for defining domain errors."));
         let _ = std::fs::remove_dir_all(&root);
@@ -1229,7 +1310,9 @@ mod tests {
     fn rebuild_core_skips_non_active_entries() {
         let root = tmpdir("core_skip");
         let store = MemoryStore::new(&root);
-        store.write_entry(&active_entry("keep", EntryType::Fact, "2026-05-10")).unwrap();
+        store
+            .write_entry(&active_entry("keep", EntryType::Fact, "2026-05-10"))
+            .unwrap();
         let mut gone = active_entry("gone", EntryType::Fact, "2026-05-10");
         gone.status = EntryStatus::Superseded;
         store.write_entry(&gone).unwrap();
@@ -1238,7 +1321,11 @@ mod tests {
         let core = store.read_core().unwrap();
         assert!(core.contains("[fact]"));
         // superseded entries do not enter the resident layer (the only line should come from keep).
-        assert_eq!(core.matches("- [").count(), 1, "only 1 active entry should enter core");
+        assert_eq!(
+            core.matches("- [").count(),
+            1,
+            "only 1 active entry should enter core"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1263,7 +1350,11 @@ mod tests {
         let mut fresh = old;
         fresh.body = "New content received from cloud".into();
         store.write_entry(&fresh).unwrap();
-        let op = ConsolidateOp::Requalify { id: "topic".into(), scope: Some("stale scope".into()), body: Some("stale body".into()) };
+        let op = ConsolidateOp::Requalify {
+            id: "topic".into(),
+            scope: Some("stale scope".into()),
+            body: Some("stale body".into()),
+        };
         assert!(apply_consolidate_ops(&store, vec![op], &existing, "2026-10-19").is_err());
         assert_eq!(store.list_entries().unwrap()[0].1.body, fresh.body);
         let _ = std::fs::remove_dir_all(root);
@@ -1284,7 +1375,10 @@ mod tests {
 
     #[test]
     fn missing_candidate_domain_defaults_to_project_and_cross_domain_merges_are_rejected() {
-        let parsed = parse_candidates(r#"[{"id":"unknown","type":"fact","subject":"s","body":"b","source":["s.jsonl"]}]"#).unwrap();
+        let parsed = parse_candidates(
+            r#"[{"id":"unknown","type":"fact","subject":"s","body":"b","source":["s.jsonl"]}]"#,
+        )
+        .unwrap();
         assert_eq!(parsed[0].domain, Domain::Project);
         let root = tmpdir("domain_isolation");
         let store = MemoryStore::with_roots(vec![root.join("personal"), root.join("project")]);
@@ -1293,13 +1387,20 @@ mod tests {
         project.domain = Domain::Project;
         let project = vet(project, &HashMap::new(), "2026-10-19", None, None).unwrap();
         store.write_entry(&project).unwrap();
-        let existing = [(personal.id.clone(), personal), (project.id.clone(), project)].into_iter().collect();
-        let op = ConsolidateOp::Merge { sources: vec!["personal".into(), "project".into()], target: candidate("merged") };
+        let existing = [
+            (personal.id.clone(), personal),
+            (project.id.clone(), project),
+        ]
+        .into_iter()
+        .collect();
+        let op = ConsolidateOp::Merge {
+            sources: vec!["personal".into(), "project".into()],
+            target: candidate("merged"),
+        };
         let outcome = apply_consolidate_ops(&store, vec![op], &existing, "2026-10-19").unwrap();
         assert_eq!(outcome.merged, 0);
         assert_eq!(outcome.rejected.len(), 1);
         assert_eq!(store.list_entries().unwrap().len(), 2);
         let _ = std::fs::remove_dir_all(root);
     }
-
 }

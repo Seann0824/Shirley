@@ -1,7 +1,7 @@
 use crossterm::{
     event::{
-        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste,
-        EnableMouseCapture, KeyEvent, MouseEvent, MouseEventKind,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        KeyEvent, MouseEvent, MouseEventKind,
     },
     execute,
 };
@@ -40,11 +40,7 @@ impl EventHandler {
         // and release writes the selected text to the system clipboard. This makes copying
         // mouse-only, with no need to press a copy key. The cost is that the terminal's native
         // selection is taken over (but the program provides an equivalent, auto-copying one).
-        execute!(
-            std::io::stdout(),
-            EnableMouseCapture,
-            EnableBracketedPaste
-        )?;
+        execute!(std::io::stdout(), EnableMouseCapture, EnableBracketedPaste)?;
         let (sender, receiver) = mpsc::unbounded_channel();
         let running = Arc::new(AtomicBool::new(true));
         let worker_running = Arc::clone(&running);

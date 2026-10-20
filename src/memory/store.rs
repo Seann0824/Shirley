@@ -64,17 +64,33 @@ impl MemoryStore {
     }
 
     pub(crate) fn lock_roots(&self) -> Result<Vec<std::fs::File>, MemoryError> {
-        self.roots.iter().collect::<std::collections::BTreeSet<_>>().into_iter()
-            .map(|root| lock_root(root)).collect()
+        self.roots
+            .iter()
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|root| lock_root(root))
+            .collect()
     }
 
     /// Reject stale model proposals if a sync or another curator changed their inputs.
-    pub(crate) fn matches_snapshot(&self, expected: &std::collections::HashMap<String, Entry>) -> Result<bool, MemoryError> {
-        let normalize = |mut entry: Entry| { entry.usage_count = None; entry.utility = None; entry };
-        let current: std::collections::HashMap<_, _> = self.list_entries()?.into_iter()
-            .map(|(_, entry)| (entry.id.clone(), normalize(entry))).collect();
-        let expected: std::collections::HashMap<_, _> = expected.iter()
-            .map(|(id, entry)| (id.clone(), normalize(entry.clone()))).collect();
+    pub(crate) fn matches_snapshot(
+        &self,
+        expected: &std::collections::HashMap<String, Entry>,
+    ) -> Result<bool, MemoryError> {
+        let normalize = |mut entry: Entry| {
+            entry.usage_count = None;
+            entry.utility = None;
+            entry
+        };
+        let current: std::collections::HashMap<_, _> = self
+            .list_entries()?
+            .into_iter()
+            .map(|(_, entry)| (entry.id.clone(), normalize(entry)))
+            .collect();
+        let expected: std::collections::HashMap<_, _> = expected
+            .iter()
+            .map(|(id, entry)| (id.clone(), normalize(entry.clone())))
+            .collect();
         Ok(current == expected)
     }
 
@@ -157,14 +173,21 @@ impl MemoryStore {
         let root = self.root_for_domain(entry.domain);
         Self::ensure_layout_at(root)?;
         let path = self.entry_path(entry);
-        let previous = std::fs::read_to_string(&path).ok().and_then(|text| Entry::parse(&text).ok());
-        if previous.as_ref().is_none_or(|old| old.subject != entry.subject || old.body != entry.body) {
+        let previous = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|text| Entry::parse(&text).ok());
+        if previous
+            .as_ref()
+            .is_none_or(|old| old.subject != entry.subject || old.body != entry.body)
+        {
             super::vector::invalidate(root, &entry.id)?;
         }
         let mut rendered = entry.render();
         // A usage-statistics/curation rewrite must not silently enroll legacy entries in cloud sync.
-        if entry.domain == Domain::Personal && std::fs::read_to_string(&path)
-            .is_ok_and(|old| !super::format::has_explicit_domain(&old)) {
+        if entry.domain == Domain::Personal
+            && std::fs::read_to_string(&path)
+                .is_ok_and(|old| !super::format::has_explicit_domain(&old))
+        {
             rendered = rendered.replacen("domain: personal\n", "", 1);
         }
         atomic_write(&path, rendered.as_bytes())?;
@@ -278,8 +301,15 @@ impl MemoryStore {
 }
 
 pub(crate) fn validate_id(id: &str) -> Result<(), MemoryError> {
-    if id.is_empty() || id.len() > 200 || !id.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_') {
-        return Err(MemoryError::Parse("memory id must be a slug of at most 200 bytes".into()));
+    if id.is_empty()
+        || id.len() > 200
+        || !id
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
+    {
+        return Err(MemoryError::Parse(
+            "memory id must be a slug of at most 200 bytes".into(),
+        ));
     }
     Ok(())
 }
@@ -287,10 +317,16 @@ pub(crate) fn validate_id(id: &str) -> Result<(), MemoryError> {
 /// OS lock, shared by curation, desktop, TUI and the sync endpoint. Never held over HTTP.
 pub(crate) fn lock_root(root: &Path) -> Result<std::fs::File, MemoryError> {
     std::fs::create_dir_all(root)?;
-    if std::fs::symlink_metadata(root.join(".write.lock")).is_ok_and(|meta| meta.file_type().is_symlink()) {
+    if std::fs::symlink_metadata(root.join(".write.lock"))
+        .is_ok_and(|meta| meta.file_type().is_symlink())
+    {
         return Err(MemoryError::Parse("memory lock cannot be a symlink".into()));
     }
-    let file = std::fs::OpenOptions::new().create(true).truncate(false).read(true).write(true)
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
         .open(root.join(".write.lock"))?;
     file.lock()?;
     Ok(file)
@@ -298,14 +334,21 @@ pub(crate) fn lock_root(root: &Path) -> Result<std::fs::File, MemoryError> {
 
 pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), MemoryError> {
     use std::io::Write;
-    let parent = path.parent().ok_or_else(|| MemoryError::Parse("missing parent".into()))?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| MemoryError::Parse("missing parent".into()))?;
     std::fs::create_dir_all(parent)?;
     let nonce = format!("{}-{:?}", std::process::id(), std::thread::current().id());
-    let temp = parent.join(format!(".{}.{}.tmp", path.file_name().unwrap().to_string_lossy(), nonce));
+    let temp = parent.join(format!(
+        ".{}.{}.tmp",
+        path.file_name().unwrap().to_string_lossy(),
+        nonce
+    ));
     let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.create(true).truncate(true).write(true);
-        #[cfg(unix)] {
+        #[cfg(unix)]
+        {
             use std::os::unix::fs::OpenOptionsExt;
             options.mode(0o600);
         }
@@ -314,7 +357,9 @@ pub(crate) fn atomic_write(path: &Path, bytes: &[u8]) -> Result<(), MemoryError>
         file.sync_all()?;
         std::fs::rename(&temp, path)
     })();
-    if result.is_err() { let _ = std::fs::remove_file(&temp); }
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temp);
+    }
     result.map_err(Into::into)
 }
 
@@ -331,7 +376,7 @@ fn dir_for(entry_type: EntryType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::memory::format::{Confidence, Domain, EntryStatus};
+    use crate::memory::format::{Confidence, EntryStatus};
 
     fn tmp(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -406,8 +451,12 @@ mod tests {
         let w = MemoryStore::new(&workspace);
         g.write_entry(&entry("fact-db", EntryType::Fact, "Global: uses MySQL."))
             .unwrap();
-        w.write_entry(&entry("fact-db", EntryType::Fact, "Workspace: uses Postgres."))
-            .unwrap();
+        w.write_entry(&entry(
+            "fact-db",
+            EntryType::Fact,
+            "Workspace: uses Postgres.",
+        ))
+        .unwrap();
 
         // roots[0]=global (write), roots[1]=workspace (overrides on read).
         let merged = MemoryStore::with_roots(vec![global.clone(), workspace.clone()]);
@@ -420,8 +469,12 @@ mod tests {
     fn core_merges_global_then_workspace() {
         let global = tmp("core_g");
         let workspace = tmp("core_w");
-        MemoryStore::new(&global).write_core("Global: the user is Sean.").unwrap();
-        MemoryStore::new(&workspace).write_core("Workspace: migrating.").unwrap();
+        MemoryStore::new(&global)
+            .write_core("Global: the user is Sean.")
+            .unwrap();
+        MemoryStore::new(&workspace)
+            .write_core("Workspace: migrating.")
+            .unwrap();
         let merged = MemoryStore::with_roots(vec![global, workspace]);
         assert_eq!(
             merged.read_core().as_deref(),

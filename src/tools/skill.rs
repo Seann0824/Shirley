@@ -53,7 +53,10 @@ impl ActivateSkillTool {
                 "additionalProperties": false
             }),
         };
-        Self { runtime, definition }
+        Self {
+            runtime,
+            definition,
+        }
     }
 }
 
@@ -77,9 +80,9 @@ impl Tool for ActivateSkillTool {
                 Err(ActivateError::UnknownSkill(name)) => Err(ToolError::ArgumentsError(format!(
                     "unknown skill `{name}`; use one of the skills listed in <available_skills>"
                 ))),
-                Err(ActivateError::ReadFailed(reason)) => {
-                    Err(ToolError::ExecutionError(format!("failed to load skill: {reason}")))
-                }
+                Err(ActivateError::ReadFailed(reason)) => Err(ToolError::ExecutionError(format!(
+                    "failed to load skill: {reason}"
+                ))),
             }
         })
     }
@@ -131,7 +134,10 @@ impl ReadSkillFileTool {
                 "additionalProperties": false
             }),
         };
-        Self { catalog, definition }
+        Self {
+            catalog,
+            definition,
+        }
     }
 }
 

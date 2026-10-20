@@ -384,10 +384,11 @@ mod tests {
         assert_eq!(history[0]["content"], "Remote history");
         let sent = remote.command("agent_send", serde_json::json!({"project": project, "session": "remote-chat", "text": "continue"})).await.unwrap();
         assert_eq!(sent["executed_on"], "cloud");
-        let seen = seen.lock().unwrap();
-        assert_eq!(seen[2].1["project"], "/cloud/repo");
-        assert_eq!(seen[2].1["session"], "remote-chat");
-        drop(seen);
+        {
+            let seen = seen.lock().unwrap();
+            assert_eq!(seen[2].1["project"], "/cloud/repo");
+            assert_eq!(seen[2].1["session"], "remote-chat");
+        }
         assert!(
             remote
                 .command("../api/memory/sync", serde_json::json!({}))

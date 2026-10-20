@@ -13,8 +13,8 @@ use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use super::format::{Entry, IndexLine, MemoryError};
-use super::store::{MemoryStore, INDEX_FILE};
-use super::vector::{cosine, VectorStore};
+use super::store::{INDEX_FILE, MemoryStore};
+use super::vector::{VectorStore, cosine};
 
 /// The score and matching terms of one entry during retrieval.
 #[derive(Debug, Clone)]
@@ -101,11 +101,7 @@ pub fn write_index(root: &Path, entries: &[(String, Entry)]) -> Result<(), Memor
         for line in &lines {
             text.push_str(&format!(
                 "- [{}]({}) · {} · {} · {}\n",
-                line.id,
-                line.path,
-                line.entry_type,
-                line.summary,
-                line.date
+                line.id, line.path, line.entry_type, line.summary, line.date
             ));
         }
     }
@@ -452,7 +448,12 @@ mod tests {
             ),
             (
                 "facts/db.md".into(),
-                entry("fact-db", "database", EntryType::Fact, "The project uses Postgres."),
+                entry(
+                    "fact-db",
+                    "database",
+                    EntryType::Fact,
+                    "The project uses Postgres.",
+                ),
             ),
             (
                 "episodic/2026-05-12-ts.md".into(),
@@ -524,22 +525,16 @@ mod tests {
     #[test]
     fn search_ties_break_by_recency() {
         let entries = vec![
-            (
-                "old.md".into(),
-                {
-                    let mut e = entry("old", "topic", EntryType::Fact, "about topic");
-                    e.valid_from = Some("2026-01-01".into());
-                    e
-                },
-            ),
-            (
-                "new.md".into(),
-                {
-                    let mut e = entry("new", "topic", EntryType::Fact, "about topic");
-                    e.valid_from = Some("2026-06-01".into());
-                    e
-                },
-            ),
+            ("old.md".into(), {
+                let mut e = entry("old", "topic", EntryType::Fact, "about topic");
+                e.valid_from = Some("2026-01-01".into());
+                e
+            }),
+            ("new.md".into(), {
+                let mut e = entry("new", "topic", EntryType::Fact, "about topic");
+                e.valid_from = Some("2026-06-01".into());
+                e
+            }),
         ];
         let hits = search(&entries, "topic", 5);
         assert_eq!(hits[0].entry.id, "new");
@@ -553,14 +548,11 @@ mod tests {
                 "active.md".into(),
                 entry("active", "topic", EntryType::Preference, "topic active"),
             ),
-            (
-                "old.md".into(),
-                {
-                    let mut e = entry("old", "topic", EntryType::Preference, "topic old");
-                    e.status = EntryStatus::Superseded;
-                    e
-                },
-            ),
+            ("old.md".into(), {
+                let mut e = entry("old", "topic", EntryType::Preference, "topic old");
+                e.status = EntryStatus::Superseded;
+                e
+            }),
         ];
         let hits = search(&entries, "topic", 5);
         assert_eq!(hits[0].entry.id, "active");
@@ -596,16 +588,28 @@ mod tests {
     fn hybrid_fuses_both_legs_via_rrf() {
         // a is hit only by BM25 (keywords), b only by the vector leg (semantics) -- after fusion both should be present.
         let entries = vec![
-            ("a.md".into(), entry("a", "note", EntryType::Fact, "thiserror")),
-            ("b.md".into(), entry("b", "note", EntryType::Fact, "unrelated body")),
+            (
+                "a.md".into(),
+                entry("a", "note", EntryType::Fact, "thiserror"),
+            ),
+            (
+                "b.md".into(),
+                entry("b", "note", EntryType::Fact, "unrelated body"),
+            ),
         ];
         let mut vectors = VectorStore::new("m");
         vectors.upsert("a", vec![0.0, 1.0]);
         vectors.upsert("b", vec![1.0, 0.0]);
         let hits = hybrid_search(&entries, "thiserror", Some(&[1.0, 0.0]), &vectors, 5);
         let ids: Vec<&str> = hits.iter().map(|h| h.entry.id.as_str()).collect();
-        assert!(ids.contains(&"a"), "the BM25 leg should contribute a: {ids:?}");
-        assert!(ids.contains(&"b"), "the vector leg should contribute b: {ids:?}");
+        assert!(
+            ids.contains(&"a"),
+            "the BM25 leg should contribute a: {ids:?}"
+        );
+        assert!(
+            ids.contains(&"b"),
+            "the vector leg should contribute b: {ids:?}"
+        );
     }
 
     #[test]
@@ -632,7 +636,11 @@ mod tests {
             entry("n", "user-identity", EntryType::Fact, "用户的名字是 Sean。"),
         )];
         let hits = search(&entries, "我的名字是什么", 5);
-        assert_eq!(hits.len(), 1, "a natural-language Chinese query should match (bigram)");
+        assert_eq!(
+            hits.len(),
+            1,
+            "a natural-language Chinese query should match (bigram)"
+        );
         assert_eq!(hits[0].entry.id, "n");
     }
 
@@ -656,13 +664,13 @@ mod tests {
                 "a.md".into(),
                 entry("a", "rust", EntryType::Fact, "thiserror"),
             ),
-            (
-                "b.md".into(),
-                entry("b", "rust", EntryType::Fact, "anyhow"),
-            ),
+            ("b.md".into(), entry("b", "rust", EntryType::Fact, "anyhow")),
         ];
         let hits = search(&entries, "rust thiserror", 5);
-        assert_eq!(hits[0].entry.id, "a", "rare term should outweigh common term");
+        assert_eq!(
+            hits[0].entry.id, "a",
+            "rare term should outweigh common term"
+        );
     }
 
     #[test]

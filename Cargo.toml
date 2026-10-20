@@ -52,3 +52,53 @@ members = [
     "crates/shirley-agent-sdk-macros",
 ]
 resolver = "3"
+
+# ---------------------------------------------------------------------------
+# Lint policy: Microsoft "Pragmatic Rust Guidelines"
+# https://microsoft.github.io/rust-guidelines/
+# See docs/rust-guidelines.md for the adoption plan and the ratchet roadmap.
+# ---------------------------------------------------------------------------
+[lints]
+workspace = true
+
+[workspace.lints.rust]
+# Tier 1 — already clean across the workspace today, enforced as hard errors
+# (a real gate: `cargo build`/`clippy` fails if these regress).
+ambiguous_negative_literals = "deny"
+redundant_lifetimes = "deny"
+trivial_numeric_casts = "deny"
+unsafe_op_in_unsafe_fn = "deny"
+unused_lifetimes = "deny"
+# Promoted from warn -> deny once the backlog was cleared (ratchet step 1).
+missing_debug_implementations = "deny"
+redundant_imports = "deny"
+
+[workspace.lints.clippy]
+# Tier 2 — advisory (warn) today; the ratchet backlog. CI does not fail on these
+# yet; fix incrementally, then flip CI to `-D warnings`. (MS recommends "warn".)
+cargo = { level = "warn", priority = -1 }
+complexity = { level = "warn", priority = -1 }
+# Promoted to deny once the backlog was cleared (ratchet step 2). These groups
+# are the "definitely a bug" class; a hit here now fails the build.
+correctness = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+# Restriction-group lints explicitly called out by the MS guidelines.
+allow_attributes_without_reason = "warn"
+clone_on_ref_ptr = "warn"
+map_err_ignore = "warn"
+undocumented_unsafe_blocks = "warn"
+unused_result_ok = "warn"
+too_long_first_doc_paragraph = "warn"
+# Structured logging: do not treat literal formatting args as a format string.
+literal_string_with_formatting_args = "allow"
+# Deliberate opt-outs: numeric-cast family is noisy on a brownfield codebase and
+# is deferred to the ratchet rather than blocking the initial adoption.
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+cast_possible_wrap = "allow"
+cast_ptr_alignment = "allow"

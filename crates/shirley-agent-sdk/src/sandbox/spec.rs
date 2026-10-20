@@ -38,7 +38,6 @@ pub enum NetworkPolicy {
 #[derive(Debug, Clone)] // printable, copyable (note: no Default; it is hand-written below)
 pub struct SandboxSpec {
     // A `struct` is a "bundle of fields" type. `pub` means it can be read directly from outside.
-
     /// The program to execute, e.g. `/usr/bin/python3`.
     pub program: String, // String: a variable-length string
 
@@ -84,15 +83,15 @@ impl Default for SandboxSpec {
     fn default() -> Self {
         Self {
             // Self { ... } "constructs an instance"; every field must be given a value.
-            program: String::new(),              // empty string ""
-            args: Vec::new(),                    // empty list []
-            cwd: None,                           // no working directory
-            env: Vec::new(),                     // empty list
-            timeout: Duration::from_secs(60),    // 60 seconds
+            program: String::new(),           // empty string ""
+            args: Vec::new(),                 // empty list []
+            cwd: None,                        // no working directory
+            env: Vec::new(),                  // empty list
+            timeout: Duration::from_secs(60), // 60 seconds
             workspace_root: None,
             writable_paths: Vec::new(),
             read_only_paths: Vec::new(),
-            network: NetworkPolicy::default(),   // uses the #[default] Disabled above
+            network: NetworkPolicy::default(), // uses the #[default] Disabled above
             memory_limit_mb: None,
             max_processes: None,
         }
@@ -108,14 +107,14 @@ impl SandboxSpec {
     pub fn new(program: impl Into<String>) -> Self {
         Self {
             program: program.into(), // .into() turns the argument into a String
-            ..Default::default()     // `..` means "fill the remaining fields with defaults" (from Default above)
+            ..Default::default() // `..` means "fill the remaining fields with defaults" (from Default above)
         }
     }
 
     // `mut self` means "take ownership and allow mutation", then return it (chained style).
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into()); // push: append one to the end of the list
-        self                        // return self so .xxx() can continue
+        self // return self so .xxx() can continue
     }
 
     // Generics: I is "anything iterable", S is "the element it yields".

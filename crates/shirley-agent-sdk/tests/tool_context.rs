@@ -51,7 +51,9 @@ async fn context_is_injected_into_macro_tool() {
     let ctx = ToolContext::new().with(session.clone());
 
     let mut manager = ToolManager::new();
-    manager.register(bump::tool()).expect("registration should succeed");
+    manager
+        .register(bump::tool())
+        .expect("registration should succeed");
 
     let out = manager
         .invoke(&call("bump", r#"{"by": 2}"#), ctx.clone())
@@ -74,7 +76,9 @@ async fn context_is_shared_across_concurrent_calls() {
     let ctx = ToolContext::new().with(session.clone());
 
     let mut manager = ToolManager::new();
-    manager.register(bump::tool()).expect("registration should succeed");
+    manager
+        .register(bump::tool())
+        .expect("registration should succeed");
 
     let mut tasks = Vec::new();
     for _ in 0..10 {
@@ -96,7 +100,9 @@ async fn context_is_shared_across_concurrent_calls() {
 #[tokio::test]
 async fn missing_context_surfaces_as_tool_error() {
     let mut manager = ToolManager::new();
-    manager.register(bump::tool()).expect("registration should succeed");
+    manager
+        .register(bump::tool())
+        .expect("registration should succeed");
 
     let error = manager
         .invoke(&call("bump", r#"{"by": 1}"#), ToolContext::new())
@@ -114,14 +120,19 @@ fn context_parameter_is_not_in_schema() {
         properties.get("ctx").is_none(),
         "ctx should not appear in the schema: {properties}"
     );
-    assert!(properties.get("by").is_some(), "ordinary parameters should be kept: {properties}");
+    assert!(
+        properties.get("by").is_some(),
+        "ordinary parameters should be kept: {properties}"
+    );
 }
 
 /// Old-style tools without ctx work as usual, and their schema is unaffected by the context.
 #[tokio::test]
 async fn tools_without_context_still_work() {
     let mut manager = ToolManager::new();
-    manager.register(identity::tool()).expect("registration should succeed");
+    manager
+        .register(identity::tool())
+        .expect("registration should succeed");
 
     let out = manager
         .invoke(&call("identity", r#"{"value": 7}"#), ToolContext::new())

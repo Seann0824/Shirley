@@ -34,9 +34,9 @@ pub use runtime::SkillRuntime;
 
 // Public surface of discovery / parsing (used by the existing P0 wiring and tests).
 #[allow(unused_imports)]
-pub use discovery::{discover, Discovery};
+pub use discovery::{Discovery, discover};
 #[allow(unused_imports)]
-pub use parse::{parse_skill, ParseError, SkillMeta};
+pub use parse::{ParseError, SkillMeta, parse_skill};
 
 /// User-level root for discovering skills (the parent of `~/.agents/skills` and
 /// `~/.claude/skills`).

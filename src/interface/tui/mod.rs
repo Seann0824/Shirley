@@ -1,3 +1,19 @@
+//! TUI (ratatui) presentation layer.
+//!
+//! Everything that is specific to the terminal interface lives under this module: the app state
+//! machine ([`app`]), the renderer ([`ui`]), key mapping ([`update`]), terminal input plumbing
+//! ([`event`]), the markdown renderer ([`markdown`]), mouse selection ([`selection`]) and slash
+//! commands ([`command`]). The shared, interface-agnostic orchestration (sessions, project runtime)
+//! lives one level up in [`super::session`] / [`super::runtime`]; this module only renders it.
+
+mod app;
+mod command;
+mod event;
+mod markdown;
+mod selection;
+mod ui;
+mod update;
+
 use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
 use futures::StreamExt;
 use ratatui::{buffer::Buffer, layout::Position};
@@ -5,8 +21,9 @@ use shirley_agent_sdk::{Agent, AgentEvent};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use self::app::App;
+use self::event::{Event, EventHandler};
 use super::session::SessionManager;
-use super::{app::App, event::Event, event::EventHandler, ui, update};
 use crate::models::ModelCatalog;
 use std::sync::Arc;
 

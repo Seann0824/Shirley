@@ -52,14 +52,15 @@ fn render(output: &SandboxOutput, command: &str) -> String {
         text.push_str(&format!("[exit code] {code}\n"));
     }
 
-    // // Degradation notice: this execution's isolation did not fully take effect. Report honestly, do not silently ignore.
-    // if !output.is_fully_isolated() {
-    //     text.push_str(&format!(
-    //         "[sandbox degraded] isolation strength: {}, the following constraints did not take effect: {}\n",
-    //         output.isolation,
-    //         output.degraded.join("; ")
-    //     ));
-    // }
+    // Degradation notice: this execution's isolation did not fully take effect.
+    // Report honestly, do not silently ignore.
+    if !output.is_fully_isolated() {
+        text.push_str(&format!(
+            "[sandbox degraded] isolation strength: {}, the following constraints did not take effect: {}\n",
+            output.isolation,
+            output.degraded.join("; ")
+        ));
+    }
 
     text
 }
@@ -105,7 +106,9 @@ pub async fn bash(
 
     // 2. Execute. The timeout is applied uniformly by Sandbox; no need to wrap tokio::time::timeout here.
     let output = sandbox.run(&spec).await.map_err(|e| {
-        shirley_agent_sdk::ToolError::ExecutionError(format!("{command}: sandbox execution failed: {e}"))
+        shirley_agent_sdk::ToolError::ExecutionError(format!(
+            "{command}: sandbox execution failed: {e}"
+        ))
     })?;
 
     // 3. Render the result and return it to the model.
@@ -119,7 +122,10 @@ mod tests {
     #[tokio::test]
     async fn runs_simple_command() {
         let out = bash("echo hello".to_string(), Some(10)).await.unwrap();
-        assert!(out.contains("hello"), "output should contain hello, got: {out}");
+        assert!(
+            out.contains("hello"),
+            "output should contain hello, got: {out}"
+        );
     }
 
     #[tokio::test]
@@ -129,20 +135,29 @@ mod tests {
             .await
             .unwrap();
         assert!(out.contains("boom"), "should contain stderr: {out}");
-        assert!(out.contains("[exit code] 3"), "should contain the exit code: {out}");
+        assert!(
+            out.contains("[exit code] 3"),
+            "should contain the exit code: {out}"
+        );
     }
 
     #[tokio::test]
     async fn reports_sandbox_degradation() {
         // Currently ProcessBackend, isolation does not take effect, must honestly report degradation.
         let out = bash("true".to_string(), Some(10)).await.unwrap();
-        assert!(out.contains("[sandbox degraded]"), "should report degradation: {out}");
+        assert!(
+            out.contains("[sandbox degraded]"),
+            "should report degradation: {out}"
+        );
     }
 
     #[tokio::test]
     async fn rejects_blacklisted_command() {
         let err = bash("rm -rf /".to_string(), Some(10)).await.unwrap_err();
-        assert!(err.to_string().contains("blacklist"), "should be blocked: {err}");
+        assert!(
+            err.to_string().contains("blacklist"),
+            "should be blocked: {err}"
+        );
     }
 
     #[tokio::test]
@@ -154,6 +169,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_empty_command() {
         let err = bash("   ".to_string(), Some(10)).await.unwrap_err();
-        assert!(err.to_string().contains("cannot be empty"), "empty command should error: {err}");
+        assert!(
+            err.to_string().contains("cannot be empty"),
+            "empty command should error: {err}"
+        );
     }
 }

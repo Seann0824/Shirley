@@ -309,9 +309,12 @@ impl Entry {
 }
 
 pub(crate) fn has_explicit_domain(text: &str) -> bool {
-    split_frontmatter(text).is_ok_and(|(front, _)| front.lines().any(|line| {
-        line.split_once(':').is_some_and(|(key, _)| key.trim() == "domain")
-    }))
+    split_frontmatter(text).is_ok_and(|(front, _)| {
+        front.lines().any(|line| {
+            line.split_once(':')
+                .is_some_and(|(key, _)| key.trim() == "domain")
+        })
+    })
 }
 
 /// One index line (used by `index.md`): the minimal retrieval info projected from an entry.
@@ -364,7 +367,10 @@ fn split_frontmatter(text: &str) -> Result<(&str, &str), MemoryError> {
 }
 
 fn normalize_source(raw: &str) -> String {
-    raw.strip_prefix("session:").map(str::trim).unwrap_or(raw).to_string()
+    raw.strip_prefix("session:")
+        .map(str::trim)
+        .unwrap_or(raw)
+        .to_string()
 }
 
 fn require<T>(value: Option<T>, field: &str) -> Result<T, MemoryError> {
@@ -422,7 +428,10 @@ The user prefers thiserror over anyhow for defining domain errors.
         assert_eq!(entry.subject, "rust-error-handling");
         assert_eq!(entry.created_at, "2026-05-10");
         assert_eq!(entry.valid_from.as_deref(), Some("2026-05-10"));
-        assert_eq!(entry.supersedes.as_deref(), Some("pref-rust-error-style-v1"));
+        assert_eq!(
+            entry.supersedes.as_deref(),
+            Some("pref-rust-error-style-v1")
+        );
         assert_eq!(entry.status, EntryStatus::Active);
         assert_eq!(entry.confidence, Confidence::High);
         assert_eq!(entry.scope.as_deref(), Some("rust / domain-error-handling"));
@@ -435,7 +444,10 @@ The user prefers thiserror over anyhow for defining domain errors.
                 "2026-05-11-def.jsonl#turn:2".to_string(),
             ]
         );
-        assert_eq!(entry.body, "The user prefers thiserror over anyhow for defining domain errors.");
+        assert_eq!(
+            entry.body,
+            "The user prefers thiserror over anyhow for defining domain errors."
+        );
     }
 
     #[test]
@@ -512,6 +524,9 @@ The project uses Postgres.
     #[test]
     fn summary_takes_first_nonempty_line() {
         let entry = Entry::parse(SAMPLE).unwrap();
-        assert_eq!(entry.summary(), "The user prefers thiserror over anyhow for defining domain errors.");
+        assert_eq!(
+            entry.summary(),
+            "The user prefers thiserror over anyhow for defining domain errors."
+        );
     }
 }

@@ -27,13 +27,19 @@ pub enum StopReason {
 
 #[derive(Debug, Clone)]
 pub enum AgentEvent {
-    Retrying { attempt: usize, reason: String },
+    Retrying {
+        attempt: usize,
+        reason: String,
+    },
     ContentDelta(String),
     ReasoningDelta(String),
     MessageAdded(message::Message),
     CompressionStarted,
     CompressionFinished,
-    ContextUsage { used_tokens: u64, limit_tokens: u64 },
+    ContextUsage {
+        used_tokens: u64,
+        limit_tokens: u64,
+    },
     ToolStarted {
         call_id: String,
         name: String,
@@ -68,7 +74,9 @@ pub enum AgentEvent {
 impl fmt::Display for AgentEvent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Retrying { attempt, reason } => write!(f, "Retrying model request ({attempt}): {reason}"),
+            Self::Retrying { attempt, reason } => {
+                write!(f, "Retrying model request ({attempt}): {reason}")
+            }
             Self::ContentDelta(text) | Self::ReasoningDelta(text) => write!(f, "{text}"),
             Self::MessageAdded(message) => write!(f, "{message}"),
             Self::CompressionStarted => write!(f, "compacting context"),
@@ -84,7 +92,9 @@ impl fmt::Display for AgentEvent {
                 let _ = write!(f, "🔧 Tool Started [{call_id}]: {name}");
                 Ok(())
             }
-            Self::ToolFinished { call_id, name, ok, .. } => {
+            Self::ToolFinished {
+                call_id, name, ok, ..
+            } => {
                 let mark = if *ok { "✅" } else { "❌" };
                 let _ = write!(f, "{mark} Tool Finished [{call_id}]: {name}");
                 Ok(())

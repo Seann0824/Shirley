@@ -579,8 +579,7 @@ pub async fn fetch_models(
                 .and_then(|v| v.as_u64())
                 .filter(|n| *n > 0 && *n <= u32::MAX as u64)
                 .unwrap_or_else(default_context);
-            let supports_images =
-                crate::models::normalize_supports_images_from_value(&id, value);
+            let supports_images = crate::models::normalize_supports_images_from_value(&id, value);
             Some(ModelDefinition {
                 name: value
                     .get("name")
@@ -886,6 +885,7 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "server")]
     #[test]
     fn session_remembers_its_provider_after_default_changes_and_blocks_deleted_provider() {
         use crate::bootstrap::test_support::test_factory;

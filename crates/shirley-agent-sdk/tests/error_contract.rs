@@ -87,7 +87,10 @@ fn every_kind_has_display_text() {
         ErrorKind::ToolFailure,
         ErrorKind::Internal,
     ] {
-        assert!(!kind.to_string().is_empty(), "{kind:?} is missing display text");
+        assert!(
+            !kind.to_string().is_empty(),
+            "{kind:?} is missing display text"
+        );
     }
 }
 
@@ -100,8 +103,14 @@ fn error_source_chain_is_preserved() {
     };
     // If there is a body, it should appear in the display text, to ease troubleshooting.
     let text = error.to_string();
-    assert!(text.contains("503"), "display text should contain the status code: {text}");
-    assert!(text.contains("upstream unavailable"), "display text should contain the error body: {text}");
+    assert!(
+        text.contains("503"),
+        "display text should contain the status code: {text}"
+    );
+    assert!(
+        text.contains("upstream unavailable"),
+        "display text should contain the error body: {text}"
+    );
 }
 
 // --- Test helpers -----------------------------------------------------------

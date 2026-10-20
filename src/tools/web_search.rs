@@ -173,7 +173,9 @@ impl WebSearchState {
         let response = tokio::time::timeout(self.config.timeout, request.send())
             .await
             .map_err(|_| ToolError::ExecutionError("web search timed out".into()))?
-            .map_err(|error| ToolError::ExecutionError(format!("web search request failed: {error}")))?;
+            .map_err(|error| {
+                ToolError::ExecutionError(format!("web search request failed: {error}"))
+            })?;
 
         let status = response.status();
         let bytes = read_limited(response).await?;
@@ -183,8 +185,9 @@ impl WebSearchState {
                 "web search service returned {status}: {detail}"
             )));
         }
-        let payload: Value = serde_json::from_slice(&bytes)
-            .map_err(|_| ToolError::ExecutionError("web search service returned invalid JSON".into()))?;
+        let payload: Value = serde_json::from_slice(&bytes).map_err(|_| {
+            ToolError::ExecutionError("web search service returned invalid JSON".into())
+        })?;
         map_response(&payload, self.config.max_results)
     }
 }
@@ -199,7 +202,9 @@ fn web_search_on_register(ctx: &mut ToolContext) -> Result<(), ToolError> {
     let state = WebSearchState::from_env()
         .map_err(ToolError::ExecutionError)?
         .ok_or_else(|| {
-            ToolError::ExecutionError("DEEPSEEK_API_KEY is not configured (or explicitly disabled)".into())
+            ToolError::ExecutionError(
+                "DEEPSEEK_API_KEY is not configured (or explicitly disabled)".into(),
+            )
         })?;
     ctx.insert(state);
     Ok(())
@@ -261,8 +266,9 @@ async fn read_limited(response: reqwest::Response) -> Result<Vec<u8>, ToolError>
     let mut bytes = Vec::new();
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-        let chunk = chunk
-            .map_err(|error| ToolError::ExecutionError(format!("web search request failed: {error}")))?;
+        let chunk = chunk.map_err(|error| {
+            ToolError::ExecutionError(format!("web search request failed: {error}"))
+        })?;
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
             return Err(response_too_large());
         }
@@ -548,7 +554,9 @@ mod tests {
     fn macro_generates_expected_definition() {
         enable_env();
         let mut manager = ToolManager::new();
-        manager.register(web_search::tool()).expect("registration should succeed");
+        manager
+            .register(web_search::tool())
+            .expect("registration should succeed");
         let definition = manager
             .definitions()
             .into_iter()
@@ -621,13 +629,17 @@ mod tests {
     async fn register_hook_injects_state_and_unregister_cleans_it() {
         enable_env();
         let mut manager = ToolManager::new();
-        manager.register(web_search::tool()).expect("registration should succeed");
+        manager
+            .register(web_search::tool())
+            .expect("registration should succeed");
         assert!(
             manager.context().get::<WebSearchState>().is_some(),
             "the context should contain WebSearchState after registration"
         );
 
-        manager.unregister("web_search").expect("unregistration should succeed");
+        manager
+            .unregister("web_search")
+            .expect("unregistration should succeed");
         assert!(
             manager.context().get::<WebSearchState>().is_none(),
             "the context should clear WebSearchState after unregistration"
@@ -675,7 +687,10 @@ mod tests {
         let tool = WebSearchState::new(config, "test-key".into()).unwrap();
         let error = tool.search("redirect check").await.unwrap_err();
         assert!(error.to_string().contains("302"), "{error}");
-        assert!(target_hit.await.unwrap(), "the redirect target should not be visited");
+        assert!(
+            target_hit.await.unwrap(),
+            "the redirect target should not be visited"
+        );
     }
 
     #[tokio::test]

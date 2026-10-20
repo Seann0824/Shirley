@@ -16,33 +16,33 @@ pub const DEFAULT_PREFIX: char = '/';
 /// Parse result, consumed by `App`.
 #[derive(Debug)]
 pub enum CommandOutcome {
-/// Expand into a prompt and go through the existing send path (the UI shows the expanded content, and the AI receives the same).
+    /// Expand into a prompt and go through the existing send path (the UI shows the expanded content, and the AI receives the same).
     Prompt(String),
-/// TUI local action: show a system hint directly, without sending it to the AI.
+    /// TUI local action: show a system hint directly, without sending it to the AI.
     SystemMessage(String),
-/// TUI local action: open the model picker. The list comes from the application-layer model catalog;
-/// the command itself does not care where models come from (see the `models` module).
+    /// TUI local action: open the model picker. The list comes from the application-layer model catalog;
+    /// the command itself does not care where models come from (see the `models` module).
     ModelPicker,
-/// TUI local action: rewind the last user message, filling its original text back into the input box for editing and resending.
-/// Option A: only the most recent one, no selection panel, and candidates involve no async loading.
+    /// TUI local action: rewind the last user message, filling its original text back into the input box for editing and resending.
+    /// Option A: only the most recent one, no selection panel, and candidates involve no async loading.
     Rewind,
-/// TUI local action: open the session picker. The session list comes from the application-layer session catalog
-/// (see `crate::session`); the command itself does not care where sessions come from or where they are stored.
+    /// TUI local action: open the session picker. The session list comes from the application-layer session catalog
+    /// (see `crate::session`); the command itself does not care where sessions come from or where they are stored.
     SessionPicker,
-/// TUI local action: open the subagent picker (`docs/subagent.md` decision 10, P2).
-/// The list comes from the current session's `SubagentManager`; the command itself does not care
-/// where subagents come from. Confirming an entry opens a read-only child-transcript overlay.
+    /// TUI local action: open the subagent picker (`docs/subagent.md` decision 10, P2).
+    /// The list comes from the current session's `SubagentManager`; the command itself does not care
+    /// where subagents come from. Confirming an entry opens a read-only child-transcript overlay.
     SubagentPicker,
-/// TUI local action: enter the step-by-step login flow (asks for base_url / api_key / model in turn).
-/// The command itself does not care how/where config is written -- that is `App`'s and `settings`' concern.
+    /// TUI local action: enter the step-by-step login flow (asks for base_url / api_key / model in turn).
+    /// The command itself does not care how/where config is written -- that is `App`'s and `settings`' concern.
     Login,
-/// Dynamic slash entry: `/<skill-name> [args]` -- the harness activates that skill directly
-/// (a deterministic entry point that skips the model's judgment, see `docs/skills.md` 5.6).
+    /// Dynamic slash entry: `/<skill-name> [args]` -- the harness activates that skill directly
+    /// (a deterministic entry point that skips the model's judgment, see `docs/skills.md` 5.6).
     ///
-/// When `args` is non-empty, after activation this text is sent as **this turn's prompt**; when empty, it only activates
-/// without bothering the model (the `App` gives a local system hint).
+    /// When `args` is non-empty, after activation this text is sent as **this turn's prompt**; when empty, it only activates
+    /// without bothering the model (the `App` gives a local system hint).
     ActivateSkill { name: String, args: String },
-/// Not a known command: send it as ordinary text (lenient policy, do not interrupt the user).
+    /// Not a known command: send it as ordinary text (lenient policy, do not interrupt the user).
     Unknown,
 }
 
@@ -191,7 +191,11 @@ impl CommandManager {
                 } else {
                     let dist = levenshtein(name, frag);
                     let max_len = name.len().max(frag.len()) as f64;
-                    if max_len == 0.0 { 1.0 } else { 1.0 - dist as f64 / max_len }
+                    if max_len == 0.0 {
+                        1.0
+                    } else {
+                        1.0 - dist as f64 / max_len
+                    }
                 };
                 (name.clone(), score)
             })
@@ -213,9 +217,7 @@ impl CommandManager {
         }
         // Strip the prefix, take the first segment as the command name and the rest as args.
         let rest = &trimmed[self.prefix.len_utf8()..];
-        let (name, args) = rest
-            .split_once(char::is_whitespace)
-            .unwrap_or((rest, ""));
+        let (name, args) = rest.split_once(char::is_whitespace).unwrap_or((rest, ""));
         let name = name.trim();
         let args = args.trim();
 
@@ -253,9 +255,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
         cur[0] = i;
         for j in 1..=m {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            cur[j] = (prev[j] + 1)
-                .min(cur[j - 1] + 1)
-                .min(prev[j - 1] + cost);
+            cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut cur);
     }
@@ -270,8 +270,14 @@ mod tests {
     #[test]
     fn unknown_prefix_is_passthrough() {
         let mgr = CommandManager::new('/');
-        assert!(matches!(mgr.resolve("hello /world", &[]), CommandOutcome::Unknown));
-        assert!(matches!(mgr.resolve("/notacommand", &[]), CommandOutcome::Unknown));
+        assert!(matches!(
+            mgr.resolve("hello /world", &[]),
+            CommandOutcome::Unknown
+        ));
+        assert!(matches!(
+            mgr.resolve("/notacommand", &[]),
+            CommandOutcome::Unknown
+        ));
         assert!(matches!(mgr.resolve("", &[]), CommandOutcome::Unknown));
     }
 
@@ -280,38 +286,63 @@ mod tests {
         // Use a temp directory as the workspace, ensuring there is no Agent.md there.
         let dir = std::env::temp_dir().join(format!("shirley_cmd_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir); }
+        unsafe {
+            std::env::set_var("SHIRLEY_WORKSPACE", &dir);
+        }
         let mgr = CommandManager::new('/');
         match mgr.resolve("/init", &[]) {
-            CommandOutcome::Prompt(p) => assert!(p.contains("Agent.md"), "should expand into a guide-generating prompt: {p}"),
+            CommandOutcome::Prompt(p) => assert!(
+                p.contains("Agent.md"),
+                "should expand into a guide-generating prompt: {p}"
+            ),
             other => panic!("expected Prompt, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
-        unsafe { std::env::remove_var("SHIRLEY_WORKSPACE"); }
+        unsafe {
+            std::env::remove_var("SHIRLEY_WORKSPACE");
+        }
     }
 
     #[test]
     fn rewind_starts_last_turn() {
         let mgr = CommandManager::new('/');
-        assert!(matches!(mgr.resolve("/rewind", &[]), CommandOutcome::Rewind));
+        assert!(matches!(
+            mgr.resolve("/rewind", &[]),
+            CommandOutcome::Rewind
+        ));
         // It should also hit with args (args are ignored -- only the latest one is rewound).
-        assert!(matches!(mgr.resolve("/rewind 2", &[]), CommandOutcome::Rewind));
+        assert!(matches!(
+            mgr.resolve("/rewind 2", &[]),
+            CommandOutcome::Rewind
+        ));
     }
 
     #[test]
     fn model_opens_picker() {
         let mgr = CommandManager::new('/');
-        assert!(matches!(mgr.resolve("/model", &[]), CommandOutcome::ModelPicker));
+        assert!(matches!(
+            mgr.resolve("/model", &[]),
+            CommandOutcome::ModelPicker
+        ));
         // It should also hit with args (args are ignored by the picker UI).
-        assert!(matches!(mgr.resolve("/model gpt", &[]), CommandOutcome::ModelPicker));
+        assert!(matches!(
+            mgr.resolve("/model gpt", &[]),
+            CommandOutcome::ModelPicker
+        ));
     }
 
     #[test]
     fn session_opens_picker() {
         let mgr = CommandManager::new('/');
-        assert!(matches!(mgr.resolve("/session", &[]), CommandOutcome::SessionPicker));
+        assert!(matches!(
+            mgr.resolve("/session", &[]),
+            CommandOutcome::SessionPicker
+        ));
         // It should also hit with args (args are ignored by the picker UI).
-        assert!(matches!(mgr.resolve("/session 2", &[]), CommandOutcome::SessionPicker));
+        assert!(matches!(
+            mgr.resolve("/session 2", &[]),
+            CommandOutcome::SessionPicker
+        ));
     }
 
     #[test]
@@ -319,94 +350,114 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("shirley_cmd_exist_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join(GUIDE_FILE_NAME), "# Project notes\n").unwrap();
-        unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir); }
+        unsafe {
+            std::env::set_var("SHIRLEY_WORKSPACE", &dir);
+        }
         let mgr = CommandManager::new('/');
-        assert!(matches!(mgr.resolve("/init", &[]), CommandOutcome::SystemMessage(_)));
+        assert!(matches!(
+            mgr.resolve("/init", &[]),
+            CommandOutcome::SystemMessage(_)
+        ));
         let _ = std::fs::remove_dir_all(&dir);
-        unsafe { std::env::remove_var("SHIRLEY_WORKSPACE"); }
+        unsafe {
+            std::env::remove_var("SHIRLEY_WORKSPACE");
+        }
     }
 }
 
-    #[test]
-    fn fuzzy_recalls_init_from_typos() {
-        let mgr = CommandManager::new('/');
-        // Tolerate common typos: transposition (inti), extra char (initt), missing char (nit), prefix (ini).
-        for typo in ["/i", "/inti", "/initt", "/nit", "/ini"] {
-            let hits = mgr.fuzzy_match(typo, &[]);
-            assert!(!hits.is_empty(), "{typo} should recall init, got {hits:?}");
-            assert_eq!(hits[0].0, "init", "{typo} should prefer init");
+#[test]
+fn fuzzy_recalls_init_from_typos() {
+    let mgr = CommandManager::new('/');
+    // Tolerate common typos: transposition (inti), extra char (initt), missing char (nit), prefix (ini).
+    for typo in ["/i", "/inti", "/initt", "/nit", "/ini"] {
+        let hits = mgr.fuzzy_match(typo, &[]);
+        assert!(!hits.is_empty(), "{typo} should recall init, got {hits:?}");
+        assert_eq!(hits[0].0, "init", "{typo} should prefer init");
+    }
+    // A too-heavy typo (itn needs 3 edits) should not be recalled in the first place, to avoid noise.
+    assert!(mgr.fuzzy_match("/itn", &[]).is_empty());
+}
+
+#[test]
+fn slash_alone_lists_all_commands() {
+    // When only the trigger `/` is typed, all commands should be listed for direct selection.
+    let mgr = CommandManager::new('/');
+    let hits = mgr.fuzzy_match("/", &[]);
+    assert_eq!(
+        hits.len(),
+        mgr.command_count(),
+        "`/` should list all commands"
+    );
+    assert!(hits.iter().any(|(n, _)| n == "init"));
+}
+
+#[test]
+fn fuzzy_no_suggestion_for_exact_or_plain_text() {
+    let mgr = CommandManager::new('/');
+    // No suggestion on an exact match
+    assert!(
+        mgr.fuzzy_match("/init", &[]).is_empty(),
+        "an exact match should not suggest"
+    );
+    // Not triggered by a non-command prefix
+    assert!(mgr.fuzzy_match("hello", &[]).is_empty());
+}
+
+#[test]
+fn skill_name_resolves_to_activate() {
+    let mgr = CommandManager::new('/');
+    let skills = vec!["pdf".to_owned(), "docx".to_owned()];
+    // No args: only activate, args empty.
+    match mgr.resolve("/pdf", &skills) {
+        CommandOutcome::ActivateSkill { name, args } => {
+            assert_eq!(name, "pdf");
+            assert!(args.is_empty());
         }
-        // A too-heavy typo (itn needs 3 edits) should not be recalled in the first place, to avoid noise.
-        assert!(mgr.fuzzy_match("/itn", &[]).is_empty());
+        other => panic!("expected ActivateSkill, got {other:?}"),
     }
-
-    #[test]
-    fn slash_alone_lists_all_commands() {
-        // When only the trigger `/` is typed, all commands should be listed for direct selection.
-        let mgr = CommandManager::new('/');
-        let hits = mgr.fuzzy_match("/", &[]);
-        assert_eq!(hits.len(), mgr.command_count(), "`/` should list all commands");
-        assert!(hits.iter().any(|(n, _)| n == "init"));
-    }
-
-    #[test]
-    fn fuzzy_no_suggestion_for_exact_or_plain_text() {
-        let mgr = CommandManager::new('/');
-        // No suggestion on an exact match
-        assert!(mgr.fuzzy_match("/init", &[]).is_empty(), "an exact match should not suggest");
-        // Not triggered by a non-command prefix
-        assert!(mgr.fuzzy_match("hello", &[]).is_empty());
-    }
-
-    #[test]
-    fn skill_name_resolves_to_activate() {
-        let mgr = CommandManager::new('/');
-        let skills = vec!["pdf".to_owned(), "docx".to_owned()];
-        // No args: only activate, args empty.
-        match mgr.resolve("/pdf", &skills) {
-            CommandOutcome::ActivateSkill { name, args } => {
-                assert_eq!(name, "pdf");
-                assert!(args.is_empty());
-            }
-            other => panic!("expected ActivateSkill, got {other:?}"),
+    // With args: activate + use the args as this turn's prompt.
+    match mgr.resolve("/docx convert this document to markdown", &skills) {
+        CommandOutcome::ActivateSkill { name, args } => {
+            assert_eq!(name, "docx");
+            assert_eq!(args, "convert this document to markdown");
         }
-        // With args: activate + use the args as this turn's prompt.
-        match mgr.resolve("/docx convert this document to markdown", &skills) {
-            CommandOutcome::ActivateSkill { name, args } => {
-                assert_eq!(name, "docx");
-                assert_eq!(args, "convert this document to markdown");
-            }
-            other => panic!("expected ActivateSkill, got {other:?}"),
-        }
-        // A name not in the catalog is still ordinary text (lenient policy, no interruption).
-        assert!(matches!(mgr.resolve("/nope", &skills), CommandOutcome::Unknown));
+        other => panic!("expected ActivateSkill, got {other:?}"),
     }
+    // A name not in the catalog is still ordinary text (lenient policy, no interruption).
+    assert!(matches!(
+        mgr.resolve("/nope", &skills),
+        CommandOutcome::Unknown
+    ));
+}
 
-    #[test]
-    fn builtin_wins_over_same_named_skill() {
-        // Built-in precedence: even if the catalog has a skill named `model`, `/model` still opens the model picker.
-        let mgr = CommandManager::new('/');
-        let skills = vec!["model".to_owned()];
-        assert!(matches!(mgr.resolve("/model", &skills), CommandOutcome::ModelPicker));
-    }
+#[test]
+fn builtin_wins_over_same_named_skill() {
+    // Built-in precedence: even if the catalog has a skill named `model`, `/model` still opens the model picker.
+    let mgr = CommandManager::new('/');
+    let skills = vec!["model".to_owned()];
+    assert!(matches!(
+        mgr.resolve("/model", &skills),
+        CommandOutcome::ModelPicker
+    ));
+}
 
-    #[test]
-    fn fuzzy_match_includes_skill_names() {
-        let mgr = CommandManager::new('/');
-        let skills = vec!["pdf".to_owned()];
-        // `/` lists all: built-ins + skills.
-        let all = mgr.fuzzy_match("/", &skills);
-        assert_eq!(all.len(), mgr.command_count() + 1);
-        assert!(all.iter().any(|(n, _)| n == "pdf"));
-        // Prefix hits a skill name.
-        let hits = mgr.fuzzy_match("/pd", &skills);
-        assert_eq!(hits[0].0, "pdf");
-    }
+#[test]
+fn fuzzy_match_includes_skill_names() {
+    let mgr = CommandManager::new('/');
+    let skills = vec!["pdf".to_owned()];
+    // `/` lists all: built-ins + skills.
+    let all = mgr.fuzzy_match("/", &skills);
+    assert_eq!(all.len(), mgr.command_count() + 1);
+    assert!(all.iter().any(|(n, _)| n == "pdf"));
+    // Prefix hits a skill name.
+    let hits = mgr.fuzzy_match("/pd", &skills);
+    assert_eq!(hits[0].0, "pdf");
+}
 
-    #[test]
-    fn fuzzy_ignores_args_segment() {
-        // The args portion should not interfere with command-name matching
-        let mgr = CommandManager::new('/');
-        let hits = mgr.fuzzy_match("/inti some extra args", &[]);
-        assert!(!hits.is_empty() && hits[0].0 == "init");
-    }
+#[test]
+fn fuzzy_ignores_args_segment() {
+    // The args portion should not interfere with command-name matching
+    let mgr = CommandManager::new('/');
+    let hits = mgr.fuzzy_match("/inti some extra args", &[]);
+    assert!(!hits.is_empty() && hits[0].0 == "init");
+}

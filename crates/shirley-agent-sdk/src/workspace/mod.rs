@@ -1,11 +1,11 @@
 use std::{
-    fs,
-    io,
+    fs, io,
     path::{Component, Path, PathBuf},
 };
 
 use crate::error::{ErrorKind, SdkError};
 
+#[derive(Debug)]
 pub struct WorkSpace {
     root: PathBuf,
 }

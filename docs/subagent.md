@@ -451,7 +451,7 @@ changes.
 | `AgentFactory` (`bootstrap.rs`) | `SubagentManager` holds `Arc<AgentFactory>`; creating a child = `build_agent(vec![])` (spawn) or `build_agent(parent snapshot with system stripped)` (fork); **`build_agent` gains a `tool_filter` parameter** to trim the child tool table (decision 5) |
 | `Agent` | The child is just an ordinary `Agent`, running `run(task)`; concurrency/compression/tools are all reused |
 | `ContextProvider` | **Optionally** add a `SubagentContextProvider` that injects "you have N running subagents + their status" at the end of each round (same style as todo injection, appended at the end, KV-friendly). P0 can skip |
-| `Session` (`interface/session.rs`) | one `Arc<SubagentManager>` per session (alongside `todo` / `memory` / `skills`, entering `BuiltAgent` and `Session` fields); subagents are isolated per session |
+| `Session` (`interface/session/mod.rs`) | one `Arc<SubagentManager>` per session (alongside `todo` / `memory` / `skills`, entering `BuiltAgent` and `Session` fields); subagents are isolated per session |
 | `SessionStore` (`session.rs`) | add a `SubagentStore` (index + per-agent logs), reusing the `JsonlSessionStore` core; `FileSessionCatalog` gains `<name>.agents/` directory management; **the child transcript can be `load()`-replayed for the preview** (decision 10) |
 
 The wiring of `bootstrap::build_agent` (illustrative):

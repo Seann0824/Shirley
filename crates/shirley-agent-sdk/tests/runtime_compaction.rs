@@ -9,7 +9,6 @@
 
 use shirley_agent_sdk::{HeuristicCounter, Message, ToolCall, plan_cut};
 
-
 fn system(text: &str) -> Message {
     Message::System {
         content: text.into(),
@@ -59,7 +58,10 @@ fn no_compaction_when_only_background() {
 fn no_compaction_when_everything_fits() {
     let messages = vec![system("s"), user("hello"), user("world")];
     let plan = plan_cut(&messages, 10_000, &counter());
-    assert!(plan.is_none(), "there should be no cut point when everything fits: {plan:?}");
+    assert!(
+        plan.is_none(),
+        "there should be no cut point when everything fits: {plan:?}"
+    );
 }
 
 /// The background prefix is never compacted: `head` covers the leading system, and the cut point never lands in it.
@@ -71,7 +73,10 @@ fn background_prefix_is_never_compacted() {
     }
     let plan = plan_cut(&messages, 40, &counter()).expect("a cut point should be produced");
     assert_eq!(plan.head, 1, "the leading system must be background");
-    assert!(plan.cut > plan.head, "the cut point must be after the background");
+    assert!(
+        plan.cut > plan.head,
+        "the cut point must be after the background"
+    );
 }
 
 /// The previous `ContextSummary` is background: it gets replaced by the new summary and does not consume the retain budget.
@@ -87,7 +92,10 @@ fn prior_summary_is_background() {
         messages.push(user(&format!("long user message #{i} to blow the budget")));
     }
     let plan = plan_cut(&messages, 40, &counter()).expect("a cut point should be produced");
-    assert_eq!(plan.head, 2, "system + previous summary both count as background");
+    assert_eq!(
+        plan.head, 2,
+        "system + previous summary both count as background"
+    );
     assert!(plan.cut >= 2, "background must not be compacted");
 }
 
@@ -113,7 +121,10 @@ fn never_cuts_between_assistant_tool_calls_and_tool_results() {
     let mut messages = vec![system("s"), user("take a look for me")];
     for i in 0..20 {
         messages.push(assistant_calls(&[&format!("call_{i}")]));
-        messages.push(tool(&format!("call_{i}"), "historical tool output to consume budget"));
+        messages.push(tool(
+            &format!("call_{i}"),
+            "historical tool output to consume budget",
+        ));
     }
     messages.push(user("this is the current task"));
     for i in 0..10 {
@@ -174,12 +185,15 @@ fn compaction_still_fires_when_one_task_has_a_long_tool_chain() {
             "huge tool output, extremely extremely extremely long",
         ));
     }
-    let plan = plan_cut(&messages, 60, &counter())
-        .expect("a long chain of large tool output must trigger compaction, or the context will blow up");
+    let plan = plan_cut(&messages, 60, &counter()).expect(
+        "a long chain of large tool output must trigger compaction, or the context will blow up",
+    );
     assert!(plan.cut > plan.head, "there must be a compactable region");
     // The task itself is still extracted correctly (so the rebuild stage can decide how to retain it; see step 4).
     match &plan.current_task {
-        Some(Message::User { content }) => assert_eq!(content, "help me refactor the whole project"),
+        Some(Message::User { content }) => {
+            assert_eq!(content, "help me refactor the whole project")
+        }
         other => panic!("current_task should be the last User, got {other:?}"),
     }
 }
@@ -189,7 +203,9 @@ fn compaction_still_fires_when_one_task_has_a_long_tool_chain() {
 fn extracts_last_user_message_as_current_task() {
     let mut messages = vec![system("s"), user("first question")];
     for i in 0..30 {
-        messages.push(user(&format!("long message {i} in the middle to consume budget")));
+        messages.push(user(&format!(
+            "long message {i} in the middle to consume budget"
+        )));
     }
     messages.push(user("this is the most recent question"));
     let plan = plan_cut(&messages, 30, &counter()).expect("a cut point should be produced");
@@ -306,7 +322,10 @@ fn current_task_is_not_duplicated() {
         "the task should not appear in to_compress"
     );
     // The task is at the end, in the retained segment -> not extracted, position unchanged (appears once in remain).
-    assert!(!parts.task_extracted, "the task should not be extracted when it is in the retained segment");
+    assert!(
+        !parts.task_extracted,
+        "the task should not be extracted when it is in the retained segment"
+    );
     assert_eq!(
         parts.remain.iter().filter(|m| is_task(m)).count(),
         1,
@@ -333,9 +352,15 @@ fn task_is_extracted_even_when_inside_the_compacted_region() {
 
     let plan = plan_cut(&messages, 60, &counter()).expect("a cut point should be produced");
     // The cut point lands after the task -> the task would otherwise be compressed into the summary.
-    assert!(plan.cut > task_index, "setup precondition: the cut point should land after the task");
+    assert!(
+        plan.cut > task_index,
+        "setup precondition: the cut point should land after the task"
+    );
     let parts = plan.split(&messages);
-    assert!(parts.task_extracted, "the task must be extracted when it lands in the to-compress region");
+    assert!(
+        parts.task_extracted,
+        "the task must be extracted when it lands in the to-compress region"
+    );
     match &parts.current_task {
         Some(Message::User { content }) => assert_eq!(content, "current task"),
         other => panic!("the task must be extracted, got {other:?}"),
@@ -366,10 +391,10 @@ fn to_compress_never_contains_background() {
     let parts = plan.split(&messages);
 
     assert!(
-        !parts.to_compress.iter().any(|m| matches!(
-            m,
-            Message::System { .. } | Message::ContextSummary { .. }
-        )),
+        !parts
+            .to_compress
+            .iter()
+            .any(|m| matches!(m, Message::System { .. } | Message::ContextSummary { .. })),
         "background must not enter the to-compress segment"
     );
 }
@@ -390,16 +415,16 @@ fn rebuild_preserves_order_when_task_is_in_remain() {
 
     let plan = plan_cut(&messages, 40, &counter()).expect("a cut point should be produced");
     let parts = plan.split(&messages);
-    assert!(!parts.task_extracted, "setup precondition: the task should be in the retained segment");
+    assert!(
+        !parts.task_extracted,
+        "setup precondition: the task should be in the retained segment"
+    );
 
     let rebuilt = parts.rebuild("summary");
 
     // Message count after rebuild = summary + retained segment (the system prompt is not among them).
     assert_eq!(rebuilt.len(), 1 + parts.remain.len());
-    assert!(matches!(
-        rebuilt[0],
-        Message::ContextSummary { .. }
-    ));
+    assert!(matches!(rebuilt[0], Message::ContextSummary { .. }));
     // The extracted task should not appear extra: the number of users in the rebuild matches the retained segment.
     let users_in_rebuilt = rebuilt
         .iter()
@@ -420,10 +445,7 @@ fn rebuild_preserves_order_when_task_is_in_remain() {
         .position(|m| matches!(m, Message::User { content } if content == "current task"))
         .expect("the task should be in the rebuild result");
     assert!(
-        matches!(
-            rebuilt.get(task_pos + 1),
-            Some(Message::Assistant { .. })
-        ),
+        matches!(rebuilt.get(task_pos + 1), Some(Message::Assistant { .. })),
         "the task should be immediately followed by its assistant, got: {:?}",
         rebuilt.get(task_pos + 1)
     );
@@ -447,15 +469,15 @@ fn rebuild_reinjects_extracted_task_before_remain() {
 
     let plan = plan_cut(&messages, 60, &counter()).expect("a cut point should be produced");
     let parts = plan.split(&messages);
-    assert!(parts.task_extracted, "setup precondition: the task should be extracted");
+    assert!(
+        parts.task_extracted,
+        "setup precondition: the task should be extracted"
+    );
 
     let rebuilt = parts.rebuild("summary");
 
     // Structure: summary + task + retained segment (the system prompt is not among them).
-    assert!(matches!(
-        rebuilt[0],
-        Message::ContextSummary { .. }
-    ));
+    assert!(matches!(rebuilt[0], Message::ContextSummary { .. }));
     let task_pos = 1;
     assert!(
         matches!(rebuilt[task_pos], Message::User { .. }),
@@ -541,9 +563,7 @@ fn rebuild_keeps_exactly_one_summary() {
     }
     // The rebuild result contains no System: the system prompt is fetched fresh and pinned to the top by `Agent`, not via rebuild.
     assert!(
-        !rebuilt
-            .iter()
-            .any(|m| matches!(m, Message::System { .. })),
+        !rebuilt.iter().any(|m| matches!(m, Message::System { .. })),
         "rebuild should not copy the system prompt"
     );
     // The summary is the head of the rebuild result.
@@ -578,6 +598,8 @@ fn repeated_compaction_does_not_stack_summaries() {
         .iter()
         .filter(|m| matches!(m, Message::ContextSummary { .. }))
         .count();
-    assert_eq!(count, 1, "after repeated compaction there should still be only one summary, got {count}");
+    assert_eq!(
+        count, 1,
+        "after repeated compaction there should still be only one summary, got {count}"
+    );
 }
-

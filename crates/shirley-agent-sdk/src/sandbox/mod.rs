@@ -33,8 +33,8 @@
 
 // Declare the three submodules, each corresponding to one file.
 pub mod backend; // backend/mod.rs
-pub mod output;  // output.rs
-pub mod spec;    // spec.rs
+pub mod output; // output.rs
+pub mod spec; // spec.rs
 
 // Re-export common types so callers can write one less path segment.
 // E.g. sandbox::SandboxSpec instead of sandbox::spec::SandboxSpec.
@@ -55,6 +55,15 @@ pub struct Sandbox<B: SandboxBackend> {
     backend: B,
     /// Overrides the timeout in the spec; `None` means use the spec's own.
     hard_timeout: Option<Duration>,
+}
+
+impl<B: SandboxBackend> std::fmt::Debug for Sandbox<B> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The backend has no `Debug` bound; report only the generic-independent fields.
+        f.debug_struct("Sandbox")
+            .field("hard_timeout", &self.hard_timeout)
+            .finish_non_exhaustive()
+    }
 }
 
 // `impl<B: SandboxBackend> Sandbox<B>`: add methods to "a Sandbox over any backend".

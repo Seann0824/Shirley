@@ -74,15 +74,22 @@ pub struct Usage {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum StreamEvent {
     /// Carries the initial usage (input side).
-    MessageStart { message: MessageStartPayload },
+    MessageStart {
+        message: MessageStartPayload,
+    },
     /// Block start. `content_block` carries the initial content (a tool_use's id/name is here).
     ContentBlockStart {
         index: usize,
         content_block: ContentBlock,
     },
     /// Block delta.
-    ContentBlockDelta { index: usize, delta: Delta },
-    ContentBlockStop { index: usize },
+    ContentBlockDelta {
+        index: usize,
+        delta: Delta,
+    },
+    ContentBlockStop {
+        index: usize,
+    },
     /// **The terminal stop_reason and output usage are here.**
     MessageDelta {
         delta: MessageDeltaPayload,

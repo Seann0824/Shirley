@@ -3,18 +3,18 @@ use shirley_agent_sdk::AgentError;
 mod bootstrap;
 mod interface;
 mod memory;
-mod models;
 mod model_providers;
+mod models;
 mod project;
-mod remote;
 mod prompt;
 mod prompt_template;
+mod remote;
 mod session;
 mod settings;
+mod skills;
 mod status;
 mod storage;
 mod subagent;
-mod skills;
 mod todo;
 mod tools;
 mod workspace_search;
@@ -54,9 +54,7 @@ fn main() -> Result<(), AgentError> {
     // Running them on the same machine under the same OS user intentionally means they
     // see the same projects / sessions / config. Move the legacy `<config_dir>/shirley`
     // root over once so the desktop's existing data does not appear lost.
-    if storage::migrate_legacy_root()
-        .map_err(|error| AgentError::Other(Box::new(error)))?
-    {
+    if storage::migrate_legacy_root().map_err(|error| AgentError::Other(Box::new(error)))? {
         eprintln!(
             "[storage] migrated legacy state root into {}",
             storage::global_root().display()
@@ -67,10 +65,13 @@ fn main() -> Result<(), AgentError> {
     let working_dir = prompt::workspace_root();
 
     // Move legacy project-local state before any session files are opened.
-    let migrated = storage::migrate_all(&working_dir)
-        .map_err(|error| AgentError::Other(Box::new(error)))?;
+    let migrated =
+        storage::migrate_all(&working_dir).map_err(|error| AgentError::Other(Box::new(error)))?;
     if std::env::args().any(|arg| arg == "--migrate-data") {
-        println!("Migrated {migrated} legacy workspaces into {}", storage::global_root().display());
+        println!(
+            "Migrated {migrated} legacy workspaces into {}",
+            storage::global_root().display()
+        );
         return Ok(());
     }
 

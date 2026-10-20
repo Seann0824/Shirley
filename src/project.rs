@@ -153,7 +153,11 @@ impl ProjectRegistry {
     /// - Registered and not archived -> only refresh `last_opened_ms` (no duplicate registration).
     ///
     /// Returns the registered entry (a clone).
-    pub fn add(&mut self, path: PathBuf, name: Option<String>) -> Result<ProjectEntry, ProjectError> {
+    pub fn add(
+        &mut self,
+        path: PathBuf,
+        name: Option<String>,
+    ) -> Result<ProjectEntry, ProjectError> {
         let canonical = std::fs::canonicalize(&path)
             .map_err(|error| ProjectError::Canonicalize(format!("{}: {error}", path.display())))?;
         let id = canonical.to_string_lossy().into_owned();

@@ -387,7 +387,10 @@ mod tests {
             })
             .unwrap();
         let rendered = store.render().unwrap();
-        assert!(rendered.contains("<goal>goal</goal>"), "goal should be preserved");
+        assert!(
+            rendered.contains("<goal>goal</goal>"),
+            "goal should be preserved"
+        );
         assert!(rendered.contains("- finding A"));
     }
 
@@ -428,7 +431,10 @@ mod tests {
             })
             .unwrap_err();
         assert!(matches!(err, ToolError::ArgumentsError(_)));
-        assert!(store.render().is_none(), "validation failure should not produce side effects");
+        assert!(
+            store.render().is_none(),
+            "validation failure should not produce side effects"
+        );
     }
 
     #[test]
@@ -449,14 +455,19 @@ mod tests {
     fn provider_injects_ledger_when_non_empty() {
         let store = Arc::new(TodoStore::new());
         let provider = TodoContextProvider::new(store.clone());
-        assert!(provider.context().is_none(), "an empty ledger is not injected in the first round");
+        assert!(
+            provider.context().is_none(),
+            "an empty ledger is not injected in the first round"
+        );
         store
             .apply(TodoUpdate {
                 goal: Some("do something".into()),
                 ..Default::default()
             })
             .unwrap();
-        let text = provider.context().expect("a non-empty ledger should be injected");
+        let text = provider
+            .context()
+            .expect("a non-empty ledger should be injected");
         assert!(text.contains(TASK_STATE_HEADER));
         assert!(text.contains("<goal>do something</goal>"));
     }

@@ -90,9 +90,15 @@ async fn register_runs_on_register_and_injects_state() {
     REGISTER_CALLS.store(0, Ordering::SeqCst);
 
     let mut manager = ToolManager::new();
-    manager.register(bump::tool()).expect("registration should succeed");
+    manager
+        .register(bump::tool())
+        .expect("registration should succeed");
 
-    assert_eq!(REGISTER_CALLS.load(Ordering::SeqCst), 1, "created should be called once");
+    assert_eq!(
+        REGISTER_CALLS.load(Ordering::SeqCst),
+        1,
+        "created should be called once"
+    );
     assert!(
         manager.context().get::<CounterState>().is_some(),
         "the state injected by the hook should be in the manager context"
@@ -112,12 +118,20 @@ fn unregister_runs_on_unregister_and_cleans_context() {
     UNREGISTER_CALLS.store(0, Ordering::SeqCst);
 
     let mut manager = ToolManager::new();
-    manager.register(bump::tool()).expect("registration should succeed");
+    manager
+        .register(bump::tool())
+        .expect("registration should succeed");
     assert!(manager.context().get::<CounterState>().is_some());
 
-    manager.unregister("bump").expect("unregister should succeed");
+    manager
+        .unregister("bump")
+        .expect("unregister should succeed");
 
-    assert_eq!(UNREGISTER_CALLS.load(Ordering::SeqCst), 1, "destroy should be called once");
+    assert_eq!(
+        UNREGISTER_CALLS.load(Ordering::SeqCst),
+        1,
+        "destroy should be called once"
+    );
     assert!(
         manager.context().get::<CounterState>().is_none(),
         "destroy should clear the context entry it injected"
@@ -130,7 +144,9 @@ fn unregister_runs_on_unregister_and_cleans_context() {
 #[test]
 fn unregister_unknown_tool_is_not_found() {
     let mut manager = ToolManager::new();
-    let error = manager.unregister("nope").expect_err("unregistering an unregistered tool should fail");
+    let error = manager
+        .unregister("nope")
+        .expect_err("unregistering an unregistered tool should fail");
     assert!(
         matches!(error, ToolError::NotFoundError(_)),
         "should be NotFoundError, got: {error:?}"
@@ -141,7 +157,9 @@ fn unregister_unknown_tool_is_not_found() {
 #[test]
 fn on_register_failure_rejects_registration() {
     let mut manager = ToolManager::new();
-    let error = manager.register(broken::tool()).expect_err("a failing hook should reject registration");
+    let error = manager
+        .register(broken::tool())
+        .expect_err("a failing hook should reject registration");
     assert!(matches!(error, ToolError::ExecutionError(_)), "{error:?}");
     assert!(
         manager.definitions().iter().all(|d| d.name != "broken"),
@@ -153,7 +171,9 @@ fn on_register_failure_rejects_registration() {
 #[tokio::test]
 async fn stateless_tool_without_hooks_still_works() {
     let mut manager = ToolManager::new();
-    manager.register(identity::tool()).expect("registration should succeed");
+    manager
+        .register(identity::tool())
+        .expect("registration should succeed");
 
     let out = manager
         .invoke(&call("identity", r#"{"value": 7}"#), ToolContext::new())
@@ -161,5 +181,7 @@ async fn stateless_tool_without_hooks_still_works() {
         .expect("the call should succeed");
     assert_eq!(out, serde_json::json!(7));
 
-    manager.unregister("identity").expect("unregistration should succeed");
+    manager
+        .unregister("identity")
+        .expect("unregistration should succeed");
 }

@@ -10,8 +10,8 @@
 //! are applied uniformly by [`super::Sandbox`], ensuring no backend can evade them).
 
 // Bring in the types we need.
-use crate::sandbox::spec::SandboxSpec;   // the execution spec (what to run)
-use crate::sandbox::output::SandboxOutput; // the execution result
+use crate::sandbox::output::SandboxOutput;
+use crate::sandbox::spec::SandboxSpec; // the execution spec (what to run) // the execution result
 
 // `pub mod process;` means "this directory has a submodule `process`",
 // which it will find at backend/process.rs.
@@ -98,7 +98,11 @@ pub enum SandboxError {
     /// conversion, so call sites can keep using `?`; `#[source]` preserves the error chain for
     /// upward tracing.
     #[error("[sandbox io error]: {0}")]
-    Io(#[from] #[source] std::io::Error),
+    Io(
+        #[from]
+        #[source]
+        std::io::Error,
+    ),
 }
 
 // Hook into the SDK's unified error contract: lets callers use the same interface to judge

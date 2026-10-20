@@ -203,8 +203,8 @@ This table is the core of this document: which point in the architecture each fe
 | Context compaction | `runtime` + `message` | `runtime/mod.rs` (`ContextSummary`) | implemented, fragile |
 | usage / cache hit rate | `message` + `adapter` | `message/mod.rs`, `chat_completions` | implemented |
 | ChatCompletions protocol | `adapter` | `adapter/chat_completions/` | implemented |
-| TUI rendering and scrolling | application layer | `interface/ui.rs`, `app.rs` | implemented |
-| Markdown -> TUI render layer | application layer | `interface/markdown.rs` (`parse` -> `Block` -> `render` -> `Line`/`Span`) | implemented |
+| TUI rendering and scrolling | application layer | `interface/tui/ui.rs`, `app.rs` | implemented |
+| Markdown -> TUI render layer | application layer | `interface/tui/markdown.rs` (`parse` -> `Block` -> `render` -> `Line`/`Span`) | implemented |
 | Streaming output | `adapter` + `runtime` + application layer | `adapter/chat_completions` (SSE parsing), `AgentEvent::ContentDelta` | implemented |
 | reasoning streaming | `adapter` + `message` + application layer | `AgentEvent::ReasoningDelta`, `ReasoningDelta` event | implemented |
 | Multi-protocol (Responses / Anthropic) | `adapter` | the `todo!()` in `codec` | not done, will panic |
@@ -215,7 +215,7 @@ This table is the core of this document: which point in the architecture each fe
 | Retry / timeout | `adapter` + `runtime` | `request_timeout` not wired | not done |
 | Memory system | new module + `runtime` | none | not done |
 | Task planning | new module + `runtime` | none | not done |
-| Session persistence | application layer `session.rs` + `interface/session.rs` | the `SessionStore` contract (`src/session.rs`) + `JsonlSessionStore` + `SessionManager` orchestration; the SDK does not hold a session | implemented (JSONL backend) |
+| Session persistence | application layer `session.rs` + `interface/session/mod.rs` | the `SessionStore` contract (`src/session.rs`) + `JsonlSessionStore` + `SessionManager` orchestration; the SDK does not hold a session | implemented (JSONL backend) |
 
 **9. Dependency graph of features and architecture nodes**
 
@@ -277,5 +277,5 @@ Scheduling is not maintained in this document, to avoid drifting in two places -
 - Change message semantics -> `message/mod.rs`; first add the Usage unit tests from `testing.md`.
 - Change loop behavior -> `runtime/mod.rs`; at the same time check whether `StopReason` has a corresponding production point.
 - Add a tool -> write only one `#[tool]` function in `src/tools/*.rs` and register it in `main.rs`.
-- Change rendering -> `interface/ui.rs`; pay attention to `MessageCache`'s invalidation logic and `row_offsets`'s line-wrap estimation.
-- Change Markdown styling / add syntax -> `interface/markdown.rs`; parsing (`parse` -> `Block`) and rendering (`render` -> `Line`) are separate, so adding syntax touches only the `parse` side and styling touches only the `render` side.
+- Change rendering -> `interface/tui/ui.rs`; pay attention to `MessageCache`'s invalidation logic and `row_offsets`'s line-wrap estimation.
+- Change Markdown styling / add syntax -> `interface/tui/markdown.rs`; parsing (`parse` -> `Block`) and rendering (`render` -> `Line`) are separate, so adding syntax touches only the `parse` side and styling touches only the `render` side.

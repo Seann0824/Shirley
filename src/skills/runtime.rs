@@ -219,7 +219,10 @@ mod tests {
         let once = runtime.render().unwrap();
         runtime.activate("alpha").unwrap();
         let twice = runtime.render().unwrap();
-        assert_eq!(once, twice, "re-activation should not change the output (keep the cache stable)");
+        assert_eq!(
+            once, twice,
+            "re-activation should not change the output (keep the cache stable)"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -232,7 +235,10 @@ mod tests {
         let block = runtime.activate("alpha").unwrap();
         assert!(block.contains("<skill_content name=\"alpha\">"));
         assert!(block.contains("BODY-INSTRUCTION"));
-        assert!(!block.contains("name: alpha"), "frontmatter should be stripped");
+        assert!(
+            !block.contains("name: alpha"),
+            "frontmatter should be stripped"
+        );
         assert!(block.contains("<file>scripts/run.py</file>"));
         std::fs::remove_dir_all(&dir).ok();
     }

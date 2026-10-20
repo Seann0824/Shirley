@@ -7,11 +7,7 @@
 //!
 //! The selection is expressed in screen cell coordinates (matching ratatui `Buffer` global coordinates).
 
-use ratatui::{
-    buffer::Buffer,
-    layout::Position,
-    style::Modifier,
-};
+use ratatui::{buffer::Buffer, layout::Position, style::Modifier};
 use unicode_width::UnicodeWidthStr;
 
 /// A selection formed by one mouse drag (anchor -> current point, endpoints inclusive).

@@ -30,9 +30,7 @@ use crate::models::{self, ModelCatalog, ModelEntry};
 use crate::prompt;
 use crate::session::{self, SessionCatalog};
 use crate::settings::Settings;
-use crate::skills::{
-    self, SkillCatalog, SkillContextProvider, SkillRuntime,
-};
+use crate::skills::{self, SkillCatalog, SkillContextProvider, SkillRuntime};
 use crate::subagent::{
     DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH, DEFAULT_PER_TASK_MAX_STEPS, DEFAULT_WAIT_TIMEOUT_MS,
     SubagentLimits, SubagentManager, SubagentTool, ToolSelection,
@@ -97,14 +95,23 @@ impl AgentFactory {
     }
 
     /// Explicit application-data root for isolated tests and assembly.
-    pub(crate) fn assemble_at(working_dir: PathBuf, global_root: PathBuf) -> Result<Self, AgentError> {
+    pub(crate) fn assemble_at(
+        working_dir: PathBuf,
+        global_root: PathBuf,
+    ) -> Result<Self, AgentError> {
         let paths = crate::storage::StoragePaths::new(global_root, &working_dir)
             .map_err(|error| AgentError::Other(Box::new(error)))?;
-        paths.migrate().map_err(|error| AgentError::Other(Box::new(error)))?;
-        let settings = Settings::load(Some(&paths.global.join("config.toml")), &|key| std::env::var(key).ok())
+        paths
+            .migrate()
             .map_err(|error| AgentError::Other(Box::new(error)))?;
-        let needs_login = !settings.is_configured() && crate::model_providers::default_config(&paths.global)
-            .map_err(|error| AgentError::Other(Box::new(std::io::Error::other(error))))?.is_none();
+        let settings = Settings::load(Some(&paths.global.join("config.toml")), &|key| {
+            std::env::var(key).ok()
+        })
+        .map_err(|error| AgentError::Other(Box::new(error)))?;
+        let needs_login = !settings.is_configured()
+            && crate::model_providers::default_config(&paths.global)
+                .map_err(|error| AgentError::Other(Box::new(std::io::Error::other(error))))?
+                .is_none();
 
         // Model catalog: by default derives `/v1/models` from the chat completions base_url,
         // but can be overridden with `models_url` in config. On fetch failure falls back to the built-in static list.
@@ -117,9 +124,11 @@ impl AgentFactory {
             settings.api_key.clone(),
             models::StaticCatalog::builtin().entries(),
         ));
-        let model_catalog: Arc<dyn ModelCatalog> = Arc::new(crate::model_providers::ConfiguredCatalog {
-            global: paths.global.clone(), fallback: legacy_catalog,
-        });
+        let model_catalog: Arc<dyn ModelCatalog> =
+            Arc::new(crate::model_providers::ConfiguredCatalog {
+                global: paths.global.clone(),
+                fallback: legacy_catalog,
+            });
 
         let mut model_config = ModelConfig::builder()
             .protocol(settings.protocol)
@@ -363,7 +372,9 @@ impl AgentFactory {
     /// "first `set_model`, then `set_tool_calling`". The protocol is chosen by the model-declared `tool_mode`,
     /// falling back to the config-layer default (`self.model_config.tool_calling`) when undeclared.
     pub fn model_config_for(&self, entry: &ModelEntry) -> ModelConfig {
-        if let Some(configured) = &entry.configured { return configured.config(); }
+        if let Some(configured) = &entry.configured {
+            return configured.config();
+        }
         let mut config = self.model_config.clone();
         config.model = entry.value.clone();
         config.tool_calling =
@@ -378,7 +389,9 @@ impl AgentFactory {
     }
 
     pub fn model_providers_root(&self) -> &std::path::Path {
-        self.memory_roots[0].parent().expect("memory root has a parent")
+        self.memory_roots[0]
+            .parent()
+            .expect("memory root has a parent")
     }
 
     pub fn default_model_config(&self) -> Result<ModelConfig, AgentError> {
@@ -456,7 +469,10 @@ impl AgentFactory {
     ///
     /// Shares the curator model with [`AgentFactory::curate`] (if `[memory]` configures one, use the separate model).
     /// When `sessions_dir` exists, does **verification against original evidence**.
-    pub async fn consolidate(&self, session_model: &ModelConfig) -> Result<memory::ConsolidateOutcome, CuratorError> {
+    pub async fn consolidate(
+        &self,
+        session_model: &ModelConfig,
+    ) -> Result<memory::ConsolidateOutcome, CuratorError> {
         let agent = self.curator_agent(session_model)?;
         let store = self.memory_store();
         let sessions_dir = self.sessions_dir();
@@ -489,7 +505,9 @@ impl AgentFactory {
 
     /// The session log dir (for the curator's evidence verification).
     fn sessions_dir(&self) -> PathBuf {
-        self.session_catalog.storage_dir().expect("factory catalog has a session storage directory")
+        self.session_catalog
+            .storage_dir()
+            .expect("factory catalog has a session storage directory")
     }
 }
 
@@ -533,7 +551,10 @@ pub fn resolve_tool_calling_for(
 /// Inherits the main config's `stream` / `thinking` / `reasoning_effort` / `context_window_tokens`
 /// and other fields, overriding only the endpoint / key / model / protocol explicitly given by the curator -- avoiding "configured a curator model
 /// but lost the main config's other fields".
-fn build_curator_config(mem: &crate::settings::MemorySettings, main: &ModelConfig) -> Option<ModelConfig> {
+fn build_curator_config(
+    mem: &crate::settings::MemorySettings,
+    main: &ModelConfig,
+) -> Option<ModelConfig> {
     // If no curator key is configured at all, do not build a separate config.
     if mem.curator_model.is_none()
         && mem.curator_base_url.is_none()
@@ -546,9 +567,15 @@ fn build_curator_config(mem: &crate::settings::MemorySettings, main: &ModelConfi
     if let Some(model) = mem.curator_model.as_ref().filter(|m| !m.trim().is_empty()) {
         config.model = model.clone();
     }
-    if let Some(base_url) = mem.curator_base_url.as_ref().filter(|u| !u.trim().is_empty()) {
-        if mem.curator_api_key.is_none() && url::Url::parse(base_url).ok().map(|u| u.origin())
-            != url::Url::parse(&main.base_url).ok().map(|u| u.origin()) {
+    if let Some(base_url) = mem
+        .curator_base_url
+        .as_ref()
+        .filter(|u| !u.trim().is_empty())
+    {
+        if mem.curator_api_key.is_none()
+            && url::Url::parse(base_url).ok().map(|u| u.origin())
+                != url::Url::parse(&main.base_url).ok().map(|u| u.origin())
+        {
             config.api_key = None;
         }
         config.base_url = base_url.clone();
@@ -580,10 +607,7 @@ fn build_embedder(settings: &Settings) -> Option<Arc<Embedder>> {
         .as_ref()
         .map(|s| s.trim())
         .filter(|s| !s.is_empty())?;
-    let api_key = mem
-        .embedding_api_key
-        .clone()
-        .filter(|key| !key.is_empty());
+    let api_key = mem.embedding_api_key.clone().filter(|key| !key.is_empty());
     let config = EmbeddingConfig {
         endpoint: endpoint.to_string(),
         api_key,
@@ -662,9 +686,8 @@ fn apply_tool_filter(manager: &mut ToolManager, selection: &ToolSelection) {
         .iter()
         .map(|definition| definition.name.clone())
         .collect();
-    let keep: std::collections::HashSet<String> = filtered_tool_names(&names, selection)
-        .into_iter()
-        .collect();
+    let keep: std::collections::HashSet<String> =
+        filtered_tool_names(&names, selection).into_iter().collect();
     for name in names {
         if !keep.contains(&name) {
             let _ = manager.unregister(&name);
@@ -778,13 +801,20 @@ mod tests {
 
     #[test]
     fn global_storage_restores_legacy_sessions_and_project_memory() {
-        let root = std::env::temp_dir().join(format!("shirley-global-migration-{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("shirley-global-migration-{}", std::process::id()));
         let workspace = root.join("repo");
         let legacy = workspace.join(".shirley");
         std::fs::create_dir_all(legacy.join("sessions")).unwrap();
         std::fs::create_dir_all(legacy.join("memory/facts")).unwrap();
-        let message = Message::User { content: "existing conversation".into() };
-        std::fs::write(legacy.join("sessions/existing.jsonl"), format!("{}\n", serde_json::to_string(&message).unwrap())).unwrap();
+        let message = Message::User {
+            content: "existing conversation".into(),
+        };
+        std::fs::write(
+            legacy.join("sessions/existing.jsonl"),
+            format!("{}\n", serde_json::to_string(&message).unwrap()),
+        )
+        .unwrap();
         std::fs::write(legacy.join("sessions/existing.title"), "Existing title").unwrap();
         std::fs::write(legacy.join("memory/facts/project.md"), "---\nid: fact-project\ntype: fact\ndomain: project\nsubject: project\ncreated_at: 2026-10-16\nstatus: active\nconfidence: high\nsource:\n  - session: existing.jsonl#turn:1\n---\n\nExisting project fact.\n").unwrap();
         let factory = AgentFactory::assemble_at(workspace.clone(), root.join("global")).unwrap();
@@ -793,9 +823,24 @@ mod tests {
         assert_eq!(sessions[0].label, "Existing title");
         assert_eq!(sessions[0].preview, "existing conversation");
         assert!(factory.sessions_dir().starts_with(root.join("global")));
-        assert!(factory.memory_store().list_entries().unwrap().iter().any(|(_, entry)| entry.id == "fact-project"));
-        let messages = factory.session_catalog.open("existing").unwrap().load().unwrap();
-        assert_eq!(serde_json::to_value(messages).unwrap(), serde_json::to_value(vec![message]).unwrap());
+        assert!(
+            factory
+                .memory_store()
+                .list_entries()
+                .unwrap()
+                .iter()
+                .any(|(_, entry)| entry.id == "fact-project")
+        );
+        let messages = factory
+            .session_catalog
+            .open("existing")
+            .unwrap()
+            .load()
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(messages).unwrap(),
+            serde_json::to_value(vec![message]).unwrap()
+        );
         assert!(!legacy.exists());
         let _ = AgentFactory::assemble_at(workspace, root.join("global")).unwrap();
         assert!(!legacy.exists());
@@ -805,18 +850,27 @@ mod tests {
     #[test]
     fn grep_and_read_are_registered_and_available_to_children() {
         let manager = assemble_tools();
-        let names: Vec<String> = manager.definitions().iter()
-            .map(|tool| tool.name.clone()).collect();
+        let names: Vec<String> = manager
+            .definitions()
+            .iter()
+            .map(|tool| tool.name.clone())
+            .collect();
         assert!(names.iter().any(|name| name == "grep"));
         assert!(names.iter().any(|name| name == "read"));
         assert!(names.iter().all(|name| name != "read_file"));
-        assert!(filtered_tool_names(&names, &ToolSelection::default())
-            .iter().any(|name| name == "grep"));
+        assert!(
+            filtered_tool_names(&names, &ToolSelection::default())
+                .iter()
+                .any(|name| name == "grep")
+        );
         assert_eq!(
-            filtered_tool_names(&names, &ToolSelection {
-                allow: Some(vec!["grep".into(), "read".into()]),
-                deny: vec![],
-            }),
+            filtered_tool_names(
+                &names,
+                &ToolSelection {
+                    allow: Some(vec!["grep".into(), "read".into()]),
+                    deny: vec![],
+                }
+            ),
             vec!["grep", "read"]
         );
     }
@@ -896,9 +950,19 @@ mod tests {
         manager.delete_session("s").unwrap();
 
         let active = manager.active_name().map(str::to_owned);
-        assert_ne!(active.as_deref(), Some("s"), "the foreground should no longer sit on the deleted session");
-        assert!(active.is_some(), "after deleting the foreground session a fresh empty one should be supplied");
-        assert!(manager.active_agent().is_some(), "the new empty session should be ready");
+        assert_ne!(
+            active.as_deref(),
+            Some("s"),
+            "the foreground should no longer sit on the deleted session"
+        );
+        assert!(
+            active.is_some(),
+            "after deleting the foreground session a fresh empty one should be supplied"
+        );
+        assert!(
+            manager.active_agent().is_some(),
+            "the new empty session should be ready"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
@@ -912,7 +976,9 @@ mod tests {
     async fn live_smoke_against_configured_provider() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let factory = Arc::new(AgentFactory::assemble(root).expect("assembly failed"));
-        let mut built = factory.build_agent(Vec::new()).expect("failed to build Agent");
+        let mut built = factory
+            .build_agent(Vec::new())
+            .expect("failed to build Agent");
         let result = built
             .agent
             .run("Reply with just two words: hello")
@@ -1017,17 +1083,23 @@ mod tests {
     #[test]
     fn model_config_for_applies_entry_tool_mode() {
         let f = factory(tmp_root("mcfg"));
-        let tagged = ModelEntry::new("tagged", "tagged", "p")
-            .with_tool_mode(Some("content".into()));
+        let tagged =
+            ModelEntry::new("tagged", "tagged", "p").with_tool_mode(Some("content".into()));
         let plain = ModelEntry::new("plain", "plain", "p");
 
         let config = f.model_config_for(&tagged);
         assert_eq!(config.model, "tagged");
-        assert!(config.tool_calling.is_content(), "declaring content should pick the Tagged protocol");
+        assert!(
+            config.tool_calling.is_content(),
+            "declaring content should pick the Tagged protocol"
+        );
 
         let config = f.model_config_for(&plain);
         assert_eq!(config.model, "plain");
-        assert!(!config.tool_calling.is_content(), "undeclared should fall back to the config default Native");
+        assert!(
+            !config.tool_calling.is_content(),
+            "undeclared should fall back to the config default Native"
+        );
     }
 
     /// `model_config_for`: image capability is a catalog-declared fact, applied per model.
@@ -1074,22 +1146,44 @@ mod tests {
         );
         assert!(manager.begin_turn("s", "hello".into()).is_some());
 
-        assert!(manager.delete_session("s").is_err(), "a running session should refuse deletion");
-        assert_eq!(manager.active_name(), Some("s"), "the foreground should not change after a refusal");
+        assert!(
+            manager.delete_session("s").is_err(),
+            "a running session should refuse deletion"
+        );
+        assert_eq!(
+            manager.active_name(),
+            Some("s"),
+            "the foreground should not change after a refusal"
+        );
 
         let _ = std::fs::remove_dir_all(&root);
     }
     #[test]
     fn memory_curator_follows_session_provider_and_does_not_reuse_key_for_another_host() {
-        let root = std::env::temp_dir().join(format!("shirley-curator-provider-{}", chrono::Utc::now().timestamp_nanos_opt().unwrap()));
+        let root = std::env::temp_dir().join(format!(
+            "shirley-curator-provider-{}",
+            chrono::Utc::now().timestamp_nanos_opt().unwrap()
+        ));
         let mut factory = super::test_support::test_factory(root.clone());
-        let session = ModelConfig::builder().protocol(shirley_agent_sdk::ModelProtocol::Responses).base_url("https://selected.example/v1/responses").model("chosen").api_key("selected-key").build();
+        let session = ModelConfig::builder()
+            .protocol(shirley_agent_sdk::ModelProtocol::Responses)
+            .base_url("https://selected.example/v1/responses")
+            .model("chosen")
+            .api_key("selected-key")
+            .build();
         let curator = factory.curator_agent(&session).unwrap();
         assert_eq!(curator.model_config().base_url, session.base_url);
         assert_eq!(curator.model_config().api_key, session.api_key);
-        factory.curator_settings.curator_base_url = Some("https://different.example/v1/responses".into());
-        assert_eq!(factory.curator_agent(&session).unwrap().model_config().api_key, None);
+        factory.curator_settings.curator_base_url =
+            Some("https://different.example/v1/responses".into());
+        assert_eq!(
+            factory
+                .curator_agent(&session)
+                .unwrap()
+                .model_config()
+                .api_key,
+            None
+        );
         let _ = std::fs::remove_dir_all(root);
     }
-
 }

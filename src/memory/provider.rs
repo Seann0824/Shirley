@@ -25,7 +25,7 @@ use shirley_agent_sdk::ContextProvider;
 
 use super::embed::{EmbedError, Embedder};
 use super::format::{Entry, EntryStatus, EntryType, MemoryError};
-use super::index::{hybrid_search, Scored};
+use super::index::{Scored, hybrid_search};
 use super::store::MemoryStore;
 use super::vector::VectorStore;
 
@@ -90,10 +90,17 @@ impl MemoryRuntime {
     pub async fn prefetch_query_vector(&self) -> Result<(), EmbedError> {
         if let Some(global) = self.store.primary_root().parent() {
             if global.join("remote.json").exists() {
-                match tokio::time::timeout(std::time::Duration::from_secs(3), crate::remote::sync_once(global)).await {
-                    Ok(Ok(_)) => {},
+                match tokio::time::timeout(
+                    std::time::Duration::from_secs(3),
+                    crate::remote::sync_once(global),
+                )
+                .await
+                {
+                    Ok(Ok(_)) => {}
                     Ok(Err(error)) => eprintln!("[memory:sync] using offline memory: {error}"),
-                    Err(_) => eprintln!("[memory:sync] pre-turn sync timed out; using offline memory"),
+                    Err(_) => {
+                        eprintln!("[memory:sync] pre-turn sync timed out; using offline memory")
+                    }
                 }
             }
         }
@@ -125,32 +132,56 @@ impl MemoryRuntime {
         };
         let mut count = 0;
         for root in self.store.roots() {
-            let entries = self.store.list_entries_in(root)
+            let entries = self
+                .store
+                .list_entries_in(root)
                 .map_err(|error| EmbedError::Transport(error.to_string()))?;
             let vectors = VectorStore::load_merged(std::slice::from_ref(root), embedder.model());
-            let missing: Vec<(String, String)> = entries.iter()
+            let missing: Vec<(String, String)> = entries
+                .iter()
                 .filter(|(_, entry)| vectors.get(&entry.id).is_none())
-                .map(|(_, entry)| (entry.id.clone(), embed_text(entry))).collect();
-            let embedded = if missing.is_empty() { Vec::new() } else {
-                embedder.embed(&missing.iter().map(|(_, text)| text.clone()).collect::<Vec<_>>()).await?
+                .map(|(_, entry)| (entry.id.clone(), embed_text(entry)))
+                .collect();
+            let embedded = if missing.is_empty() {
+                Vec::new()
+            } else {
+                embedder
+                    .embed(
+                        &missing
+                            .iter()
+                            .map(|(_, text)| text.clone())
+                            .collect::<Vec<_>>(),
+                    )
+                    .await?
             };
             // Sync may update entries during the embedding request. Re-read under the same
             // OS lock and install vectors only for unchanged text, into the correct domain root.
             let _lock = super::store::lock_root(root)
                 .map_err(|error| EmbedError::Transport(error.to_string()))?;
-            let current: HashMap<String, Entry> = self.store.list_entries_in(root)
-                .map_err(|error| EmbedError::Transport(error.to_string()))?.into_iter()
-                .map(|(_, entry)| (entry.id.clone(), entry)).collect();
+            let current: HashMap<String, Entry> = self
+                .store
+                .list_entries_in(root)
+                .map_err(|error| EmbedError::Transport(error.to_string()))?
+                .into_iter()
+                .map(|(_, entry)| (entry.id.clone(), entry))
+                .collect();
             let mut latest = VectorStore::load_merged(std::slice::from_ref(root), embedder.model());
             let mut changed = latest.retain_ids(current.keys().map(String::as_str)) > 0;
             for ((id, text), vector) in missing.into_iter().zip(embedded) {
-                if current.get(&id).is_some_and(|entry| embed_text(entry) == text) {
+                if current
+                    .get(&id)
+                    .is_some_and(|entry| embed_text(entry) == text)
+                {
                     latest.upsert(id, vector);
                     count += 1;
                     changed = true;
                 }
             }
-            if changed { latest.save(root).map_err(|error| EmbedError::Transport(error.to_string()))?; }
+            if changed {
+                latest
+                    .save(root)
+                    .map_err(|error| EmbedError::Transport(error.to_string()))?;
+            }
         }
         Ok(count)
     }
@@ -204,7 +235,11 @@ impl MemoryRuntime {
     /// Called by [`MemoryContextProvider`], and can also be called directly by tests.
     pub fn render(&self) -> Option<String> {
         let core = self.store.read_core();
-        let query = self.query.lock().expect("memory query lock poisoned").clone();
+        let query = self
+            .query
+            .lock()
+            .expect("memory query lock poisoned")
+            .clone();
         let relevant = match query.as_deref() {
             Some(q) if !q.trim().is_empty() => {
                 let entries = self.store.list_entries().unwrap_or_default();
@@ -443,17 +478,32 @@ mod tests {
     fn strip_core_header_drops_metadata_keeps_entries() {
         let raw = "# Memory Core\n\n> Maintained by the program (projection of active entries); do not edit by hand.\n\n- [fact] The user is Sean.\n- [preference] Prefers Rust.\n";
         let stripped = strip_core_header(raw);
-        assert!(!stripped.contains("# Memory Core"), "should strip the title: {stripped}");
-        assert!(!stripped.contains("do not edit"), "should strip the maintenance comment: {stripped}");
-        assert!(stripped.contains("The user is Sean."), "should keep the entry: {stripped}");
-        assert!(stripped.starts_with("- [fact]"), "should start with the first entry: {stripped}");
+        assert!(
+            !stripped.contains("# Memory Core"),
+            "should strip the title: {stripped}"
+        );
+        assert!(
+            !stripped.contains("do not edit"),
+            "should strip the maintenance comment: {stripped}"
+        );
+        assert!(
+            stripped.contains("The user is Sean."),
+            "should keep the entry: {stripped}"
+        );
+        assert!(
+            stripped.starts_with("- [fact]"),
+            "should start with the first entry: {stripped}"
+        );
     }
 
     #[test]
     fn strip_core_header_handles_empty_and_bodyless() {
         assert_eq!(strip_core_header(""), "");
         // only a header, no entries -> empty string (do not inject an empty core).
-        assert_eq!(strip_core_header("# Memory Core\n\n> Maintained by the program; do not edit.\n"), "");
+        assert_eq!(
+            strip_core_header("# Memory Core\n\n> Maintained by the program; do not edit.\n"),
+            ""
+        );
     }
 
     #[test]
@@ -461,12 +511,15 @@ mod tests {
         // dual-root concatenation: global + workspace each carry a title block; both must be stripped, leaving only entries.
         let raw = "# Memory Core\n\n> Maintained by the program; do not edit.\n\n- [fact] Personal fact.\n\n# Memory Core\n\n> Maintained by the program; do not edit.\n\n- [fact] Project fact.\n";
         let stripped = strip_core_header(raw);
-        assert_eq!(stripped, "- [fact] Personal fact.\n\n- [fact] Project fact.");
+        assert_eq!(
+            stripped,
+            "- [fact] Personal fact.\n\n- [fact] Project fact."
+        );
         assert!(!stripped.contains("# Memory Core"));
         assert!(!stripped.contains("do not edit"));
     }
     use super::*;
-    use crate::memory::format::{Confidence, Domain, Entry};
+    use crate::memory::format::{Confidence, Domain};
 
     fn tmp(tag: &str) -> std::path::PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -505,14 +558,20 @@ mod tests {
         let root = tmp("empty");
         let runtime = MemoryRuntime::new(MemoryStore::new(&root));
         assert!(runtime.render().is_none());
-        assert!(MemoryContextProvider::new(Arc::new(runtime)).context().is_none());
+        assert!(
+            MemoryContextProvider::new(Arc::new(runtime))
+                .context()
+                .is_none()
+        );
     }
 
     #[test]
     fn core_is_always_injected_without_query() {
         let root = tmp("core");
         let store = MemoryStore::new(&root);
-        store.write_core("The user is Sean and prefers Rust.").unwrap();
+        store
+            .write_core("The user is Sean and prefers Rust.")
+            .unwrap();
         let runtime = MemoryRuntime::new(store);
         let rendered = runtime.render().unwrap();
         assert!(rendered.contains("<memory_context>"));
@@ -533,7 +592,12 @@ mod tests {
             ))
             .unwrap();
         store
-            .write_entry(&entry("fact-db", "database", EntryType::Fact, "The project uses Postgres."))
+            .write_entry(&entry(
+                "fact-db",
+                "database",
+                EntryType::Fact,
+                "The project uses Postgres.",
+            ))
             .unwrap();
         let runtime = MemoryRuntime::new(store);
         runtime.set_query("rust error style");
@@ -541,7 +605,10 @@ mod tests {
         assert!(rendered.contains("<relevant>"));
         assert!(rendered.contains("[preference]"));
         assert!(rendered.contains("thiserror"));
-        assert!(!rendered.contains("Postgres"), "unrelated entry should not appear");
+        assert!(
+            !rendered.contains("Postgres"),
+            "unrelated entry should not appear"
+        );
     }
 
     #[test]
@@ -580,7 +647,12 @@ mod tests {
         let root = tmp("flush");
         let store = MemoryStore::new(&root);
         store
-            .write_entry(&entry("fact-rust", "rust", EntryType::Fact, "Facts about Rust."))
+            .write_entry(&entry(
+                "fact-rust",
+                "rust",
+                EntryType::Fact,
+                "Facts about Rust.",
+            ))
             .unwrap();
         let runtime = MemoryRuntime::new(MemoryStore::new(&root));
 
@@ -624,7 +696,12 @@ mod tests {
         let root = tmp("provider");
         let store = MemoryStore::new(&root);
         store
-            .write_entry(&entry("fact-rust", "rust", EntryType::Fact, "Facts about Rust."))
+            .write_entry(&entry(
+                "fact-rust",
+                "rust",
+                EntryType::Fact,
+                "Facts about Rust.",
+            ))
             .unwrap();
         let runtime = Arc::new(MemoryRuntime::new(store));
         let provider = MemoryContextProvider::new(runtime.clone());

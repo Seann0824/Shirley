@@ -21,8 +21,8 @@ use std::time::Duration;
 use shirley_agent_sdk::{Tool, ToolContext, ToolDefinition, ToolError, ToolFuture, Usage};
 
 use super::manager::{
-    SubagentError, SubagentInfo, SubagentKind, SubagentManager, SubagentStatus, WaitOutcome,
-    DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS,
+    DEFAULT_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS, SubagentError, SubagentInfo, SubagentKind,
+    SubagentManager, SubagentStatus, WaitOutcome,
 };
 
 /// The `subagent` tool. Holds the manager (the session's subagent registry + factory).
@@ -138,7 +138,14 @@ impl Tool for SubagentTool {
                         .ok_or_else(|| ToolError::ArgumentsError("`task` is required".into()))?;
                     // depth = 0 for a top-level dispatch (the parent is always the top level).
                     let id = manager
-                        .dispatch(kind, args.name.clone(), task, args.tools, args.deny_tools, 0)
+                        .dispatch(
+                            kind,
+                            args.name.clone(),
+                            task,
+                            args.tools,
+                            args.deny_tools,
+                            0,
+                        )
                         .map_err(map_error)?;
                     if args.detach.unwrap_or(false) {
                         // Non-blocking: hand back the handle; the child runs on.
@@ -192,9 +199,9 @@ impl Tool for SubagentTool {
                     let id = args
                         .id
                         .ok_or_else(|| ToolError::ArgumentsError("`id` is required".into()))?;
-                    let info = manager
-                        .info(&id)
-                        .ok_or_else(|| ToolError::ArgumentsError(format!("no such subagent: {id}")))?;
+                    let info = manager.info(&id).ok_or_else(|| {
+                        ToolError::ArgumentsError(format!("no such subagent: {id}"))
+                    })?;
                     Ok(info_json(&info))
                 }
                 "cancel" => {
@@ -290,7 +297,7 @@ mod tests {
     use super::*;
     use crate::bootstrap::test_support::test_factory_with_base;
     use serde_json::{Value, json};
-    use shirley_agent_sdk::{Message, Tool};
+    use shirley_agent_sdk::Message;
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::Mutex;
@@ -428,13 +435,18 @@ mod tests {
             }
         });
 
-        let root = std::env::temp_dir().join(format!("shirley_subagent_spawn_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("shirley_subagent_spawn_{}", std::process::id()));
         let factory = Arc::new(test_factory_with_base(root, &url, false));
         let mut built = factory.build_agent(Vec::new()).unwrap();
 
         let result = built.agent.run("parent task").await.unwrap();
         assert_eq!(
-            result.messages.iter().filter(|m| matches!(m, Message::Tool { .. })).count(),
+            result
+                .messages
+                .iter()
+                .filter(|m| matches!(m, Message::Tool { .. }))
+                .count(),
             1,
             "the parent's messages must grow by exactly one tool result"
         );
@@ -481,15 +493,20 @@ mod tests {
             }
         });
 
-        let root = std::env::temp_dir().join(format!("shirley_subagent_fork_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("shirley_subagent_fork_{}", std::process::id()));
         let factory = Arc::new(test_factory_with_base(root, &url, false));
         let mut built = factory.build_agent(Vec::new()).unwrap();
 
         // Seed the fork snapshot source (in the app the `Session` does this from `Agent::messages()`).
         let manager = built.subagents.clone().expect("top level has a manager");
         manager.set_parent_view(vec![
-            Message::System { content: "parent-system".into() },
-            Message::User { content: "earlier question".into() },
+            Message::System {
+                content: "parent-system".into(),
+            },
+            Message::User {
+                content: "earlier question".into(),
+            },
             Message::Assistant {
                 content: Some("earlier answer".into()),
                 reasoning_content: None,
@@ -523,7 +540,8 @@ mod tests {
     #[tokio::test]
     async fn list_reports_dispatched_subagents() {
         let (url, _requests) = mock_model(|_| text_reply("child-answer"));
-        let root = std::env::temp_dir().join(format!("shirley_subagent_list_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("shirley_subagent_list_{}", std::process::id()));
         let factory = Arc::new(test_factory_with_base(root, &url, false));
         let built = factory.build_agent(Vec::new()).unwrap();
         let manager = built.subagents.clone().unwrap();
@@ -531,7 +549,10 @@ mod tests {
         let ctx = ToolContext::new();
 
         let spawned = tool
-            .invoke(json!({ "action": "spawn", "task": "do a thing" }), ctx.clone())
+            .invoke(
+                json!({ "action": "spawn", "task": "do a thing" }),
+                ctx.clone(),
+            )
             .await
             .unwrap();
         assert_eq!(spawned["status"], "completed");
@@ -550,7 +571,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(3000));
             text_reply("child-answer")
         });
-        let root = std::env::temp_dir().join(format!("shirley_subagent_cancel_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("shirley_subagent_cancel_{}", std::process::id()));
         let factory = Arc::new(test_factory_with_base(root, &url, false));
         let built = factory.build_agent(Vec::new()).unwrap();
         let manager = built.subagents.clone().unwrap();
@@ -558,7 +580,10 @@ mod tests {
         let ctx = ToolContext::new();
 
         let detached = tool
-            .invoke(json!({ "action": "spawn", "task": "slow", "detach": true }), ctx.clone())
+            .invoke(
+                json!({ "action": "spawn", "task": "slow", "detach": true }),
+                ctx.clone(),
+            )
             .await
             .unwrap();
         let id = detached["id"].as_str().unwrap().to_string();
@@ -582,7 +607,8 @@ mod tests {
     #[tokio::test]
     async fn wait_on_finished_subagent_returns_immediately() {
         let (url, _requests) = mock_model(|_| text_reply("child-answer"));
-        let root = std::env::temp_dir().join(format!("shirley_subagent_wait_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("shirley_subagent_wait_{}", std::process::id()));
         let factory = Arc::new(test_factory_with_base(root, &url, false));
         let built = factory.build_agent(Vec::new()).unwrap();
         let manager = built.subagents.clone().unwrap();
@@ -590,7 +616,10 @@ mod tests {
         let ctx = ToolContext::new();
 
         let detached = tool
-            .invoke(json!({ "action": "spawn", "task": "quick", "detach": true }), ctx.clone())
+            .invoke(
+                json!({ "action": "spawn", "task": "quick", "detach": true }),
+                ctx.clone(),
+            )
             .await
             .unwrap();
         let id = detached["id"].as_str().unwrap().to_string();
@@ -613,7 +642,8 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(3000));
             text_reply("child-answer")
         });
-        let root = std::env::temp_dir().join(format!("shirley_subagent_wait_to_{}", std::process::id()));
+        let root =
+            std::env::temp_dir().join(format!("shirley_subagent_wait_to_{}", std::process::id()));
         let factory = Arc::new(test_factory_with_base(root, &url, false));
         let built = factory.build_agent(Vec::new()).unwrap();
         let manager = built.subagents.clone().unwrap();
@@ -621,13 +651,19 @@ mod tests {
         let ctx = ToolContext::new();
 
         let detached = tool
-            .invoke(json!({ "action": "spawn", "task": "slow", "detach": true }), ctx.clone())
+            .invoke(
+                json!({ "action": "spawn", "task": "slow", "detach": true }),
+                ctx.clone(),
+            )
             .await
             .unwrap();
         let id = detached["id"].as_str().unwrap().to_string();
 
         let waited = tool
-            .invoke(json!({ "action": "wait", "id": id, "timeout_ms": 150 }), ctx)
+            .invoke(
+                json!({ "action": "wait", "id": id, "timeout_ms": 150 }),
+                ctx,
+            )
             .await
             .unwrap();
         assert_eq!(waited["status"], "running");

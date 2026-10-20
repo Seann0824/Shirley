@@ -343,7 +343,10 @@ impl fmt::Display for Message {
                     f,
                     "⚙️ Tool Result [{}]: {}",
                     tool_call_id,
-                    content.as_ref().map(|content| content.to_string()).unwrap_or_default()
+                    content
+                        .as_ref()
+                        .map(|content| content.to_string())
+                        .unwrap_or_default()
                 );
                 Ok(())
             }

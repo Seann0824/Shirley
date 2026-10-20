@@ -9,8 +9,7 @@ use serde_json::Value;
 use crate::{
     ModelConfig,
     adapter::{
-        AdapterError, AdapterEvent, ModelRequest, ModelResponse, ModelFinishReason,
-        PreparedRequest,
+        AdapterError, AdapterEvent, ModelFinishReason, ModelRequest, ModelResponse, PreparedRequest,
     },
     message, tool,
 };
@@ -125,8 +124,10 @@ pub fn encode_request(
     );
 
     if let Some(api_key) = &config.api_key {
-        let mut authorization = HeaderValue::from_str(&format!("Bearer {api_key}"))
-            .map_err(|error| AdapterError::Encode(format!("API key is not a valid header value: {error}")))?;
+        let mut authorization =
+            HeaderValue::from_str(&format!("Bearer {api_key}")).map_err(|error| {
+                AdapterError::Encode(format!("API key is not a valid header value: {error}"))
+            })?;
         authorization.set_sensitive(true);
         headers.insert(reqwest::header::AUTHORIZATION, authorization);
     }
@@ -436,7 +437,10 @@ mod tests {
             "choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
             "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}
         }));
-        assert!(response.is_ok(), "a non-streaming response should not require a top-level id: {response:?}");
+        assert!(
+            response.is_ok(),
+            "a non-streaming response should not require a top-level id: {response:?}"
+        );
     }
 
     fn config() -> ModelConfig {
@@ -451,7 +455,11 @@ mod tests {
         messages: &'a [message::Message],
         tools: &'a [&'a tool::ToolDefinition],
     ) -> ModelRequest<'a> {
-        ModelRequest { messages, tools, session_id: None }
+        ModelRequest {
+            messages,
+            tools,
+            session_id: None,
+        }
     }
 
     fn body(config: &ModelConfig) -> Value {

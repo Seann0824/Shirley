@@ -24,7 +24,10 @@ fn model_config() -> ModelConfig {
 #[test]
 fn static_prompt_is_context_independent() {
     let prompt: SystemPrompt = "You are Shirley".into();
-    assert_eq!(prompt.resolve(&SystemPromptContext::default()), "You are Shirley");
+    assert_eq!(
+        prompt.resolve(&SystemPromptContext::default()),
+        "You are Shirley"
+    );
 }
 
 /// Function form: can read `SystemPromptContext.working_dir`.
@@ -40,7 +43,10 @@ fn function_prompt_reads_working_dir() {
         )
     });
 
-    assert_eq!(prompt.resolve(&SystemPromptContext::default()), "cwd=<none>");
+    assert_eq!(
+        prompt.resolve(&SystemPromptContext::default()),
+        "cwd=<none>"
+    );
     let with_dir = SystemPromptContext {
         working_dir: Some(PathBuf::from("/work")),
     };
@@ -52,9 +58,7 @@ fn function_prompt_reads_working_dir() {
 fn builder_accepts_function_prompt_and_working_dir() {
     let agent = Agent::builder()
         .model_config(model_config())
-        .system_prompt(|ctx: &SystemPromptContext| {
-            format!("cwd:{:?}", ctx.working_dir)
-        })
+        .system_prompt(|ctx: &SystemPromptContext| format!("cwd:{:?}", ctx.working_dir))
         .working_dir(PathBuf::from("/work"))
         .build();
     // A successful construction proves the type contract holds (resolution happens inside `Agent::new`).
@@ -64,5 +68,8 @@ fn builder_accepts_function_prompt_and_working_dir() {
 /// It also constructs when no prompt is passed (empty prompt = no pinned System message).
 #[test]
 fn builder_defaults_to_empty_prompt() {
-    let _ = Agent::builder().model_config(model_config()).build().unwrap();
+    let _ = Agent::builder()
+        .model_config(model_config())
+        .build()
+        .unwrap();
 }

@@ -91,6 +91,15 @@ pub struct ToolContext {
     inner: Arc<HashMap<TypeId, Arc<dyn Any + Send + Sync>>>,
 }
 
+impl std::fmt::Debug for ToolContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // The stored values are `dyn Any` and cannot be formatted; show the entry count.
+        f.debug_struct("ToolContext")
+            .field("entries", &self.inner.len())
+            .finish()
+    }
+}
+
 impl ToolContext {
     pub fn new() -> Self {
         Self::default()
@@ -137,6 +146,7 @@ impl ToolContext {
     }
 }
 
+#[derive(Debug)]
 pub struct ToolDefinition {
     pub name: String,
 
@@ -188,6 +198,16 @@ pub struct ToolManager {
     /// clones it for dispatch on each call, and `on_unregister` cleans up.
     /// See `docs/tool-lifecycle.md`.
     context: ToolContext,
+}
+
+impl std::fmt::Debug for ToolManager {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Tools are `Box<dyn Tool>` (no `Debug`); show their names instead.
+        f.debug_struct("ToolManager")
+            .field("tools", &self.tools.keys().collect::<Vec<_>>())
+            .field("context", &self.context)
+            .finish()
+    }
 }
 
 impl Default for ToolManager {
@@ -278,15 +298,21 @@ impl ToolManager {
             let message = serde_json::from_str::<serde_json::Value>(&input.arguments)
                 .ok()
                 .and_then(|value| {
-                    value.get("message").and_then(|m| m.as_str()).map(str::to_string)
+                    value
+                        .get("message")
+                        .and_then(|m| m.as_str())
+                        .map(str::to_string)
                 })
-                .unwrap_or_else(|| "Malformed tool call; please resend a complete, valid call.".to_string());
+                .unwrap_or_else(|| {
+                    "Malformed tool call; please resend a complete, valid call.".to_string()
+                });
             return Ok(serde_json::Value::String(message));
         }
 
-        let tool = self.tools.get(&input.name).ok_or_else(|| {
-            ToolError::NotFoundError(input.name.clone())
-        })?;
+        let tool = self
+            .tools
+            .get(&input.name)
+            .ok_or_else(|| ToolError::NotFoundError(input.name.clone()))?;
 
         let arguments = serde_json::from_str(&input.arguments).map_err(|error| {
             ToolError::ArgumentsError(format!("arguments is not valid JSON: {error}"))

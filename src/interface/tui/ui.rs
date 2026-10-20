@@ -7,9 +7,10 @@ use ratatui::{
 };
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
-use super::app::{App, ChatMessage, Item, Role};
-use shirley_agent_sdk::Message;
+use super::app::App;
 use super::markdown;
+use crate::interface::view::{ChatMessage, Item, Role, ToolGroup};
+use shirley_agent_sdk::Message;
 
 /// Maximum number of lines shown for the input box; beyond that it scrolls vertically inside, to avoid squeezing the message area.
 const INPUT_MAX_LINES: usize = 10;
@@ -197,7 +198,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
                     ratatui::layout::Rect::new(
                         messages_area.x,
                         messages_area.y + (row - scroll) as u16,
-                        messages_area.width.min("▸ context compacted".width() as u16),
+                        messages_area
+                            .width
+                            .min("▸ context compacted".width() as u16),
                         1,
                     ),
                     index,
@@ -566,7 +569,12 @@ fn draw_subagent_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rec
     let width = (area.width.saturating_sub(2)).clamp(24, 72).min(area.width);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let popup_area = ratatui::layout::Rect { x, y, width, height };
+    let popup_area = ratatui::layout::Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     frame.render_widget(ratatui::widgets::Clear, popup_area);
 
@@ -574,8 +582,11 @@ fn draw_subagent_picker(frame: &mut Frame, app: &App, area: ratatui::layout::Rec
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::Cyan))
         .title_top(
-            Line::from("Subagents (\u{2191}\u{2193} select \u{b7} Enter preview \u{b7} Esc cancel)".to_owned())
-                .style(Style::default().fg(Color::Cyan)),
+            Line::from(
+                "Subagents (\u{2191}\u{2193} select \u{b7} Enter preview \u{b7} Esc cancel)"
+                    .to_owned(),
+            )
+            .style(Style::default().fg(Color::Cyan)),
         );
 
     let mut lines: Vec<Line> = Vec::new();
@@ -618,7 +629,12 @@ fn draw_subagent_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Re
     let height = area.height.saturating_sub(2).min(area.height);
     let x = area.x + (area.width.saturating_sub(width)) / 2;
     let y = area.y + (area.height.saturating_sub(height)) / 2;
-    let popup_area = ratatui::layout::Rect { x, y, width, height };
+    let popup_area = ratatui::layout::Rect {
+        x,
+        y,
+        width,
+        height,
+    };
 
     frame.render_widget(ratatui::widgets::Clear, popup_area);
 
@@ -643,9 +659,15 @@ fn draw_subagent_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Re
             Message::User { content } => {
                 lines.push(Line::from(Span::styled(
                     "task".to_owned(),
-                    Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 )));
-                lines.extend(markdown::render(&content.as_text(), Style::default(), inner_width));
+                lines.extend(markdown::render(
+                    &content.as_text(),
+                    Style::default(),
+                    inner_width,
+                ));
                 lines.push(Line::default());
             }
             Message::Assistant { content, .. } => {
@@ -654,7 +676,9 @@ fn draw_subagent_preview(frame: &mut Frame, app: &App, area: ratatui::layout::Re
                 };
                 lines.push(Line::from(Span::styled(
                     "agent".to_owned(),
-                    Style::default().fg(Color::Green).add_modifier(Modifier::BOLD),
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD),
                 )));
                 lines.extend(markdown::render(content, Style::default(), inner_width));
                 lines.push(Line::default());
@@ -712,7 +736,8 @@ fn draw_command_suggestions(frame: &mut Frame, app: &App, area: ratatui::layout:
         .border_type(BorderType::Rounded)
         .border_style(Style::default().fg(Color::DarkGray))
         .title_top(
-            Line::from("Command suggestions (↑↓←→ select · Tab/Enter complete)".to_owned()).style(title_style),
+            Line::from("Command suggestions (↑↓←→ select · Tab/Enter complete)".to_owned())
+                .style(title_style),
         );
     let selected = app.suggestion_index();
     let lines: Vec<Line> = suggestions
@@ -821,11 +846,7 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
             Style::default().fg(Color::Red),
             Style::default().fg(Color::Red),
         ),
-        Role::Notice => (
-            None,
-            Style::default(),
-            Style::default().fg(Color::DarkGray),
-        ),
+        Role::Notice => (None, Style::default(), Style::default().fg(Color::DarkGray)),
     };
 
     if let Some(label) = label {
@@ -849,12 +870,7 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
     lines.push(Line::default());
 }
 
-fn append_tools(
-    lines: &mut Vec<Line>,
-    group: &super::app::ToolGroup,
-    show_args: bool,
-    width: usize,
-) {
+fn append_tools(lines: &mut Vec<Line>, group: &ToolGroup, show_args: bool, width: usize) {
     let name_style = Style::default()
         .fg(Color::Yellow)
         .add_modifier(Modifier::BOLD);
@@ -1230,7 +1246,10 @@ mod tests {
             cache.start_row,
             cache.row_offsets[cache.item_line_offsets[2]]
         );
-        assert!(cache.start_row > 0, "the third item does not start at row 0");
+        assert!(
+            cache.start_row > 0,
+            "the third item does not start at row 0"
+        );
     }
 
     #[test]

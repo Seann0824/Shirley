@@ -46,10 +46,15 @@ async fn always_fails(
 #[tokio::test]
 async fn tool_round_trip() {
     let mut manager = ToolManager::new();
-    manager.register(add::tool()).expect("registration should succeed");
+    manager
+        .register(add::tool())
+        .expect("registration should succeed");
 
     let call = tool_call("call_1", "add", r#"{"left": 2, "right": 3}"#);
-    let output = manager.invoke(&call, ToolContext::new()).await.expect("invocation should succeed");
+    let output = manager
+        .invoke(&call, ToolContext::new())
+        .await
+        .expect("invocation should succeed");
 
     assert_eq!(output, serde_json::json!(5));
 }
@@ -60,10 +65,15 @@ async fn tool_error_passes_through() {
     use shirley_agent_sdk::SdkError;
 
     let mut manager = ToolManager::new();
-    manager.register(always_fails::tool()).expect("registration should succeed");
+    manager
+        .register(always_fails::tool())
+        .expect("registration should succeed");
 
     let call = tool_call("call_1", "always_fails", r#"{"message": "boom"}"#);
-    let error = manager.invoke(&call, ToolContext::new()).await.expect_err("should fail");
+    let error = manager
+        .invoke(&call, ToolContext::new())
+        .await
+        .expect_err("should fail");
 
     // The ExecutionError the tool throws itself must be preserved as-is, not wrapped into something else.
     assert!(
@@ -79,11 +89,16 @@ async fn tool_error_passes_through() {
 #[tokio::test]
 async fn bad_arguments_are_reported_as_arguments_error() {
     let mut manager = ToolManager::new();
-    manager.register(add::tool()).expect("registration should succeed");
+    manager
+        .register(add::tool())
+        .expect("registration should succeed");
 
     // missing field
     let call = tool_call("call_1", "add", r#"{"left": 2}"#);
-    let error = manager.invoke(&call, ToolContext::new()).await.expect_err("missing field should fail");
+    let error = manager
+        .invoke(&call, ToolContext::new())
+        .await
+        .expect_err("missing field should fail");
     assert!(
         matches!(error, ToolError::ArgumentsError(_)),
         "a missing field should be ArgumentsError, got: {error:?}"
@@ -91,7 +106,10 @@ async fn bad_arguments_are_reported_as_arguments_error() {
 
     // arguments is not JSON at all
     let call = tool_call("call_2", "add", "not json");
-    let error = manager.invoke(&call, ToolContext::new()).await.expect_err("invalid JSON should fail");
+    let error = manager
+        .invoke(&call, ToolContext::new())
+        .await
+        .expect_err("invalid JSON should fail");
     assert!(
         matches!(error, ToolError::ArgumentsError(_)),
         "invalid JSON should be ArgumentsError, got: {error:?}"
@@ -103,7 +121,10 @@ async fn bad_arguments_are_reported_as_arguments_error() {
 async fn unknown_tool_is_not_found() {
     let manager = ToolManager::new();
     let call = tool_call("call_1", "nope", "{}");
-    let error = manager.invoke(&call, ToolContext::new()).await.expect_err("a nonexistent tool should fail");
+    let error = manager
+        .invoke(&call, ToolContext::new())
+        .await
+        .expect_err("a nonexistent tool should fail");
     assert!(
         matches!(error, ToolError::NotFoundError(_)),
         "should be NotFoundError, got: {error:?}"
@@ -114,8 +135,12 @@ async fn unknown_tool_is_not_found() {
 #[test]
 fn duplicate_registration_is_rejected() {
     let mut manager = ToolManager::new();
-    manager.register(add::tool()).expect("first registration should succeed");
-    let error = manager.register(add::tool()).expect_err("duplicate registration should fail");
+    manager
+        .register(add::tool())
+        .expect("first registration should succeed");
+    let error = manager
+        .register(add::tool())
+        .expect_err("duplicate registration should fail");
     assert!(
         matches!(error, ToolError::RepetitionError(_)),
         "should be RepetitionError, got: {error:?}"

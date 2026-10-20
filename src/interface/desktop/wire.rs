@@ -192,9 +192,10 @@ impl StateSnapshotWire {
     pub fn from_snapshot(snapshot: &StateSnapshot) -> Self {
         let (health, health_detail) = match &snapshot.health {
             Health::Healthy => ("healthy".to_owned(), None),
-            Health::SlowTool { name, elapsed_ms } => {
-                ("slow_tool".to_owned(), Some(format!("{name} · {elapsed_ms} ms")))
-            }
+            Health::SlowTool { name, elapsed_ms } => (
+                "slow_tool".to_owned(),
+                Some(format!("{name} · {elapsed_ms} ms")),
+            ),
             Health::Retrying { attempt, reason } => (
                 "retrying".to_owned(),
                 Some(format!("attempt {attempt} · {reason}")),
@@ -289,7 +290,10 @@ impl AgentEventWire {
     pub fn from_event(event: AgentEvent) -> Option<Self> {
         let wire = match event {
             AgentEvent::Retrying { attempt, reason } => Self::Retrying {
-                project: None, session: None, attempt, reason,
+                project: None,
+                session: None,
+                attempt,
+                reason,
             },
             // Reasoning does not reach the UI: swallow it (the SDK still emits the event for internal observation).
             AgentEvent::ReasoningDelta(_) => return None,
@@ -386,8 +390,10 @@ impl AgentEventWire {
     /// the backend pump's `project::session` key).
     pub fn with_route(mut self, project: &str, session: &str) -> Self {
         let (project_slot, session_slot) = match &mut self {
-            Self::Retrying { project, session, .. } |
-            Self::ContentDelta {
+            Self::Retrying {
+                project, session, ..
+            }
+            | Self::ContentDelta {
                 project, session, ..
             }
             | Self::MessageAdded {
@@ -490,8 +496,8 @@ impl From<CoreItemWire> for ItemWire {
 }
 
 /// UI role → wire-format string (aligned with `role` in `web/src/types/wire.ts`).
-fn role_wire(role: crate::interface::app::Role) -> &'static str {
-    use crate::interface::app::Role;
+fn role_wire(role: crate::interface::view::Role) -> &'static str {
+    use crate::interface::view::Role;
     match role {
         Role::User => "user",
         Role::Assistant => "assistant",
@@ -586,7 +592,10 @@ mod tests {
 
         let wire = StateSnapshotWire::from_snapshot(&snap(
             Liveness::Stalled,
-            Health::SlowTool { name: "bash".into(), elapsed_ms: 4200 },
+            Health::SlowTool {
+                name: "bash".into(),
+                elapsed_ms: 4200,
+            },
             Some(Activity::ToolCall),
         ));
         assert_eq!(wire.liveness, "stalled");
@@ -598,7 +607,10 @@ mod tests {
 
         let wire = StateSnapshotWire::from_snapshot(&snap(
             Liveness::Unreachable,
-            Health::Failed { kind: None, message: "boom".into() },
+            Health::Failed {
+                kind: None,
+                message: "boom".into(),
+            },
             None,
         ));
         assert_eq!(wire.liveness, "unreachable");
@@ -608,7 +620,10 @@ mod tests {
 
         let wire = StateSnapshotWire::from_snapshot(&snap(
             Liveness::Running,
-            Health::Retrying { attempt: 2, reason: "429".into() },
+            Health::Retrying {
+                attempt: 2,
+                reason: "429".into(),
+            },
             Some(Activity::ModelCall),
         ));
         assert_eq!(wire.health, "retrying");

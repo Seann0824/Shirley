@@ -478,7 +478,11 @@ mod tests {
         messages: &'a [message::Message],
         tools: &'a [&'a tool::ToolDefinition],
     ) -> ModelRequest<'a> {
-        ModelRequest { messages, tools, session_id: None }
+        ModelRequest {
+            messages,
+            tools,
+            session_id: None,
+        }
     }
 
     fn body(config: &ModelConfig, messages: &[message::Message]) -> Value {
@@ -507,7 +511,10 @@ mod tests {
         let input = body["input"].as_array().unwrap();
         assert_eq!(input.len(), 2, "both system and user are in input");
         assert_eq!(input[0]["role"], serde_json::json!("system"));
-        assert_eq!(input[0]["content"], serde_json::json!("You are an assistant"));
+        assert_eq!(
+            input[0]["content"],
+            serde_json::json!("You are an assistant")
+        );
         assert_eq!(input[1]["role"], serde_json::json!("user"));
     }
 
@@ -592,7 +599,11 @@ mod tests {
         }];
         let body = body(&config(), &messages);
         let input = body["input"].as_array().unwrap();
-        assert_eq!(input.len(), 2, "text and function_call should be sibling items");
+        assert_eq!(
+            input.len(),
+            2,
+            "text and function_call should be sibling items"
+        );
         assert_eq!(input[0]["type"], serde_json::json!("message"));
         assert_eq!(input[0]["role"], serde_json::json!("assistant"));
         // Historical assistant text uses plain string content (strictly conforming to EasyInputMessage).
@@ -646,7 +657,10 @@ mod tests {
         let encoded = &body["tools"][0];
         assert_eq!(encoded["type"], serde_json::json!("function"));
         assert_eq!(encoded["name"], serde_json::json!("bash"));
-        assert!(encoded.get("function").is_none(), "there should be no function wrapper layer");
+        assert!(
+            encoded.get("function").is_none(),
+            "there should be no function wrapper layer"
+        );
     }
 
     #[test]
@@ -819,7 +833,6 @@ mod tests {
 
     /// Feed a sequence of SSE texts to the streaming decode core and collect the events.
     async fn collect_stream(chunks: Vec<&'static str>) -> Vec<AdapterEvent> {
-        use futures::StreamExt;
         let stream = futures::stream::iter(
             chunks
                 .into_iter()
@@ -929,7 +942,6 @@ mod tests {
         let chunks = vec![
             "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n",
         ];
-        use futures::StreamExt;
         let stream = futures::stream::iter(vec![Ok::<_, reqwest::Error>(
             bytes::Bytes::from_static(chunks[0].as_bytes()),
         )]);
@@ -1018,7 +1030,10 @@ mod tests {
             !content.trim().is_empty(),
             "should get non-empty text output, actual: {content:?}"
         );
-        assert!(finished.usage.input_tokens > 0, "usage.input_tokens should be > 0");
+        assert!(
+            finished.usage.input_tokens > 0,
+            "usage.input_tokens should be > 0"
+        );
     }
 
     /// Real-network test (ignored by default): whether **a mid-list system** is accepted by DeepSeek.
@@ -1135,7 +1150,9 @@ mod tests {
                 eprintln!("tool_call = {} / {}", call.id, call.name);
                 (call.id.clone(), call.name.clone())
             }
-            other => panic!("the first turn should be an assistant with tool calls, actual: {other:?}"),
+            other => {
+                panic!("the first turn should be an assistant with tool calls, actual: {other:?}")
+            }
         };
         assert_eq!(first.finish_reason, ModelFinishReason::ToolCalls);
         assert_eq!(call_name, "get_weather");
@@ -1159,7 +1176,10 @@ mod tests {
             message::Message::Assistant { content, .. } => {
                 let text = content.clone().unwrap_or_default();
                 eprintln!("final = {text:?}");
-                assert!(!text.trim().is_empty(), "the second turn should give final text");
+                assert!(
+                    !text.trim().is_empty(),
+                    "the second turn should give final text"
+                );
             }
             other => panic!("the second turn should be a text assistant, actual: {other:?}"),
         }
@@ -1173,8 +1193,11 @@ mod tests {
         messages: &[message::Message],
         tools: &[&tool::ToolDefinition],
     ) -> ModelResponse {
-        use futures::StreamExt;
-        let request = ModelRequest { messages, tools, session_id: None };
+        let request = ModelRequest {
+            messages,
+            tools,
+            session_id: None,
+        };
         let mut stream = crate::adapter::invoke(client, config, request).await;
         while let Some(event) = stream.next().await {
             if let AdapterEvent::Finished(response) = event.expect("the request should not error") {
@@ -1255,18 +1278,26 @@ mod tests {
         eprintln!("finish    = {:?}", finished.finish_reason);
         match &finished.message {
             message::Message::Assistant { tool_calls, .. } => {
-                let call = tool_calls.first().expect("the terminal state should contain a function_call");
+                let call = tool_calls
+                    .first()
+                    .expect("the terminal state should contain a function_call");
                 eprintln!(
                     "tool_call = {} / {} / {}",
                     call.id, call.name, call.arguments
                 );
                 assert_eq!(call.name, "get_weather");
                 assert!(!call.id.is_empty(), "call_id should not be empty");
-                assert!(call.arguments.contains("city"), "arguments should be complete JSON");
+                assert!(
+                    call.arguments.contains("city"),
+                    "arguments should be complete JSON"
+                );
             }
             other => panic!("expected an assistant with tool calls, actual: {other:?}"),
         }
         assert_eq!(finished.finish_reason, ModelFinishReason::ToolCalls);
-        assert!(!reasoning.is_empty(), "streaming should produce reasoning deltas");
+        assert!(
+            !reasoning.is_empty(),
+            "streaming should produce reasoning deltas"
+        );
     }
 }

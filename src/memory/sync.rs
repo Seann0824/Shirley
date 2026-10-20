@@ -451,7 +451,12 @@ pub async fn synchronize(
     let _client = CLIENT_LOCK.lock().await;
     let root = global.join("memory");
     let response = remote
-        .post("api/memory/sync", &SyncRequest { changes: Vec::new() })
+        .post(
+            "api/memory/sync",
+            &SyncRequest {
+                changes: Vec::new(),
+            },
+        )
         .await?;
     let response: SyncResponse = serde_json::from_value(response).map_err(|e| e.to_string())?;
     let (downloaded, excluded) = {
@@ -570,8 +575,7 @@ mod tests {
         // A stale client writes with an outdated `expected`: the cloud is authoritative and
         // last-write-wins, so the newer value simply replaces the old one -- no conflict copy.
         let offline = entry("language", "Japanese");
-        let result =
-            exchange(&root.0, request(vec![change(&offline, Some(base))])).unwrap();
+        let result = exchange(&root.0, request(vec![change(&offline, Some(base))])).unwrap();
         assert!(result.conflicts.is_empty());
         assert_eq!(
             Entry::parse(result.records["language"].content.as_ref().unwrap())
@@ -835,13 +839,9 @@ mod tests {
         let (remote, task) = cloud(server.0.join("memory")).await;
         let store = MemoryStore::new(client.0.join("memory"));
         store.write_entry(&entry("language", "Chinese")).unwrap();
-        let report = push_written(
-            &client.0,
-            &remote,
-            &["language".to_string()],
-        )
-        .await
-        .unwrap();
+        let report = push_written(&client.0, &remote, &["language".to_string()])
+            .await
+            .unwrap();
         assert_eq!(report.uploaded, 1);
         // The cloud now owns the entry and it was installed back locally.
         assert!(
@@ -852,9 +852,11 @@ mod tests {
                 .any(|(_, e)| e.id == "language" && e.body == "Chinese")
         );
         assert_eq!(
-            Entry::parse(&std::fs::read_to_string(store.entry_path(&entry("language", ""))).unwrap())
-                .unwrap()
-                .body,
+            Entry::parse(
+                &std::fs::read_to_string(store.entry_path(&entry("language", ""))).unwrap()
+            )
+            .unwrap()
+            .body,
             "Chinese"
         );
         task.abort();
@@ -874,9 +876,13 @@ mod tests {
         let (remote, task) = cloud(server.0.join("memory")).await;
         let store = MemoryStore::new(client.0.join("memory"));
         // Local-only entry: the cloud has never heard of it.
-        store.write_entry(&entry("local-only", "Should be dropped")).unwrap();
+        store
+            .write_entry(&entry("local-only", "Should be dropped"))
+            .unwrap();
         // Offline edit of an entry the cloud owns.
-        store.write_entry(&entry("language", "Offline Japanese")).unwrap();
+        store
+            .write_entry(&entry("language", "Offline Japanese"))
+            .unwrap();
         let report = synchronize(&client.0, &remote).await.unwrap();
         assert_eq!(report.uploaded, 0);
         let listed = store.list_entries().unwrap();
@@ -908,8 +914,7 @@ mod tests {
         let a = Temp::new();
         let b = Temp::new();
         let (remote, task) = cloud(server.0.join("memory")).await;
-        let a_store =
-            MemoryStore::with_roots(vec![a.0.join("memory"), a.0.join("project/memory")]);
+        let a_store = MemoryStore::with_roots(vec![a.0.join("memory"), a.0.join("project/memory")]);
         let mut project = entry("project", "Local secret");
         project.domain = Domain::Project;
         let project_path = a_store.write_entry(&project).unwrap();

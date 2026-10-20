@@ -8,47 +8,12 @@ use crate::subagent::SubagentInfo;
 use crate::todo::TaskView;
 
 use super::command::{CommandManager, CommandOutcome, DEFAULT_PREFIX};
-use super::session::SessionManager;
+use crate::interface::session::SessionManager;
 
 use super::selection::Selection;
 use super::ui::MessageCache;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Role {
-    User,
-    Assistant,
-    System,
-    Error,
-    /// A neutral system notice shown inline (e.g. "images were dropped, continuing"). Distinct
-    /// from `System` (command output) and `Error`; rendered muted, no label, not markdown.
-    Notice,
-}
-
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    pub role: Role,
-    pub content: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ToolCallView {
-    pub id: String,
-    pub name: String,
-    // Raw JSON arguments, kept so the TUI can show which file was read
-    pub arguments: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct ToolGroup {
-    pub calls: Vec<ToolCallView>,
-}
-
-#[derive(Debug, Clone)]
-pub enum Item {
-    Message(ChatMessage),
-    Tools(ToolGroup),
-    Compact { content: String, expanded: bool },
-}
+use crate::interface::view::{Item, Role};
 
 /// State of the `/model` picker. The list is fully loaded by the model catalog when opened,
 /// so here we only store the data needed for display and the highlight position.
@@ -117,7 +82,9 @@ impl LoginStep {
     fn prompt(&self) -> &'static str {
         match self {
             LoginStep::BaseUrl => "Enter the model service address base_url",
-            LoginStep::ApiKey => "Enter the API Key (leave blank for local services; press Enter to skip)",
+            LoginStep::ApiKey => {
+                "Enter the API Key (leave blank for local services; press Enter to skip)"
+            }
             LoginStep::Model => "Enter the default model name",
         }
     }
@@ -195,7 +162,7 @@ pub struct App {
 }
 
 impl std::ops::Deref for App {
-    type Target = super::session::Session;
+    type Target = crate::interface::session::Session;
     /// Transparent access to foreground-session fields: `self.items` / `self.agent` / `self.waiting` ...
     /// all resolve to `sessions.active()` ("the current session's view").
     fn deref(&self) -> &Self::Target {
@@ -568,7 +535,9 @@ impl App {
                         // Activation failed (unknown skill / file read failure): report locally, do not send to the model.
                         self.input.clear();
                         self.input_cursor = 0;
-                        self.add_system_message(format!("failed to activate skill `{name}`: {reason}"));
+                        self.add_system_message(format!(
+                            "failed to activate skill `{name}`: {reason}"
+                        ));
                         return None;
                     }
                 }
@@ -834,7 +803,10 @@ impl App {
         };
         self.set_input(current);
         self.command_hint = Some(format!(" {} · Enter confirm · Esc cancel ", step.prompt()));
-        self.add_system_message(format!("{} (Enter keeps the current value):", step.prompt()));
+        self.add_system_message(format!(
+            "{} (Enter keeps the current value):",
+            step.prompt()
+        ));
     }
 
     /// Submit the current field and advance to the next step; when finished, persist and hot-update.
@@ -851,7 +823,9 @@ impl App {
                 let trimmed = value.trim();
                 if trimmed.is_empty() {
                     // An empty endpoint is meaningless: stay on this step and re-ask, do not advance.
-                    self.add_system_message("base_url cannot be empty, please enter again.".to_owned());
+                    self.add_system_message(
+                        "base_url cannot be empty, please enter again.".to_owned(),
+                    );
                     self.login = Some(flow);
                     self.prompt_login_step();
                     return;
@@ -893,7 +867,10 @@ impl App {
             )
         });
         if let Some(config) = config {
-            if let Err(error) = self.sessions.active_mut().select_model(config, None) { self.add_system_message(error); return; }
+            if let Err(error) = self.sessions.active_mut().select_model(config, None) {
+                self.add_system_message(error);
+                return;
+            }
         } else if let Some(agent) = self.agent.as_mut() {
             agent.set_provider(flow.base_url.clone(), flow.api_key.clone());
             if let Some(model) = model.clone() {
@@ -1127,7 +1104,10 @@ impl App {
             .map(|factory| factory.model_config_for(&entry));
         if let Some(config) = config {
             let key = entry.configured.as_ref().map(|_| entry.value.clone());
-            if let Err(error) = self.sessions.active_mut().select_model(config, key) { self.add_system_message(error); return None; }
+            if let Err(error) = self.sessions.active_mut().select_model(config, key) {
+                self.add_system_message(error);
+                return None;
+            }
         } else if let Some(agent) = self.agent.as_mut() {
             agent.set_model(entry.value.clone());
         }
@@ -1445,7 +1425,8 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&root);
         let factory = std::sync::Arc::new(
-            crate::bootstrap::AgentFactory::assemble_at(root.clone(), root.join("app-data")).expect("assemble factory"),
+            crate::bootstrap::AgentFactory::assemble_at(root.clone(), root.join("app-data"))
+                .expect("assemble factory"),
         );
         let built = factory.build_agent(Vec::new()).expect("build agent");
         let sessions = crate::interface::session::SessionManager::with_factory(
@@ -1483,9 +1464,18 @@ mod tests {
         for ch in "/session".chars() {
             app.push_input(ch);
         }
-        assert!(app.submit().is_none(), "/session should not be sent as a prompt");
-        assert!(app.take_session_picker_request(), "should request loading the session list");
-        assert!(!app.is_waiting(), "should not enter the waiting-for-reply state");
+        assert!(
+            app.submit().is_none(),
+            "/session should not be sent as a prompt"
+        );
+        assert!(
+            app.take_session_picker_request(),
+            "should request loading the session list"
+        );
+        assert!(
+            !app.is_waiting(),
+            "should not enter the waiting-for-reply state"
+        );
         assert!(app.input().is_empty(), "the input should be cleared");
     }
 
@@ -1548,9 +1538,18 @@ mod tests {
         for ch in "/model".chars() {
             app.push_input(ch);
         }
-        assert!(app.submit().is_none(), "/model should not be sent as a prompt");
-        assert!(app.take_picker_request(), "should request loading the model list");
-        assert!(!app.is_waiting(), "should not enter the waiting-for-reply state");
+        assert!(
+            app.submit().is_none(),
+            "/model should not be sent as a prompt"
+        );
+        assert!(
+            app.take_picker_request(),
+            "should request loading the model list"
+        );
+        assert!(
+            !app.is_waiting(),
+            "should not enter the waiting-for-reply state"
+        );
         assert!(app.input().is_empty(), "the input should be cleared");
     }
 
@@ -1575,7 +1574,10 @@ mod tests {
         app.picker_move(1);
         let chosen = app.picker_confirm();
         assert_eq!(chosen.as_deref(), Some("model-b"));
-        assert!(!app.is_picker_open(), "the panel should close after confirm");
+        assert!(
+            !app.is_picker_open(),
+            "the panel should close after confirm"
+        );
         assert_eq!(app.current_model().as_deref(), Some("model-b"));
     }
 
@@ -1601,7 +1603,10 @@ mod tests {
         app.open_picker(vec![ModelEntry::new("plain", "plain", "p")]);
         app.picker_confirm();
         let config = app.agent.as_ref().unwrap().model_config();
-        assert!(!config.tool_calling.is_content(), "undeclared should fall back to the default Native");
+        assert!(
+            !config.tool_calling.is_content(),
+            "undeclared should fall back to the default Native"
+        );
     }
 
     #[test]
@@ -1611,7 +1616,11 @@ mod tests {
         app.open_picker(vec![ModelEntry::new("x", "x", "p")]);
         app.picker_cancel();
         assert!(!app.is_picker_open());
-        assert_eq!(app.current_model(), before, "cancel should not change the model");
+        assert_eq!(
+            app.current_model(),
+            before,
+            "cancel should not change the model"
+        );
     }
 
     #[test]
@@ -1633,10 +1642,16 @@ mod tests {
         for ch in "/login".chars() {
             app.push_input(ch);
         }
-        assert!(app.submit().is_none(), "/login should not be sent as a prompt");
+        assert!(
+            app.submit().is_none(),
+            "/login should not be sent as a prompt"
+        );
         assert!(app.is_login(), "should enter the login flow");
         assert_eq!(app.login_step(), Some(LoginStep::BaseUrl));
-        assert!(!app.is_waiting(), "should not enter the waiting-for-reply state");
+        assert!(
+            !app.is_waiting(),
+            "should not enter the waiting-for-reply state"
+        );
         // The input box is pre-filled with the current base_url; Enter keeps it.
         assert_eq!(app.input(), "http://localhost");
     }
@@ -1656,7 +1671,11 @@ mod tests {
         app.set_input("sk-secret".into());
         app.submit();
         assert_eq!(app.login_step(), Some(LoginStep::Model));
-        assert_eq!(app.input(), "test", "the model defaults to the current value");
+        assert_eq!(
+            app.input(),
+            "test",
+            "the model defaults to the current value"
+        );
 
         // Step 3: change the model -> finish.
         app.set_input("new-model".into());
@@ -1758,7 +1777,10 @@ mod tests {
             "the input box should be cleared after an interrupt (the turn is kept, not resent)"
         );
         // The UI keeps this turn's user item (items are not truncated).
-        assert!(!app.items().is_empty(), "this turn's UI items should be kept after an interrupt");
+        assert!(
+            !app.items().is_empty(),
+            "this turn's UI items should be kept after an interrupt"
+        );
         assert!(
             app.items().iter().any(|item| matches!(
                 item,
@@ -1797,9 +1819,17 @@ mod tests {
 
         app.start_rewind_last_turn();
         // Only the latest one is rolled back: the input box should be filled with "second", and the edit point points at UI item 1.
-        assert_eq!(app.input(), "second", "should fill back the last user message");
+        assert_eq!(
+            app.input(),
+            "second",
+            "should fill back the last user message"
+        );
         assert!(app.is_rewind_edit(), "should enter rewind-edit mode");
-        assert_eq!(app.rewind_edit_item(), Some(1), "should point at the message item being edited");
+        assert_eq!(
+            app.rewind_edit_item(),
+            Some(1),
+            "should point at the message item being edited"
+        );
         assert!(app.command_hint().is_some(), "should give a resend hint");
     }
 
@@ -1841,7 +1871,10 @@ mod tests {
     fn rewind_without_user_message_is_noop() {
         let mut app = App::new(agent_with_users(vec![]));
         app.start_rewind_last_turn();
-        assert!(!app.is_rewind_edit(), "no rewindable message should not enter edit mode");
+        assert!(
+            !app.is_rewind_edit(),
+            "no rewindable message should not enter edit mode"
+        );
         assert!(app.input().is_empty());
     }
 
@@ -1856,10 +1889,20 @@ mod tests {
         for ch in "/rewind".chars() {
             app.push_input(ch);
         }
-        assert!(app.submit().is_none(), "/rewind should not be sent as a prompt");
+        assert!(
+            app.submit().is_none(),
+            "/rewind should not be sent as a prompt"
+        );
         assert!(app.is_rewind_edit(), "should enter rewind-edit mode");
-        assert!(!app.is_waiting(), "should not enter the waiting-for-reply state");
-        assert_eq!(app.input(), "only", "should fill back the last user message");
+        assert!(
+            !app.is_waiting(),
+            "should not enter the waiting-for-reply state"
+        );
+        assert_eq!(
+            app.input(),
+            "only",
+            "should fill back the last user message"
+        );
         assert!(app.command_hint().is_some(), "should give a resend hint");
     }
 
@@ -1886,13 +1929,19 @@ mod tests {
         // Try again, this time editing and pressing Enter to resend.
         app.start_rewind_last_turn();
         app.push_input('!');
-        assert!(app.command_hint().is_some(), "edit mode should keep the resend hint");
+        assert!(
+            app.command_hint().is_some(),
+            "edit mode should keep the resend hint"
+        );
         assert_eq!(
             app.submit().as_deref(),
             Some("first!"),
             "Enter should resend the edited content"
         );
-        assert!(app.is_waiting(), "resending should enter the waiting-for-reply state");
+        assert!(
+            app.is_waiting(),
+            "resending should enter the waiting-for-reply state"
+        );
     }
 
     #[test]
@@ -2080,7 +2129,10 @@ mod tests {
         let picked = names[1].clone();
         app.accept_suggestion();
         assert_eq!(app.input(), format!("/{picked} "));
-        assert!(app.suggestions().is_empty(), "the suggestions should be cleared after accepting");
+        assert!(
+            app.suggestions().is_empty(),
+            "the suggestions should be cleared after accepting"
+        );
         assert_eq!(app.suggestion_index(), 0);
     }
 
@@ -2103,6 +2155,10 @@ mod tests {
         assert!(!app.suggestions().is_empty());
         app.dismiss_suggestions();
         assert!(app.suggestions().is_empty());
-        assert_eq!(app.input(), "/r", "Esc only closes the popup, does not touch the input");
+        assert_eq!(
+            app.input(),
+            "/r",
+            "Esc only closes the popup, does not touch the input"
+        );
     }
 }

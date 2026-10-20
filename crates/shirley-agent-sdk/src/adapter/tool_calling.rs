@@ -332,7 +332,10 @@ fn render_placeholders(template: &str, pairs: &[(&str, &str)]) -> String {
                 }
             }
         }
-        let ch = template[index..].chars().next().expect("index is on a char boundary");
+        let ch = template[index..]
+            .chars()
+            .next()
+            .expect("index is on a char boundary");
         out.push(ch);
         index += ch.len_utf8();
     }
@@ -426,7 +429,11 @@ fn render_object_schema(node: &Value, level: usize) -> Vec<String> {
 
     if let Some(properties) = node.get("properties").and_then(|value| value.as_object()) {
         for (key, child) in properties {
-            let opt_mark = if required.contains(key.as_str()) { "" } else { "?" };
+            let opt_mark = if required.contains(key.as_str()) {
+                ""
+            } else {
+                "?"
+            };
             let comment = child
                 .get("description")
                 .and_then(|value| value.as_str())
@@ -478,10 +485,7 @@ fn is_object_schema(node: &Value) -> bool {
 
 fn is_array_of_objects(node: &Value) -> bool {
     node.get("type").and_then(|value| value.as_str()) == Some("array")
-        && node
-            .get("items")
-            .map(is_object_schema)
-            .unwrap_or(false)
+        && node.get("items").map(is_object_schema).unwrap_or(false)
 }
 
 fn type_label(node: &Value) -> String {
@@ -616,15 +620,23 @@ pub(crate) fn encode_messages_for_content(
     // The tool catalog is appended after the first system message (the tool set is sorted by name
     // and stable within a session -> stable prefix). It only affects the request view and is not
     // written into `self.messages`.
-    let instructions = if tools.is_empty() { String::new() } else { protocol.render_instructions(tools) };
+    let instructions = if tools.is_empty() {
+        String::new()
+    } else {
+        protocol.render_instructions(tools)
+    };
     let mut messages = messages;
     if !instructions.trim().is_empty() {
         match messages.first() {
             Some(Message::System { content }) => {
-                out.push(Message::System { content: format!("{content}\n\n{instructions}") });
+                out.push(Message::System {
+                    content: format!("{content}\n\n{instructions}"),
+                });
                 messages = &messages[1..];
             }
-            _ => out.push(Message::System { content: instructions }),
+            _ => out.push(Message::System {
+                content: instructions,
+            }),
         }
     }
     let mut index = 0;
@@ -838,7 +850,8 @@ impl TagConfig {
 
     /// Whether `parent` may directly contain `child`: only `tool` can contain `name` / `params`.
     fn can_contain(&self, parent: &str, child: &str) -> bool {
-        parent == self.tool.as_str() && (child == self.name.as_str() || child == self.params.as_str())
+        parent == self.tool.as_str()
+            && (child == self.name.as_str() || child == self.params.as_str())
     }
 }
 
@@ -1024,7 +1037,11 @@ impl TagParser {
     /// Append a plain char to "the content of the currently open tag" or the "outside-tags
     /// buffer".
     fn push_text(&mut self, ch: char) {
-        if self.stack.last().is_none_or(|tag| tag.name == self.cfg.description || tag.name == self.cfg.thinking) {
+        if self
+            .stack
+            .last()
+            .is_none_or(|tag| tag.name == self.cfg.description || tag.name == self.cfg.thinking)
+        {
             if ch == '`' {
                 self.backtick_run += 1;
                 if self.backtick_run == 3 {
@@ -1034,7 +1051,11 @@ impl TagParser {
                 self.backtick_run = 0;
             }
         }
-        if self.stack.last().is_some_and(|tag| tag.name == self.cfg.params) {
+        if self
+            .stack
+            .last()
+            .is_some_and(|tag| tag.name == self.cfg.params)
+        {
             if self.params_json_escape {
                 self.params_json_escape = false;
             } else if ch == '\\' && self.params_json_in_string {
@@ -1140,9 +1161,16 @@ impl TagParser {
         if self.params_json_in_string
             && closing
             && name == self.cfg.params
-            && self.stack.last().is_some_and(|tag| tag.name == self.cfg.params)
+            && self
+                .stack
+                .last()
+                .is_some_and(|tag| tag.name == self.cfg.params)
         {
-            let buffer = self.stack.last().map(|tag| tag.buf.clone()).unwrap_or_default();
+            let buffer = self
+                .stack
+                .last()
+                .map(|tag| tag.buf.clone())
+                .unwrap_or_default();
             if serde_json::from_str::<serde_json::Value>(buffer.trim()).is_err() {
                 self.push_noise(&format!("<{raw}>"));
                 return;
@@ -1162,7 +1190,9 @@ impl TagParser {
                 self.push_noise(&format!("<{raw}>"));
                 return;
             }
-        } else if closing || (name != self.cfg.thinking && name != self.cfg.description && name != self.cfg.tool) {
+        } else if closing
+            || (name != self.cfg.thinking && name != self.cfg.description && name != self.cfg.tool)
+        {
             self.push_noise(&format!("<{raw}>"));
             return;
         }
@@ -1332,7 +1362,10 @@ impl ContentStreamParser for TaggedStreamParser {
                 format!("<{}>", self.parser.cfg.description),
                 format!("<{}>", self.parser.cfg.tool),
             ];
-            if opening_tags.iter().any(|tag| tag == trimmed || trimmed.starts_with(tag)) {
+            if opening_tags
+                .iter()
+                .any(|tag| tag == trimmed || trimmed.starts_with(tag))
+            {
                 self.protocol_response = Some(true);
                 let prefix = std::mem::take(&mut self.prefix);
                 for ch in prefix.chars() {
@@ -1461,8 +1494,18 @@ mod tests {
             reasoning_content: None,
             tool_calls: vec![],
         };
-        let Message::Assistant { tool_calls: first, .. } = parse_content_response(&protocol(), response()) else { panic!("expected assistant") };
-        let Message::Assistant { tool_calls: second, .. } = parse_content_response(&protocol(), response()) else { panic!("expected assistant") };
+        let Message::Assistant {
+            tool_calls: first, ..
+        } = parse_content_response(&protocol(), response())
+        else {
+            panic!("expected assistant")
+        };
+        let Message::Assistant {
+            tool_calls: second, ..
+        } = parse_content_response(&protocol(), response())
+        else {
+            panic!("expected assistant")
+        };
         assert_ne!(first[0].id, second[0].id);
     }
 
@@ -1479,7 +1522,14 @@ mod tests {
             }]
         })).unwrap();
         let message = parse_content_response(&protocol(), response.message);
-        let Message::Assistant { content, tool_calls, .. } = message else { panic!("expected assistant") };
+        let Message::Assistant {
+            content,
+            tool_calls,
+            ..
+        } = message
+        else {
+            panic!("expected assistant")
+        };
         assert_eq!(content.as_deref(), Some("let me read the file first"));
         assert_eq!(tool_calls.len(), 1);
         assert_eq!(tool_calls[0].name, "read");
@@ -1489,7 +1539,10 @@ mod tests {
     #[test]
     fn description_only_has_no_calls() {
         let doc = protocol().parse("<description>answer directly, no tool call</description>");
-        assert_eq!(doc.description.as_deref(), Some("answer directly, no tool call"));
+        assert_eq!(
+            doc.description.as_deref(),
+            Some("answer directly, no tool call")
+        );
         assert!(doc.calls.is_empty());
     }
 
@@ -1509,15 +1562,19 @@ mod tests {
     #[test]
     fn leading_prose_before_tool_requests_reformat_without_running_it() {
         let response = Message::Assistant {
-            content: Some(concat!(
-                "I'll note the task.\n\n",
-                "<tool>\n<name>todo</name>\n",
-                "<params>{\"goal\":\"design sub-agent\"}</params>\n</tool>",
-            ).into()),
+            content: Some(
+                concat!(
+                    "I'll note the task.\n\n",
+                    "<tool>\n<name>todo</name>\n",
+                    "<params>{\"goal\":\"design sub-agent\"}</params>\n</tool>",
+                )
+                .into(),
+            ),
             reasoning_content: None,
             tool_calls: Vec::new(),
         };
-        let Message::Assistant { tool_calls, .. } = parse_content_response(&protocol(), response) else {
+        let Message::Assistant { tool_calls, .. } = parse_content_response(&protocol(), response)
+        else {
             panic!("expected assistant");
         };
         assert_eq!(tool_calls.len(), 1);
@@ -1528,7 +1585,10 @@ mod tests {
     #[test]
     fn nested_protocol_tag_is_literal_until_parent_closes() {
         let doc = protocol().parse("<thinking>reasoning<description>answer</description>");
-        assert_eq!(doc.thinking.as_deref(), Some("reasoning<description>answer</description>"));
+        assert_eq!(
+            doc.thinking.as_deref(),
+            Some("reasoning<description>answer</description>")
+        );
         assert!(doc.description.is_none());
     }
 
@@ -1546,13 +1606,18 @@ mod tests {
         let (_, streamed) = collect_visible(&protocol(), &[&wrapped]);
         assert_eq!(streamed, example);
 
-        let outside = format!("<description>Example</description>\n```xml\n<tool><name>bash</name><params>{{}}</params></tool>\n```");
+        let outside = format!(
+            "<description>Example</description>\n```xml\n<tool><name>bash</name><params>{{}}</params></tool>\n```"
+        );
         assert!(protocol().parse(&outside).calls.is_empty());
 
         let inline = "<description>call example:\n<tool><name>bash</name><params>{}</params></tool></description>";
         assert!(protocol().parse(inline).calls.is_empty());
         let (_, streamed) = collect_visible(&protocol(), &[inline]);
-        assert_eq!(streamed, "call example:\n<tool><name>bash</name><params>{}</params></tool>");
+        assert_eq!(
+            streamed,
+            "call example:\n<tool><name>bash</name><params>{}</params></tool>"
+        );
     }
 
     #[test]
@@ -1566,28 +1631,44 @@ mod tests {
         // Truncated by max_tokens: `<params>` is unclosed -> not executed, and recorded in errors (Step 5).
         let doc = protocol().parse("<tool><name>bash</name><params>{\"command\":\"ls");
         assert!(doc.calls.is_empty());
-        assert!(!doc.errors.is_empty(), "should record a truncation error: {doc:?}");
+        assert!(
+            !doc.errors.is_empty(),
+            "should record a truncation error: {doc:?}"
+        );
     }
 
     #[test]
     fn missing_name_records_error() {
         let doc = protocol().parse("<tool><params>{}</params></tool>");
         assert!(doc.calls.is_empty());
-        assert!(doc.errors.iter().any(|e| e.contains("name")), "should record a missing name: {doc:?}");
+        assert!(
+            doc.errors.iter().any(|e| e.contains("name")),
+            "should record a missing name: {doc:?}"
+        );
     }
 
     #[test]
     fn invalid_params_json_records_error() {
         let doc = protocol().parse("<tool><name>bash</name><params>{not json}</params></tool>");
-        assert!(!doc.errors.is_empty(), "should record invalid JSON: {doc:?}");
+        assert!(
+            !doc.errors.is_empty(),
+            "should record invalid JSON: {doc:?}"
+        );
     }
 
     #[test]
     fn unmatched_quote_in_params_falls_back_to_text() {
         // When a string quote is unclosed, `</params>` should not be swallowed; invalid JSON -> restore as text + record an error.
-        let doc = protocol().parse("<tool><name>bash</name><params>{\"command\":\"ls}</params></tool>");
-        assert!(doc.calls.is_empty(), "invalid JSON should not be executed: {doc:?}");
-        assert!(!doc.errors.is_empty(), "should record invalid JSON: {doc:?}");
+        let doc =
+            protocol().parse("<tool><name>bash</name><params>{\"command\":\"ls}</params></tool>");
+        assert!(
+            doc.calls.is_empty(),
+            "invalid JSON should not be executed: {doc:?}"
+        );
+        assert!(
+            !doc.errors.is_empty(),
+            "should record invalid JSON: {doc:?}"
+        );
     }
 
     #[test]
@@ -1598,7 +1679,8 @@ mod tests {
             reasoning_content: None,
             tool_calls: Vec::new(),
         };
-        let Message::Assistant { tool_calls, .. } = parse_content_response(&protocol(), message) else {
+        let Message::Assistant { tool_calls, .. } = parse_content_response(&protocol(), message)
+        else {
             panic!("expected assistant");
         };
         assert_eq!(tool_calls.len(), 1);
@@ -1610,22 +1692,32 @@ mod tests {
     fn native_reasoning_wins_over_tagged_thinking() {
         // Thinking-source priority: native reasoning wins; `<thinking>` only fills a gap (Step 5).
         let message = Message::Assistant {
-            content: Some("<thinking>tag thinking</thinking><description>answer</description>".into()),
+            content: Some(
+                "<thinking>tag thinking</thinking><description>answer</description>".into(),
+            ),
             reasoning_content: Some("native thinking".into()),
             tool_calls: Vec::new(),
         };
-        let Message::Assistant { reasoning_content, .. } = parse_content_response(&protocol(), message) else {
+        let Message::Assistant {
+            reasoning_content, ..
+        } = parse_content_response(&protocol(), message)
+        else {
             panic!("expected assistant");
         };
         assert_eq!(reasoning_content.as_deref(), Some("native thinking"));
 
         // When native is empty, use `<thinking>`.
         let message = Message::Assistant {
-            content: Some("<thinking>tag thinking</thinking><description>answer</description>".into()),
+            content: Some(
+                "<thinking>tag thinking</thinking><description>answer</description>".into(),
+            ),
             reasoning_content: None,
             tool_calls: Vec::new(),
         };
-        let Message::Assistant { reasoning_content, .. } = parse_content_response(&protocol(), message) else {
+        let Message::Assistant {
+            reasoning_content, ..
+        } = parse_content_response(&protocol(), message)
+        else {
             panic!("expected assistant");
         };
         assert_eq!(reasoning_content.as_deref(), Some("tag thinking"));
@@ -1637,7 +1729,11 @@ mod tests {
         let protocol = protocol();
         let (thinking, content) = collect_visible(
             &protocol,
-            &["<description>answer</description>\n", "some stray text\n", "<tool><name>bash</name><params>{}</params></tool>"],
+            &[
+                "<description>answer</description>\n",
+                "some stray text\n",
+                "<tool><name>bash</name><params>{}</params></tool>",
+            ],
         );
         assert_eq!(thinking, "");
         assert_eq!(content, "answer");
@@ -1694,16 +1790,15 @@ mod tests {
         let mut parser = protocol.stream_parser();
         let mut thinking = String::new();
         let mut content = String::new();
-        let mut absorb = |chunks: Vec<VisibleChunk>,
-                          thinking: &mut String,
-                          content: &mut String| {
-            for chunk in chunks {
-                match chunk {
-                    VisibleChunk::Thinking(text) => thinking.push_str(&text),
-                    VisibleChunk::Content(text) => content.push_str(&text),
+        let mut absorb =
+            |chunks: Vec<VisibleChunk>, thinking: &mut String, content: &mut String| {
+                for chunk in chunks {
+                    match chunk {
+                        VisibleChunk::Thinking(text) => thinking.push_str(&text),
+                        VisibleChunk::Content(text) => content.push_str(&text),
+                    }
                 }
-            }
-        };
+            };
         for piece in pieces {
             absorb(parser.push(piece), &mut thinking, &mut content);
         }
@@ -1716,7 +1811,9 @@ mod tests {
         let protocol = protocol();
         let (thinking, content) = collect_visible(
             &protocol,
-            &["<thinking>think a bit</thinking>\n<description>doing it now</description>\n<tool><name>read</name><params>{\"path\":\"a.rs\"}</params></tool>"],
+            &[
+                "<thinking>think a bit</thinking>\n<description>doing it now</description>\n<tool><name>read</name><params>{\"path\":\"a.rs\"}</params></tool>",
+            ],
         );
         // thinking / description increments are visible; the `<tool>` block is fully suppressed.
         assert_eq!(thinking, "think a bit");
@@ -1759,11 +1856,18 @@ mod tests {
             fn parse(&self, _text: &str) -> ParsedDocument {
                 ParsedDocument::default()
             }
-            fn render_assistant(&self, _t: Option<&str>, _c: Option<&str>, _calls: &[ToolCall]) -> String {
+            fn render_assistant(
+                &self,
+                _t: Option<&str>,
+                _c: Option<&str>,
+                _calls: &[ToolCall],
+            ) -> String {
                 String::new()
             }
             fn render_result(&self, _call: &ToolCall, _output: &str) -> Message {
-                Message::User { content: String::new().into() }
+                Message::User {
+                    content: String::new().into(),
+                }
             }
         }
         let mut parser = Bare.stream_parser();
@@ -1816,7 +1920,10 @@ mod tests {
         }];
         // thinking is no longer replayed (Step 6): carrying historical reasoning every turn would bloat the context.
         let text = proto.render_assistant(Some("think a bit"), Some("look at the catalog"), &calls);
-        assert!(!text.contains("think a bit"), "should not replay thinking: {text}");
+        assert!(
+            !text.contains("think a bit"),
+            "should not replay thinking: {text}"
+        );
         let doc = proto.parse(&text);
         assert_eq!(doc.thinking.as_deref(), None);
         assert_eq!(doc.description.as_deref(), Some("look at the catalog"));
@@ -1841,7 +1948,10 @@ mod tests {
             arguments: args.into(),
         }];
         let text = proto.render_assistant(None, Some(content), &calls);
-        assert!(text.contains("&lt;"), "should escape `<` in the body: {text}");
+        assert!(
+            text.contains("&lt;"),
+            "should escape `<` in the body: {text}"
+        );
         let doc = proto.parse(&text);
         assert_eq!(doc.description.as_deref(), Some(content));
         assert_eq!(doc.calls.len(), 1);
@@ -1868,13 +1978,24 @@ mod tests {
         // user is preserved as-is.
         assert!(matches!(&out[0], Message::User { content } if content == "hello"));
         // assistant is re-rendered into tagged original text (the tags must appear).
-        let Message::Assistant { content, tool_calls, .. } = &out[1] else {
+        let Message::Assistant {
+            content,
+            tool_calls,
+            ..
+        } = &out[1]
+        else {
             panic!("expected assistant");
         };
         let text = content.as_deref().unwrap();
         // thinking is not replayed (Step 6), but the description tag is kept.
-        assert!(!text.contains("<thinking>"), "should not replay thinking: {text}");
-        assert!(text.contains("<description>I'm here</description>"), "description tag: {text}");
+        assert!(
+            !text.contains("<thinking>"),
+            "should not replay thinking: {text}"
+        );
+        assert!(
+            text.contains("<description>I'm here</description>"),
+            "description tag: {text}"
+        );
         assert!(tool_calls.is_empty());
     }
 
@@ -1909,7 +2030,10 @@ mod tests {
             panic!("expected user (rendered tool result)");
         };
         let content = content.as_text();
-        assert!(content.contains("{\"tool\":\"bash\"}"), "feedback header: {content}");
+        assert!(
+            content.contains("{\"tool\":\"bash\"}"),
+            "feedback header: {content}"
+        );
         assert!(content.contains("file.txt"), "feedback body: {content}");
     }
 
@@ -1948,19 +2072,39 @@ mod tests {
         ];
         let out = encode_messages_for_content(&messages, &[], &proto);
         // assistant + one merged user (not two users).
-        assert_eq!(out.len(), 2, "multiple tool results should be merged, actual output: {out:?}");
+        assert_eq!(
+            out.len(),
+            2,
+            "multiple tool results should be merged, actual output: {out:?}"
+        );
         assert!(matches!(&out[0], Message::Assistant { .. }));
         let Message::User { content } = &out[1] else {
             panic!("expected single merged user, got {:?}", out[1]);
         };
         let content = content.as_text();
         // Both result blocks are present, each headed per the template.
-        assert!(content.contains("{\"tool\":\"bash\"}"), "missing bash block: {content}");
-        assert!(content.contains("file.txt"), "missing bash output: {content}");
-        assert!(content.contains("{\"tool\":\"read\"}"), "missing read block: {content}");
-        assert!(content.contains("fn main() {}"), "missing read output: {content}");
+        assert!(
+            content.contains("{\"tool\":\"bash\"}"),
+            "missing bash block: {content}"
+        );
+        assert!(
+            content.contains("file.txt"),
+            "missing bash output: {content}"
+        );
+        assert!(
+            content.contains("{\"tool\":\"read\"}"),
+            "missing read block: {content}"
+        );
+        assert!(
+            content.contains("fn main() {}"),
+            "missing read output: {content}"
+        );
         // The two blocks are separated by a blank line.
-        assert_eq!(content.matches("{\"tool\":").count(), 2, "there should be two blocks: {content}");
+        assert_eq!(
+            content.matches("{\"tool\":").count(),
+            2,
+            "there should be two blocks: {content}"
+        );
     }
 
     #[test]
@@ -1975,12 +2119,27 @@ mod tests {
         assert!(text.contains("run a command"));
         assert!(text.contains("<tool>"));
         // The four-section structure modeled on figmaagent (contract locked in to prevent silent regressions).
-        assert!(text.contains("# Tool-calling protocol"), "missing the how-it-works section: {text}");
-        assert!(text.contains("# Output format (follow strictly)"), "missing the output-format section: {text}");
-        assert!(text.contains("# Available tools"), "missing the tool-catalog section: {text}");
-        assert!(text.contains("# Tool-result feedback"), "missing the feedback-recognition section: {text}");
+        assert!(
+            text.contains("# Tool-calling protocol"),
+            "missing the how-it-works section: {text}"
+        );
+        assert!(
+            text.contains("# Output format (follow strictly)"),
+            "missing the output-format section: {text}"
+        );
+        assert!(
+            text.contains("# Available tools"),
+            "missing the tool-catalog section: {text}"
+        );
+        assert!(
+            text.contains("# Tool-result feedback"),
+            "missing the feedback-recognition section: {text}"
+        );
         // Parameters are rendered as a compact doc (not raw JSON Schema).
-        assert!(text.contains("Parameters:"), "missing the parameter doc: {text}");
+        assert!(
+            text.contains("Parameters:"),
+            "missing the parameter doc: {text}"
+        );
         // The contract must cover the "no tool needed, plain text directly" branch (otherwise the model may force out a tool block).
         assert!(
             text.contains("when you don't need a tool, just output plain text"),
@@ -2002,7 +2161,10 @@ mod tests {
             parameters: serde_json::json!({"type": "object"}),
         };
         let text = protocol().render_instructions(&[&def]);
-        assert!(text.contains("tool catalog truncated"), "should explicitly flag truncation: {text}");
+        assert!(
+            text.contains("tool catalog truncated"),
+            "should explicitly flag truncation: {text}"
+        );
         // The fixed contract is still present (only the catalog section, which grows with tool count, is truncated).
         assert!(text.contains("# Tool-calling protocol"));
         assert!(text.contains("# Output format (follow strictly)"));
@@ -2022,9 +2184,15 @@ mod tests {
             }
         });
         let doc = render_schema_doc(&schema);
-        assert!(doc.contains("command: string"), "required field must have no ?: {doc}");
+        assert!(
+            doc.contains("command: string"),
+            "required field must have no ?: {doc}"
+        );
         assert!(doc.contains("// the command to run"), "comment: {doc}");
-        assert!(doc.contains("timeout?: integer (>=1)"), "optional+constraint: {doc}");
+        assert!(
+            doc.contains("timeout?: integer (>=1)"),
+            "optional+constraint: {doc}"
+        );
         assert!(doc.contains("\"fast\" | \"safe\""), "enum: {doc}");
     }
 }

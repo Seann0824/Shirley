@@ -9,7 +9,7 @@
 //! string; Responses: `[{type:input_text}]`; Anthropic: `[{type:text}]`). This
 //! preserves the KV prefix cache for the overwhelmingly common text case.
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use super::AdapterError;
 use crate::message::{Content, ContentPart, ImageDetail, ImagePart, ImageSource};
@@ -61,9 +61,7 @@ pub(crate) fn responses_content(content: &Content) -> Result<Value, AdapterError
     let mut parts = Vec::new();
     for part in content.as_parts() {
         match part {
-            ContentPart::Text { text } => {
-                parts.push(json!({ "type": "input_text", "text": text }))
-            }
+            ContentPart::Text { text } => parts.push(json!({ "type": "input_text", "text": text })),
             ContentPart::Image(image) => {
                 let mut block = json!({ "type": "input_image" });
                 match &image.source {
@@ -197,7 +195,6 @@ pub(crate) fn images_only(content: &Content) -> Option<Content> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::message::{ContentPart, ImagePart};
 
     fn mixed() -> Content {
         Content::parts(vec![

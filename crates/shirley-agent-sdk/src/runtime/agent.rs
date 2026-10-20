@@ -3,12 +3,12 @@ use super::context::ContextProvider;
 use super::error::AgentError;
 use super::event::{AgentEvent, RunResult, StopReason};
 use super::prompt::{SystemPrompt, SystemPromptContext};
+use crate::SdkError;
 use crate::adapter;
 use crate::adapter::ModelRequest;
 use crate::message;
 use crate::token;
 use crate::tool;
-use crate::SdkError;
 use futures::StreamExt;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -56,6 +56,19 @@ pub struct Agent {
     /// this counter). `0` means **no cap** — the loop only ends when the model stops requesting
     /// tools.
     max_steps: usize,
+}
+
+impl std::fmt::Debug for Agent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // `system_prompt` (a boxed closure) and `context_provider` (a trait object) are not
+        // `Debug`; summarize them instead of deriving.
+        f.debug_struct("Agent")
+            .field("model_config", &self.model_config)
+            .field("working_dir", &self.working_dir)
+            .field("messages", &self.messages.len())
+            .field("max_steps", &self.max_steps)
+            .finish_non_exhaustive()
+    }
 }
 
 #[bon::bon]
@@ -845,9 +858,7 @@ fn trim_compaction_tool_outputs(
             message::Message::Tool {
                 content: Some(content),
                 ..
-            } if content.is_text_only() => {
-                Some((i, token::count_content_parts(content)))
-            }
+            } if content.is_text_only() => Some((i, token::count_content_parts(content))),
             _ => None,
         })
         .collect();

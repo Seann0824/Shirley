@@ -1,6 +1,6 @@
 # Cloud web interface (only-chat)
 
-> ℹ️ This document covers the **transport contract** (`POST /api/cmd/{name}` + `GET /api/events`) and the `spawn_turn` lifecycle, which are still accurate. The **orchestration** it once described as "one workspace" has since been unified with the desktop: the server now runs the same `ProjectRuntimeManager` core (`src/interface/runtime.rs`) as the Tauri shell, so multi-project / lazy per-project runtimes / `ProjectRegistry` **are** in effect. For the architecture and landing map see [`cloud-server.md`](./cloud-server.md); where the two disagree, `cloud-server.md` wins.
+> ℹ️ This document covers the **transport contract** (`POST /api/cmd/{name}` + `GET /api/events`) and the `spawn_turn` lifecycle, which are still accurate. The **orchestration** it once described as "one workspace" has since been unified with the desktop: the server now runs the same `ProjectRuntimeManager` core (`src/interface/runtime/mod.rs`) as the Tauri shell, so multi-project / lazy per-project runtimes / `ProjectRegistry` **are** in effect. For the architecture and landing map see [`cloud-server.md`](./cloud-server.md); where the two disagree, `cloud-server.md` wins.
 
 ## What it is
 
@@ -64,7 +64,7 @@ Without the feature, `--server` returns a clear "build with `--features server`"
 
 | Path | Responsibility |
 | --- | --- |
-| `src/interface/server.rs` | axum router; `ServerState`; single `POST /api/cmd/{name}` dispatcher; per-turn driver (`spawn_turn`); SSE fan-out; static hosting of the desktop build. |
+| `src/interface/server/mod.rs` | axum router; `ServerState`; single `POST /api/cmd/{name}` dispatcher; per-turn driver (`spawn_turn`); SSE fan-out; static hosting of the desktop build. |
 | `src/interface/desktop/web/` | the **unchanged** React frontend. Only `src/lib/bridge.ts` gained a third transport (`createHttpBridge`). |
 | `src/interface/desktop/web/dist/` | the build output served by the server (`npm run build`). |
 | `src/main.rs` | `Mode::Server` selection (`--server` / `SHIRLEY_INTERFACE=server`). |

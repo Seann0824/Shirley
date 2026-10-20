@@ -97,8 +97,12 @@ impl JsonlSessionStore {
             if line.trim().is_empty() {
                 continue;
             }
-            let message: Message = serde_json::from_str(&line)
-                .map_err(|e| SessionError::Backend(format!("failed to parse session log line {}: {e}", log.len() + 1)))?;
+            let message: Message = serde_json::from_str(&line).map_err(|e| {
+                SessionError::Backend(format!(
+                    "failed to parse session log line {}: {e}",
+                    log.len() + 1
+                ))
+            })?;
             log.push(message);
         }
         Ok(log)
@@ -113,8 +117,9 @@ impl JsonlSessionStore {
         {
             let mut file = File::create(&tmp)?;
             for message in log {
-                let line = serde_json::to_string(message)
-                    .map_err(|e| SessionError::Backend(format!("failed to serialize session message: {e}")))?;
+                let line = serde_json::to_string(message).map_err(|e| {
+                    SessionError::Backend(format!("failed to serialize session message: {e}"))
+                })?;
                 writeln!(file, "{line}")?;
             }
             file.flush()?;
@@ -132,8 +137,9 @@ impl JsonlSessionStore {
 
 impl SessionStore for JsonlSessionStore {
     fn append(&self, message: &Message) -> Result<(), SessionError> {
-        let line = serde_json::to_string(message)
-            .map_err(|e| SessionError::Backend(format!("failed to serialize session message: {e}")))?;
+        let line = serde_json::to_string(message).map_err(|e| {
+            SessionError::Backend(format!("failed to serialize session message: {e}"))
+        })?;
         let mut file = self.file.lock().expect("session lock poisoned");
         writeln!(file, "{line}")?;
         file.flush()?;
@@ -305,12 +311,16 @@ pub trait SessionCatalog: Send + Sync {
     ///
     /// The default implementation errors -- backends without metadata support (e.g. [`EmptySessionCatalog`]) need not implement it.
     fn rename(&self, _name: &str, _title: &str) -> Result<(), SessionError> {
-        Err(SessionError::Backend("this session catalog does not support renaming".into()))
+        Err(SessionError::Backend(
+            "this session catalog does not support renaming".into(),
+        ))
     }
 
     /// Delete a session (along with its log and title). The default implementation errors.
     fn delete(&self, _name: &str) -> Result<(), SessionError> {
-        Err(SessionError::Backend("this session catalog does not support deletion".into()))
+        Err(SessionError::Backend(
+            "this session catalog does not support deletion".into(),
+        ))
     }
 
     /// The directory holding the session logs (for cross-directory moves). The default returns `None` -- backends without
@@ -326,7 +336,9 @@ pub trait SessionCatalog: Send + Sync {
     /// `<name>.title` into the target directory. If the target already has a same-named session it **errors**
     /// (no silent overwrite, to avoid data loss). The default implementation errors.
     fn move_to(&self, _name: &str, _dest_dir: &Path) -> Result<(), SessionError> {
-        Err(SessionError::Backend("this session catalog does not support moving".into()))
+        Err(SessionError::Backend(
+            "this session catalog does not support moving".into(),
+        ))
     }
 }
 
@@ -472,7 +484,9 @@ impl FileSessionCatalog {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let tmp = self.dir.join(format!("index.json.{}.{}.tmp", std::process::id(), unique));
+        let tmp = self
+            .dir
+            .join(format!("index.json.{}.{}.tmp", std::process::id(), unique));
         if std::fs::write(&tmp, json).is_err() {
             let _ = std::fs::remove_file(&tmp);
             return;
@@ -629,7 +643,9 @@ impl SessionCatalog for FileSessionCatalog {
 
     fn rename(&self, name: &str, title: &str) -> Result<(), SessionError> {
         if !self.path_for(name).exists() {
-            return Err(SessionError::Backend(format!("session does not exist: {name}")));
+            return Err(SessionError::Backend(format!(
+                "session does not exist: {name}"
+            )));
         }
         self.write_title(name, title)
     }
@@ -637,7 +653,9 @@ impl SessionCatalog for FileSessionCatalog {
     fn delete(&self, name: &str) -> Result<(), SessionError> {
         let log = self.path_for(name);
         if !log.exists() {
-            return Err(SessionError::Backend(format!("session does not exist: {name}")));
+            return Err(SessionError::Backend(format!(
+                "session does not exist: {name}"
+            )));
         }
         std::fs::remove_file(&log)?;
         let _ = std::fs::remove_file(self.dir.join(format!("{name}.model.json")));
@@ -653,11 +671,15 @@ impl SessionCatalog for FileSessionCatalog {
     fn move_to(&self, name: &str, dest_dir: &Path) -> Result<(), SessionError> {
         let log = self.path_for(name);
         if !log.exists() {
-            return Err(SessionError::Backend(format!("session does not exist: {name}")));
+            return Err(SessionError::Backend(format!(
+                "session does not exist: {name}"
+            )));
         }
         let dest_log = dest_dir.join(format!("{name}.jsonl"));
         if dest_log.exists() {
-            return Err(SessionError::Backend(format!("the target project already has a session with this name: {name}")));
+            return Err(SessionError::Backend(format!(
+                "the target project already has a session with this name: {name}"
+            )));
         }
         std::fs::create_dir_all(dest_dir)?;
         // Move the log first (source of truth), then the title sidecar (subordinate; missing is not an error).
@@ -665,11 +687,17 @@ impl SessionCatalog for FileSessionCatalog {
         let dest_model = dest_dir.join(format!("{name}.model.json"));
         let has_model = model.exists();
         if has_model {
-            if dest_model.exists() { return Err(SessionError::Backend("target already has model selection metadata".into())); }
+            if dest_model.exists() {
+                return Err(SessionError::Backend(
+                    "target already has model selection metadata".into(),
+                ));
+            }
             std::fs::rename(&model, &dest_model)?;
         }
         if let Err(error) = std::fs::rename(&log, &dest_log) {
-            if has_model { let _ = std::fs::rename(&dest_model, &model); }
+            if has_model {
+                let _ = std::fs::rename(&dest_model, &model);
+            }
             return Err(error.into());
         }
         let title = self.title_path_for(name);
@@ -740,7 +768,9 @@ fn truncate_chars(text: &str, max: usize) -> String {
 /// long input to the titling model.
 pub fn first_user_message(messages: &[Message]) -> Option<String> {
     messages.iter().find_map(|message| match message {
-        Message::User { content } => Some(truncate_chars(&content.as_text(), AUTO_TITLE_INPUT_CHARS)),
+        Message::User { content } => {
+            Some(truncate_chars(&content.as_text(), AUTO_TITLE_INPUT_CHARS))
+        }
         _ => None,
     })
 }
@@ -758,10 +788,7 @@ Output only the title itself: no quotes, no punctuation, no explanation, no newl
 /// Clean the title returned by the model: take the first non-empty line, strip wrapping quotes / backticks and surrounding whitespace,
 /// collapse internal whitespace, truncate to [`AUTO_TITLE_MAX_CHARS`]. Returns `None` if empty after cleaning.
 pub fn sanitize_title(raw: &str) -> Option<String> {
-    let line = raw
-        .lines()
-        .map(str::trim)
-        .find(|line| !line.is_empty())?;
+    let line = raw.lines().map(str::trim).find(|line| !line.is_empty())?;
     let trimmed = line
         .trim_matches(|ch| matches!(ch, '"' | '\'' | '`' | '“' | '”' | '‘' | '’'))
         .trim();
@@ -790,11 +817,15 @@ impl SessionCatalog for EmptySessionCatalog {
     }
 
     fn open(&self, _name: &str) -> Result<Arc<dyn SessionStore>, SessionError> {
-        Err(SessionError::Backend("the empty session catalog does not support opening sessions".into()))
+        Err(SessionError::Backend(
+            "the empty session catalog does not support opening sessions".into(),
+        ))
     }
 
     fn create(&self) -> Result<(SessionEntry, Arc<dyn SessionStore>), SessionError> {
-        Err(SessionError::Backend("the empty session catalog does not support creating sessions".into()))
+        Err(SessionError::Backend(
+            "the empty session catalog does not support creating sessions".into(),
+        ))
     }
 }
 
@@ -803,7 +834,10 @@ mod tests {
     use super::*;
 
     fn tmp_path(tag: &str) -> PathBuf {
-        std::env::temp_dir().join(format!("shirley_session_{tag}_{}.jsonl", std::process::id()))
+        std::env::temp_dir().join(format!(
+            "shirley_session_{tag}_{}.jsonl",
+            std::process::id()
+        ))
     }
 
     fn user(content: &str) -> Message {
@@ -951,7 +985,10 @@ mod tests {
         let legacy = shirley.join("session.jsonl");
         std::fs::write(
             &legacy,
-            format!("{}\n", serde_json::to_string(&user("old conversation")).unwrap()),
+            format!(
+                "{}\n",
+                serde_json::to_string(&user("old conversation")).unwrap()
+            ),
         )
         .unwrap();
         let catalog = FileSessionCatalog::new(&dir);
@@ -972,12 +1009,13 @@ mod tests {
         let (entry, store) = catalog.create_named(Some("migration task")).unwrap();
         assert_eq!(entry.label, "migration task");
         store.append(&user("first turn")).unwrap();
-        store.append(&Message::Assistant {
-            content: Some("reply".into()),
-            reasoning_content: None,
-            tool_calls: Vec::new(),
-        })
-        .unwrap();
+        store
+            .append(&Message::Assistant {
+                content: Some("reply".into()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+            })
+            .unwrap();
         store.append(&user("second turn")).unwrap();
         let listed = catalog.list().unwrap();
         assert_eq!(listed.len(), 1);
@@ -1031,7 +1069,10 @@ mod tests {
         let listed = catalog.list().unwrap();
         assert_eq!(listed.len(), 1);
         let index_path = catalog.index_path();
-        assert!(index_path.exists(), "index.json should be written on first list");
+        assert!(
+            index_path.exists(),
+            "index.json should be written on first list"
+        );
         let raw = std::fs::read_to_string(&index_path).unwrap();
         let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap();
         assert_eq!(parsed["version"], 1);
@@ -1074,7 +1115,12 @@ mod tests {
         // Bump the mtime explicitly to avoid same-millisecond flakiness on coarse filesystems.
         let log = catalog.path_for(&entry.name);
         let mut f = OpenOptions::new().append(true).open(&log).unwrap();
-        writeln!(f, "{}", serde_json::to_string(&user("second message")).unwrap()).unwrap();
+        writeln!(
+            f,
+            "{}",
+            serde_json::to_string(&user("second message")).unwrap()
+        )
+        .unwrap();
         drop(f);
         let bumped = std::time::SystemTime::now() + std::time::Duration::from_millis(10);
         let _ = filetime_set(&log, bumped);
@@ -1178,25 +1224,36 @@ mod tests {
             Some("fix the login page styling")
         );
         // No user message -> None.
-        assert!(first_user_message(&[Message::Assistant {
-            content: Some("x".into()),
-            reasoning_content: None,
-            tool_calls: Vec::new(),
-        }])
-        .is_none());
+        assert!(
+            first_user_message(&[Message::Assistant {
+                content: Some("x".into()),
+                reasoning_content: None,
+                tool_calls: Vec::new(),
+            }])
+            .is_none()
+        );
         // Over-long input is truncated by character with an ellipsis.
         let long = "字".repeat(AUTO_TITLE_INPUT_CHARS + 50);
-        let got = first_user_message(&[Message::User { content: long.into() }]).unwrap();
+        let got = first_user_message(&[Message::User {
+            content: long.into(),
+        }])
+        .unwrap();
         assert!(got.ends_with('…'));
         assert_eq!(got.chars().count(), AUTO_TITLE_INPUT_CHARS + 1);
     }
 
     #[test]
     fn sanitize_title_strips_quotes_and_whitespace() {
-        assert_eq!(sanitize_title("  “fix login page styles”  ").as_deref(), Some("fix login page styles"));
+        assert_eq!(
+            sanitize_title("  “fix login page styles”  ").as_deref(),
+            Some("fix login page styles")
+        );
         assert_eq!(sanitize_title("`fix login`").as_deref(), Some("fix login"));
         // Take the first non-empty line.
-        assert_eq!(sanitize_title("\n\nfirst title line\nsecond line").as_deref(), Some("first title line"));
+        assert_eq!(
+            sanitize_title("\n\nfirst title line\nsecond line").as_deref(),
+            Some("first title line")
+        );
         // Collapse internal whitespace.
         assert_eq!(sanitize_title("a   b\tc").as_deref(), Some("a b c"));
         // Empty after cleaning -> None.

@@ -8,7 +8,6 @@
 //! a remote request certainly does. Fixing the signature now means we will not have to revisit the caller when we
 //! swap the implementation -- exactly the point of "closed to modification, open to extension".
 
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
@@ -71,15 +70,14 @@ impl ModelEntry {
     }
 }
 
-    /// The async result of listing selectable models. Same style as the SDK's `ToolFuture`: a hand-written boxed future,
-    /// so the trait can be used as `dyn`.
-pub type ModelListFuture<'a> =
-    Pin<Box<dyn Future<Output = Vec<ModelEntry>> + Send + 'a>>;
+/// The async result of listing selectable models. Same style as the SDK's `ToolFuture`: a hand-written boxed future,
+/// so the trait can be used as `dyn`.
+pub type ModelListFuture<'a> = Pin<Box<dyn Future<Output = Vec<ModelEntry>> + Send + 'a>>;
 
-    /// Model catalog interface -- the only stable contract exposed outward.
+/// Model catalog interface -- the only stable contract exposed outward.
 ///
-    /// The caller depends on exactly one thing: being able to get a list of [`ModelEntry`]. Where the list comes from
-    /// (hardcoded / remote endpoint / cache) is an implementation detail.
+/// The caller depends on exactly one thing: being able to get a list of [`ModelEntry`]. Where the list comes from
+/// (hardcoded / remote endpoint / cache) is an implementation detail.
 pub trait ModelCatalog: Send + Sync {
     fn list(&self) -> ModelListFuture<'_>;
 }
@@ -128,7 +126,11 @@ impl ModelCatalog for StaticCatalog {
 /// Figma Make's model catalog does not yet declare tool capability; fill it in as `content` based on its provider / model-name
 /// prefix -- **this is data normalization, not a parsing branch** (`docs/tool-calling-refactor.md`
 /// Step 3: capability declarations belong to catalog data; parsing logic does not know about providers).
-pub(crate) fn normalize_tool_mode(id: &str, provider: &str, declared: Option<String>) -> Option<String> {
+pub(crate) fn normalize_tool_mode(
+    id: &str,
+    provider: &str,
+    declared: Option<String>,
+) -> Option<String> {
     if let Some(mode) = declared
         .map(|mode| mode.trim().to_ascii_lowercase())
         .filter(|mode| !mode.is_empty())
@@ -195,7 +197,9 @@ pub(crate) fn normalize_supports_images_from_value(id: &str, value: &serde_json:
     let declared = value.get("supports_images").and_then(|v| v.as_bool());
     let supports_vision = value.get("supports_vision").and_then(|v| v.as_bool());
     let input_modalities = string_array(
-        value.get("architecture").and_then(|a| a.get("input_modalities")),
+        value
+            .get("architecture")
+            .and_then(|a| a.get("input_modalities")),
     );
     let modalities_input = string_array(value.get("modalities").and_then(|m| m.get("input")));
     normalize_supports_images(
@@ -212,8 +216,22 @@ pub(crate) fn normalize_supports_images_from_value(id: &str, value: &serde_json:
 fn name_suggests_vision(id: &str) -> bool {
     let id = id.to_ascii_lowercase();
     const VISION_MARKERS: [&str; 16] = [
-        "vision", "multimodal", "-vl", "vl-", "gpt-4o", "gpt-4.1", "gpt-5", "o4", "claude-3",
-        "claude-4", "claude-sonnet", "gemini", "llava", "pixtral", "glm-4v", "internvl",
+        "vision",
+        "multimodal",
+        "-vl",
+        "vl-",
+        "gpt-4o",
+        "gpt-4.1",
+        "gpt-5",
+        "o4",
+        "claude-3",
+        "claude-4",
+        "claude-sonnet",
+        "gemini",
+        "llava",
+        "pixtral",
+        "glm-4v",
+        "internvl",
     ];
     VISION_MARKERS.iter().any(|marker| id.contains(marker))
 }
@@ -400,11 +418,7 @@ impl ModelCatalog for RemoteCatalog {
 /// `/messages`, `responses` ends at `/responses`. Recognizing only one of them means the other two assemble a
 /// nonexistent address (e.g. `.../v1/messages/models`), the list fetch fails and silently falls back to the
 /// built-in static list -- showing up as no real models in the `/model` selector.
-const PROTOCOL_ENDPOINT_SUFFIXES: [&str; 3] = [
-    "/chat/completions",
-    "/messages",
-    "/responses",
-];
+const PROTOCOL_ENDPOINT_SUFFIXES: [&str; 3] = ["/chat/completions", "/messages", "/responses"];
 
 /// Derive the model list endpoint address from `base_url`.
 ///
@@ -465,11 +479,7 @@ mod tests {
     #[tokio::test]
     async fn remote_catalog_falls_back_when_unreachable() {
         let fallback = vec![ModelEntry::new("fb", "fb", "local")];
-        let catalog = RemoteCatalog::new(
-            "http://127.0.0.1:1/v1/models",
-            None,
-            fallback.clone(),
-        );
+        let catalog = RemoteCatalog::new("http://127.0.0.1:1/v1/models", None, fallback.clone());
         assert_eq!(catalog.list().await, fallback);
     }
 
@@ -530,7 +540,10 @@ mod tests {
             vec!["m1", "m2"],
             "the first should fetch the remote list"
         );
-        assert_eq!(second, first, "the second should hit the cache and return the same list");
+        assert_eq!(
+            second, first,
+            "the second should hit the cache and return the same list"
+        );
         assert_eq!(
             hits.load(Ordering::SeqCst),
             1,
@@ -553,7 +566,11 @@ mod tests {
             !entries.iter().all(|e| e.value == "fallback"),
             "should fetch the remote list rather than the fallback: {entries:?}"
         );
-        eprintln!("fetched {} models, e.g. {:?}", entries.len(), entries.first());
+        eprintln!(
+            "fetched {} models, e.g. {:?}",
+            entries.len(),
+            entries.first()
+        );
     }
 
     /// Live diagnostic: build a `RemoteCatalog` from the **real workspace config** and fetch, to
@@ -565,7 +582,8 @@ mod tests {
     #[ignore]
     async fn live_remote_catalog_from_workspace_config() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let settings = crate::settings::Settings::load_default(&root).expect("failed to load settings");
+        let settings =
+            crate::settings::Settings::load_default(&root).expect("failed to load settings");
         let url = settings
             .models_url
             .clone()
@@ -581,7 +599,10 @@ mod tests {
             entries.len(),
             entries.iter().take(3).map(|e| &e.value).collect::<Vec<_>>()
         );
-        assert_ne!(entries, fallback, "should not fall back to the built-in list (which means the remote was really fetched)");
+        assert_ne!(
+            entries, fallback,
+            "should not fall back to the built-in list (which means the remote was really fetched)"
+        );
     }
 
     #[test]

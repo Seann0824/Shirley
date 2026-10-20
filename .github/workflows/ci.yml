@@ -1,0 +1,57 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  # Fail fast on Tier-1 lint regressions (they are `deny` in Cargo.toml).
+  RUSTFLAGS: ""
+
+jobs:
+  build-test-clippy:
+    name: build · test · clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # --- Tier 1 hard gate: default build must compile ---
+      - name: Build (default features)
+        run: cargo build --workspace --locked
+
+      # `server` feature is required for tests: src/model_providers.rs references
+      # crate::interface::runtime, which is cfg-gated behind desktop/server.
+      - name: Build (server feature)
+        run: cargo build --workspace --features server --locked
+
+      - name: Test (server feature)
+        run: cargo test --workspace --features server --locked
+
+      # Tier-1 rustc lints are `deny` in [workspace.lints]; a regression fails here.
+      # Tier-2 clippy lints are `warn` and only print (advisory ratchet backlog).
+      - name: Clippy (Tier-1 gate, Tier-2 advisory)
+        run: cargo clippy --workspace --all-targets --features server --locked
+
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    # Blocking: the one-shot `cargo fmt --all` reformat has landed (591 diffs -> 0).
+    # See docs/rust-guidelines.md "Ratchet roadmap".
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - name: cargo fmt --check
+        run: cargo fmt --all --check

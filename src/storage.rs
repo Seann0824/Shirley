@@ -51,9 +51,13 @@ fn merge_legacy_root(legacy: &Path, global: &Path) -> io::Result<bool> {
         if entry.file_name() == "projects.json" && target.exists() {
             let mut current: serde_json::Value = serde_json::from_slice(&fs::read(&target)?)?;
             let old: serde_json::Value = serde_json::from_slice(&fs::read(&source)?)?;
-            let projects = current.get_mut("projects").and_then(|v| v.as_array_mut())
+            let projects = current
+                .get_mut("projects")
+                .and_then(|v| v.as_array_mut())
                 .ok_or_else(|| io::Error::other("invalid current project registry"))?;
-            let old_projects = old.get("projects").and_then(|v| v.as_array())
+            let old_projects = old
+                .get("projects")
+                .and_then(|v| v.as_array())
                 .ok_or_else(|| io::Error::other("invalid legacy project registry"))?;
             let before = projects.len();
             for project in old_projects {
@@ -244,14 +248,22 @@ fn migrate_chat_namespace(global: &Path) -> io::Result<()> {
         return Ok(());
     };
     let workspaces = global.join("workspaces");
-    if !workspaces.is_dir() { return Ok(()); }
+    if !workspaces.is_dir() {
+        return Ok(());
+    }
     for entry in fs::read_dir(&workspaces)? {
         let source = entry?.path();
-        if source == destination.state { continue; }
+        if source == destination.state {
+            continue;
+        }
         let manifest = source.join("workspace.json");
-        if !manifest.is_file() { continue; }
+        if !manifest.is_file() {
+            continue;
+        }
         let value: serde_json::Value = serde_json::from_slice(&fs::read(&manifest)?)?;
-        if value.get("workspace").and_then(|v| v.as_str()) != old_chat.to_str() { continue; }
+        if value.get("workspace").and_then(|v| v.as_str()) != old_chat.to_str() {
+            continue;
+        }
         for entry in fs::read_dir(&source)? {
             let entry = entry?;
             if entry.file_name() != "workspace.json" {
@@ -560,17 +572,32 @@ mod tests {
     fn rebinds_legacy_chat_namespace_and_keeps_session_sidecars() {
         let dir = fixture();
         let old_chat = dirs::config_dir().unwrap().join("shirley/chat");
-        let old_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, old_chat.as_os_str().as_encoded_bytes());
+        let old_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            old_chat.as_os_str().as_encoded_bytes(),
+        );
         let old = dir.join("workspaces").join(old_id.to_string());
-        write(&old.join("workspace.json"), &serde_json::json!({"version":1,"workspace":old_chat}).to_string());
+        write(
+            &old.join("workspace.json"),
+            &serde_json::json!({"version":1,"workspace":old_chat}).to_string(),
+        );
         write(&old.join("sessions/old.jsonl"), "history");
         write(&old.join("sessions/old.title"), "title");
         write(&old.join("sessions/old.agents/child.jsonl"), "child");
         migrate_chat_namespace(&dir).unwrap();
         let paths = StoragePaths::new(dir.clone(), &dir.join("chat")).unwrap();
-        assert_eq!(fs::read_to_string(paths.sessions().join("old.jsonl")).unwrap(), "history");
-        assert_eq!(fs::read_to_string(paths.sessions().join("old.title")).unwrap(), "title");
-        assert_eq!(fs::read_to_string(paths.sessions().join("old.agents/child.jsonl")).unwrap(), "child");
+        assert_eq!(
+            fs::read_to_string(paths.sessions().join("old.jsonl")).unwrap(),
+            "history"
+        );
+        assert_eq!(
+            fs::read_to_string(paths.sessions().join("old.title")).unwrap(),
+            "title"
+        );
+        assert_eq!(
+            fs::read_to_string(paths.sessions().join("old.agents/child.jsonl")).unwrap(),
+            "child"
+        );
         migrate_chat_namespace(&dir).unwrap();
         assert!(!old.join("sessions").exists());
         fs::remove_dir_all(dir).unwrap();
@@ -581,14 +608,24 @@ mod tests {
         let dir = fixture();
         let legacy = dir.join("old");
         let global = dir.join("new");
-        write(&legacy.join("projects.json"), r#"{"version":1,"projects":[{"id":"a","name":"old"},{"id":"b"}]}"#);
-        write(&global.join("projects.json"), r#"{"version":1,"projects":[{"id":"a","name":"current"}]}"#);
+        write(
+            &legacy.join("projects.json"),
+            r#"{"version":1,"projects":[{"id":"a","name":"old"},{"id":"b"}]}"#,
+        );
+        write(
+            &global.join("projects.json"),
+            r#"{"version":1,"projects":[{"id":"a","name":"current"}]}"#,
+        );
         write(&legacy.join("workspaces/id/sessions/old.jsonl"), "history");
         assert!(merge_legacy_root(&legacy, &global).unwrap());
-        let registry: serde_json::Value = serde_json::from_slice(&fs::read(global.join("projects.json")).unwrap()).unwrap();
+        let registry: serde_json::Value =
+            serde_json::from_slice(&fs::read(global.join("projects.json")).unwrap()).unwrap();
         assert_eq!(registry["projects"].as_array().unwrap().len(), 2);
         assert_eq!(registry["projects"][0]["name"], "current");
-        assert_eq!(fs::read_to_string(global.join("workspaces/id/sessions/old.jsonl")).unwrap(), "history");
+        assert_eq!(
+            fs::read_to_string(global.join("workspaces/id/sessions/old.jsonl")).unwrap(),
+            "history"
+        );
         assert!(!merge_legacy_root(&legacy, &global).unwrap());
         fs::remove_dir_all(dir).unwrap();
     }

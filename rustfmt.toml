@@ -1,0 +1,7 @@
+# Rustfmt configuration.
+# We follow the Microsoft "Pragmatic Rust Guidelines" (see docs/rust-guidelines.md).
+# NOTE: the codebase has never been rustfmt'd as a whole, so `cargo fmt --all
+# --check` is still noisy. CI runs it as *advisory* (non-blocking) until the
+# one-shot reformat lands; see docs/rust-guidelines.md "Ratchet roadmap".
+edition = "2024"
+max_width = 100

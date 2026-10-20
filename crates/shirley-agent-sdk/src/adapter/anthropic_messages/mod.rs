@@ -38,7 +38,9 @@ const DEFAULT_MAX_TOKENS: u32 = 4096;
 /// Messages -> `(system, messages)`.
 ///
 /// `System` / `ContextSummary` are lifted to the top-level `system`; the rest become content-block messages.
-fn encode_messages(messages: &[message::Message]) -> Result<(Option<String>, Vec<Value>), AdapterError> {
+fn encode_messages(
+    messages: &[message::Message],
+) -> Result<(Option<String>, Vec<Value>), AdapterError> {
     let mut system: Vec<String> = Vec::new();
     let mut encoded: Vec<Value> = Vec::new();
 
@@ -233,7 +235,9 @@ fn decode_content(content: &[dto::ContentBlock]) -> message::Message {
         match block {
             dto::ContentBlock::Text { text: chunk } => text.push_str(chunk),
             // signature is not echoed back (the server doesn't validate it in practice; see docs/anthropic-messages-api.md).
-            dto::ContentBlock::Thinking { thinking: chunk, .. } => thinking.push_str(chunk),
+            dto::ContentBlock::Thinking {
+                thinking: chunk, ..
+            } => thinking.push_str(chunk),
             dto::ContentBlock::ToolUse { id, name, input } => {
                 if id.is_empty() {
                     continue;
@@ -296,9 +300,8 @@ fn decode_usage(usage: Option<&dto::Usage>) -> message::Usage {
 }
 
 pub fn decode_response(body: Value) -> Result<ModelResponse, AdapterError> {
-    let response = serde_json::from_value::<dto::MessageResponse>(body).map_err(|error| {
-        AdapterError::Decode(format!("failed to parse response: {error}"))
-    })?;
+    let response = serde_json::from_value::<dto::MessageResponse>(body)
+        .map_err(|error| AdapterError::Decode(format!("failed to parse response: {error}")))?;
     Ok(ModelResponse {
         message: decode_content(&response.content),
         finish_reason: finish_reason(&response),
@@ -487,7 +490,11 @@ mod tests {
         messages: &'a [message::Message],
         tools: &'a [&'a tool::ToolDefinition],
     ) -> ModelRequest<'a> {
-        ModelRequest { messages, tools, session_id: None }
+        ModelRequest {
+            messages,
+            tools,
+            session_id: None,
+        }
     }
 
     fn body(config: &ModelConfig, messages: &[message::Message]) -> Value {
@@ -542,9 +549,16 @@ mod tests {
             },
         ];
         let body = body(&config(), &messages);
-        assert_eq!(body["system"], serde_json::json!("You are an assistant\n\nsummary"));
+        assert_eq!(
+            body["system"],
+            serde_json::json!("You are an assistant\n\nsummary")
+        );
         let messages = body["messages"].as_array().unwrap();
-        assert_eq!(messages.len(), 1, "system/summary should not enter messages");
+        assert_eq!(
+            messages.len(),
+            1,
+            "system/summary should not enter messages"
+        );
         assert_eq!(messages[0]["role"], serde_json::json!("user"));
     }
 
@@ -556,7 +570,10 @@ mod tests {
         let body = body(&config(), &messages);
         let messages = body["messages"].as_array().unwrap();
         assert_eq!(messages[0]["content"][0]["type"], serde_json::json!("text"));
-        assert_eq!(messages[0]["content"][0]["text"], serde_json::json!("hello"));
+        assert_eq!(
+            messages[0]["content"][0]["text"],
+            serde_json::json!("hello")
+        );
     }
 
     #[test]
@@ -677,7 +694,12 @@ mod tests {
                 "system": null
             }))
             .build();
-        let body = body(&config, &[message::Message::System { content: "s".into() }]);
+        let body = body(
+            &config,
+            &[message::Message::System {
+                content: "s".into(),
+            }],
+        );
         assert_eq!(body["thinking"]["budget_tokens"], serde_json::json!(2048));
         assert!(body.get("system").is_none(), "null should delete the key");
     }
@@ -729,11 +751,17 @@ mod tests {
             }
         });
         let response = decode_response(body).unwrap();
-        assert_eq!(response.usage.input_tokens, 2435, "input must add cache_read back");
+        assert_eq!(
+            response.usage.input_tokens, 2435,
+            "input must add cache_read back"
+        );
         assert_eq!(response.usage.cached_input_tokens, Some(2301));
         assert_eq!(response.usage.cache_reported_input_tokens, Some(2435));
         let rate = response.usage.cache_hit_rate().unwrap();
-        assert!((rate - 2301.0 / 2435.0).abs() < 1e-9, "the hit rate should be within (0,1)");
+        assert!(
+            (rate - 2301.0 / 2435.0).abs() < 1e-9,
+            "the hit rate should be within (0,1)"
+        );
     }
 
     #[test]
@@ -745,7 +773,10 @@ mod tests {
         });
         let response = decode_response(body).unwrap();
         assert_eq!(response.usage.input_tokens, 10);
-        assert_eq!(response.usage.cached_input_tokens, None, "unreported should be None");
+        assert_eq!(
+            response.usage.cached_input_tokens, None,
+            "unreported should be None"
+        );
         assert_eq!(response.usage.cache_hit_rate(), None);
     }
 
@@ -762,7 +793,10 @@ mod tests {
                 "stop_reason": stop_reason,
             });
             let response = decode_response(body).unwrap();
-            assert_eq!(response.finish_reason, expected, "stop_reason={stop_reason}");
+            assert_eq!(
+                response.finish_reason, expected,
+                "stop_reason={stop_reason}"
+            );
         }
     }
 
@@ -778,7 +812,6 @@ mod tests {
 
     /// Feed a sequence of SSE texts to the streaming decode core and collect the events.
     async fn collect_stream(chunks: Vec<&'static str>) -> Vec<AdapterEvent> {
-        use futures::StreamExt;
         let stream = futures::stream::iter(
             chunks
                 .into_iter()
@@ -894,9 +927,8 @@ mod tests {
             eprintln!("skipping: DEEPSEEK_API_KEY not set");
             return None;
         };
-        let base_url = std::env::var("SHIRLEY_ANTHROPIC_BASE_URL").unwrap_or_else(|_| {
-            "https://api.deepseek.com/anthropic/v1/messages".to_owned()
-        });
+        let base_url = std::env::var("SHIRLEY_ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|_| "https://api.deepseek.com/anthropic/v1/messages".to_owned());
         let model = std::env::var("SHIRLEY_ANTHROPIC_MODEL")
             .unwrap_or_else(|_| "deepseek-flash".to_owned());
         Some(
@@ -916,8 +948,11 @@ mod tests {
         messages: &[message::Message],
         tools: &[&tool::ToolDefinition],
     ) -> ModelResponse {
-        use futures::StreamExt;
-        let request = ModelRequest { messages, tools, session_id: None };
+        let request = ModelRequest {
+            messages,
+            tools,
+            session_id: None,
+        };
         let mut stream = crate::adapter::invoke(client, config, request).await;
         while let Some(event) = stream.next().await {
             if let AdapterEvent::Finished(response) = event.expect("the request should not error") {
@@ -969,8 +1004,14 @@ mod tests {
         eprintln!("content = {content:?}");
         eprintln!("finish  = {:?}", finished.finish_reason);
         eprintln!("usage   = {:?}", finished.usage);
-        assert!(!content.trim().is_empty(), "should get non-empty text output");
-        assert!(finished.usage.input_tokens > 0, "usage.input_tokens should be > 0");
+        assert!(
+            !content.trim().is_empty(),
+            "should get non-empty text output"
+        );
+        assert!(
+            finished.usage.input_tokens > 0,
+            "usage.input_tokens should be > 0"
+        );
     }
 
     /// Real-network **tool round-trip** test (ignored by default), verifying the most critical path:
@@ -1011,10 +1052,15 @@ mod tests {
                 let call = tool_calls.first().expect("should emit one tool call");
                 eprintln!("tool_call = {} / {}", call.id, call.name);
                 assert_eq!(call.name, "get_weather");
-                assert!(call.arguments.contains("city"), "arguments should contain city");
+                assert!(
+                    call.arguments.contains("city"),
+                    "arguments should contain city"
+                );
                 call.id.clone()
             }
-            other => panic!("the first turn should be an assistant with tool calls, actual: {other:?}"),
+            other => {
+                panic!("the first turn should be an assistant with tool calls, actual: {other:?}")
+            }
         };
         assert_eq!(first.finish_reason, ModelFinishReason::ToolCalls);
 
@@ -1037,7 +1083,10 @@ mod tests {
             message::Message::Assistant { content, .. } => {
                 let text = content.clone().unwrap_or_default();
                 eprintln!("final = {text:?}");
-                assert!(!text.trim().is_empty(), "the second turn should give final text");
+                assert!(
+                    !text.trim().is_empty(),
+                    "the second turn should give final text"
+                );
             }
             other => panic!("the second turn should be a text assistant, actual: {other:?}"),
         }
@@ -1098,11 +1147,19 @@ mod tests {
         eprintln!("reasoning = {} chars", reasoning.len());
         match &finished.message {
             message::Message::Assistant { tool_calls, .. } => {
-                let call = tool_calls.first().expect("the terminal state should contain a tool_use");
-                eprintln!("tool_call = {} / {} / {}", call.id, call.name, call.arguments);
+                let call = tool_calls
+                    .first()
+                    .expect("the terminal state should contain a tool_use");
+                eprintln!(
+                    "tool_call = {} / {} / {}",
+                    call.id, call.name, call.arguments
+                );
                 assert_eq!(call.name, "get_weather");
                 assert!(!call.id.is_empty(), "tool_use id should not be empty");
-                assert!(call.arguments.contains("city"), "arguments should be the fully aggregated JSON");
+                assert!(
+                    call.arguments.contains("city"),
+                    "arguments should be the fully aggregated JSON"
+                );
             }
             other => panic!("expected an assistant with tool calls, actual: {other:?}"),
         }

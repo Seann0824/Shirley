@@ -1,17 +1,11 @@
-mod app;
-mod command;
 pub mod desktop;
 #[cfg(any(feature = "desktop", feature = "server"))]
 pub(crate) mod runtime;
 #[cfg(feature = "server")]
 pub mod server;
-mod event;
-mod markdown;
-mod selection;
 pub(crate) mod session;
 mod tui;
-mod ui;
-mod update;
+pub(crate) mod view;
 
 use std::sync::Arc;
 

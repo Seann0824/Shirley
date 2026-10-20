@@ -18,7 +18,7 @@ embeddings / graph database.
 
 > **Implementation status (V1 + V2 + V2.5 landed)**: `src/memory/` (the seven modules `format` /
 > `store` / `index` / `provider` / `curator` / `embed` / `vector`) + application-layer wiring
-> (`bootstrap.rs` / `interface/session.rs` / TUI / desktop). **The SDK is unchanged**; it only reuses
+> (`bootstrap.rs` / `interface/session/mod.rs` / TUI / desktop). **The SDK is unchanged**; it only reuses
 > the existing seam `ContextProvider`. V2.5 = retrieval upgraded to **hybrid retrieval (BM25 +
 > semantic vectors, RRF fusion)**, honestly degrading to pure BM25 when embedding is not configured.
 > Phases and acceptance criteria are in section 10, gaps in section 11.
@@ -453,8 +453,8 @@ src/memory/
 | --- | --- |
 | `src/memory/` (**application layer**) | the five submodules above |
 | `src/bootstrap.rs` (application layer) | `build_agent` creates a fresh `Arc<MemoryRuntime>` per session, and via `CompositeContextProvider` combines `TodoContextProvider` and `MemoryContextProvider` into a **single** `context_provider` injection (the SDK's `Agent` takes only one provider, hence this glue). Returns `BuiltAgent { agent, memory }` -- bringing the `MemoryRuntime` handle back to the driver |
-| `src/interface/session.rs` (application layer) | `Session` holds `memory: Option<Arc<MemoryRuntime>>` (one per session, with an independent query slot); on leaving the foreground, `switch_to` / `create_new` calls `spawn_curation` (`Handle::try_current()` guard, background best-effort) |
-| `src/interface/tui.rs` / `desktop/shell.rs` (application layer) | before starting a round, `memory.set_query(this round's user input)` and **`await prefetch_query_vector()`** -- `ContextProvider::context()` is a **synchronous** interface while embedding is async HTTP, so the query vector must be **pre-fetched before entering `run_stream`** and put into an in-memory slot; `context()` only reads the slot and does no network |
+| `src/interface/session/mod.rs` (application layer) | `Session` holds `memory: Option<Arc<MemoryRuntime>>` (one per session, with an independent query slot); on leaving the foreground, `switch_to` / `create_new` calls `spawn_curation` (`Handle::try_current()` guard, background best-effort) |
+| `src/interface/tui/mod.rs` / `desktop/shell.rs` (application layer) | before starting a round, `memory.set_query(this round's user input)` and **`await prefetch_query_vector()`** -- `ContextProvider::context()` is a **synchronous** interface while embedding is async HTTP, so the query vector must be **pre-fetched before entering `run_stream`** and put into an in-memory slot; `context()` only reads the slot and does no network |
 | `crates/shirley-agent-sdk/src/runtime/context.rs` (SDK) | reuses the existing generic seam `ContextProvider`, **unchanged** |
 
 - The optional `remember` / `recall` memory tools go through an application-layer `Tool` (a

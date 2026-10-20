@@ -452,7 +452,7 @@ capabilities"**.
 ### 8.1 Add a `CommandOutcome` branch + `Builtin`
 
 ```rust
-// src/interface/command.rs
+// src/interface/tui/command.rs
 enum Builtin { Init, Model, Rewind, Session, Login, Plugin }  // add Plugin
 
 pub enum CommandOutcome {
@@ -670,9 +670,9 @@ src/plugins/wire.rs
 | --- | --- |
 | `src/main.rs` | `mod plugins;` |
 | `src/bootstrap.rs` | `assemble` adds `PluginHost::load`; `build_agent` merges skills + registers MCP tools; `AgentFactory` adds a `plugin_host` field |
-| `src/interface/command.rs` | `Builtin::Plugin` + `CommandOutcome::PluginManager` |
-| `src/interface/app.rs` | plugin panel state + operation wiring |
-| `src/interface/ui.rs` | plugin panel rendering |
+| `src/interface/tui/command.rs` | `Builtin::Plugin` + `CommandOutcome::PluginManager` |
+| `src/interface/tui/app.rs` | plugin panel state + operation wiring |
+| `src/interface/tui/ui.rs` | plugin panel rendering |
 | `src/interface/desktop/*` | `agent_list_plugins` / `agent_add_plugin` / ... commands |
 | `src/skills/catalog.rs` | `SkillCatalog::with_plugin_skills` (union + collision rules) |
 | `Cargo.toml` | MCP needs tokio's process/io feature (`tokio` already present); HTTP uses `reqwest` (already present) |

@@ -108,8 +108,12 @@ pub(super) fn invalidate(root: &Path, id: &str) -> Result<(), std::io::Error> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(error) => return Err(error),
     };
-    let Ok(mut store) = serde_json::from_str::<VectorStore>(&text) else { return Ok(()); };
-    if store.vectors.remove(id).is_some() { store.save(root)?; }
+    let Ok(mut store) = serde_json::from_str::<VectorStore>(&text) else {
+        return Ok(());
+    };
+    if store.vectors.remove(id).is_some() {
+        store.save(root)?;
+    }
     Ok(())
 }
 
@@ -178,8 +182,12 @@ mod tests {
         store.save(&root).unwrap();
 
         // changed the embedding model -> the old vectors are discarded entirely.
-        let loaded = VectorStore::load_merged(std::slice::from_ref(&root), "text-embedding-3-small");
-        assert!(loaded.is_empty(), "a model mismatch should discard all old vectors");
+        let loaded =
+            VectorStore::load_merged(std::slice::from_ref(&root), "text-embedding-3-small");
+        assert!(
+            loaded.is_empty(),
+            "a model mismatch should discard all old vectors"
+        );
     }
 
     #[test]
@@ -195,7 +203,11 @@ mod tests {
         w.save(&workspace).unwrap();
 
         let merged = VectorStore::load_merged(&[global, workspace], "m");
-        assert_eq!(merged.get("a"), Some([9.0].as_slice()), "workspace overrides global");
+        assert_eq!(
+            merged.get("a"),
+            Some([9.0].as_slice()),
+            "workspace overrides global"
+        );
         assert_eq!(merged.len(), 2);
 
         let mut pruned = merged.clone();

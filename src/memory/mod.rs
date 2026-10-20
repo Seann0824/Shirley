@@ -18,8 +18,8 @@ pub(crate) mod format;
 pub(crate) mod index;
 pub(crate) mod provider;
 pub(crate) mod store;
-mod vector;
 pub(crate) mod sync;
+mod vector;
 
 // Re-export only the types actually consumed **outside** the module (keep the facade small):
 //   - `bootstrap.rs`: `curate` / `CurateOutcome` / `CuratorError` /

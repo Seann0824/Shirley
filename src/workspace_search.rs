@@ -110,9 +110,17 @@ pub fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<FileE
                 queue.push_back((child_abs, child_rel.clone()));
             }
             entries.push(FileEntry {
-                name: child_rel.rsplit('/').next().unwrap_or(&child_rel).to_string(),
+                name: child_rel
+                    .rsplit('/')
+                    .next()
+                    .unwrap_or(&child_rel)
+                    .to_string(),
                 path: child_rel,
-                kind: if is_dir { FileKind::Dir } else { FileKind::File },
+                kind: if is_dir {
+                    FileKind::Dir
+                } else {
+                    FileKind::File
+                },
             });
         }
     }
@@ -142,8 +150,16 @@ pub fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<FileE
         })
         .collect();
 
-    scored.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.path.cmp(&b.2.path)));
-    scored.into_iter().take(limit).map(|(_, _, entry)| entry).collect()
+    scored.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.path.cmp(&b.2.path))
+    });
+    scored
+        .into_iter()
+        .take(limit)
+        .map(|(_, _, entry)| entry)
+        .collect()
 }
 
 /// Whether `needle` is a subsequence of `haystack` (case already normalized).

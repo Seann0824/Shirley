@@ -134,7 +134,10 @@ mod tests {
     fn render_includes_role_and_working_dir() {
         let dir = tempfile_dir("render_role");
         let text = render(&dir);
-        assert!(text.contains("You are Shirley"), "should contain the role setting: {text}");
+        assert!(
+            text.contains("You are Shirley"),
+            "should contain the role setting: {text}"
+        );
         assert!(
             text.contains(&dir.display().to_string()),
             "should contain the working directory: {text}"
@@ -147,8 +150,14 @@ mod tests {
         // This assertion prevents this instruction from being lost in a future prompt edit.
         let dir = tempfile_dir("render_todo");
         let text = render(&dir);
-        assert!(text.contains("`todo` tool"), "should instruct using the todo tool: {text}");
-        assert!(text.contains("break it down"), "should break the task down first: {text}");
+        assert!(
+            text.contains("`todo` tool"),
+            "should instruct using the todo tool: {text}"
+        );
+        assert!(
+            text.contains("break it down"),
+            "should break the task down first: {text}"
+        );
     }
 
     #[test]
@@ -172,9 +181,16 @@ mod tests {
     #[test]
     fn render_includes_guide_when_present() {
         let dir = tempfile_dir("render_guide");
-        std::fs::write(dir.join(GUIDE_FILE_NAME), "# Project notes\nrun cargo test first").unwrap();
+        std::fs::write(
+            dir.join(GUIDE_FILE_NAME),
+            "# Project notes\nrun cargo test first",
+        )
+        .unwrap();
         let text = render(&dir);
-        assert!(text.contains("run cargo test first"), "should inline Agent.md: {text}");
+        assert!(
+            text.contains("run cargo test first"),
+            "should inline Agent.md: {text}"
+        );
     }
 
     #[test]
@@ -205,15 +221,24 @@ mod tests {
             "child agent must not get the subagent guidance: {without}"
         );
         // The placeholder must be fully substituted, never left verbatim.
-        assert!(!with.contains("{{subagent_guide}}"), "placeholder must be substituted");
-        assert!(!without.contains("{{subagent_guide}}"), "placeholder must be substituted");
+        assert!(
+            !with.contains("{{subagent_guide}}"),
+            "placeholder must be substituted"
+        );
+        assert!(
+            !without.contains("{{subagent_guide}}"),
+            "placeholder must be substituted"
+        );
     }
 
     #[test]
     fn render_notes_missing_guide() {
         let dir = tempfile_dir("render_missing");
         let text = render(&dir);
-        assert!(text.contains("not found"), "should give a hint when the guide is missing: {text}");
+        assert!(
+            text.contains("not found"),
+            "should give a hint when the guide is missing: {text}"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@
 use std::path::Path;
 
 use super::discovery::discover;
-use super::parse::{body, SkillMeta};
+use super::parse::{SkillMeta, body};
 
 /// Within the directory injection text, a single skill's description is clipped once more to keep the whole directory from being too long.
 const MAX_DIRECTORY_CHARS: usize = 8000;
@@ -118,11 +118,7 @@ impl SkillCatalog {
         body.push_str(SKILLS_HEADER);
         body.push('\n');
         for skill in &self.skills {
-            let location = skill
-                .root
-                .join("SKILL.md")
-                .to_string_lossy()
-                .to_string();
+            let location = skill.root.join("SKILL.md").to_string_lossy().to_string();
             body.push_str(&format!(
                 "  <skill name=\"{}\" location=\"{}\">{}</skill>\n",
                 escape(&skill.name),
@@ -158,8 +154,18 @@ fn list_resources(root: &Path) -> Vec<String> {
         };
         let mut names: Vec<String> = entries
             .flatten()
-            .filter(|entry| entry.file_type().map(|kind| kind.is_file()).unwrap_or(false))
-            .filter_map(|entry| entry.file_name().to_str().map(|name| format!("{dir}/{name}")))
+            .filter(|entry| {
+                entry
+                    .file_type()
+                    .map(|kind| kind.is_file())
+                    .unwrap_or(false)
+            })
+            .filter_map(|entry| {
+                entry
+                    .file_name()
+                    .to_str()
+                    .map(|name| format!("{dir}/{name}"))
+            })
             .collect();
         names.sort();
         resources.extend(names);
@@ -200,10 +206,8 @@ mod tests {
 
     #[test]
     fn renders_one_line_per_skill() {
-        let catalog = SkillCatalog::new(vec![
-            meta("alpha", "does alpha"),
-            meta("beta", "does beta"),
-        ]);
+        let catalog =
+            SkillCatalog::new(vec![meta("alpha", "does alpha"), meta("beta", "does beta")]);
         let text = catalog.render_directory().unwrap();
         assert!(text.starts_with("<available_skills>"));
         assert!(text.trim_end().ends_with("</available_skills>"));
