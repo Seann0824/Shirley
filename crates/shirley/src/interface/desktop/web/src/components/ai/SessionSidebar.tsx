@@ -34,8 +34,9 @@ import type { ProjectEntry, SessionEntry } from "@/lib/bridge";
  * 2. **Recent**: recently aggregated sessions across projects (including Chat sessions) —
  *    chat and project sessions share one column, with the owning project noted in small
  *    text inline (Chat sessions have no label).
- * 3. **Pinned**: manually pinned sessions (local `localStorage` only; not synced /
- *    persisted).
+ * 3. **Pinned**: manually pinned sessions, aggregated across projects (local
+ *    `localStorage` only; not synced / persisted). Pinned sessions are removed from the
+ *    Projects and Recent lists so they appear exactly once.
  * 4. **Projects**: associated workspace directories — **each project is a collapsible
  *    group**, expanding to its sessions.
  *
@@ -228,9 +229,11 @@ export function SessionSidebar({
     };
   }, [projectIdsKey]);
 
-  const togglePin = (name: string) => {
+  // Pin key = `project::name`: session names are unique only within a project, so a bare
+  // name would collide across projects (and make pinned entries unfindable).
+  const togglePin = (key: string) => {
     setPinned((prev) => {
-      const next = prev.includes(name) ? prev.filter((item) => item !== name) : [...prev, name];
+      const next = prev.includes(key) ? prev.filter((item) => item !== key) : [...prev, key];
       writeStringArray(PINNED_STORAGE_KEY, next);
       return next;
     });
@@ -283,10 +286,18 @@ export function SessionSidebar({
     setConfirmingDelete(null);
   };
 
-  // Pinning is only meaningful for the current project's sessions (session names are unique only within a project).
-  const pinnedEntries = (sessionsByProject[activeProject ?? ""] ?? []).filter((entry) =>
-    pinned.includes(entry.name),
-  );
+  // Pinned: aggregate across every loaded project (and Chat) — a pinned session may live in
+  // any project. Order follows the pin insertion order; keys are `project::name`.
+  const pinnedEntries = pinned
+    .map((key) => {
+      const sep = key.indexOf("::");
+      if (sep < 0) return null;
+      const project = key.slice(0, sep);
+      const name = key.slice(sep + 2);
+      const entry = (sessionsByProject[project] ?? []).find((item) => item.name === name);
+      return entry ? { project, entry } : null;
+    })
+    .filter((item): item is { project: string; entry: SessionEntry } => item !== null);
   // "Recent": aggregated across projects (including Chat sessions), most recently
   // modified first. Chat and project sessions share one column, with the owning project
   // name noted inline in small text; Chat sessions (pseudo project) have no label.
@@ -301,6 +312,7 @@ export function SessionSidebar({
       (sessionsByProject[project.id] ?? []).map((entry) => ({ project: project.id, entry })),
     ),
   ]
+    .filter(({ project, entry }) => !pinned.includes(`${project}::${entry.name}`))
     .sort((a, b) => b.entry.modified_ms - a.entry.modified_ms)
     .slice(0, 30);
 
@@ -314,15 +326,15 @@ export function SessionSidebar({
   const sessionMenu = (entry: SessionEntry, group: "pinned" | "project" | "recent", project: string) => {
     // Edit state / delete confirmation are located by `project::name` — session names are unique only within a project.
     const key = `${project}::${entry.name}`;
-    const isPinned = pinned.includes(entry.name);
+    const isPinned = group === "pinned" || pinned.includes(`${project}::${entry.name}`);
     const isConfirming = confirmingDelete === key;
     return (
       <>
         <ContextMenuItem
-          icon={isPinned || group === "pinned" ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
-          onSelect={() => togglePin(entry.name)}
+          icon={isPinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
+          onSelect={() => togglePin(`${project}::${entry.name}`)}
         >
-          {isPinned || group === "pinned" ? "Unpin" : "Pin"}
+          {isPinned ? "Unpin" : "Pin"}
         </ContextMenuItem>
         <ContextMenuItem
           icon={<Pencil className="size-3.5" />}
@@ -388,7 +400,7 @@ export function SessionSidebar({
     // The active state requires the same project and session name — session names are unique only within a project.
     const active = project === activeProject && entry.name === current;
     const isEditing = editingSession === `${project}::${entry.name}`;
-    const isPinned = group === "pinned" || pinned.includes(entry.name);
+    const isPinned = group === "pinned" || pinned.includes(`${project}::${entry.name}`);
     // Inline actions: pin (pin/unpin) and more (same menu as right-click, housing
     // rename/delete). Hidden by default, shown on hover or focus; a pinned pin stays
     // visible to indicate the state.
@@ -413,7 +425,7 @@ export function SessionSidebar({
           className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
           onClick={(event) => {
             event.stopPropagation();
-            togglePin(entry.name);
+            togglePin(`${project}::${entry.name}`);
           }}
         >
           {/* Pinned uses the solid Pin (same position); unpinned uses PinOff to hint that pinning is available. */}
@@ -512,6 +524,25 @@ export function SessionSidebar({
         >
           <MessageSquarePlus className="size-4 text-muted" />New session
         </button>
+        {/* Pinned: manually pinned sessions, aggregated across projects (ChatGPT-Work-style
+            "Pinned" block above Projects). Order follows pin insertion order. */}
+        {pinnedEntries.length > 0 && (
+          <section className="mb-3">
+            <div className="flex h-8 items-center px-2">
+              <span className="min-w-0 truncate text-[0.875rem] font-medium text-muted">Pinned</span>
+            </div>
+            <div role="listbox" aria-label="Pinned sessions" className="flex flex-col gap-0.5">
+              {pinnedEntries.map(({ project, entry }) =>
+                renderRow(
+                  entry,
+                  "pinned",
+                  project,
+                  project === chatProjectId ? undefined : projectNameById[project],
+                ),
+              )}
+            </div>
+          </section>
+        )}
         {/* Projects: associated directories (placed before "Recent"). **Group header collapsible**, and each project is collapsible too. */}
         <section className="mb-3">
           <Collapsible open={!projectsCollapsed} onOpenChange={toggleProjectsCollapsed}>
@@ -658,7 +689,9 @@ export function SessionSidebar({
                           {projectSessions.length === 0 ? (
                             <p className="px-2 py-1.5 text-caption text-muted">No sessions yet.</p>
                           ) : (
-                            projectSessions.map((session) => renderRow(session, "project", entry.id))
+                            projectSessions
+                              .filter((session) => !pinned.includes(`${entry.id}::${session.name}`))
+                              .map((session) => renderRow(session, "project", entry.id))
                           )}
                         </div>
                       </CollapsibleContent>
