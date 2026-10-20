@@ -277,14 +277,14 @@ impl Default for TodoStore {
 /// A one-line description added to the ledger when injecting the request (so the model knows what this is and what to do).
 ///
 /// Separate from [`TodoStore::render`]: the tool result does not need this description repeated.
-pub const TASK_STATE_HEADER: &str = include_str!("../prompts/todo_header.md");
+pub const TASK_STATE_HEADER: &str = include_str!("../../prompts/todo_header.md");
 
 /// The nudge reminder (nag) injected when the model has not updated the ledger for several rounds.
 ///
 /// Separate from `TASK_STATE_HEADER`: this one appears only when the ledger is **empty** or has **gone stale**,
 /// as a "cold-start guardrail" -- when the ledger is empty there is no header to inject, so the model lacks an explicit
 /// trigger instruction at the start; this fills it in.
-pub const TODO_NAG_REMINDER: &str = include_str!("../prompts/todo_nag.md");
+pub const TODO_NAG_REMINDER: &str = include_str!("../../prompts/todo_nag.md");
 
 /// XML text escaping: prevents the model's `<` / `&` from breaking the tag structure.
 fn escape(input: &str) -> String {
