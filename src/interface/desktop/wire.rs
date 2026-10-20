@@ -20,6 +20,7 @@ use shirley_agent_sdk::ErrorKind;
 use shirley_agent_sdk::Usage;
 
 use crate::interface::session::{ItemWire as CoreItemWire, ToolCallWire};
+use crate::status::{Activity, Health, Liveness, StateSnapshot};
 use crate::todo::TaskView;
 
 /// Stable snake_case wire name for an [`ErrorKind`]. The frontend switches on these
@@ -152,6 +153,91 @@ impl From<Usage> for UsageWire {
             cached_input_tokens: usage.cached_input_tokens,
             cache_reported_input_tokens: usage.cache_reported_input_tokens,
         }
+    }
+}
+
+/// Content-free runtime-status payload for the **`status://event`** channel.
+///
+/// This is deliberately **not** an `AgentEventWire` variant (`docs/agent-status.md` §6.1): the render
+/// channel carries content and only fires when an `AgentEvent` arrives, whereas the status stream is
+/// content-free and ticks even when nothing else happens (that is the whole point of stall
+/// detection). Keeping them separate is the A5 "content-free" guarantee.
+///
+/// `Instant` is not serializable, so the two time fields are exposed as *durations in seconds* —
+/// derived at snapshot time, never carrying a wall-clock the UI has to reconcile.
+#[derive(Debug, Clone, Serialize)]
+pub struct StateSnapshotWire {
+    pub project: Option<String>,
+    pub session: Option<String>,
+    /// `idle` / `running` / `stalled` / `unreachable`.
+    pub liveness: String,
+    /// `healthy` / `slow_tool` / `retrying` / `compacting` / `failed`.
+    pub health: String,
+    /// Human-facing detail for the health state (e.g. the slow tool's name, the retry reason).
+    /// Never prompt / output / tool-argument content.
+    pub health_detail: Option<String>,
+    /// `model_call` / `tool_call` / `compacting` / `waiting_input` (`null` when idle).
+    pub activity: Option<String>,
+    /// +1 per completed model call / tool call within the turn.
+    pub progress_seq: u64,
+    /// Seconds since `progress_seq` last advanced ("last real progress").
+    pub seconds_since_progress: Option<u64>,
+    /// Seconds since the current turn started ("Worked for Ns").
+    pub seconds_since_turn_start: Option<u64>,
+    /// True when the source that produced this snapshot is gone (render muted).
+    pub stale: bool,
+}
+
+impl StateSnapshotWire {
+    pub fn from_snapshot(snapshot: &StateSnapshot) -> Self {
+        let (health, health_detail) = match &snapshot.health {
+            Health::Healthy => ("healthy".to_owned(), None),
+            Health::SlowTool { name, elapsed_ms } => {
+                ("slow_tool".to_owned(), Some(format!("{name} · {elapsed_ms} ms")))
+            }
+            Health::Retrying { attempt, reason } => (
+                "retrying".to_owned(),
+                Some(format!("attempt {attempt} · {reason}")),
+            ),
+            Health::Compacting => ("compacting".to_owned(), None),
+            Health::Failed { message, .. } => ("failed".to_owned(), Some(message.clone())),
+        };
+        let liveness = match snapshot.liveness {
+            Liveness::Idle => "idle",
+            Liveness::Running => "running",
+            Liveness::Stalled => "stalled",
+            Liveness::Unreachable => "unreachable",
+        };
+        let activity = snapshot.activity.map(|activity| match activity {
+            Activity::ModelCall => "model_call",
+            Activity::ToolCall => "tool_call",
+            Activity::Compacting => "compacting",
+            Activity::WaitingInput => "waiting_input",
+        });
+        let now = std::time::Instant::now();
+        Self {
+            project: None,
+            session: None,
+            liveness: liveness.to_owned(),
+            health,
+            health_detail,
+            activity: activity.map(str::to_owned),
+            progress_seq: snapshot.progress_seq,
+            seconds_since_progress: snapshot
+                .last_progress_at
+                .map(|t| now.duration_since(t).as_secs()),
+            seconds_since_turn_start: snapshot
+                .turn_started_at
+                .map(|t| now.duration_since(t).as_secs()),
+            stale: snapshot.stale,
+        }
+    }
+
+    /// Tag the snapshot with its source project + session (same routing key as `agent://event`).
+    pub fn with_route(mut self, project: &str, session: &str) -> Self {
+        self.project = Some(project.to_owned());
+        self.session = Some(session.to_owned());
+        self
     }
 }
 
@@ -440,5 +526,92 @@ impl SessionSnapshotWire {
             running,
             todo: todo.map(TaskViewWire::from),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::status::StateKeeper;
+
+    /// `StateSnapshotWire` must be serialisable and **content-free**: the JSON keys are exactly
+    /// the status fields, never any prompt / output / tool-argument text (the whole point of a
+    /// separate `status://event` channel — `docs/agent-status.md` §6.1 / A5).
+    #[test]
+    fn state_snapshot_wire_is_content_free() {
+        let keeper = StateKeeper::new();
+        keeper.begin_turn();
+        let wire = StateSnapshotWire::from_snapshot(&keeper.snapshot()).with_route("proj", "sess");
+        let json = serde_json::to_value(&wire).unwrap();
+
+        let obj = json.as_object().expect("object");
+        let mut keys: Vec<&str> = obj.keys().map(String::as_str).collect();
+        keys.sort_unstable();
+        assert_eq!(
+            keys,
+            vec![
+                "activity",
+                "health",
+                "health_detail",
+                "liveness",
+                "progress_seq",
+                "project",
+                "seconds_since_progress",
+                "seconds_since_turn_start",
+                "session",
+                "stale",
+            ]
+        );
+        // Routing + derived liveness are present; nothing content-bearing leaked in.
+        assert_eq!(json["project"], "proj");
+        assert_eq!(json["session"], "sess");
+        assert_eq!(json["liveness"], "running");
+        assert_eq!(json["health"], "healthy");
+    }
+
+    /// Every `Health` / `Liveness` / `Activity` variant maps to a stable lowercase tag (so the
+    /// frontend can switch on it without parsing prose).
+    #[test]
+    fn state_snapshot_wire_maps_every_variant() {
+        use crate::status::{Activity, Health, Liveness, StateSnapshot};
+        let snap = |liveness, health, activity| StateSnapshot {
+            liveness,
+            health,
+            activity,
+            progress_seq: 7,
+            last_progress_at: None,
+            turn_started_at: None,
+            stale: true,
+        };
+
+        let wire = StateSnapshotWire::from_snapshot(&snap(
+            Liveness::Stalled,
+            Health::SlowTool { name: "bash".into(), elapsed_ms: 4200 },
+            Some(Activity::ToolCall),
+        ));
+        assert_eq!(wire.liveness, "stalled");
+        assert_eq!(wire.health, "slow_tool");
+        assert_eq!(wire.activity.as_deref(), Some("tool_call"));
+        assert_eq!(wire.health_detail.as_deref(), Some("bash · 4200 ms"));
+        assert_eq!(wire.progress_seq, 7);
+        assert!(wire.stale);
+
+        let wire = StateSnapshotWire::from_snapshot(&snap(
+            Liveness::Unreachable,
+            Health::Failed { kind: None, message: "boom".into() },
+            None,
+        ));
+        assert_eq!(wire.liveness, "unreachable");
+        assert_eq!(wire.health, "failed");
+        assert_eq!(wire.activity, None);
+        assert_eq!(wire.health_detail.as_deref(), Some("boom"));
+
+        let wire = StateSnapshotWire::from_snapshot(&snap(
+            Liveness::Running,
+            Health::Retrying { attempt: 2, reason: "429".into() },
+            Some(Activity::ModelCall),
+        ));
+        assert_eq!(wire.health, "retrying");
+        assert_eq!(wire.health_detail.as_deref(), Some("attempt 2 · 429"));
     }
 }

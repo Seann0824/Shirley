@@ -10,7 +10,7 @@
 // `unsubscribe` on switching away. A project is an "associated workspace directory" —
 // one project hosts multiple sessions.
 
-import type { AgentEventWire, SessionSnapshot } from "@/types/wire";
+import type { AgentEventWire, SessionSnapshot, StateSnapshotWire } from "@/types/wire";
 import { providerBridge, mockProviderBridge, selectionKey, type ProviderBridge } from "@/lib/model-providers";
 
 /** Subscription handle for one session: snapshot + unsubscribe. */
@@ -158,6 +158,13 @@ export type AgentBridge = {
   /** Request cancellation of the given session's current turn. */
   cancel: (project: string, session: string) => Promise<void>;
   /**
+   * Subscribe to the **content-free** runtime-status stream (`status://event` on desktop,
+   * `/api/status` SSE on the cloud). Separate from `openSession`: the status channel ticks
+   * even when no `AgentEvent` arrives (that is what makes stall detection possible), and it
+   * carries no prompt / output / tool-argument text. Returns an unsubscribe handle.
+   */
+  subscribeStatus: (onStatus: (snapshot: StateSnapshotWire) => void) => Promise<() => void>;
+  /**
    * Subscribe to a session: returns a view snapshot (to rebuild the transcript) + an
    * unsubscribe handle. Subsequent events for that session are pushed back via
    * `onEvent` (including background sessions — the `project` / `session` fields mark
@@ -262,6 +269,14 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
   // un-unregistered and consume events multiple times (a past bug).
   const router = eventRouter();
   const unlisten = await listen<AgentEventWire>(remote ? "agent://remote-event" : "agent://event", (event) => router.push(event.payload));
+  // Content-free status channel: a single global listener; App routes snapshots by
+  // `project::session`. Absent when proxying a remote source (status is local-only for now).
+  const statusListeners: Array<(snapshot: StateSnapshotWire) => void> = [];
+  const statusUnlisten = remote
+    ? null
+    : await listen<StateSnapshotWire>("status://event", (event) => {
+        for (const listener of statusListeners) listener(event.payload);
+      });
   if (remote) {
     const stopConnection = await listen<boolean>("agent://remote-connection", ({ payload: connected }) => {
       window.dispatchEvent(new CustomEvent("shirley-remote-connection", { detail: connected }));
@@ -303,6 +318,15 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
     },
     async cancel(project, session) {
       await invoke("agent_cancel", { project, session });
+    },
+    async subscribeStatus(onStatus) {
+      if (statusUnlisten) statusListeners.push(onStatus);
+      return () => {
+        const index = statusListeners.indexOf(onStatus);
+        if (index >= 0) statusListeners.splice(index, 1);
+        // The shared `listen` stays registered for the app's lifetime (like `unlisten`
+        // above); only the per-callback subscription is dropped here.
+      };
     },
     async openSession(project, session, onEvent) {
       const route = router.begin(project, session, onEvent);
@@ -445,6 +469,10 @@ function createMockBridge(): AgentBridge {
     },
     async cancel(project, session) {
       cancelled.add(routeKey(project, session));
+    },
+    async subscribeStatus() {
+      // mock: no runtime status stream; return a no-op unsubscribe.
+      return () => {};
     },
     async openSession(project, session, onEvent) {
       const key = routeKey(project, session);
@@ -660,6 +688,19 @@ async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
     }
     router.push(wire);
   });
+  // Content-free status stream on its own SSE endpoint (`/api/status`), independent of the
+  // `agent_event` stream above. Routed to local listeners; App keys them by `project::session`.
+  const statusListeners: Array<(snapshot: StateSnapshotWire) => void> = [];
+  const statusEs = new EventSource(`${baseUrl}/api/status${token ? `?token=${encodeURIComponent(token)}` : ""}`);
+  statusEs.addEventListener("status", (ev) => {
+    let snapshot: StateSnapshotWire;
+    try {
+      snapshot = JSON.parse((ev as MessageEvent).data) as StateSnapshotWire;
+    } catch {
+      return;
+    }
+    for (const listener of statusListeners) listener(snapshot);
+  });
   // No snapshot may be requested before the event stream is actually subscribed.
   await new Promise<void>((resolve, reject) => {
     const cleanup = () => { clearTimeout(timer); es.removeEventListener("open", opened); es.removeEventListener("error", failed); };
@@ -702,6 +743,13 @@ async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
     },
     async cancel(project, session) {
       await httpCall(baseUrl, "agent_cancel", { project, session });
+    },
+    async subscribeStatus(onStatus) {
+      statusListeners.push(onStatus);
+      return () => {
+        const index = statusListeners.indexOf(onStatus);
+        if (index >= 0) statusListeners.splice(index, 1);
+      };
     },
     async openSession(project, session, onEvent) {
       const route = router.begin(project, session, onEvent);

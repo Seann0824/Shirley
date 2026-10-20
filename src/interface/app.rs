@@ -1,7 +1,6 @@
 use ratatui::layout::{Position, Rect};
 use shirley_agent_sdk::{Agent, AgentEvent, Message, Usage};
 use std::sync::Arc;
-use std::time::Instant;
 
 use crate::models::{ModelCatalog, ModelEntry, StaticCatalog};
 use crate::session::{EmptySessionCatalog, SessionCatalog, SessionEntry};
@@ -280,7 +279,7 @@ impl App {
     }
 
     pub fn is_compressing(&self) -> bool {
-        self.compressing
+        self.status.is_compacting()
     }
 
     pub fn context_usage(&self) -> Option<(u64, u64)> {
@@ -370,11 +369,11 @@ impl App {
     }
 
     pub fn is_waiting(&self) -> bool {
-        self.waiting
+        self.status.is_active()
     }
 
     pub fn waiting_seconds(&self) -> Option<u64> {
-        self.waiting_since.map(|since| since.elapsed().as_secs())
+        self.status.elapsed_seconds()
     }
 
     pub fn show_tool_args(&self) -> bool {
@@ -479,7 +478,7 @@ impl App {
             self.advance_login();
             return None;
         }
-        if self.waiting || self.agent.is_none() || self.input.trim().is_empty() {
+        if self.status.is_active() || self.agent.is_none() || self.input.trim().is_empty() {
             return None;
         }
         // Slash command: when it starts with the prefix and matches a built-in command, parse it first.
@@ -591,8 +590,7 @@ impl App {
         }
 
         self.command_hint = None;
-        self.waiting = true;
-        self.waiting_since = Some(Instant::now());
+        self.status.begin_turn();
         let prompt = std::mem::take(&mut self.input);
         self.input_cursor = 0;
         self.history.push(prompt.clone());
@@ -655,8 +653,9 @@ impl App {
     pub fn restore_agent(&mut self, agent: Agent) {
         let session = self.sessions.active_mut();
         session.agent = Some(agent);
-        session.waiting = false;
-        session.waiting_since = None;
+        // Returning the Agent means the turn is over: release the runtime status here too
+        // (idempotent with `complete_turn` -> `finish_turn` -> `status.end_turn()`).
+        session.status.end_turn();
     }
 
     /// Wrap-up after this turn's reply ends (completed normally or interrupted by the user).
@@ -674,7 +673,7 @@ impl App {
 
     /// The user pressed Esc to request interrupting the current reply (only effective while waiting for a reply).
     pub fn request_interrupt(&mut self) {
-        if self.waiting {
+        if self.status.is_active() {
             self.interrupt_requested = true;
         }
     }
@@ -1407,7 +1406,8 @@ impl App {
         self.last_usage = None;
         self.total_usage = Usage::default();
         self.context_usage = None;
-        self.compressing = false;
+        // Runtime status lives in each session's own keeper; switching sessions simply exposes a
+        // different keeper, so there is no stale flag to clear here.
     }
 
     /// Recompute suggestions on input change (called uniformly after push/insert/pop/delete/move etc.).

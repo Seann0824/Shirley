@@ -80,3 +80,32 @@ export type SessionSnapshot = {
   /** Current task-ledger snapshot for this session (`null` = empty / no ledger). */
   todo: TaskViewWire | null;
 };
+
+/**
+ * Content-free runtime-status snapshot (aligned with the Rust `StateSnapshotWire`).
+ *
+ * Delivered on the **separate** `status://event` channel (cloud: `/api/status` SSE), never
+ * inside `AgentEventWire`: the render channel carries content and only fires on an
+ * `AgentEvent`, whereas this ticks even when nothing else happens (that is what makes stall
+ * detection possible). Contains **no** prompt / output / tool-argument text.
+ */
+export type StateSnapshotWire = {
+  project: string | null;
+  session: string | null;
+  /** `idle` / `running` / `stalled` / `unreachable`. */
+  liveness: "idle" | "running" | "stalled" | "unreachable";
+  /** `healthy` / `slow_tool` / `retrying` / `compacting` / `failed`. */
+  health: "healthy" | "slow_tool" | "retrying" | "compacting" | "failed";
+  /** Human-facing detail for the health state (e.g. slow tool name). Never content. */
+  health_detail: string | null;
+  /** `model_call` / `tool_call` / `compacting` / `waiting_input` (`null` when idle). */
+  activity: "model_call" | "tool_call" | "compacting" | "waiting_input" | null;
+  /** +1 per completed model call / tool call within the turn. */
+  progress_seq: number;
+  /** Seconds since `progress_seq` last advanced ("last real progress"). */
+  seconds_since_progress: number | null;
+  /** Seconds since the current turn started ("Worked for Ns"). */
+  seconds_since_turn_start: number | null;
+  /** True when the source that produced this snapshot is gone (render muted). */
+  stale: boolean;
+};

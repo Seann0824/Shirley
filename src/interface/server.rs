@@ -51,10 +51,10 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
 
-use super::desktop::wire::AgentEventWire;
+use super::desktop::wire::{AgentEventWire, StateSnapshotWire};
 use super::runtime::{
     EventSink, FileEntryWire, HistoryMessageWire, ModelEntryWire, ProjectEntryWire,
-    ProjectRuntimeManager, SessionEntryWire, SkillEntryWire, SubagentSummaryWire,
+    ProjectRuntimeManager, SessionEntryWire, SkillEntryWire, StatusSink, SubagentSummaryWire,
 };
 use crate::bootstrap::AgentFactory;
 use crate::project::ProjectRegistry;
@@ -69,6 +69,10 @@ struct ServerState {
     manager: Arc<ProjectRuntimeManager>,
     /// Global fan-out of serialized wire events to every connected SSE client.
     events: broadcast::Sender<String>,
+    /// Separate fan-out of **content-free** runtime-status snapshots (`/api/status`). Kept apart
+    /// from `events` on purpose (see `docs/agent-status.md` §6.1): the status channel must tick
+    /// even when no `AgentEvent` arrives.
+    status_events: broadcast::Sender<String>,
     token: Option<String>,
     memory_root: PathBuf,
     sequence: Arc<AtomicU64>,
@@ -83,6 +87,7 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
     let working_dir = factory.working_dir.clone();
     let registry = ProjectRegistry::load_default().map_err(|e| std::io::Error::other(e.to_string()))?;
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
+    let (status_events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
     // The event sink the core calls for every wire event: serialise + fan out.
     let sink_tx = events.clone();
@@ -95,12 +100,23 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         }
     });
 
+    // Content-free status sink: serialise the snapshot and fan out on its own channel.
+    let status_tx = status_events.clone();
+    let status_sink: StatusSink = Arc::new(move |wire: StateSnapshotWire| {
+        if let Ok(json) = serde_json::to_string(&wire) {
+            let _ = status_tx.send(json);
+        }
+    });
+
     // Chat uses the same persistent workspace as the desktop interface.
-    let manager = Arc::new(ProjectRuntimeManager::new(
-        Arc::new(tokio::sync::Mutex::new(registry)),
-        Some(crate::storage::global_root().join("chat")),
-        sink,
-    ));
+    let manager = Arc::new(
+        ProjectRuntimeManager::new(
+            Arc::new(tokio::sync::Mutex::new(registry)),
+            Some(crate::storage::global_root().join("chat")),
+            sink,
+        )
+        .with_status_sink(status_sink),
+    );
     // Register the server's default workspace so the UI always has a project to show.
     manager
         .register_default(working_dir)
@@ -109,7 +125,7 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
 
     let token = std::env::var("SHIRLEY_SERVER_TOKEN").ok().filter(|s| !s.trim().is_empty());
     let state = Arc::new(ServerState {
-        manager, events, token, sequence,
+        manager, events, status_events, token, sequence,
         memory_root: crate::storage::global_root().join("memory"),
     });
 
@@ -126,6 +142,7 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
     let app = Router::new()
         .route("/api/cmd/{cmd}", post(dispatch))
         .route("/api/events", get(events_handler))
+        .route("/api/status", get(status_handler))
         .route("/api/memory/sync", post(memory_sync))
         .route("/api/memory/review", post(memory_review))
         .route("/api/memory/confirm-personal", post(memory_confirm_personal))
@@ -502,15 +519,38 @@ async fn events_handler(
 ) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
     let rx = state.events.subscribe();
     let stream = futures::stream::unfold(rx, |mut rx| async move {
+        // Every branch returns, so a `loop` here would never actually loop (clippy::never_loop).
+        match rx.recv().await {
+            Ok(json) => {
+                let event = Event::default().event("agent_event").data(json);
+                Some((Ok::<_, Infallible>(event), rx))
+            }
+            Err(broadcast::error::RecvError::Lagged(_)) => {
+                Some((Ok(Event::default().event("resync").data("{}")), rx))
+            }
+            Err(broadcast::error::RecvError::Closed) => None,
+        }
+    });
+    Sse::new(stream).keep_alive(KeepAlive::default())
+}
+
+/// Content-free runtime-status SSE stream (`/api/status`). Same shape as `events_handler`
+/// but on the separate `status_events` channel and with a distinct SSE event name, so a
+/// client can subscribe to liveness/health without receiving any conversation content.
+async fn status_handler(
+    State(state): State<Arc<ServerState>>,
+) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+    let rx = state.status_events.subscribe();
+    let stream = futures::stream::unfold(rx, |mut rx| async move {
+        // A `Lagged` status receiver simply skips the missed snapshots: a status snapshot is a
+        // rebuildable projection, so there is nothing to "resync" — the next tick re-sends it.
         loop {
             match rx.recv().await {
                 Ok(json) => {
-                    let event = Event::default().event("agent_event").data(json);
+                    let event = Event::default().event("status").data(json);
                     return Some((Ok::<_, Infallible>(event), rx));
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => {
-                    return Some((Ok(Event::default().event("resync").data("{}")), rx));
-                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
         }
@@ -528,13 +568,15 @@ mod tests {
         let manager = Arc::new(ProjectRuntimeManager::new(
             Arc::new(tokio::sync::Mutex::new(ProjectRegistry::load(dir.join("projects.json")).unwrap())), None, Arc::new(|_| {})));
         let (events, _) = broadcast::channel(8);
-        let state = Arc::new(ServerState { manager, events, token: Some("secret".into()), memory_root: dir.join("memory"), sequence: Arc::new(AtomicU64::new(0)) });
+        let (status_events, _) = broadcast::channel(8);
+        let state = Arc::new(ServerState { manager, events, status_events, token: Some("secret".into()), memory_root: dir.join("memory"), sequence: Arc::new(AtomicU64::new(0)) });
         let app = Router::new()
             .route("/api/cmd/{cmd}", post(dispatch))
             .route("/api/memory/sync", post(memory_sync))
             .route("/api/memory/review", post(memory_review))
             .route("/api/memory/confirm-personal", post(memory_confirm_personal))
             .route("/api/events", get(events_handler))
+        .route("/api/status", get(status_handler))
             .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

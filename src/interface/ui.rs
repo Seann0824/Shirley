@@ -1012,8 +1012,17 @@ fn format_arguments(arguments: &str) -> Vec<Line<'static>> {
 }
 
 fn input_label(app: &App) -> Line<'static> {
-    let (text, color) = if app.is_compressing() {
+    use crate::status::Liveness;
+    let snapshot = app.status.snapshot();
+    let (text, color) = if snapshot.stale {
+        // The driver task vanished mid-turn: the rest of the snapshot is "last known", not live.
+        // Never render a dead turn as if it were working (docs/agent-status.md §5.6).
+        (" stale · last known state ".to_owned(), Color::Red)
+    } else if app.is_compressing() {
         (" compacting context ".to_owned(), Color::Yellow)
+    } else if snapshot.liveness == Liveness::Stalled {
+        let seconds = app.waiting_seconds().unwrap_or(0);
+        (format!(" stalled {seconds}s · no progress "), Color::Yellow)
     } else if let Some(seconds) = app.waiting_seconds() {
         (format!(" Shirley replying {seconds}s "), Color::Cyan)
     } else {

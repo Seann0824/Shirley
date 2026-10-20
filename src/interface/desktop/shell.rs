@@ -24,7 +24,7 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 
-use super::wire::{AgentEventWire, SessionSnapshotWire, TaskViewWire};
+use super::wire::{AgentEventWire, SessionSnapshotWire, StateSnapshotWire, TaskViewWire};
 use crate::interface::runtime::{
     FileEntryWire, HistoryMessageWire, ModelEntryWire, ProjectEntryWire, ProjectRuntimeManager,
     SessionEntryWire, SkillEntryWire, SubagentSummaryWire, route_key,
@@ -34,6 +34,9 @@ use shirley_agent_sdk::AgentEvent;
 
 /// The single event name the webview listens on.
 const EVENT_NAME: &str = "agent://event";
+
+/// Content-free runtime-status channel (separate from `agent://event`, see `docs/agent-status.md`).
+const STATUS_EVENT_NAME: &str = "status://event";
 
 /// Chat mode workspace root: `~/.shirley/chat`.
 fn chat_root() -> PathBuf {
@@ -293,8 +296,16 @@ async fn agent_subscribe(
     let pump_session = session.clone();
     let pump_key = key.clone();
     let handle = tauri::async_runtime::spawn(async move {
+        // Status heartbeat: poll the session's own `StateKeeper` every second and emit the
+        // content-free snapshot on the separate `status://event` channel. It runs *alongside*
+        // `rx.recv()` because status must tick even when no `AgentEvent` arrives — that is the
+        // whole point of stall detection.
+        let mut hb = tokio::time::interval(std::time::Duration::from_secs(1));
+        hb.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
-            match rx.recv().await {
+          tokio::select! {
+            received = rx.recv() => {
+              match received {
                 Ok(Ok(event)) => {
                     // `todo` tool completion = task-ledger change: the SDK emits no
                     // dedicated event, so re-read the ledger snapshot and push a
@@ -337,7 +348,23 @@ async fn agent_subscribe(
                 }
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                 Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+              }
             }
+            _ = hb.tick() => {
+                let snapshot = match manager.ensure_runtime(&pump_project).await {
+                    Ok(runtime) => {
+                        let guard = runtime.lock().await;
+                        guard.sessions.session(&pump_session).map(|s| s.status.snapshot())
+                    }
+                    Err(_) => None,
+                };
+                if let Some(snapshot) = snapshot {
+                    let wire = StateSnapshotWire::from_snapshot(&snapshot)
+                        .with_route(&pump_project, &pump_session);
+                    let _ = app.emit(STATUS_EVENT_NAME, wire);
+                }
+            }
+          }
         }
         pumps.lock().await.remove(&pump_key);
     });

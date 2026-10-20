@@ -35,7 +35,7 @@ use shirley_agent_sdk::{
 };
 use tokio::sync::{broadcast, oneshot, Mutex};
 
-use super::desktop::wire::{AgentEventWire, SessionSnapshotWire, TaskViewWire};
+use super::desktop::wire::{AgentEventWire, SessionSnapshotWire, StateSnapshotWire, TaskViewWire};
 use crate::bootstrap::AgentFactory;
 use crate::interface::session::SessionManager;
 use crate::project::{ProjectEntry, ProjectRegistry};
@@ -58,12 +58,20 @@ pub struct ProjectRuntime {
 /// Event sink the transport supplies to receive wire events from the turn driver.
 pub type EventSink = Arc<dyn Fn(AgentEventWire) + Send + Sync>;
 
+/// Status sink for the **content-free** runtime-status stream (`status://event` on desktop,
+/// `/api/status` SSE on the cloud). Deliberately separate from [`EventSink`]: the render channel
+/// carries content and only fires on `AgentEvent`; the status channel ticks even when nothing else
+/// happens (that is the whole point of stall detection). See `docs/agent-status.md` §6.1.
+pub type StatusSink = Arc<dyn Fn(StateSnapshotWire) + Send + Sync>;
+
 /// A shared, interface-agnostic multi-project runtime manager.
 pub struct ProjectRuntimeManager {
     registry: Arc<Mutex<ProjectRegistry>>,
     runtimes: Arc<Mutex<HashMap<String, Arc<Mutex<ProjectRuntime>>>>>,
     cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
     sink: EventSink,
+    /// Content-free runtime-status fan-out (separate channel; no-op by default).
+    status_sink: StatusSink,
     /// If `Some`, the `__chat__` pseudo project resolves to this root.
     /// If `None`, `__chat__` is rejected.
     chat_root: Option<PathBuf>,
@@ -81,8 +89,16 @@ impl ProjectRuntimeManager {
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             sink,
+            status_sink: Arc::new(|_| {}),
             chat_root,
         }
+    }
+
+    /// Install the content-free status sink (desktop emits `status://event`; the server fans out
+    /// `/api/status`). Kept as a builder so existing `new()` call sites are untouched.
+    pub fn with_status_sink(mut self, sink: StatusSink) -> Self {
+        self.status_sink = sink;
+        self
     }
 
     /// Register (or refresh) a project at `working_dir` so the server always has at
@@ -364,7 +380,7 @@ impl ProjectRuntimeManager {
         user_content: Content,
     ) -> Result<(), String> {
         let runtime = self.ensure_runtime(project).await?;
-        let (mut agent, memory, session_name) = {
+        let (mut agent, memory, session_name, status) = {
             let mut guard = runtime.lock().await;
             let session_name = match session {
                 Some(name) => name,
@@ -386,12 +402,18 @@ impl ProjectRuntimeManager {
             if let Some(memory) = memory.as_ref() {
                 memory.set_query(text.as_str());
             }
-            (agent, memory, session_name)
+            let status = guard
+                .sessions
+                .session(&session_name)
+                .map(|s| s.status.clone())
+                .ok_or_else(|| "session not found".to_owned())?;
+            (agent, memory, session_name, status)
         };
 
         let catalog = runtime.lock().await.factory.session_catalog.clone();
         let runtime_for_task = runtime.clone();
         let sink = self.sink.clone();
+        let status_sink = self.status_sink.clone();
         let cancels = self.cancels.clone();
         let key = route_key(project, &session_name);
         let project_owned = project.to_owned();
@@ -399,9 +421,14 @@ impl ProjectRuntimeManager {
         self.cancels.lock().await.insert(key.clone(), cancel_tx);
 
         tokio::spawn(async move {
+            // Safety net (`docs/agent-status.md` §5.6): if this task is aborted/dropped mid-turn the
+            // guard flips the keeper to `Unreachable` + `stale`; disarmed on the normal path below.
+            let mut turn_guard = crate::status::TurnGuard::new(status.clone());
+            emit_status(&status_sink, &project_owned, &session_name, &status);
             let terminal = guard_turn(async {
                 let mut cancel_rx = cancel_rx;
                 let mut stream = agent.run_stream_content(user_content);
+                let mut hb = tokio::time::interval(std::time::Duration::from_secs(1));
                 if let Some(memory) = memory.as_ref() {
                     tokio::select! {
                         biased;
@@ -413,6 +440,12 @@ impl ProjectRuntimeManager {
                     tokio::select! {
                         biased;
                         _ = &mut cancel_rx => return Ok(cancelled_event()),
+                        // Heartbeat: the only thing that ticks when no AgentEvent arrives, so a silent
+                        // turn still flips Running -> Stalled (docs §5.2).
+                        _ = hb.tick() => {
+                            status.tick();
+                            emit_status(&status_sink, &project_owned, &session_name, &status);
+                        }
                         event = stream.next() => {
                             let event = event
                                 .ok_or_else(|| "Agent stream ended unexpectedly; conversation preserved.".to_owned())?
@@ -431,6 +464,7 @@ impl ProjectRuntimeManager {
                                     sink_todo(&sink, &project_owned, &session_name, todo);
                                 }
                             }
+                            emit_status(&status_sink, &project_owned, &session_name, &status);
                         }
                     }
                 }
@@ -458,7 +492,9 @@ impl ProjectRuntimeManager {
                     Err(message) => sink_error(&sink, &project_owned, &session_name, message),
                 }
             }
+            emit_status(&status_sink, &project_owned, &session_name, &status);
 
+            turn_guard.disarm();
             if let Some((config, first)) = title_input {
                 let _ = tokio::time::timeout(
                     std::time::Duration::from_secs(20),
@@ -743,6 +779,15 @@ fn sink_event(sink: &EventSink, project: &str, session: &str, event: AgentEvent)
     if let Some(wire) = AgentEventWire::from_event(event).map(|w| w.with_route(project, session)) {
         sink(wire);
     }
+}
+
+fn emit_status(
+    sink: &StatusSink,
+    project: &str,
+    session: &str,
+    keeper: &crate::status::StateKeeper,
+) {
+    sink(StateSnapshotWire::from_snapshot(&keeper.snapshot()).with_route(project, session));
 }
 
 fn sink_error(sink: &EventSink, project: &str, session: &str, message: &str) {

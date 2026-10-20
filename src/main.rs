@@ -11,6 +11,7 @@ mod prompt;
 mod prompt_template;
 mod session;
 mod settings;
+mod status;
 mod storage;
 mod subagent;
 mod skills;

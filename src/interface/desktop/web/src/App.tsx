@@ -28,7 +28,7 @@ import { SkillSlashPopover } from "@/lib/slash/SkillSlashPopover";
 import { CHIP_TOKEN, stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
 import { agentBridge, type ProjectEntry, type SessionSubscription } from "@/lib/bridge";
-import type { AgentEventWire, SessionSnapshot, TaskViewWire, UsageWire } from "@/types/wire";
+import type { AgentEventWire, SessionSnapshot, StateSnapshotWire, TaskViewWire, UsageWire } from "@/types/wire";
 import type { AiSegment, AiToolExecution } from "@/types/ai";
 import { cn } from "@/ui/utils";
 import { MOBILE_LAYOUT_QUERY, useMobileLayout } from "@/lib/use-mobile-layout";
@@ -168,6 +168,56 @@ function removeLocations(history: NavigationHistory, remove: (entry: SessionLoca
 }
 
 /**
+ * Content-free runtime-status pill (P2): derived purely from the `status://event` stream.
+ *
+ * Unlike the render stream (which only fires on an `AgentEvent`), the status channel ticks
+ * every second even while the model is streaming or a tool is running — so it can tell
+ * "long generation" apart from "actually stuck". It carries no prompt / output / tool args.
+ *
+ * `Worked for Ns` is derived from the backend's `seconds_since_turn_start`; the stall hint
+ * from `seconds_since_progress` (last *real* progress: a completed model or tool call).
+ */
+function StatusPill({ status }: { status: StateSnapshotWire | null }) {
+  if (!status) return null;
+  if (status.liveness === "idle") return null;
+  const seconds = status.seconds_since_turn_start;
+  const stalled = status.liveness === "stalled" || status.liveness === "unreachable";
+  const tone = status.stale || status.liveness === "unreachable"
+    ? "text-danger-ink"
+    : stalled
+      ? "text-warn-ink"
+      : "text-muted";
+  const label = status.stale
+    ? "stale · last known state"
+    : status.liveness === "unreachable"
+      ? "connection lost"
+      : status.liveness === "stalled"
+        ? `stalled · no progress for ${status.seconds_since_progress ?? 0}s`
+        : status.health === "compacting"
+          ? "compacting context"
+          : status.health === "retrying"
+            ? `retrying${status.health_detail ? ` · ${status.health_detail}` : ""}`
+            : status.health === "slow_tool"
+              ? `slow tool${status.health_detail ? ` · ${status.health_detail}` : ""}`
+              : status.activity === "tool_call"
+                ? "running tool"
+                : status.activity === "model_call"
+                  ? "thinking"
+                  : "working";
+  return (
+    <div className={cn("mx-3 mb-1 flex items-center gap-2 text-caption", tone)} role="status" aria-live="polite">
+      {!stalled && (
+        <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
+      )}
+      <span>{label}</span>
+      {seconds !== null && !stalled && (
+        <span className="font-utility">· worked for {seconds}s</span>
+      )}
+    </div>
+  );
+}
+
+/**
  * Runtime status line: compressing / context usage. Placed above the input, below the task card.
  *
  * Mirrors the TUI footer's context-usage hint: desktop previously did not handle
@@ -260,6 +310,10 @@ export function App() {
   const [navigationHistory, setNavigationHistory] = useState<NavigationHistory>({ entries: [], index: -1 });
   const [navigationBusy, setNavigationBusy] = useState(false);
   const [sessionTitles, setSessionTitles] = useState<Record<string, string>>({});
+  // Content-free runtime status per session (`project::session`), from the separate
+  // `status://event` channel. Kept apart from `views` because it ticks independently of
+  // the render stream and carries no content (see docs/agent-status.md §6.1 / P2).
+  const [statuses, setStatuses] = useState<Record<string, StateSnapshotWire>>({});
   const updateCurrentTitle = useCallback((title: string) => {
     if (activeProject && sessionName) {
       const key = viewKey(activeProject, sessionName);
@@ -359,6 +413,29 @@ export function App() {
       setUiError(e instanceof Error ? e.message : String(e));
       return [] as ProjectEntry[];
     }
+  }, []);
+
+  // Subscribe to the content-free runtime-status stream once for the app's lifetime.
+  // Snapshots arrive tagged with `project` + `session`; store them per `project::session`.
+  // Kept separate from the render stream: it ticks every second even without an
+  // `AgentEvent` (that is what lets the UI tell "long generation" from "actually stuck").
+  useEffect(() => {
+    let unsubscribe: (() => void) | null = null;
+    let disposed = false;
+    void (async () => {
+      const bridge = await agentBridge();
+      const stop = await bridge.subscribeStatus((snapshot) => {
+        if (snapshot.project == null || snapshot.session == null) return;
+        const key = viewKey(snapshot.project, snapshot.session);
+        setStatuses((prev) => ({ ...prev, [key]: snapshot }));
+      });
+      if (disposed) stop();
+      else unsubscribe = stop;
+    })().catch(() => {});
+    return () => {
+      disposed = true;
+      unsubscribe?.();
+    };
   }, []);
 
   // Apply an event to the given session's view (functional update to avoid stale closures).
@@ -1098,6 +1175,8 @@ export function App() {
       ? (views[viewKey(activeProject, sessionName)] ?? emptyView())
       : emptyView();
   const busy = view.busy;
+  // Content-free runtime status for the foreground session (separate `status://event` channel).
+  const status = activeProject && sessionName ? (statuses[viewKey(activeProject, sessionName)] ?? null) : null;
   // The user message currently being edited in place (matches the active session). While set,
   // the composer is rendered at the message's position instead of the bottom, and submit rewinds
   // that turn and resends (see `send` / `beginEdit`).
@@ -1331,6 +1410,8 @@ export function App() {
             )}
             {/* Task ledger: model-maintained task progress, resident above the input — the most direct signal that "the task is progressing". */}
             {view.todo && <TaskCard task={view.todo} />}
+            {/* Content-free runtime status pill (liveness / health / worked-for), from the separate status channel. */}
+            <StatusPill status={status} />
             {/* Runtime status line: compressing / context usage. Gives the "process" visible feedback instead of a silent UI. */}
             <SessionStatusLine
               retryStatus={view.retryStatus}

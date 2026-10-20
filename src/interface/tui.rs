@@ -16,7 +16,11 @@ async fn run_agent(
     updates: mpsc::UnboundedSender<Result<AgentEvent, String>>,
     mut cancel: tokio::sync::oneshot::Receiver<()>,
     memory: Option<Arc<crate::memory::MemoryRuntime>>,
+    status: Arc<crate::status::StateKeeper>,
 ) -> Agent {
+    // Safety net (`docs/agent-status.md` §5.6): if this task is aborted / dropped mid-turn the guard
+    // flips the keeper to `Unreachable` + `stale`; on any normal return we disarm it first.
+    let mut guard = crate::status::TurnGuard::new(status);
     // Memory V2.5: use this turn's user input as the query, and **prefetch the query vector**
     // (embedding is async HTTP, while `ContextProvider::context()` is synchronous, so it can only
     // be computed ahead of time here). When embedding is unconfigured / prefetch fails it is a no-op --
@@ -61,6 +65,7 @@ async fn run_agent(
     if let Some(error) = failure {
         let _ = updates.send(Err(error));
     }
+    guard.disarm();
     agent
 }
 
@@ -210,12 +215,14 @@ impl<'a> Tui<'a> {
                                 let memory = self.app.memory.clone();
                                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                                 self.cancel = Some(cancel_tx);
+                                let status = self.app.status.clone();
                                 response = Some(tokio::spawn(run_agent(
                                     agent,
                                     prompt,
                                     updates_tx.clone(),
                                     cancel_rx,
                                     memory,
+                                    status,
                                 )));
                             }
                             // User requested interrupt: send a cancel signal to the running task (one-shot).
@@ -264,7 +271,12 @@ impl<'a> Tui<'a> {
                         }
                     }
                 },
-                _ = tick.tick(), if response.is_some() => {}
+                // Heartbeat: re-evaluate time-based transitions (slow tool / stalled) ~1 Hz.
+                // This is the only thing that ticks when no AgentEvent arrives -- that is the whole
+                // point of stall detection (a silent turn must still be observable).
+                _ = tick.tick(), if response.is_some() => {
+                    self.app.status.tick();
+                }
                 completed = async { response.as_mut().expect("response exists").await }, if response.is_some() => {
                     while let Ok(update) = updates_rx.try_recv() {
                         self.apply(update);

@@ -16,7 +16,6 @@
 use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
-use std::time::Instant;
 
 use shirley_agent_sdk::{Agent, AgentEvent, Message, Usage};
 use tokio::sync::broadcast;
@@ -26,6 +25,7 @@ use super::app::{ChatMessage, Item, Role, ToolCallView};
 use crate::bootstrap::AgentFactory;
 use crate::memory::MemoryRuntime;
 use crate::session::{SessionCatalog, SessionStore};
+use crate::status::StateKeeper;
 use crate::subagent::{SubagentManager, SubagentStore};
 use crate::skills::SkillRuntime;
 use crate::todo::{TaskView, TodoStore};
@@ -66,14 +66,15 @@ pub struct Session {
     model: Option<String>,
     /// This session's message items (the render view).
     pub items: Vec<Item>,
-    pub waiting: bool,
-    pub waiting_since: Option<Instant>,
+    /// Runtime status (liveness / health / activity / progress) -- the **single writer** of the
+    /// session's run state. The former `waiting` / `waiting_since` / `compressing` / `running`
+    /// flags are now derived from this keeper (see `docs/agent-status.md` §6.1).
+    pub status: Arc<StateKeeper>,
     pub scroll: usize,
     pub auto_scroll: bool,
     pub max_scroll: usize,
     pub last_usage: Option<Usage>,
     pub total_usage: Usage,
-    pub compressing: bool,
     pub context_usage: Option<(u64, u64)>,
     /// The `items` index where this turn's streaming reply starts (used at wrap-up to truncate a half-finished streaming reply).
     pub streaming_delta_start: Option<usize>,
@@ -85,9 +86,6 @@ pub struct Session {
     /// `docs/multi-session.md` decision 2): `SessionManager` only feeds each
     /// `AgentEvent` to the corresponding session, it does not hold channels.
     events: broadcast::Sender<Result<AgentEvent, String>>,
-    /// Whether this session is running a turn (its `Agent` moved into a background task). Synonymous with `agent.is_none()`,
-    /// kept separately to make the state transition explicit.
-    pub running: bool,
     /// This session's persistent store (`None` = no persistence, for tests).
     ///
     /// Persistence is event-driven via [`Session::apply_event`]: on receiving the SDK's `MessageAdded` it
@@ -152,19 +150,16 @@ impl Session {
             agent: Some(agent),
             model,
             items: Vec::new(),
-            waiting: false,
-            waiting_since: None,
+            status: Arc::new(StateKeeper::new()),
             scroll: 0,
             auto_scroll: true,
             max_scroll: 0,
             last_usage: None,
             total_usage: Usage::default(),
-            compressing: false,
             context_usage: None,
             streaming_delta_start: None,
             interrupt_requested: false,
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
-            running: false,
             store,
             memory,
             skills,
@@ -261,6 +256,13 @@ impl Session {
     /// This is the accumulation entry **shared** by the TUI and desktop: whoever drives `run_stream` feeds the events
     /// here, and the UI only reads results. The `Err` branch is a runtime error message (rendered as an error item).
     pub fn apply_event(&mut self, event: Result<AgentEvent, String>) {
+        // Status reduction happens here, once, for every interface (TUI / desktop / server): the
+        // keeper is the **single writer** of liveness / health / activity / progress, so the
+        // hand-maintained flags cannot drift from the event stream (docs/agent-status.md §6.1).
+        match &event {
+            Ok(event) => self.status.on_event(event),
+            Err(error) => self.status.on_error(error),
+        }
         match event {
             Ok(AgentEvent::MessageAdded(message)) => {
                 // Keep the fork snapshot source current (the SDK gives a `Tool` no live message
@@ -298,8 +300,8 @@ impl Session {
             Ok(AgentEvent::ToolStarted { .. }) | Ok(AgentEvent::ToolFinished { .. }) => {}
             Ok(AgentEvent::Finished(_)) => {
                 self.streaming_delta_start = None;
-                self.compressing = false;
-                // waiting is only released after the driver returns the Agent, to avoid accepting the next turn early.
+                // Status (liveness / health / compressing) is reduced inside `apply_event`'s prologue;
+                // the turn is released only after the driver returns the Agent (see `finish_turn`).
             }
         }
     }
@@ -307,9 +309,7 @@ impl Session {
     /// Normal completion, cancellation, and failure all clear the streaming start point, so the next turn's completion does not truncate the previous turn and new user input.
     pub fn finish_turn(&mut self) {
         self.streaming_delta_start = None;
-        self.compressing = false;
-        self.waiting = false;
-        self.waiting_since = None;
+        self.status.end_turn();
     }
 
     /// Current view snapshot: exports rebuildable plain data in UI item order (`Item` -> [`ItemWire`]).
@@ -451,7 +451,8 @@ impl Session {
     }
 
     fn add_error(&mut self, error: String) {
-        self.compressing = false;
+        // A runtime error ends the turn and is classified structurally by the keeper (not by text).
+        self.status.on_error(&error);
         self.push_message(Role::Error, error);
     }
 
@@ -503,11 +504,10 @@ impl Session {
     }
 
     fn start_compression(&mut self) {
-        self.compressing = true;
+        // Liveness/health for compaction is reduced by the keeper in `apply_event`'s prologue.
     }
 
     fn finish_compression(&mut self) {
-        self.compressing = false;
         self.context_usage = None;
     }
 
@@ -880,7 +880,7 @@ impl SessionManager {
         if self
             .sessions
             .get(&id)
-            .map(|session| session.running)
+            .map(|session| session.status.is_active())
             .unwrap_or(false)
         {
             return Err("agent is currently running".to_owned());
@@ -941,7 +941,7 @@ impl SessionManager {
         // Sync the current model name into the mirror first, then `take` the `Agent` away -- the mirror can still answer this session's model during the run.
         session.remember_model();
         let agent = session.agent.take()?;
-        session.running = true;
+        session.status.begin_turn();
         session.push_message(Role::User, user_message);
         Some(agent)
     }
@@ -951,7 +951,6 @@ impl SessionManager {
     pub fn restore_agent(&mut self, name: &str, agent: Agent) {
         if let Some(session) = self.session_mut(name) {
             session.agent = Some(agent);
-            session.running = false;
             session.remember_model();
             session.finish_turn();
         }
@@ -971,7 +970,7 @@ impl SessionManager {
     pub fn rewind_last_turn(&mut self, name: &str) -> Option<String> {
         let session = self.session_mut(name)?;
         // Do not rewind while a turn is in flight (its `Agent` is out in a background task).
-        if session.running {
+        if session.status.is_active() {
             return None;
         }
         let content = session.rewind_last_user_turn()?;
@@ -1139,7 +1138,7 @@ impl SessionManager {
     #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
     pub fn is_running(&self, name: &str) -> bool {
         self.session(name)
-            .map(|session| session.running)
+            .map(|session| session.status.is_active())
             .unwrap_or(false)
     }
 
