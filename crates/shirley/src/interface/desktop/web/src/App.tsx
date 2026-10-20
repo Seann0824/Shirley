@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Clock, LoaderCircle, Plus, X } from "lucide-react";
+import { Clock, ImagePlus, ListChecks, LoaderCircle, Plus, X } from "lucide-react";
 import { DesktopChrome } from "@/components/DesktopChrome";
 import {
   AiConversationTranscript,
@@ -335,6 +335,13 @@ export function App() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     window.matchMedia(MOBILE_LAYOUT_QUERY).matches || readBool(SIDEBAR_STORAGE_KEY, false),
   );
+  // Task ledger panel: **not resident** — the user opens it from the composer toggle.
+  // Resets to closed when switching sessions (keyed by `project::session`), so a new
+  // session never inherits a stale "open" state.
+  const [taskPanelKey, setTaskPanelKey] = useState<string | null>(null);
+  // Hidden `<input type="file">` for picking image files (the paste path is not enough:
+  // users also want to choose an image from disk).
+  const imageInputRef = useRef<HTMLInputElement>(null);
   // UI mode is derived from "whether the foreground is attached to a project": pseudo
   // project `__chat__` => Chat (no associated project), otherwise => Work. There is no
   // separate mode state — switching projects / switching to Chat switches the mode,
@@ -1257,16 +1264,75 @@ export function App() {
         onSend={() => void send()}
         onStop={() => void stop()}
         leadingAction={
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-sm"
-            aria-label="Add reference (@)"
-            className="rounded-full text-muted hover:text-ink"
-            onClick={() => editorRef.current?.openMention()}
-          >
-            <Plus />
-          </Button>
+          <>
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Add reference (@)"
+              className="rounded-full text-muted hover:text-ink"
+              onClick={() => editorRef.current?.openMention()}
+            >
+              <Plus />
+            </Button>
+            {/* Image upload entry: always present (paste alone is not discoverable). Opens
+                the OS file dialog; picked files become `image` chips, the same payload shape
+                as pasted images. */}
+            <Button
+              type="button"
+              variant="ghost"
+              size="icon-sm"
+              aria-label="Attach image"
+              title="Attach image"
+              className="rounded-full text-muted hover:text-ink"
+              onClick={() => imageInputRef.current?.click()}
+            >
+              <ImagePlus />
+            </Button>
+            <input
+              ref={imageInputRef}
+              type="file"
+              accept="image/*"
+              multiple
+              className="hidden"
+              onChange={(event) => {
+                const files = Array.from(event.target.files ?? []);
+                // Reset so picking the same file twice still fires `change`.
+                event.target.value = "";
+                if (files.length > 0) void editorRef.current?.insertImageFiles(files);
+              }}
+            />
+            {/* Task ledger toggle: the card is not resident; this is the only entry, and it
+                carries a live progress badge so "is it moving" stays visible at a glance. */}
+            {view.todo && activeProject && sessionName && (
+              <Button
+                type="button"
+                variant="ghost"
+                size="sm"
+                className={cn(
+                  "rounded-full text-muted hover:text-ink",
+                  taskPanelKey === viewKey(activeProject, sessionName) && "bg-quiet text-ink",
+                )}
+                aria-expanded={taskPanelKey === viewKey(activeProject, sessionName)}
+                aria-label="Show task list"
+                title="Task list"
+                onClick={() =>
+                  setTaskPanelKey((prev) =>
+                    prev === viewKey(activeProject, sessionName)
+                      ? null
+                      : viewKey(activeProject, sessionName),
+                  )
+                }
+              >
+                <ListChecks aria-hidden="true" />
+                {view.todo.total > 0 && (
+                  <span className="font-utility text-caption">
+                    {view.todo.completed}/{view.todo.total}
+                  </span>
+                )}
+              </Button>
+            )}
+          </>
         }
         trailingAction={
           <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
@@ -1408,8 +1474,15 @@ export function App() {
                 {error}
               </p>
             )}
-            {/* Task ledger: model-maintained task progress, resident above the input — the most direct signal that "the task is progressing". */}
-            {view.todo && <TaskCard task={view.todo} />}
+            {/* Task ledger: model-maintained task progress. **Not resident** — shown only
+                when the user opens it via the composer's task toggle (the toggle carries a
+                live progress badge so the "is it moving" signal stays visible). */}
+            {view.todo && activeProject && sessionName && taskPanelKey === viewKey(activeProject, sessionName) && (
+              <TaskCard
+                task={view.todo}
+                onClose={() => setTaskPanelKey(null)}
+              />
+            )}
             {/* Content-free runtime status pill (liveness / health / worked-for), from the separate status channel. */}
             <StatusPill status={status} />
             {/* Runtime status line: compressing / context usage. Gives the "process" visible feedback instead of a silent UI. */}

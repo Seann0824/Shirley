@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { CheckCircle2, ChevronDown, Circle, ListChecks, LoaderCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, Circle, ListChecks, LoaderCircle, X } from "lucide-react";
 import { Button } from "@/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/ui/collapsible";
 import { cn } from "@/ui/utils";
@@ -13,10 +13,11 @@ import type { TaskViewWire } from "@/types/wire";
 // signal. This consumes the structured `todo_updated` snapshot the backend emits when the
 // `todo` tool completes (it does not parse the injected XML).
 //
-// Collapse strategy: goal + progress stay visible (at a glance), while the step list is
-// collapsed by default — steps are the "process", and the user mainly cares "what is the
-// goal, how far has it advanced"; expand for details if wanted.
-export function TaskCard({ task }: { task: TaskViewWire }) {
+// Collapse strategy: the card itself is **not resident** — the user opens it from the
+// composer's task toggle, and it closes on demand (`onClose`). Within the card, goal +
+// progress stay visible while the step list is collapsed by default — steps are the
+// "process", and the user mainly cares "what is the goal, how far has it advanced".
+export function TaskCard({ task, onClose }: { task: TaskViewWire; onClose?: () => void }) {
   const [open, setOpen] = useState(false);
   const done = task.total > 0 && task.completed === task.total;
 
@@ -48,6 +49,18 @@ export function TaskCard({ task }: { task: TaskViewWire }) {
                 />
               </Button>
             </CollapsibleTrigger>
+          )}
+          {onClose && (
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              className="text-muted"
+              aria-label="Hide task list"
+              onClick={onClose}
+            >
+              <X aria-hidden="true" />
+            </Button>
           )}
         </div>
         {task.steps.length > 0 && (

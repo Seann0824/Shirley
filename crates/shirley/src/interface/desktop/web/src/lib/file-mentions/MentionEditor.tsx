@@ -34,6 +34,11 @@ export type MentionEditorHandle = {
   insertSkill: (skill: SkillEntry) => void;
   /** Insert a pasted-image chip at the caret (data URL payload). */
   insertImage: (reference: FileReference) => void;
+  /**
+   * Insert image files picked from the OS file dialog / drag-and-drop (each becomes an
+   * `image` chip with a data: URL payload — the same shape as pasted images).
+   */
+  insertImageFiles: (files: File[]) => Promise<void>;
   /** Open the `@` reference picker from the external "+" button (empty query, immediate fetch). */
   openMention: () => void;
 };
@@ -270,6 +275,21 @@ export const MentionEditor = forwardRef<
   selectRef.current = handleSelect;
   const imageInsertRef = useRef<(reference: FileReference) => void>(() => {});
   imageInsertRef.current = insertReferenceAtCaret;
+  const insertImageFiles = useCallback(
+    async (files: File[]) => {
+      for (const file of files) {
+        if (!file.type.startsWith("image/")) continue;
+        const dataUrl = await fileToDataUrl(file);
+        insertReferenceAtCaret({
+          path: `image:${file.name || "image"}`,
+          name: file.name || "image",
+          kind: "image",
+          dataUrl,
+        });
+      }
+    },
+    [insertReferenceAtCaret],
+  );
   const slashSelectRef = useRef<(skill: SkillEntry) => void>(() => {});
   slashSelectRef.current = handleSkillSelect;
   useImperativeHandle(ref, () => ({
@@ -277,6 +297,7 @@ export const MentionEditor = forwardRef<
     insertReference: (reference) => selectRef.current(reference),
     insertSkill: (skill) => slashSelectRef.current(skill),
     insertImage: (reference) => imageInsertRef.current(reference),
+    insertImageFiles: (files) => insertImageFiles(files),
     openMention: () => {
       rootRef.current?.focus({ preventScroll: true });
       mentionRef.current = { queryStart: -1 };
@@ -509,6 +530,27 @@ export const MentionEditor = forwardRef<
     [handleInput, insertReferenceAtCaret],
   );
 
+  // Drag-and-drop image files onto the editor: same payload shape as paste / file dialog.
+  const handleDrop = useCallback(
+    async (event: React.DragEvent<HTMLDivElement>) => {
+      const files = Array.from(event.dataTransfer?.files ?? []).filter((file) =>
+        file.type.startsWith("image/"),
+      );
+      if (files.length === 0) return;
+      event.preventDefault();
+      for (const file of files) {
+        const dataUrl = await fileToDataUrl(file);
+        insertReferenceAtCaret({
+          path: `image:${file.name || "image"}`,
+          name: file.name || "image",
+          kind: "image",
+          dataUrl,
+        });
+      }
+    },
+    [insertReferenceAtCaret],
+  );
+
   // Keep the native listener registered at mount always calling the latest implementation.
   inputRef.current = handleInput;
 
@@ -534,6 +576,10 @@ export const MentionEditor = forwardRef<
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
       onPaste={(event) => void handlePaste(event)}
+      onDragOver={(event) => {
+        if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
+      }}
+      onDrop={(event) => void handleDrop(event)}
     />
   );
 });
