@@ -28,8 +28,11 @@ mod tool;
 
 pub use manager::{
     DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH, DEFAULT_PER_TASK_MAX_STEPS, DEFAULT_WAIT_TIMEOUT_MS,
-    SubagentError, SubagentEvent, SubagentInfo, SubagentKind, SubagentLimits, SubagentManager,
-    SubagentStatus, ToolSelection, WaitOutcome,
+    SubagentInfo, SubagentLimits, SubagentManager, ToolSelection,
 };
-pub use store::{IndexRecord, SubagentStore};
+// `SubagentKind` / `SubagentStatus` are only referenced by tests today; re-export them under
+// `cfg(test)` so the non-test build stays free of dead-code warnings.
+#[cfg(test)]
+pub use manager::{SubagentKind, SubagentStatus};
+pub use store::SubagentStore;
 pub use tool::SubagentTool;

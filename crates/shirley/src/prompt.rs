@@ -57,21 +57,7 @@ fn read_guide(root: &Path) -> Option<String> {
     (!content.trim().is_empty()).then_some(content)
 }
 
-/// Construct the application-side system prompt.
-///
-/// Returns a [`SystemPrompt`] whose function reads the current working directory and `Agent.md` on each resolve.
-/// This way the system prompt regenerated during compression rebuild always reflects the latest project state.
-pub fn build(working_dir: PathBuf) -> SystemPrompt {
-    SystemPrompt::from(move |context: &SystemPromptContext| {
-        let root = context
-            .working_dir
-            .clone()
-            .unwrap_or_else(|| working_dir.clone());
-        render(&root)
-    })
-}
-
-/// Like [`build`], but decides whether to inject the subagent guidance.
+/// Build the application-side system prompt, deciding whether to inject the subagent guidance.
 ///
 /// `subagents = true` is passed only for the **top-level** agent when the `subagent` tool is
 /// registered; child agents (and a disabled config) get `false`, so the guidance never appears
@@ -89,6 +75,7 @@ pub fn build_with_subagents(working_dir: PathBuf, subagents: bool) -> SystemProm
 /// Assemble the role, working directory, and project guide into the final text.
 ///
 /// Split out so it is independently testable: no dependency on the closure or runtime context.
+#[cfg(test)]
 fn render(root: &Path) -> String {
     // Default: inject the subagent guidance (the top-level agent). Tests that do not care about
     // subagents go through here and still get the full prompt.
@@ -246,7 +233,7 @@ mod tests {
         // When the context explicitly gives a directory, it should win over the construction-time default.
         let default_dir = tempfile_dir("build_default");
         let ctx_dir = tempfile_dir("build_ctx");
-        let prompt = build(default_dir);
+        let prompt = build_with_subagents(default_dir, true);
         let resolved = prompt.resolve(&SystemPromptContext {
             working_dir: Some(ctx_dir.clone()),
         });
@@ -259,7 +246,7 @@ mod tests {
     #[test]
     fn build_falls_back_to_default_dir() {
         let default_dir = tempfile_dir("build_fallback");
-        let prompt = build(default_dir.clone());
+        let prompt = build_with_subagents(default_dir.clone(), true);
         let resolved = prompt.resolve(&SystemPromptContext { working_dir: None });
         assert!(
             resolved.contains(&default_dir.display().to_string()),

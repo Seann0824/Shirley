@@ -50,10 +50,7 @@ use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
 
 use super::desktop::wire::{AgentEventWire, StateSnapshotWire};
-use super::runtime::{
-    EventSink, FileEntryWire, HistoryMessageWire, ModelEntryWire, ProjectEntryWire,
-    ProjectRuntimeManager, SessionEntryWire, SkillEntryWire, StatusSink, SubagentSummaryWire,
-};
+use super::runtime::{EventSink, ProjectRuntimeManager, SessionEntryWire, StatusSink};
 use crate::bootstrap::AgentFactory;
 use crate::project::ProjectRegistry;
 

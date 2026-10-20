@@ -19,7 +19,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use shirley_agent_sdk::{AgentEvent, ErrorKind, StopReason, Usage};
+use shirley_agent_sdk::{AgentEvent, ErrorKind, StopReason};
 
 /// Default "alive but not progressing" threshold. Generous on purpose: image / 3D generation and
 /// long compactions legitimately take minutes (ASP §7.2.1 says set it per agent / per task type).
@@ -254,6 +254,10 @@ impl StateKeeper {
     }
 
     /// Mark the session as "waiting by design" (login / rewind edit). Suppresses `Stalled`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "waiting-by-design flag not yet driven by the UI")
+    )]
     pub fn set_waiting_input(&self, waiting: bool) {
         let mut s = self.lock();
         if waiting {
@@ -297,6 +301,10 @@ impl StateKeeper {
 
     // ---- Derived accessors (the only way the UI asks "is it running / compressing") ----
 
+    #[expect(
+        dead_code,
+        reason = "wire.rs reads the `liveness` field directly; accessor kept for completeness"
+    )]
     pub fn liveness(&self) -> Liveness {
         self.lock().liveness
     }
@@ -318,6 +326,10 @@ impl StateKeeper {
     }
 
     /// Seconds since `progress_seq` last advanced — the "last real progress" figure.
+    #[expect(
+        dead_code,
+        reason = "UI reads the precomputed snapshot field; accessor kept for completeness"
+    )]
     pub fn seconds_since_progress(&self) -> Option<u64> {
         self.lock()
             .last_progress_at
@@ -397,7 +409,7 @@ fn finish(s: &mut Inner, stop: &StopReason) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use shirley_agent_sdk::RunResult;
+    use shirley_agent_sdk::{RunResult, Usage};
 
     fn keeper() -> StateKeeper {
         // Tiny thresholds so the time-based paths are reachable without sleeping for minutes.

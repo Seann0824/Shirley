@@ -378,6 +378,7 @@ impl Settings {
     }
 
     /// Convenience entry point: uses the real `config_dir` and process env vars.
+    #[cfg(test)]
     pub fn load_default(workspace_root: &Path) -> Result<Self, SettingsError> {
         let paths =
             crate::storage::StoragePaths::new(crate::storage::global_root(), workspace_root)?;

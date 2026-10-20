@@ -185,8 +185,16 @@ pub struct WaitOutcome {
 #[derive(Clone, Debug)]
 pub enum SubagentEvent {
     /// A stream event forwarded from the child's own `run_stream` (deltas, tool calls, ...).
+    #[expect(
+        dead_code,
+        reason = "the per-subagent real-time channel is not yet wired into the UI; the event is emitted but its payload is unread"
+    )]
     Agent(AgentEvent),
     /// The child reached a terminal state (`completed` / `failed` / `cancelled`).
+    #[expect(
+        dead_code,
+        reason = "the per-subagent real-time channel is not yet wired into the UI; the event is emitted but its payload is unread"
+    )]
     Status(SubagentStatus),
 }
 
@@ -306,11 +314,19 @@ impl SubagentManager {
         manager
     }
 
+    #[expect(
+        dead_code,
+        reason = "introspection accessor, not yet consumed by any interface"
+    )]
     pub fn limits(&self) -> &SubagentLimits {
         &self.limits
     }
 
     /// The tool names a child may be granted (`subagent` is never included).
+    #[expect(
+        dead_code,
+        reason = "introspection accessor, not yet consumed by any interface"
+    )]
     pub fn available_tools(&self) -> &[String] {
         &self.available_tools
     }
@@ -326,6 +342,10 @@ impl SubagentManager {
     }
 
     /// The default `wait` timeout (ms).
+    #[expect(
+        dead_code,
+        reason = "introspection accessor, not yet consumed by any interface"
+    )]
     pub fn default_timeout_ms(&self) -> u64 {
         self.default_timeout_ms
     }
@@ -558,6 +578,10 @@ impl SubagentManager {
     }
 
     /// Subscribe to a subagent's real-time event stream (decision 10, path 2).
+    #[expect(
+        dead_code,
+        reason = "the per-subagent real-time channel is not yet wired into the UI"
+    )]
     pub fn subscribe(&self, id: &str) -> Option<broadcast::Receiver<SubagentEvent>> {
         self.events
             .lock()

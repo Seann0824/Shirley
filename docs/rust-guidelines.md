@@ -163,9 +163,16 @@ CI 只把 **Tier 1 当硬门禁**，Tier 2 只展示不阻塞：
 3. ✅ 清理 clippy `correctness`/`suspicious`（真实命中各 2 处）→ 已翻 `deny`；再清 `style`（11）/`complexity`（3）/`perf`（1）→ 均已翻 `deny`。✅ 清 `allow_attributes_without_reason`（48 处：`dead_code`/`unused_imports` 补 `reason` 保留 `allow`，无条件触发的 `too_many_arguments` 转 `#[expect(..., reason=...)]`）与 `cargo_common_metadata`（6 处：补齐三个 crate 的 description/license/repository/keywords/categories）→ 均翻 `deny`。
 4. ✅ 给测试里的 15 处 `set_var/remove_var` 补 `// SAFETY:`，`undocumented_unsafe_blocks` 已清零并翻 `deny`。
 5. ✅ 接入 MS 推荐的其它工具链：`cargo-audit`（依赖漏洞）、`cargo-hack`（feature 组合矩阵）已加进 CI；`cargo-udeps` / `miri`（需 nightly，暂缓）。
-6. ✅ 清 `pedantic` / `restriction` 的结构型子集：批次 A（16 条机械型：`uninlined_format_args` … `too_long_first_doc_paragraph`）+ 批次 B（7 条：`assigning_clones` / `match_same_arms` / `map_unwrap_or` / `float_cmp` / `trivially_copy_pass_by_ref` / `unnecessary_wraps` / `redundant_closure_for_method_calls`）已全部清零并逐条翻 `deny`。**下一步**：继续清 `pedantic` 剩余存量（`missing_errors_doc` / `needless_pass_by_value` / `too_many_lines` 等）与 restriction 剩余（`clone_on_ref_ptr` / `unused_result_ok` / `map_err_ignore`）。
+6. ✅ 清 `pedantic` / `restriction` 的结构型子集：批次 A（16 条机械型：`uninlined_format_args` … `too_long_first_doc_paragraph`）+ 批次 B（7 条：`assigning_clones` / `match_same_arms` / `map_unwrap_or` / `float_cmp` / `trivially_copy_pass_by_ref` / `unnecessary_wraps` / `redundant_closure_for_method_calls`）已全部清零并逐条翻 `deny`。
+7. ✅ **lib 门面化后暴露的 `dead_code` / `unused_imports` 存量清零**（`cargo build -p Shirley --all-targets --features server` 曾报 19 lib + 10 lib-test 警告）。按证据分四类处理：①纯未用导入 → 直接删；②仅测试用 → `#[cfg(test)]`；③仅某 feature 用 → `#[cfg(feature = "...")]`（如 `interface::runtime::subscribe` → `desktop`，`remote::{save,command,EventDecoder}` → `any(desktop,test)`）；④保留但暂无调用者（公共 API 面/为未来预留）→ `#[expect(dead_code, reason = "...")]`。**注意**：`prompt::build` 这类被 `build_with_subagents` 取代的旧入口直接删，其测试改测新入口。清完后 clippy `--workspace --all-targets --features server` exit 0。
+8. **下一步**：继续清 `pedantic` 剩余存量（`missing_errors_doc` / `needless_pass_by_value` / `too_many_lines` 等）与 restriction 剩余（`clone_on_ref_ptr` / `unused_result_ok` / `map_err_ignore`）。
 
 ## 7. 与其它规范的取舍
 
 - 我们**没有**引入 `clippy::nursery`（不稳定、噪声大），MS 也把它列为可选。
 - 命名类建议（`M-WEASEL-WORDS`：避免 `Manager`/`Factory` 这类含糊词）无法用 lint 自动检查，属于 code review 约定，暂不强制；现有 `SessionManager` / `AgentFactory` 等命名保留（改名会破坏外部契约且收益低）。
+- **批次 C（结构型存量）评估结论：不重命名、不拆分、不强解环**。理由如下：
+  - **weasel-word 重命名**：M-WEASEL-WORDS 原文针对的是**公共 API 的可读性**；本地 7 个 `*Manager` / `*Factory`（`CommandManager` / `EventHandler` / `ProjectRuntimeManager` / `SessionManager` / `AgentFactory` / `SubagentManager` / SDK `ToolManager`）除 `ToolManager` 外全是应用 crate 内 `pub(crate)`，不构成公共 API 面；且 `ToolManager` 被 60+ 处引用。改名是纯机械大改、零行为收益、易引入错误，与「不为抽象而抽象」原则相悖 → 保留。
+  - **>800 行大文件拆分**：与目录结构议题正交，属 `too_many_lines` 一类结构债，拆分风险高（易破坏前缀缓存/事件顺序）；`too_many_lines` 已显式保留 `warn`（advisory）→ 暂不拆。
+  - **4 组模块循环依赖**（`settings ↔ storage`、`remote ↔ memory`、`models ↔ model_providers`、`bootstrap ↔ subagent`）：需移动类型归属，风险高、收益低，已在 `lib.rs` 文档与 `Agent.md` 标注为 known structural debt → 暂不强解。
+- **easy-fix 复核**：`ModelfinishReaon` typo 与 chat_completions 的过时 TODO 注释均已不存在（现为 `ModelFinishReason`）；默认无 feature `build` / `test` 已 exit 0（lib 化后自动解决）。`bash.rs` 两条 TODO（统一错误格式 / 可配置 backend，受 `SandboxBackend` 非 object-safe 限制）是诚实的未来工作标记，非过时注释，保留。

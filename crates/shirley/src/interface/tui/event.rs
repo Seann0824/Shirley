@@ -21,6 +21,10 @@ pub enum Event {
     Mouse(MouseEvent),
     // Text delivered whole by the terminal via "bracketed paste"; may contain newlines.
     Paste(String),
+    #[expect(
+        dead_code,
+        reason = "resize dimensions are forwarded from the terminal but not read yet; the TUI redraws every frame"
+    )]
     Resize(u16, u16),
 }
 

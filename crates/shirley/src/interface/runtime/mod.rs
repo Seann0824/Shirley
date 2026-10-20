@@ -545,6 +545,7 @@ impl ProjectRuntimeManager {
     ///
     /// Subscribe and snapshot happen **under the same lock** so nothing is lost or
     /// duplicated: the snapshot covers before-subscribe, the receiver covers after.
+    #[cfg(feature = "desktop")]
     pub async fn subscribe(
         &self,
         project: &str,

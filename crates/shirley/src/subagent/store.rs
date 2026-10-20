@@ -79,10 +79,15 @@ impl SubagentStore {
     }
 
     /// Build from an application state root (`<state>/sessions/<session>.agents`).
+    #[expect(
+        dead_code,
+        reason = "alternate constructor kept for state-root callers; production uses for_session"
+    )]
     pub fn new(root: &Path, session: &str) -> Self {
         Self::for_session(&root.join("sessions"), session)
     }
 
+    #[expect(dead_code, reason = "accessor not yet consumed by any interface")]
     pub fn dir(&self) -> &Path {
         &self.dir
     }
@@ -158,6 +163,10 @@ impl SubagentStore {
     }
 
     /// All subagent ids that have a transcript on disk (excluding the index).
+    #[expect(
+        dead_code,
+        reason = "recovery helper not yet consumed; restore uses index.jsonl"
+    )]
     pub fn transcript_ids(&self) -> Vec<String> {
         let Ok(read) = std::fs::read_dir(&self.dir) else {
             return Vec::new();

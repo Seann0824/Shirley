@@ -174,6 +174,7 @@ impl MemoryStore {
     }
 
     /// Write one entry (**selecting the root by `entry.domain`**; `id` determines the file name). Returns the written path.
+    #[cfg(test)]
     pub fn write_entry(&self, entry: &Entry) -> Result<PathBuf, MemoryError> {
         let root = self.root_for_domain(entry.domain);
         let _lock = lock_root(root)?;

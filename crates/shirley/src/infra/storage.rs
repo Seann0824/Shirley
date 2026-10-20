@@ -141,6 +141,7 @@ impl StoragePaths {
         })
     }
 
+    #[cfg(test)]
     pub fn sessions(&self) -> PathBuf {
         self.state.join("sessions")
     }
