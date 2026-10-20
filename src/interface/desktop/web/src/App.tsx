@@ -1,11 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Clock, LoaderCircle, X } from "lucide-react";
+import { Clock, LoaderCircle, Plus, X } from "lucide-react";
 import { DesktopChrome } from "@/components/DesktopChrome";
 import {
   AiConversationTranscript,
   type AiTranscriptMessage,
 } from "@/components/ai/AiConversationTranscript";
 import { AiChatComposer } from "@/components/ai/AiChatComposer";
+import { Button } from "@/ui/button";
 import { AssistantMessage } from "@/components/AssistantMessage";
 import { ImageHoverPreview } from "@/components/ImageHoverPreview";
 import { TaskCard } from "@/components/ai/TaskCard";
@@ -1176,6 +1177,18 @@ export function App() {
         onValueChange={() => {}}
         onSend={() => void send()}
         onStop={() => void stop()}
+        leadingAction={
+          <Button
+            type="button"
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Add reference (@)"
+            className="rounded-full text-muted hover:text-ink"
+            onClick={() => editorRef.current?.openMention()}
+          >
+            <Plus />
+          </Button>
+        }
         trailingAction={
           <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
         }

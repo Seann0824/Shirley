@@ -34,6 +34,8 @@ export type MentionEditorHandle = {
   insertSkill: (skill: SkillEntry) => void;
   /** Insert a pasted-image chip at the caret (data URL payload). */
   insertImage: (reference: FileReference) => void;
+  /** Open the `@` reference picker from the external "+" button (empty query, immediate fetch). */
+  openMention: () => void;
 };
 
 /** Nearest `/` start before the caret (no whitespace in between); returns -1 if none. */
@@ -275,6 +277,11 @@ export const MentionEditor = forwardRef<
     insertReference: (reference) => selectRef.current(reference),
     insertSkill: (skill) => slashSelectRef.current(skill),
     insertImage: (reference) => imageInsertRef.current(reference),
+    openMention: () => {
+      rootRef.current?.focus({ preventScroll: true });
+      mentionRef.current = { queryStart: -1 };
+      search.open();
+    },
   }));
 
   const handleBackspace = useCallback((): boolean => {

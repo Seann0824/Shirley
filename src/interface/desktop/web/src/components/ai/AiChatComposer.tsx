@@ -18,8 +18,9 @@ type AiChatComposerProps = Omit<ComponentPropsWithoutRef<"form">, "children" | "
   textareaRef?: Ref<HTMLTextAreaElement>;
   textareaClassName?: string;
   textareaOnKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => boolean | void;
+  /** Left cluster of the action row: e.g. the "+" attach button and the access pill. */
   leadingAction?: ReactNode;
-  /** An action placed to the left of the send button, on the same row (e.g. the model switcher). */
+  /** Actions placed to the right of the action row, before the send button (e.g. the model switcher). */
   trailingAction?: ReactNode;
   /**
    * A custom input control replacing the built-in `<textarea>` (e.g. a rich input with
@@ -34,6 +35,13 @@ type AiChatComposerProps = Omit<ComponentPropsWithoutRef<"form">, "children" | "
   onStop?: () => void;
 };
 
+/**
+ * The chat composer: a single rounded pill that mirrors the reference layout — the text
+ * area sits on top, and an action row runs along the bottom with a left cluster (attach /
+ * access) and a right cluster (model switcher + round send button). It is a pure layout
+ * shell; all controls are supplied by the caller through `leadingAction` / `trailingAction`
+ * / `inputSlot`, so it never owns business state.
+ */
 export function AiChatComposer({
   id,
   label,
@@ -64,7 +72,7 @@ export function AiChatComposer({
   return (
     <form
       className={cn(
-        "relative flex shrink-0 flex-col rounded-card border border-line bg-surface p-2 shadow-card transition-[border-color,box-shadow] duration-150 ease-product focus-within:border-line-strong focus-within:ring-2 focus-within:ring-ink/8",
+        "relative flex shrink-0 flex-col gap-1 rounded-[1.75rem] border border-line bg-surface p-2.5 shadow-card transition-[border-color,box-shadow] duration-150 ease-product focus-within:border-line-strong focus-within:ring-2 focus-within:ring-ink/8",
         className,
       )}
       data-ai-chat-composer
@@ -81,7 +89,7 @@ export function AiChatComposer({
       }}
     >
       {children}
-      <div className="order-3 min-w-0">
+      <div className="order-1 min-w-0 px-1.5 pt-1">
         {inputSlot ?? (
           <>
             <label className="sr-only" htmlFor={id}>
@@ -96,7 +104,7 @@ export function AiChatComposer({
               maxLength={maxLength}
               enterKeyHint="enter"
               className={cn(
-                "max-h-40 min-h-12 resize-none overflow-y-auto rounded-none border-0 bg-transparent p-2 [field-sizing:content] hover:bg-transparent focus:border-transparent focus:bg-transparent focus:ring-0",
+                "max-h-40 min-h-11 resize-none overflow-y-auto rounded-none border-0 bg-transparent p-0 [field-sizing:content] hover:bg-transparent focus:border-transparent focus:bg-transparent focus:ring-0",
                 textareaClassName,
               )}
               placeholder={placeholder}
@@ -113,17 +121,18 @@ export function AiChatComposer({
           </>
         )}
       </div>
-      <div className="order-4 mt-1 flex items-center justify-between gap-2">
+      <div className="order-2 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1">{leadingAction}</div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 items-center gap-1.5">
           {trailingAction}
           {showStop ? (
             <Button
               type="button"
-              variant="secondary"
+              variant="primary"
               size="icon-sm"
               aria-label="Stop generating"
               disabled={disabled}
+              className="rounded-full"
               onClick={(event) => {
                 event.preventDefault();
                 onStop?.();
@@ -138,6 +147,7 @@ export function AiChatComposer({
               size="icon-sm"
               aria-label={busy ? "Add to queue, send after the previous turn finishes" : sendLabel}
               disabled={disabled || !hasText}
+              className="rounded-full"
             >
               <ArrowUp data-icon="inline-start" />
             </Button>
