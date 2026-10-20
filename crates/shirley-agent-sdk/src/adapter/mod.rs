@@ -79,6 +79,11 @@ pub enum AdapterEvent {
     Retrying { attempt: usize, reason: String },
     ReasoningDelta(String),
     ContentDelta(String),
+    /// The request carried images but they were silently dropped because the model cannot
+    /// read them (declared unsupported, or the provider rejected image input). The request is
+    /// re-sent as text; the UI turns this into a neutral, human-readable notice. This never
+    /// surfaces a "does it support images" capability question to the user.
+    ImagesDropped { reason: String },
     Finished(ModelResponse),
 }
 
@@ -321,16 +326,19 @@ pub async fn invoke<'a>(
     Box::pin(async_stream::try_stream! {
         let (encode, decode, decode_stream) = codec(&config.protocol)?;
 
-        // Send-time capability guard: fail fast before touching the network. The
-        // model only accepts images when the application has explicitly declared
-        // it (deny by default). This is the one place the capability fact is
-        // enforced, so every protocol and both streaming modes are covered.
-        if !config.supports_images && content::messages_have_images(input.messages) {
-            Err(AdapterError::Encode(
-                "the configured model does not accept image input; set \
-                 ModelConfig.supports_images = true to enable it"
-                    .to_owned(),
-            ))?;
+        // Optimistic image handling (user-invisible). Images are accepted by default; the
+        // only reason to drop them up front is an explicit "this model has no image support"
+        // declaration (internal escape hatch). In that case we silently degrade instead of
+        // failing: the user keeps the attach entry and just sees the answer, with a neutral
+        // notice. A provider that *rejects* image input at request time is handled below by
+        // the same strip-and-resend path.
+        let mut messages: std::borrow::Cow<'_, [message::Message]> =
+            std::borrow::Cow::Borrowed(input.messages);
+        if !config.supports_images && content::messages_have_images(messages.as_ref()) {
+            messages = std::borrow::Cow::Owned(content::strip_images(messages.as_ref()));
+            yield AdapterEvent::ImagesDropped {
+                reason: "the configured model does not accept image input".to_owned(),
+            };
         }
 
         // Content tool protocol (see `tool_calling`): the protocol instance is built internally
@@ -339,34 +347,45 @@ pub async fn invoke<'a>(
         // turned back into feedback text; meanwhile pass empty tools and clear tool_choice, so no
         // native tool fields are generated at the source.
         let protocol = config.tool_calling.protocol();
-        let content_view: Option<Vec<message::Message>> = protocol.as_deref().map(|protocol| {
-            tool_calling::encode_messages_for_content(input.messages, input.tools, protocol)
-        });
         let no_tools: [&tool::ToolDefinition; 0] = [];
-        let content_config;
-        let encode_config = if protocol.is_some() {
-            // Content mode: clear the native tool fields. `tool_choice` is set to None directly;
-            // `parallel_tool_calls` isn't a standard field, so it's set to `null` via `extra_body`
-            // to delete it (in the shallow merge `null` means delete the key), avoiding residual
-            // native tool behavior at the endpoint.
-            content_config = ModelConfig {
-                tool_choice: None,
-                extra_body: Some(remove_parallel_tool_calls(config.extra_body.clone())),
-                ..config.clone()
+
+        // Build the encoded request from the current message view. A closure (not one-shot code)
+        // because the image-degradation retry below needs to re-encode with images stripped.
+        let build_prepared = |messages: &[message::Message]| -> Result<PreparedRequest, AdapterError> {
+            let content_view: Option<Vec<message::Message>> = protocol.as_deref().map(|protocol| {
+                tool_calling::encode_messages_for_content(messages, input.tools, protocol)
+            });
+            let content_config;
+            let encode_config = if protocol.is_some() {
+                // Content mode: clear the native tool fields. `tool_choice` is set to None directly;
+                // `parallel_tool_calls` isn't a standard field, so it's set to `null` via `extra_body`
+                // to delete it (in the shallow merge `null` means delete the key), avoiding residual
+                // native tool behavior at the endpoint.
+                content_config = ModelConfig {
+                    tool_choice: None,
+                    extra_body: Some(remove_parallel_tool_calls(config.extra_body.clone())),
+                    ..config.clone()
+                };
+                &content_config
+            } else {
+                config
             };
-            &content_config
-        } else {
-            config
+            let encode_input = ModelRequest {
+                messages: content_view.as_deref().unwrap_or(messages),
+                tools: if protocol.is_some() { &no_tools } else { input.tools },
+                session_id: input.session_id,
+            };
+            encode(encode_config, &encode_input)
         };
-        let encode_input = ModelRequest {
-            messages: content_view.as_deref().unwrap_or(input.messages),
-            tools: if protocol.is_some() { &no_tools } else { input.tools },
-            session_id: input.session_id,
-        };
-        let prepared = encode(encode_config, &encode_input)?;
+
         let mut retries = 0;
         let mut emitted = false;
+        let mut image_retry_done = false;
         'attempt: loop {
+            // Re-encode each attempt from the current message view. On an image rejection we
+            // strip the images, `continue 'attempt`, and this line rebuilds the text-only body
+            // (the previous `stream`/`prepared` are dropped by the `continue`).
+            let prepared = build_prepared(messages.as_ref())?;
             let mut stream = invoke_prepared(client, &prepared, config.stream, decode, decode_stream);
             // Content mode: build a **stream parser** that translates raw protocol text deltas
             // into visible deltas (thinking → ReasoningDelta, description → ContentDelta, tool
@@ -384,6 +403,21 @@ pub async fn invoke<'a>(
                         tokio::time::sleep(std::time::Duration::from_millis(backoff)).await;
                         continue 'attempt;
                     }
+                    // The provider rejected the request because of the images: drop them and
+                    // silently re-send as text, exactly once. This is the "optimistic default"
+                    // payoff — no capability prompt, no failure surfaced, the user just gets the
+                    // answer. Only happens before any delta is emitted, so nothing to unwind.
+                    Err(error)
+                        if !emitted
+                            && !image_retry_done
+                            && content::messages_have_images(messages.as_ref())
+                            && looks_like_image_rejection(&error) =>
+                    {
+                        image_retry_done = true;
+                        messages = std::borrow::Cow::Owned(content::strip_images(messages.as_ref()));
+                        yield AdapterEvent::ImagesDropped { reason: error.to_string() };
+                        continue 'attempt;
+                    }
                     Err(error) => Err(error)?,
                 };
                 let Some(parser) = stream_parser.as_mut() else {
@@ -396,6 +430,8 @@ pub async fn invoke<'a>(
                     AdapterEvent::Retrying { attempt, reason } => {
                         yield AdapterEvent::Retrying { attempt, reason };
                     }
+                    // `invoke_prepared` never emits this (only `invoke` synthesizes it); ignore.
+                    AdapterEvent::ImagesDropped { .. } => {}
                     AdapterEvent::ContentDelta(text) => {
                         for chunk in parser.push(&text) {
                             emitted = true;
@@ -424,6 +460,25 @@ pub async fn invoke<'a>(
             break;
         }
     })
+}
+
+/// Heuristic: does this HTTP error mean "this endpoint/model cannot take images"?
+///
+/// Providers word it many ways ("image input is not supported", "unknown modality", "vision
+/// not available", content-type rejections), so we look at the status class plus a small set
+/// of keywords in the body. Deliberately conservative: only client errors that mention image /
+/// vision / modality are treated as an image rejection — anything else propagates unchanged.
+fn looks_like_image_rejection(error: &AdapterError) -> bool {
+    let AdapterError::Http { status, body } = error else {
+        return false;
+    };
+    if !matches!(status, 400 | 415 | 422) {
+        return false;
+    }
+    let body = body.to_ascii_lowercase();
+    ["image", "vision", "modality", "multimodal", "image_url"]
+        .iter()
+        .any(|keyword| body.contains(keyword))
 }
 
 /// Layer a `parallel_tool_calls: null` (delete semantics) onto `extra_body`, used in content mode

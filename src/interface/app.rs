@@ -20,6 +20,9 @@ pub enum Role {
     Assistant,
     System,
     Error,
+    /// A neutral system notice shown inline (e.g. "images were dropped, continuing"). Distinct
+    /// from `System` (command output) and `Error`; rendered muted, no label, not markdown.
+    Notice,
 }
 
 #[derive(Debug, Clone)]

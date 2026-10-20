@@ -31,7 +31,7 @@ export type ProviderBridge = {
 };
 export const selectionKey = (provider: string, model: string) => `provider:${provider}:${encodeURIComponent(model).replace(/%20/g, "+").replace(/[!'()~]/g, (ch) => `%${ch.charCodeAt(0).toString(16).toUpperCase()}`)}`;
 export function emptyModel(): ModelDefinition {
-  return { id: "", name: "", context_window_tokens: 65536, supports_images: false, tool_mode: "native", thinking: false, reasoning_effort: null };
+  return { id: "", name: "", context_window_tokens: 65536, supports_images: true, tool_mode: "native", thinking: false, reasoning_effort: null };
 }
 export function emptyProvider(): ProviderDefinition {
   return { id: globalThis.crypto?.randomUUID?.() ?? `provider-${Date.now()}-${Math.random().toString(36).slice(2)}`, name: "New provider", protocol: "chat_completions", base_url: "", models_url: null, api_key: null, default_model: "", models: [emptyModel()], extra_body: null };

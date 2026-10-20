@@ -138,6 +138,47 @@ pub(crate) fn messages_have_images(messages: &[crate::message::Message]) -> bool
     })
 }
 
+/// Remove every image part from the messages, keeping text intact.
+///
+/// Used by the silent image-degradation path (`adapter::invoke`): when the model cannot
+/// read images the request is resent with the images dropped instead of failing. A message
+/// left with no text (an image-only turn) gets a short placeholder so the request stays
+/// valid. Messages without images are cloned unchanged, so an all-text request is
+/// byte-for-byte identical (KV prefix cache).
+pub(crate) fn strip_images(messages: &[crate::message::Message]) -> Vec<crate::message::Message> {
+    use crate::message::Message;
+    messages
+        .iter()
+        .map(|message| match message {
+            Message::User { content } => Message::User {
+                content: strip_content_images(content),
+            },
+            Message::Tool {
+                tool_call_id,
+                content,
+            } => Message::Tool {
+                tool_call_id: tool_call_id.clone(),
+                content: content.as_ref().map(strip_content_images),
+            },
+            other => other.clone(),
+        })
+        .collect()
+}
+
+fn strip_content_images(content: &Content) -> Content {
+    let kept: Vec<ContentPart> = content
+        .as_parts()
+        .iter()
+        .filter(|part| matches!(part, ContentPart::Text { .. }))
+        .cloned()
+        .collect();
+    if kept.is_empty() {
+        Content::text("[image omitted: this model cannot read images]")
+    } else {
+        Content::parts(kept)
+    }
+}
+
 /// The image parts of `content` as a fresh content, or `None` when there are none.
 ///
 /// Protocols whose tool-result slot is text-only (ChatCompletions / Responses) split a

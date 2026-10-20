@@ -50,6 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             AgentEvent::ContextUsage { used_tokens, limit_tokens } => {
                 println!("[context] {used_tokens}/{limit_tokens}");
             }
+            AgentEvent::Notice(text) => println!("[notice] {text}"),
             AgentEvent::CompressionStarted => println!("[compaction] started"),
             AgentEvent::CompressionFinished => println!("[compaction] finished"),
             AgentEvent::MessageAdded(_) => {}

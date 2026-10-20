@@ -956,6 +956,7 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event.expect("streaming events should not error") {
                 AdapterEvent::Retrying { .. } => {}
+                AdapterEvent::ImagesDropped { .. } => {}
                 AdapterEvent::ContentDelta(delta) => content.push_str(&delta),
                 AdapterEvent::ReasoningDelta(_) => {}
                 AdapterEvent::Finished(response) => {
@@ -1084,6 +1085,7 @@ mod tests {
         while let Some(event) = stream.next().await {
             match event.expect("streaming events should not error") {
                 AdapterEvent::Retrying { .. } => {}
+                AdapterEvent::ImagesDropped { .. } => {}
                 AdapterEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
                 AdapterEvent::ContentDelta(_) => {}
                 AdapterEvent::Finished(response) => {

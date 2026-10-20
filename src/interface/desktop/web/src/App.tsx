@@ -1459,6 +1459,18 @@ function applyWireEvent(
         ),
       };
     }
+    case "notice": {
+      // Neutral inline hint (e.g. images dropped, continuing). Appended as its own content
+      // segment so it survives the turn without being mistaken for model output.
+      if (!assistantId) return view;
+      return {
+        ...view,
+        turnSegments: appendSegment(view.turnSegments, assistantId, {
+          kind: "content",
+          text: event.text,
+        }),
+      };
+    }
     case "finished": {
       return {
         ...view,

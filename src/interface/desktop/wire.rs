@@ -116,6 +116,13 @@ pub enum AgentEventWire {
         session: Option<String>,
         todo: Option<TaskViewWire>,
     },
+    /// A neutral, human-readable notice (not an error, not model content). The frontend shows
+    /// it inline as muted text. Used for silent image degradation.
+    Notice {
+        project: Option<String>,
+        session: Option<String>,
+        text: String,
+    },
     Finished {
         project: Option<String>,
         session: Option<String>,
@@ -267,6 +274,11 @@ impl AgentEventWire {
                 project: None,
                 session: None,
             },
+            AgentEvent::Notice(text) => Self::Notice {
+                project: None,
+                session: None,
+                text,
+            },
             AgentEvent::Finished(result) => Self::Finished {
                 project: None,
                 session: None,
@@ -316,6 +328,9 @@ impl AgentEventWire {
                 project, session, ..
             }
             | Self::Finished {
+                project, session, ..
+            }
+            | Self::Notice {
                 project, session, ..
             }
             | Self::Error {
@@ -396,6 +411,7 @@ fn role_wire(role: crate::interface::app::Role) -> &'static str {
         Role::Assistant => "assistant",
         Role::System => "system",
         Role::Error => "error",
+        Role::Notice => "notice",
     }
 }
 

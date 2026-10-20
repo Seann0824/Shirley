@@ -283,6 +283,9 @@ impl Session {
             // Thinking (reasoning) is not displayed: digested internally, the user only cares about behavior and results.
             Ok(AgentEvent::ReasoningDelta(_)) => {}
             Ok(AgentEvent::Retrying { .. }) => {}
+            // Neutral notice (e.g. silent image degradation): its own view item, muted, not
+            // persisted to the session log (it is a per-turn UI hint, not conversation content).
+            Ok(AgentEvent::Notice(text)) => self.push_message(Role::Notice, text),
             Ok(AgentEvent::Usage(usage)) => self.record_usage(usage),
             Ok(AgentEvent::CompressionStarted) => self.start_compression(),
             Ok(AgentEvent::CompressionFinished) => self.finish_compression(),

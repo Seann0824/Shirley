@@ -62,6 +62,7 @@ export type AgentEventWire =
   | ({ type: "compression_finished" } & SessionTag)
   | ({ type: "todo_updated"; todo: TaskViewWire | null } & SessionTag)
   | ({ type: "error"; message: string } & SessionTag)
+  | ({ type: "notice"; text: string } & SessionTag)
   | ({ type: "finished"; stop_reason: StopReason } & SessionTag);
 
 /** One UI item in a snapshot (aligned with `ItemWire` in the Rust `desktop/wire.rs`). */

@@ -141,6 +141,83 @@ pub(crate) fn normalize_tool_mode(id: &str, provider: &str, declared: Option<Str
     None
 }
 
+/// **Normalize a model's image capability into catalog data** (`docs/multimodal.md`).
+///
+/// Same shape as [`normalize_tool_mode`]: it turns the many spellings providers use into one
+/// `bool`. Priority (`Continue.dev`-style, but with an **optimistic** default):
+///
+/// 1. explicit declaration (`supports_images`)
+/// 2. `supports_vision` (LiteLLM / models.dev legacy)
+/// 3. `architecture.input_modalities` (OpenRouter) / `modalities.input` (models.dev) — an
+///    `image` entry means yes, a non-empty list without `image` means text-only
+/// 4. built-in model-name table (known vision families)
+/// 5. **default `true`** — optimistic: try sending once, and if the provider really rejects the
+///    image the adapter strips it and resends silently (`docs/multimodal.md`). Never a wall.
+///
+/// The user is never asked and never sees a capability toggle: a wrong guess costs at most one
+/// extra failed request, then degrades invisibly.
+pub(crate) fn normalize_supports_images(
+    id: &str,
+    declared: Option<bool>,
+    supports_vision: Option<bool>,
+    input_modalities: Option<&[String]>,
+    modalities_input: Option<&[String]>,
+) -> bool {
+    if let Some(value) = declared {
+        return value;
+    }
+    if let Some(value) = supports_vision {
+        return value;
+    }
+    for list in [input_modalities, modalities_input].into_iter().flatten() {
+        if !list.is_empty() {
+            return list.iter().any(|m| m.eq_ignore_ascii_case("image"));
+        }
+    }
+    if name_suggests_vision(id) {
+        return true;
+    }
+    // Optimistic default: attempt with images, degrade silently on real rejection.
+    true
+}
+
+/// Convenience over a raw `/v1/models` item (used by the provider-registry path, which keeps the
+/// item as `serde_json::Value`).
+pub(crate) fn normalize_supports_images_from_value(id: &str, value: &serde_json::Value) -> bool {
+    fn string_array(value: Option<&serde_json::Value>) -> Option<Vec<String>> {
+        value.and_then(|v| v.as_array()).map(|items| {
+            items
+                .iter()
+                .filter_map(|item| item.as_str().map(str::to_owned))
+                .collect()
+        })
+    }
+    let declared = value.get("supports_images").and_then(|v| v.as_bool());
+    let supports_vision = value.get("supports_vision").and_then(|v| v.as_bool());
+    let input_modalities = string_array(
+        value.get("architecture").and_then(|a| a.get("input_modalities")),
+    );
+    let modalities_input = string_array(value.get("modalities").and_then(|m| m.get("input")));
+    normalize_supports_images(
+        id,
+        declared,
+        supports_vision,
+        input_modalities.as_deref(),
+        modalities_input.as_deref(),
+    )
+}
+
+/// Built-in name table: model families that are known to accept images. Only used as a hint;
+/// the final fallback is optimistic `true`.
+fn name_suggests_vision(id: &str) -> bool {
+    let id = id.to_ascii_lowercase();
+    const VISION_MARKERS: [&str; 16] = [
+        "vision", "multimodal", "-vl", "vl-", "gpt-4o", "gpt-4.1", "gpt-5", "o4", "claude-3",
+        "claude-4", "claude-sonnet", "gemini", "llava", "pixtral", "glm-4v", "internvl",
+    ];
+    VISION_MARKERS.iter().any(|marker| id.contains(marker))
+}
+
 /// The in-memory lifetime of a successful result.
 ///
 /// The model list almost never changes within a session, and hitting the network every time `/model` is opened makes the selector
@@ -232,6 +309,27 @@ struct ModelDto {
     /// Whether the model accepts image input (optional, see [`ModelEntry::supports_images`]).
     #[serde(default)]
     supports_images: Option<bool>,
+    /// LiteLLM / models.dev legacy spelling of the same capability.
+    #[serde(default)]
+    supports_vision: Option<bool>,
+    /// OpenRouter-style `architecture.input_modalities`.
+    #[serde(default)]
+    architecture: Option<ArchitectureDto>,
+    /// models.dev-style `modalities.input`.
+    #[serde(default)]
+    modalities: Option<ModalitiesDto>,
+}
+
+#[derive(Deserialize)]
+struct ArchitectureDto {
+    #[serde(default)]
+    input_modalities: Option<Vec<String>>,
+}
+
+#[derive(Deserialize)]
+struct ModalitiesDto {
+    #[serde(default)]
+    input: Option<Vec<String>>,
 }
 
 impl ModelCatalog for RemoteCatalog {
@@ -259,9 +357,23 @@ impl ModelCatalog for RemoteCatalog {
                             let label = m.name.unwrap_or_else(|| m.id.clone());
                             let provider = m.owned_by.unwrap_or_else(|| "remote".to_owned());
                             let tool_mode = normalize_tool_mode(&m.id, &provider, m.tool_mode);
+                            // Multi-format capability detection (see `normalize_supports_images`).
+                            let input_modalities = m
+                                .architecture
+                                .as_ref()
+                                .and_then(|a| a.input_modalities.as_deref());
+                            let modalities_input =
+                                m.modalities.as_ref().and_then(|mo| mo.input.as_deref());
+                            let supports_images = normalize_supports_images(
+                                &m.id,
+                                m.supports_images,
+                                m.supports_vision,
+                                input_modalities,
+                                modalities_input,
+                            );
                             ModelEntry::new(label, m.id, provider)
                                 .with_tool_mode(tool_mode)
-                                .with_supports_images(m.supports_images)
+                                .with_supports_images(Some(supports_images))
                         })
                         .collect::<Vec<_>>(),
                 )

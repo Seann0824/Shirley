@@ -821,6 +821,11 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
             Style::default().fg(Color::Red),
             Style::default().fg(Color::Red),
         ),
+        Role::Notice => (
+            None,
+            Style::default(),
+            Style::default().fg(Color::DarkGray),
+        ),
     };
 
     if let Some(label) = label {
@@ -829,7 +834,7 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
 
     // Message body goes through Markdown -> Block -> Line/Span rendering; error messages stay as-is, so backticks/stars
     // in an error are not swallowed as syntax.
-    if message.role == Role::Error {
+    if matches!(message.role, Role::Error | Role::Notice) {
         for raw in message.content.lines() {
             lines.push(Line::from(Span::styled(raw.to_owned(), base_style)));
         }

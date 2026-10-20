@@ -426,6 +426,15 @@ impl Agent {
                         adapter::AdapterEvent::Retrying { attempt, reason } => {
                             yield AgentEvent::Retrying { attempt, reason };
                         }
+                        adapter::AdapterEvent::ImagesDropped { reason } => {
+                            // Silent degradation: the images were dropped and the request
+                            // re-sent as text. Tell the user in plain language (never surface a
+                            // "does it support images" capability question).
+                            let _ = reason;
+                            yield AgentEvent::Notice(
+                                "当前模型看不了图片，已去掉图片继续。".to_owned(),
+                            );
+                        }
                         adapter::AdapterEvent::Finished(response) => {
                             resuming = false;
                             self.token_counter.calibrate(response.usage.input_tokens, estimated);
@@ -809,7 +818,8 @@ impl Agent {
                 }
                 adapter::AdapterEvent::ReasoningDelta(_)
                 | adapter::AdapterEvent::ContentDelta(_)
-                | adapter::AdapterEvent::Retrying { .. } => {}
+                | adapter::AdapterEvent::Retrying { .. }
+                | adapter::AdapterEvent::ImagesDropped { .. } => {}
             }
         }
 

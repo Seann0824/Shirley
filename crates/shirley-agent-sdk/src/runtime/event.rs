@@ -55,6 +55,13 @@ pub enum AgentEvent {
     },
     // Reported after each model call, to observe cache hits in real time
     Usage(message::Usage),
+    /// A neutral, human-readable notice for the user (not an error, not model content).
+    ///
+    /// Currently used for silent image degradation: when the model cannot read images the
+    /// request is resent as text and the user is told so in plain language. Carried as its
+    /// own event (not a `ContentDelta`) because deltas are transient view state that the real
+    /// assistant message replaces on `MessageAdded`; a notice must survive as its own item.
+    Notice(String),
     Finished(RunResult),
 }
 
@@ -82,6 +89,7 @@ impl fmt::Display for AgentEvent {
                 let _ = write!(f, "{mark} Tool Finished [{call_id}]: {name}");
                 Ok(())
             }
+            Self::Notice(text) => write!(f, "{text}"),
             Self::Usage(usage) => {
                 let hit = match usage.cache_hit_rate() {
                     Some(rate) => format!("{:.1}%", rate * 100.0),

@@ -57,7 +57,9 @@ impl Default for ModelDefinition {
             id: String::new(),
             name: String::new(),
             context_window_tokens: default_context(),
-            supports_images: false,
+            // Optimistic default (`docs/multimodal.md`): assume image input works and degrade
+            // silently on a real rejection instead of denying up front.
+            supports_images: true,
             tool_mode: default_tool_mode(),
             thinking: false,
             reasoning_effort: None,
@@ -577,6 +579,8 @@ pub async fn fetch_models(
                 .and_then(|v| v.as_u64())
                 .filter(|n| *n > 0 && *n <= u32::MAX as u64)
                 .unwrap_or_else(default_context);
+            let supports_images =
+                crate::models::normalize_supports_images_from_value(&id, value);
             Some(ModelDefinition {
                 name: value
                     .get("name")
@@ -587,10 +591,7 @@ pub async fn fetch_models(
                 id,
                 tool_mode,
                 context_window_tokens,
-                supports_images: value
-                    .get("supports_images")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(false),
+                supports_images,
                 ..ModelDefinition::default()
             })
         })

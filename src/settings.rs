@@ -436,8 +436,11 @@ impl Settings {
             .filter(|v| !v.trim().is_empty())
             .unwrap_or_else(|| DEFAULT_MODEL.to_owned());
 
-        // Image input is opt-in: deny by default.
-        let supports_images = merged.supports_images.unwrap_or(false);
+        // Image input is optimistic by default (`docs/multimodal.md`): assume the model can
+        // read images and let the adapter strip + resend silently if it really cannot. The
+        // `[provider] supports_images` / `LOCAL_SUPPORTS_IMAGES` switch is an internal escape
+        // hatch, not something a normal user ever sets.
+        let supports_images = merged.supports_images.unwrap_or(true);
 
         // The thinking switch defaults to on; reasoning effort defaults to `low` (consistent with the old hardcoding).
         let thinking = merged.thinking.unwrap_or(true);
