@@ -47,8 +47,7 @@ impl crate::error::SdkError for AgentError {
             Self::Workspace(_) => ErrorKind::BadRequest,
             // A compression failure aborts the whole turn, but retrying the same context
             // usually won't help.
-            Self::Compression(_) => ErrorKind::Internal,
-            Self::Other(_) => ErrorKind::Internal,
+            Self::Compression(_) | Self::Other(_) => ErrorKind::Internal,
         }
     }
 }

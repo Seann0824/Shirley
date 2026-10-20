@@ -151,7 +151,7 @@ impl Agent {
     }
 
     /// Switch model: replace only the `model` field; the rest of the config (protocol /
-    /// base_url / timeouts / window, etc.) is kept as-is.
+    /// `base_url` / timeouts / window, etc.) is kept as-is.
     ///
     /// This is the only SDK seam for landing the application layer's `/model` command — the
     /// model is a hot-swappable runtime parameter and takes effect without rebuilding `Agent`
@@ -189,6 +189,10 @@ impl Agent {
     /// Triggers the tool's `on_unregister` (= destroy), for dynamically enabling/disabling tools
     /// at runtime. Returns `Err` when the name is not registered. Same style as `set_model` /
     /// `set_provider`: no `Agent` rebuild.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when no tool with `name` is registered.
     pub fn unregister_tool(&mut self, name: &str) -> Result<(), AgentError> {
         self.tools.unregister(name).map_err(Into::into)
     }
@@ -202,10 +206,10 @@ impl Agent {
         &self.messages
     }
 
-    /// After dropping run_stream, save the unfinished messages and return the messages the
+    /// After dropping `run_stream`, save the unfinished messages and return the messages the
     /// application layer needs to append to the log. Repeated calls are empty; completed messages
     /// are not re-submitted. Tool calls with no returned result get a placeholder interrupted
-    /// result, so the next turn doesn't carry an orphan tool_call and get rejected by the
+    /// result, so the next turn doesn't carry an orphan `tool_call` and get rejected by the
     /// endpoint.
     pub fn finish_interrupted_turn(&mut self) -> Vec<message::Message> {
         let mut added = Vec::new();
@@ -269,12 +273,22 @@ impl Agent {
         self.messages.len()
     }
 
+    /// Run one `ReAct` round to completion and return the aggregated result.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when the model request, tool execution, or context
+    /// compaction fails, or when the event stream ends without a final result.
     pub async fn run(&mut self, task: &str) -> Result<RunResult, AgentError> {
         self.run_content(message::Content::text(task)).await
     }
 
     /// Like [`Agent::run`], but the user turn is structured [`message::Content`] (text plus
     /// image parts). The `&str` version delegates here.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] under the same conditions as [`Agent::run`].
     pub async fn run_content(&mut self, task: message::Content) -> Result<RunResult, AgentError> {
         let mut events = self.run_stream_content(task);
         while let Some(event) = events.next().await {
@@ -295,11 +309,15 @@ impl Agent {
     /// the session log / the recall store / the task ledger — it purely read-reuses the current
     /// `model_config`, so it can be called while holding `&self` without polluting the session.
     ///
-    /// Unlike [`Agent::run`]: it doesn't drive the ReAct loop, send tools, or write storage;
+    /// Unlike [`Agent::run`]: it doesn't drive the `ReAct` loop, send tools, or write storage;
     /// `stream` / `thinking` are turned off in place (a one-shot completion wants short text, so
     /// streaming and reasoning are pointless). It takes the `Assistant` text (`content`); if the
     /// model returned only reasoning (`reasoning_content`), it falls back to that; both empty
     /// returns an empty string.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentError`] when the model request or response decoding fails.
     pub async fn complete(&self, prompt: &str) -> Result<String, AgentError> {
         let client = self.client.clone();
         // Clone the config and turn off streaming / reasoning: borrow only the model name and
@@ -318,7 +336,7 @@ impl Agent {
             session_id: None,
         };
 
-        let mut stream = adapter::invoke(&client, &config, request).await;
+        let mut stream = adapter::invoke(&client, &config, request);
         while let Some(event) = stream.next().await {
             if let adapter::AdapterEvent::Finished(response) = event.map_err(AgentError::Adapter)? {
                 return Ok(match response.message {
@@ -349,6 +367,11 @@ impl Agent {
     /// Like [`Agent::run_stream`], but the user turn is structured [`message::Content`] (text
     /// parts plus image parts). The `&str` version delegates here, so a text-only turn produces
     /// byte-identical bytes as before (the plain-string fast path keeps the KV prefix cache).
+    ///
+    /// # Panics
+    ///
+    /// Panics if the internal pending-user slot was not set by this method (it is
+    /// set immediately before the stream starts, so this cannot happen in practice).
     pub fn run_stream_content(
         &mut self,
         task: message::Content,
@@ -428,7 +451,7 @@ impl Agent {
                 };
                 let mut is_finished = false;
                 let mut interrupted = None;
-                let mut stream = adapter::invoke(&client, &self.model_config, model_request).await;
+                let mut stream = adapter::invoke(&client, &self.model_config, model_request);
                 while let Some(adapter_event) = stream.next().await {
                     let adapter_event = match adapter_event {
                         Ok(event) => event,
@@ -491,7 +514,7 @@ impl Agent {
                                             let (ok, content, error_kind) =
                                                 match tools.invoke(call, ctx).await {
                                                     Ok(output) => {
-                                                        (true, value_to_content(output), None)
+                                                        (true, value_to_content(&output), None)
                                                     }
                                                     // The tool message carries the error text for the
                                                     // model to read; the stable kind travels on the
@@ -758,8 +781,7 @@ impl Agent {
             let reserve = self
                 .model_config
                 .max_output_tokens
-                .map(u64::from)
-                .unwrap_or_else(|| (window / 10).max(1));
+                .map_or_else(|| (window / 10).max(1), u64::from);
             let budget = window.saturating_sub(reserve);
             // Prefer removing the repetitive, verbose reasoning drafts, keeping the text, the
             // ledger, and the tool evidence. Only the summary request's copy is touched; the
@@ -783,7 +805,7 @@ impl Agent {
             session_id: None,
         };
 
-        let mut stream = adapter::invoke(client, &self.model_config, model_request).await;
+        let mut stream = adapter::invoke(client, &self.model_config, model_request);
         while let Some(adapter_event) = stream.next().await {
             let adapter_event = adapter_event.map_err(AgentError::Adapter)?;
             match adapter_event {
@@ -909,7 +931,7 @@ fn trim_compaction_tool_outputs(
 /// compact JSON rendering (`Value::to_string`) — for a plain string result that is the
 /// quoted form the runtime always produced, so the request bytes (and the prefix cache) are
 /// unchanged for every existing tool.
-fn value_to_content(output: serde_json::Value) -> message::Content {
+fn value_to_content(output: &serde_json::Value) -> message::Content {
     if output.is_array()
         && let Ok(content) = serde_json::from_value::<message::Content>(output.clone())
         && content.has_images()

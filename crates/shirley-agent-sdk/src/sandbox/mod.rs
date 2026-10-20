@@ -78,6 +78,7 @@ impl<B: SandboxBackend> Sandbox<B> {
 
     /// Set a hard timeout cap that the spec cannot relax.
     // mut self + returns self: chained style.
+    #[must_use]
     pub fn with_hard_timeout(mut self, timeout: Duration) -> Self {
         self.hard_timeout = Some(timeout);
         self
@@ -92,6 +93,11 @@ impl<B: SandboxBackend> Sandbox<B> {
     ///
     /// The timeout is applied uniformly here: even if the backend has its own timeout internally,
     /// this is the last line of defense.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SandboxError`] when the backend fails to start the process or the
+    /// execution itself errors out (a timeout is reported through `SandboxOutput`, not `Err`).
     pub async fn run(&self, spec: &SandboxSpec) -> Result<SandboxOutput, SandboxError> {
         // Decide how long a timeout to actually use this time.
         // match handles two cases depending on whether hard_timeout has a value.

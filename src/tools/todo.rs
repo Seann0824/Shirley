@@ -90,7 +90,7 @@ impl Tool for TodoTool {
     }
 
     fn invoke(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolFuture<'_> {
-        let store = self.store.clone();
+        let store = Arc::clone(&self.store);
         Box::pin(async move {
             let update: TodoUpdate = serde_json::from_value(input).map_err(|error| {
                 ToolError::ArgumentsError(format!("invalid tool arguments: {error}"))

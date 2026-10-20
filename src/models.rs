@@ -149,8 +149,8 @@ pub(crate) fn normalize_tool_mode(
 /// `bool`. Priority (`Continue.dev`-style, but with an **optimistic** default):
 ///
 /// 1. explicit declaration (`supports_images`)
-/// 2. `supports_vision` (LiteLLM / models.dev legacy)
-/// 3. `architecture.input_modalities` (OpenRouter) / `modalities.input` (models.dev) — an
+/// 2. `supports_vision` (`LiteLLM` / models.dev legacy)
+/// 3. `architecture.input_modalities` (`OpenRouter`) / `modalities.input` (models.dev) — an
 ///    `image` entry means yes, a non-empty list without `image` means text-only
 /// 4. built-in model-name table (known vision families)
 /// 5. **default `true`** — optimistic: try sending once, and if the provider really rejects the
@@ -194,8 +194,12 @@ pub(crate) fn normalize_supports_images_from_value(id: &str, value: &serde_json:
                 .collect()
         })
     }
-    let declared = value.get("supports_images").and_then(|v| v.as_bool());
-    let supports_vision = value.get("supports_vision").and_then(|v| v.as_bool());
+    let declared = value
+        .get("supports_images")
+        .and_then(serde_json::Value::as_bool);
+    let supports_vision = value
+        .get("supports_vision")
+        .and_then(serde_json::Value::as_bool);
     let input_modalities = string_array(
         value
             .get("architecture")
@@ -214,7 +218,6 @@ pub(crate) fn normalize_supports_images_from_value(id: &str, value: &serde_json:
 /// Built-in name table: model families that are known to accept images. Only used as a hint;
 /// the final fallback is optimistic `true`.
 fn name_suggests_vision(id: &str) -> bool {
-    let id = id.to_ascii_lowercase();
     const VISION_MARKERS: [&str; 16] = [
         "vision",
         "multimodal",
@@ -233,6 +236,7 @@ fn name_suggests_vision(id: &str) -> bool {
         "glm-4v",
         "internvl",
     ];
+    let id = id.to_ascii_lowercase();
     VISION_MARKERS.iter().any(|marker| id.contains(marker))
 }
 
@@ -327,7 +331,7 @@ struct ModelDto {
     /// Whether the model accepts image input (optional, see [`ModelEntry::supports_images`]).
     #[serde(default)]
     supports_images: Option<bool>,
-    /// LiteLLM / models.dev legacy spelling of the same capability.
+    /// `LiteLLM` / models.dev legacy spelling of the same capability.
     #[serde(default)]
     supports_vision: Option<bool>,
     /// OpenRouter-style `architecture.input_modalities`.
@@ -426,8 +430,8 @@ const PROTOCOL_ENDPOINT_SUFFIXES: [&str; 3] = ["/chat/completions", "/messages",
 ///
 /// | Protocol | `base_url` | Derived result |
 /// | --- | --- | --- |
-/// | ChatCompletions | `https://host/v1/chat/completions` | `https://host/v1/models` |
-/// | AnthropicMessages | `https://host/v1/messages` | `https://host/v1/models` |
+/// | `ChatCompletions` | `https://host/v1/chat/completions` | `https://host/v1/models` |
+/// | `AnthropicMessages` | `https://host/v1/messages` | `https://host/v1/models` |
 /// | Responses | `https://host/responses` | `https://host/models` |
 ///
 /// When none is hit (e.g. `base_url` is itself `.../v1`), fall back to appending `/models` at the end.
@@ -552,7 +556,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[ignore]
+    #[ignore = "live test; requires a reachable models endpoint"]
     async fn remote_catalog_fetches_live() {
         let catalog = RemoteCatalog::new(
             models_endpoint("http://127.0.0.1:8788/v1/chat/completions"),
@@ -579,7 +583,7 @@ mod tests {
     /// Depends on an external service and the workspace config; ignored by default, run manually:
     //   cargo test --bin Shirley live_remote_catalog_from_workspace_config -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "live test; requires the real workspace config and a reachable endpoint"]
     async fn live_remote_catalog_from_workspace_config() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let settings =

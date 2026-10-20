@@ -4,7 +4,7 @@
 //! - <https://api-docs.deepseek.com/guides/responses_api/>
 //! - <https://api-docs.deepseek.com/zh-cn/api/create-response>
 //!
-//! Differences from ChatCompletions (see `docs/responses-api.md`):
+//! Differences from `ChatCompletions` (see `docs/responses-api.md`):
 //! - system stays in place in `input` as a normal `{role:"system"}` item (no top-level
 //!   `instructions`: the server inserts those before `input`, breaking prefix caching);
 //! - `input` is an **item list**: an assistant's text and the `function_call` it emitted are
@@ -46,9 +46,9 @@ use crate::{
 /// top-level `instructions`**: the server always inserts those before `input`, which moves a
 /// mid-list / trailing system to the front and breaks the prefix.
 ///
-/// **One-to-many**: an assistant with text + tool_calls produces "a text item + several
-/// function_call items".
-fn encode_input(messages: &[message::Message]) -> Result<Vec<Value>, AdapterError> {
+/// **One-to-many**: an assistant with text + `tool_calls` produces "a text item + several
+/// `function_call` items".
+fn encode_input(messages: &[message::Message]) -> Vec<Value> {
     let mut input: Vec<Value> = Vec::new();
 
     for message in messages {
@@ -59,13 +59,13 @@ fn encode_input(messages: &[message::Message]) -> Result<Vec<Value>, AdapterErro
                     "type": "message",
                     "role": "system",
                     "content": content,
-                }))
+                }));
             }
 
             message::Message::User { content } => input.push(serde_json::json!({
                 "type": "message",
                 "role": "user",
-                "content": super::content::responses_content(content)?,
+                "content": super::content::responses_content(content),
             })),
 
             // Historical reasoning (reasoning_content) is deliberately not echoed back: the server
@@ -116,21 +116,21 @@ fn encode_input(messages: &[message::Message]) -> Result<Vec<Value>, AdapterErro
                     // output allows a string or an array of content blocks; a string is most direct for plain text.
                     "output": content
                         .as_ref()
-                        .map(|content| content.as_text())
+                        .map(super::super::message::Content::as_text)
                         .unwrap_or_default(),
                 }));
                 if let Some(images) = content.as_ref().and_then(super::content::images_only) {
                     input.push(serde_json::json!({
                         "type": "message",
                         "role": "user",
-                        "content": super::content::responses_content(&images)?,
+                        "content": super::content::responses_content(&images),
                     }));
                 }
             }
         }
     }
 
-    Ok(input)
+    input
 }
 
 /// Tool definition -> Responses format (one less level of `function` wrapping).
@@ -167,7 +167,7 @@ pub fn encode_request(
     }
     super::attach_local_session_header(&mut headers, &config.base_url, input.session_id)?;
 
-    let items = encode_input(input.messages)?;
+    let items = encode_input(input.messages);
     let mut body = serde_json::json!({
         "model": &config.model,
         "input": items,
@@ -223,7 +223,7 @@ fn apply_extra_body(body: &mut Value, extra: &Value) {
 
 /// Flatten `output[]` into one internal assistant message.
 ///
-/// Many-to-one: the three item kinds reasoning / message / function_call combine into
+/// Many-to-one: the three item kinds reasoning / message / `function_call` combine into
 /// `Message::Assistant { content, reasoning_content, tool_calls }`.
 fn decode_output(response: &dto::Response) -> ModelResponse {
     let mut content = String::new();
@@ -287,7 +287,7 @@ fn decode_output(response: &dto::Response) -> ModelResponse {
 /// accumulated delta when reasoning is missing**.
 ///
 /// Why backfill: Responses' streaming `response.completed` should carry the full `output`
-/// (including the reasoning item), but in practice the DeepSeek compatibility layer returns only
+/// (including the reasoning item), but in practice the `DeepSeek` compatibility layer returns only
 /// the message item, with reasoning appearing only as deltas. Without backfilling,
 /// `Message::Assistant.reasoning_content` would always be `None`, and on the TUI the thinking
 /// content would flash once and be wiped by the terminal message.
@@ -310,7 +310,7 @@ fn decode_output_with_reasoning(
     decoded
 }
 
-/// finish_reason determination: Responses **has no** `finish_reason` field; tool calls must be
+/// `finish_reason` determination: Responses **has no** `finish_reason` field; tool calls must be
 /// detected by whether `output` contains a `function_call`.
 fn finish_reason(response: &dto::Response, has_tool_calls: bool) -> ModelFinishReason {
     match response.status.as_deref() {
@@ -365,11 +365,10 @@ fn decode_usage(usage: Option<&dto::Usage>) -> message::Usage {
 /// `status == "failed"` -> error. Shared by streaming and non-streaming, keeping the two paths'
 /// contracts consistent.
 fn response_error(response: &dto::Response) -> AdapterError {
-    let detail = response
-        .error
-        .as_ref()
-        .map(|error| error.to_string())
-        .unwrap_or_else(|| "response.failed".to_owned());
+    let detail = response.error.as_ref().map_or_else(
+        || "response.failed".to_owned(),
+        std::string::ToString::to_string,
+    );
     AdapterError::Decode(format!("response failed: {detail}"))
 }
 
@@ -939,7 +938,7 @@ mod tests {
 
     #[tokio::test]
     async fn stream_failed_event_becomes_error() {
-        let chunks = vec![
+        let chunks = [
             "event: response.failed\ndata: {\"type\":\"response.failed\",\"response\":{\"status\":\"failed\",\"error\":{\"code\":\"server_error\",\"message\":\"boom\"}}}\n\n",
         ];
         let stream = futures::stream::iter(vec![Ok::<_, reqwest::Error>(
@@ -1001,16 +1000,14 @@ mod tests {
         };
 
         let client = reqwest::Client::new();
-        let mut stream = crate::adapter::invoke(&client, &config, request).await;
-        use futures::StreamExt;
+        let mut stream = crate::adapter::invoke(&client, &config, request);
 
         let mut content = String::new();
         let mut reasoning = String::new();
         let mut finished = None;
         while let Some(event) = stream.next().await {
             match event.expect("streaming events should not error") {
-                AdapterEvent::Retrying { .. } => {}
-                AdapterEvent::ImagesDropped { .. } => {}
+                AdapterEvent::Retrying { .. } | AdapterEvent::ImagesDropped { .. } => {}
                 AdapterEvent::ContentDelta(delta) => content.push_str(&delta),
                 AdapterEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
                 AdapterEvent::Finished(response) => {
@@ -1036,10 +1033,10 @@ mod tests {
         );
     }
 
-    /// Real-network test (ignored by default): whether **a mid-list system** is accepted by DeepSeek.
+    /// Real-network test (ignored by default): whether **a mid-list system** is accepted by `DeepSeek`.
     ///
     /// This is the sole hard prerequisite for the "drop top-level `instructions`, keep system in
-    /// place as an input item" approach. If DeepSeek rejects `role:"system"` inside input, this
+    /// place as an input item" approach. If `DeepSeek` rejects `role:"system"` inside input, this
     /// test errors.
     #[tokio::test]
     #[ignore = "real network call, requires DEEPSEEK_API_KEY"]
@@ -1082,7 +1079,6 @@ mod tests {
 
         let client = reqwest::Client::new();
         let response = crate::adapter::invoke(&client, &config, request)
-            .await
             .next()
             .await
             .expect("the stream should produce events")
@@ -1096,7 +1092,7 @@ mod tests {
     }
 
     /// Real-network **tool round-trip** test (ignored by default): the model emits a
-    /// function_call on the first turn, we send back a function_call_output, and the second turn
+    /// `function_call` on the first turn, we send back a `function_call_output`, and the second turn
     /// gets the final text.
     ///
     /// This specifically verifies whether the request encoding's `function_call` /
@@ -1198,7 +1194,7 @@ mod tests {
             tools,
             session_id: None,
         };
-        let mut stream = crate::adapter::invoke(client, config, request).await;
+        let mut stream = crate::adapter::invoke(client, config, request);
         while let Some(event) = stream.next().await {
             if let AdapterEvent::Finished(response) = event.expect("the request should not error") {
                 return response;
@@ -1255,17 +1251,16 @@ mod tests {
             session_id: None,
         };
 
-        use futures::StreamExt;
         let client = reqwest::Client::new();
-        let mut stream = crate::adapter::invoke(&client, &config, request).await;
+        let mut stream = crate::adapter::invoke(&client, &config, request);
         let mut reasoning = String::new();
         let mut finished = None;
         while let Some(event) = stream.next().await {
             match event.expect("streaming events should not error") {
-                AdapterEvent::Retrying { .. } => {}
-                AdapterEvent::ImagesDropped { .. } => {}
+                AdapterEvent::Retrying { .. }
+                | AdapterEvent::ImagesDropped { .. }
+                | AdapterEvent::ContentDelta(_) => {}
                 AdapterEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
-                AdapterEvent::ContentDelta(_) => {}
                 AdapterEvent::Finished(response) => {
                     finished = Some(response);
                     break;

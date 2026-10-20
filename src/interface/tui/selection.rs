@@ -33,12 +33,12 @@ impl Selection {
     }
 
     /// Whether this is just a click in place (no actual drag).
-    pub fn is_click(&self) -> bool {
+    pub fn is_click(self) -> bool {
         self.anchor == self.head
     }
 
     /// The normalized row range (top, bottom), endpoints inclusive.
-    fn rows(&self) -> (u16, u16) {
+    fn rows(self) -> (u16, u16) {
         (
             self.anchor.y.min(self.head.y),
             self.anchor.y.max(self.head.y),
@@ -48,7 +48,7 @@ impl Selection {
     /// The column range (left, right) of row `y` within the selection, clipped to the selection's "reading-order" shape:
     /// the first row from the anchor column to end of line, the last row from start of line to the current column, middle rows whole.
     /// Returns `None` when `y` is outside the selection's row range.
-    fn columns(&self, y: u16) -> Option<(u16, u16)> {
+    fn columns(self, y: u16) -> Option<(u16, u16)> {
         let (top, bottom) = self.rows();
         if y < top || y > bottom {
             return None;
@@ -71,7 +71,7 @@ impl Selection {
     }
 
     /// Highlight the selection on the buffer (reversed). Coordinates are clipped to the buffer area; out-of-bounds parts are ignored.
-    pub fn highlight(&self, buffer: &mut Buffer) {
+    pub fn highlight(self, buffer: &mut Buffer) {
         let area = buffer.area;
         let (top, bottom) = self.rows();
         for y in top..=bottom {
@@ -100,7 +100,7 @@ impl Selection {
     /// The continuation cell's `symbol()` reads back as a space, so cell-by-cell concatenation would insert spurious spaces between CJK;
     /// therefore this advances by symbol display width: a wide symbol is taken once, skipping the continuation cell it occupies. Each row's
     /// trailing padding is trimmed, and leading/trailing blank lines are removed too.
-    pub fn text(&self, buffer: &Buffer) -> String {
+    pub fn text(self, buffer: &Buffer) -> String {
         let area = buffer.area;
         let (top, bottom) = self.rows();
         let mut lines: Vec<String> = Vec::new();
@@ -131,10 +131,10 @@ impl Selection {
             }
             lines.push(line.trim_end().to_owned());
         }
-        while lines.first().is_some_and(|line| line.is_empty()) {
+        while lines.first().is_some_and(std::string::String::is_empty) {
             lines.remove(0);
         }
-        while lines.last().is_some_and(|line| line.is_empty()) {
+        while lines.last().is_some_and(std::string::String::is_empty) {
             lines.pop();
         }
         lines.join("\n")

@@ -40,12 +40,20 @@ async fn bump(
 }
 
 /// Injected at registration time (the context is handed to the tool).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "hook signature is fixed by the #[tool] macro contract (fn(&mut ToolContext) -> Result<(), ToolError>)"
+)]
 fn bump_on_register(ctx: &mut ToolContext) -> Result<(), ToolError> {
     ctx.insert(Arc::new(Mutex::new(Counter::default())));
     Ok(())
 }
 
 /// Released when the tool is unregistered.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "hook signature is fixed by the #[tool] macro contract (fn(&mut ToolContext) -> Result<(), ToolError>)"
+)]
 fn bump_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
     ctx.remove::<Arc<Mutex<Counter>>>();
     Ok(())

@@ -5,7 +5,10 @@
 // - headers `x-api-key` + `anthropic-version`
 //
 // Keeping unconsumed fields is part of protocol completeness, not dead code.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "protocol DTO keeps unconsumed fields for wire completeness"
+)]
 
 use serde::Deserialize;
 
@@ -57,6 +60,10 @@ pub enum ContentBlock {
 }
 
 #[derive(Debug, Clone, Deserialize)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names are the wire contract; the `_tokens` postfix matches the Anthropic API"
+)]
 pub struct Usage {
     /// **Does not include cache reads** (real captured traffic: `134 + 2301 = 2435`).
     #[serde(default)]
@@ -77,7 +84,7 @@ pub enum StreamEvent {
     MessageStart {
         message: MessageStartPayload,
     },
-    /// Block start. `content_block` carries the initial content (a tool_use's id/name is here).
+    /// Block start. `content_block` carries the initial content (a `tool_use`'s id/name is here).
     ContentBlockStart {
         index: usize,
         content_block: ContentBlock,
@@ -90,7 +97,7 @@ pub enum StreamEvent {
     ContentBlockStop {
         index: usize,
     },
-    /// **The terminal stop_reason and output usage are here.**
+    /// **The terminal `stop_reason` and output usage are here.**
     MessageDelta {
         delta: MessageDeltaPayload,
         #[serde(default)]

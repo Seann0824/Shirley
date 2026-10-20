@@ -232,7 +232,7 @@ impl<'a> Tui<'a> {
                                 let memory = self.app.memory.clone();
                                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                                 self.cancel = Some(cancel_tx);
-                                let status = self.app.status.clone();
+                                let status = Arc::clone(&self.app.status);
                                 response = Some(tokio::spawn(run_agent(
                                     agent,
                                     prompt,

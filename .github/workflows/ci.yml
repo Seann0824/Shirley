@@ -55,3 +55,34 @@ jobs:
           components: rustfmt
       - name: cargo fmt --check
         run: cargo fmt --all --check
+
+  audit:
+    name: cargo-audit (dependencies)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # Prebuilt binary, avoids compiling the tool from source on every run.
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+      # Scans Cargo.lock against the RustSec advisory database. A known-vulnerable
+      # dependency fails the job. (MS: "cargo-audit verifies crate dependencies for
+      # security vulnerabilities".)
+      - name: cargo audit
+        run: cargo audit
+
+  hack:
+    name: cargo-hack (feature matrix)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+      # Verify every meaningful feature combination compiles. The `desktop` feature
+      # pulls in Tauri (needs a system webview toolchain) and is excluded; `server`
+      # plus the default (no-feature) build are the combinations that matter here.
+      # (MS: "cargo-hack validates that all combinations of crate features work".)
+      - name: cargo hack check (server, all targets)
+        run: cargo hack check --workspace --all-targets --feature-powerset --exclude-features desktop

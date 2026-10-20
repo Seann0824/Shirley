@@ -7,7 +7,13 @@
 //! Its boundary matches the `read` tool: it only walks under the workspace root, skips
 //! dependency / build / VCS directories, and caps the traversal size so a big repo can't freeze the UI.
 
-#![cfg_attr(not(feature = "desktop"), allow(dead_code))]
+#![cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        reason = "only used when the relevant interface feature is enabled"
+    )
+)]
 
 use std::path::Path;
 
@@ -70,9 +76,8 @@ pub fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<FileE
         if visited >= MAX_VISITED {
             break;
         }
-        let read = match std::fs::read_dir(&abs) {
-            Ok(read) => read,
-            Err(_) => continue,
+        let Ok(read) = std::fs::read_dir(&abs) else {
+            continue;
         };
 
         let mut children: Vec<(std::path::PathBuf, String, bool)> = Vec::new();
@@ -86,9 +91,8 @@ pub fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<FileE
                 // Hidden entries at the workspace root (.git / .env, etc.) don't participate in references.
                 continue;
             }
-            let file_type = match entry.file_type() {
-                Ok(t) => t,
-                Err(_) => continue,
+            let Ok(file_type) = entry.file_type() else {
+                continue;
             };
             let child_rel = if rel.is_empty() {
                 name.clone()

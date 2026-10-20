@@ -21,8 +21,9 @@ pub mod process;
 // so callers can write backend::ProcessBackend instead of backend::process::ProcessBackend.
 pub use process::ProcessBackend;
 
-/// Self-describing backend capabilities. The caller uses this to decide "whether the isolation I
-/// asked for is actually in effect".
+/// Self-describing backend capabilities.
+///
+/// The caller uses this to decide "whether the isolation I asked for is actually in effect".
 /// (Note: this is the backend's "static declaration" of what it can do, not the actual result of
 /// "this particular execution".)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

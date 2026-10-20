@@ -9,6 +9,7 @@
 //! Never use it to execute untrusted input.
 
 // Stdio: controls how the subprocess's stdin/stdout/stderr are wired.
+use std::fmt::Write as _;
 use std::process::Stdio;
 
 // tokio's async Command: used to spawn the subprocess (async = does not block while waiting for it
@@ -46,9 +47,10 @@ async fn capture_output(mut pipe: impl AsyncRead + Unpin) -> std::io::Result<Str
     }
     let mut text = String::from_utf8_lossy(&captured).into_owned();
     if omitted > 0 {
-        text.push_str(&format!(
-            "\n[output truncated: {omitted} bytes omitted; capture limit is {MAX_CAPTURE_BYTES} bytes per stream. Narrow the query or redirect output to a file and read a relevant range.]\n"
-        ));
+        let _ = writeln!(
+            text,
+            "\n[output truncated: {omitted} bytes omitted; capture limit is {MAX_CAPTURE_BYTES} bytes per stream. Narrow the query or redirect output to a file and read a relevant range.]"
+        );
     }
     Ok(text)
 }
@@ -157,7 +159,7 @@ impl SandboxBackend for ProcessBackend {
             // If a proxy is required, we likewise cannot do it; say so faithfully.
             // `{ .. }` means "we don't care about the addr value inside; ignore it".
             NetworkPolicy::Proxy { .. } => {
-                degraded.push("no network isolation: proxy egress is not enforced".to_owned())
+                degraded.push("no network isolation: proxy egress is not enforced".to_owned());
             }
         }
 

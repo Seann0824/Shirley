@@ -58,9 +58,9 @@ impl Server {
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured = requests.clone();
+        let captured = Arc::clone(&requests);
         let stop = Arc::new(AtomicBool::new(false));
-        let stopping = stop.clone();
+        let stopping = Arc::clone(&stop);
         let worker = thread::spawn(move || {
             'connections: while !stopping.load(Ordering::Relaxed) {
                 let (mut socket, _) = match listener.accept() {
@@ -172,6 +172,10 @@ fn success() -> Response {
     }).to_string())
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "test helper kept ergonomic at call sites; the JSON value is only read"
+)]
 fn sse(delta: Value, finished: bool) -> String {
     format!(
         "data: {}\n\n",
@@ -307,7 +311,7 @@ async fn continuation_keeps_completed_tool_results_without_replaying_tools() {
                 description: "fixture".into(),
                 parameters: json!({"type": "object"}),
             },
-            calls: calls.clone(),
+            calls: Arc::clone(&calls),
         })
         .unwrap();
     let server = Server::new(vec![

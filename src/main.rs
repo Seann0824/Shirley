@@ -48,7 +48,7 @@ impl Mode {
 }
 
 fn main() -> Result<(), AgentError> {
-    dotenvy::dotenv().ok();
+    let _ = dotenvy::dotenv();
 
     // All interfaces (desktop / TUI / cloud server) share one state root: `~/.shirley`.
     // Running them on the same machine under the same OS user intentionally means they

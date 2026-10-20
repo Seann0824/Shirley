@@ -54,8 +54,14 @@ pub struct AgentFactory {
     compression_config: CompressionConfig,
     max_steps: usize,
     /// Working dir (workspace root). The desktop interface uses it for `@` file search (`workspace_search`);
-    /// under a TUI-only build nobody reads it, so allow dead_code.
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    /// under a TUI-only build nobody reads it, so allow `dead_code`.
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub working_dir: PathBuf,
     /// Model catalog (for `/model`), fetched asynchronously, falling back to a static list on failure.
     pub model_catalog: Arc<dyn ModelCatalog>,
@@ -95,6 +101,10 @@ impl AgentFactory {
     }
 
     /// Explicit application-data root for isolated tests and assembly.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "working_dir is stored as an owned PathBuf in the assembled factory"
+    )]
     pub(crate) fn assemble_at(
         working_dir: PathBuf,
         global_root: PathBuf,
@@ -279,17 +289,17 @@ impl AgentFactory {
         tool_manager
             .context_mut()
             .insert(tools::read::WorkspaceRoot(self.working_dir.clone()));
-        let _ = tool_manager.register(tools::TodoTool::new(todo_store.clone()));
+        let _ = tool_manager.register(tools::TodoTool::new(Arc::clone(&todo_store)));
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
         // Memory writes go **through no** tool; they are done only by the background curator (`docs/memory.md` decision 3).
-        let _ = tool_manager.register(tools::RecallTool::new(memory.clone()));
+        let _ = tool_manager.register(tools::RecallTool::new(Arc::clone(&memory)));
 
         // Skill runtime (application-layer capability): the catalog is read-only and shared across sessions; the activated set is **created fresh per session**
         // (activation state is isolated per session). `activate_skill` writes, `SkillContextProvider` reads,
         // sharing the same `Arc`, exactly like the runtime dispatch of todo / memory.
         let skill_catalog = Arc::new(self.skill_catalog.clone());
-        let skill_runtime = Arc::new(SkillRuntime::new(skill_catalog.clone()));
-        let _ = tool_manager.register(tools::ActivateSkillTool::new(skill_runtime.clone()));
+        let skill_runtime = Arc::new(SkillRuntime::new(Arc::clone(&skill_catalog)));
+        let _ = tool_manager.register(tools::ActivateSkillTool::new(Arc::clone(&skill_runtime)));
         let _ = tool_manager.register(tools::ReadSkillFileTool::new(skill_catalog));
 
         // The available tool names (before adding `subagent`), for the child-tool allow/deny check and
@@ -310,14 +320,14 @@ impl AgentFactory {
                 if self.subagent_enabled {
                     // Top level: create the manager (holding this factory) and expose the `subagent` tool.
                     let mut manager = SubagentManager::new(
-                        self.clone(),
+                        Arc::clone(self),
                         self.subagent_limits.clone(),
                         available_tools,
                     );
                     manager.set_default_tools(self.subagent_default_tools.clone());
                     manager.set_default_timeout_ms(self.subagent_default_timeout_ms);
                     let manager = Arc::new(manager);
-                    let _ = tool_manager.register(SubagentTool::new(manager.clone()));
+                    let _ = tool_manager.register(SubagentTool::new(Arc::clone(&manager)));
                     Some(manager)
                 } else {
                     // Disabled by config: the `subagent` tool is not registered at all.
@@ -329,10 +339,11 @@ impl AgentFactory {
         // The SDK `Agent` accepts only a **single** `context_provider`, but here we need to inject several
         // (task ledger + memory + skills) -- use `CompositeContextProvider` to concatenate in order.
         let provider = CompositeContextProvider::new(vec![
-            Arc::new(TodoContextProvider::new(todo_store.clone())) as Arc<dyn ContextProvider>,
-            Arc::new(MemoryContextProvider::new(memory.clone())) as Arc<dyn ContextProvider>,
+            Arc::new(TodoContextProvider::new(Arc::clone(&todo_store))) as Arc<dyn ContextProvider>,
+            Arc::new(MemoryContextProvider::new(Arc::clone(&memory))) as Arc<dyn ContextProvider>,
             // Skills (Tier1 catalog + Tier2 activated text): appended at the end of each round, KV-friendly.
-            Arc::new(SkillContextProvider::new(skill_runtime.clone())) as Arc<dyn ContextProvider>,
+            Arc::new(SkillContextProvider::new(Arc::clone(&skill_runtime)))
+                as Arc<dyn ContextProvider>,
         ]);
 
         // Subagent guidance is injected only for the top-level agent when the tool is registered:
@@ -376,7 +387,7 @@ impl AgentFactory {
             return configured.config();
         }
         let mut config = self.model_config.clone();
-        config.model = entry.value.clone();
+        config.model.clone_from(&entry.value);
         config.tool_calling =
             resolve_tool_calling_for(entry.tool_mode.as_deref(), config.tool_calling);
         // Image capability is a catalog-declared fact, same shape as `tool_mode`: when the
@@ -428,7 +439,7 @@ impl AgentFactory {
         let Ok(handle) = tokio::runtime::Handle::try_current() else {
             return;
         };
-        let catalog = self.model_catalog.clone();
+        let catalog = Arc::clone(&self.model_catalog);
         handle.spawn(async move {
             let _ = catalog.list().await;
         });
@@ -536,7 +547,7 @@ pub fn resolve_tool_calling_for(
     let mode = model_tool_mode
         .map(str::trim)
         .filter(|mode| !mode.is_empty())
-        .map(|mode| mode.to_ascii_lowercase());
+        .map(str::to_ascii_lowercase);
     match mode.as_deref() {
         Some("content") => ToolCallingMode::Tagged,
         Some("native") => ToolCallingMode::Native,
@@ -565,7 +576,7 @@ fn build_curator_config(
     }
     let mut config = main.clone();
     if let Some(model) = mem.curator_model.as_ref().filter(|m| !m.trim().is_empty()) {
-        config.model = model.clone();
+        config.model.clone_from(model);
     }
     if let Some(base_url) = mem
         .curator_base_url
@@ -578,15 +589,15 @@ fn build_curator_config(
         {
             config.api_key = None;
         }
-        config.base_url = base_url.clone();
+        config.base_url.clone_from(base_url);
     }
     if let Some(api_key) = mem.curator_api_key.clone() {
         config.api_key = (!api_key.is_empty()).then_some(api_key);
     }
-    if let Some(protocol) = mem.curator_protocol.as_deref() {
-        if let Ok(parsed) = crate::settings::parse_protocol_name(protocol) {
-            config.protocol = parsed;
-        }
+    if let Some(protocol) = mem.curator_protocol.as_deref()
+        && let Ok(parsed) = crate::settings::parse_protocol_name(protocol)
+    {
+        config.protocol = parsed;
     }
     Some(config)
 }
@@ -665,7 +676,7 @@ impl ContextProvider for CompositeContextProvider {
 }
 
 /// Build a `ToolManager` with all tools registered (bash / grep / read are always registered;
-/// web_search is not registered when unconfigured). Each `Agent` holds one; tool state is isolated per instance.
+/// `web_search` is not registered when unconfigured). Each `Agent` holds one; tool state is isolated per instance.
 fn assemble_tools() -> ToolManager {
     let mut tool_manager = ToolManager::new();
     let _ = tool_manager.register(tools::bash_tool::tool());
@@ -720,6 +731,10 @@ pub(crate) mod test_support {
     use crate::session::FileSessionCatalog;
     use shirley_agent_sdk::ModelProtocol;
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "test helper takes ownership to build owned factory fields"
+    )]
     pub(crate) fn test_factory_with_base(
         root: std::path::PathBuf,
         base_url: &str,
@@ -773,6 +788,10 @@ mod tests {
         Agent::builder().model_config(config).build().unwrap()
     }
 
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "test helper takes ownership to build owned factory fields"
+    )]
     fn factory(root: PathBuf) -> AgentFactory {
         AgentFactory {
             model_config: ModelConfig::builder()
@@ -972,7 +991,7 @@ mod tests {
     /// Depends on an external service; ignored by default, run manually:
     //   cargo test --bin Shirley live_smoke_against_configured_provider -- --ignored --nocapture
     #[tokio::test]
-    #[ignore]
+    #[ignore = "live smoke test; requires a configured external provider"]
     async fn live_smoke_against_configured_provider() {
         let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let factory = Arc::new(AgentFactory::assemble(root).expect("assembly failed"));
@@ -991,13 +1010,12 @@ mod tests {
                 Message::Assistant { content, .. } => content.clone(),
                 _ => None,
             })
-            .collect::<Vec<_>>()
-            .join("");
+            .collect::<String>();
         eprintln!("[smoke] model reply: {text:?}");
         assert!(!text.trim().is_empty(), "should get a non-empty reply");
     }
 
-    /// An empty-impl provider, to verify CompositeContextProvider's concatenation / short-circuit semantics.
+    /// An empty-impl provider, to verify `CompositeContextProvider`'s concatenation / short-circuit semantics.
     struct StaticProvider(Option<&'static str>);
 
     impl ContextProvider for StaticProvider {
@@ -1034,7 +1052,7 @@ mod tests {
         );
     }
 
-    /// Regression: CompositeContextProvider concatenates multiple providers' `context()` in order;
+    /// Regression: `CompositeContextProvider` concatenates multiple providers' `context()` in order;
     /// returns `None` when all are empty (or the list is empty), injecting no empty content.
     #[test]
     fn composite_context_provider_concatenates_and_short_circuits() {

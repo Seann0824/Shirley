@@ -146,6 +146,7 @@ impl SdkError for AdapterError {
     }
 }
 
+#[derive(Clone, Copy)]
 pub struct ModelRequest<'a> {
     pub messages: &'a [message::Message],
     pub tools: &'a [&'a tool::ToolDefinition],
@@ -223,7 +224,10 @@ pub struct ModelResponse {
     pub message: message::Message,
     /// Parsed from the response and returned with the result, for upper layers to later decide on
     /// truncation / tool calls; currently unconsumed.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub finish_reason: ModelFinishReason,
     pub usage: message::Usage,
 }
@@ -244,26 +248,25 @@ type StreamDecoder =
 
 /// Get the codec triple by protocol: request encoding / non-streaming decode / streaming decode.
 ///
-/// An unimplemented protocol returns `Err` rather than panicking: switching protocols is a
-/// runtime behavior and must not take down the host process (see `docs/runtime-hardening.md`
-/// section 7).
-fn codec(protocol: &ModelProtocol) -> Result<(Encoder, Decoder, StreamDecoder), AdapterError> {
+/// Every protocol is implemented, so this is a total mapping with no failure case; an unknown
+/// protocol cannot reach here (the enum is closed).
+fn codec(protocol: ModelProtocol) -> (Encoder, Decoder, StreamDecoder) {
     match protocol {
-        ModelProtocol::ChatCompletions => Ok((
+        ModelProtocol::ChatCompletions => (
             chat_completions::encode_request,
             chat_completions::decode_response,
             chat_completions::decode_stream_response,
-        )),
-        ModelProtocol::Responses => Ok((
+        ),
+        ModelProtocol::Responses => (
             responses::encode_request,
             responses::decode_response,
             responses::decode_stream_response,
-        )),
-        ModelProtocol::AnthropicMessages => Ok((
+        ),
+        ModelProtocol::AnthropicMessages => (
             anthropic_messages::encode_request,
             anthropic_messages::decode_response,
             anthropic_messages::decode_stream_response,
-        )),
+        ),
     }
 }
 
@@ -333,13 +336,13 @@ fn invoke_prepared<'a>(
     })
 }
 
-pub async fn invoke<'a>(
+pub fn invoke<'a>(
     client: &'a reqwest::Client,
     config: &'a ModelConfig,
     input: ModelRequest<'a>,
 ) -> Pin<Box<dyn futures::Stream<Item = Result<AdapterEvent, AdapterError>> + Send + 'a>> {
     Box::pin(async_stream::try_stream! {
-        let (encode, decode, decode_stream) = codec(&config.protocol)?;
+        let (encode, decode, decode_stream) = codec(config.protocol);
 
         // Optimistic image handling (user-invisible). Images are accepted by default; the
         // only reason to drop them up front is an explicit "this model has no image support"
@@ -406,7 +409,7 @@ pub async fn invoke<'a>(
             // into visible deltas (thinking → ReasoningDelta, description → ContentDelta, tool
             // blocks suppressed). A protocol with no stream parser swallows everything by default
             // (nothing leaks); the final state is still given by Finished.
-            let mut stream_parser = protocol.as_deref().map(|protocol| protocol.stream_parser());
+            let mut stream_parser = protocol.as_deref().map(tool_calling::ContentToolProtocol::stream_parser);
             while let Some(event) = tokio::time::timeout(config.request_timeout, stream.next())
                 .await.unwrap_or_else(|_| Some(Err(AdapterError::Timeout(config.request_timeout)))) {
                 let event = match event {

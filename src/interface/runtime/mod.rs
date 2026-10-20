@@ -21,7 +21,13 @@
 //!
 //! See `docs/cloud-server.md` for the design rationale.
 
-#![cfg_attr(not(any(feature = "desktop", feature = "server")), allow(dead_code))]
+#![cfg_attr(
+    not(any(feature = "desktop", feature = "server")),
+    allow(
+        dead_code,
+        reason = "only used when the relevant interface feature is enabled"
+    )
+)]
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -31,7 +37,7 @@ use std::sync::Arc;
 use futures::{FutureExt, StreamExt};
 use serde::Serialize;
 use shirley_agent_sdk::{
-    Agent, AgentEvent, Content, ContentPart, ImagePart, Message, RunResult, StopReason,
+    Agent, AgentEvent, Content, ContentPart, ImagePart, Message, RunResult, StopReason, Usage,
 };
 use tokio::sync::{Mutex, broadcast, oneshot};
 
@@ -111,7 +117,7 @@ impl ProjectRuntimeManager {
         self.registry
             .lock()
             .await
-            .add(working_dir, None)
+            .add(&working_dir, None)
             .map_err(|e| e.to_string())
     }
 
@@ -141,9 +147,10 @@ impl ProjectRuntimeManager {
             .map_err(|e| e.to_string())??;
             let rt = {
                 let mut map = self.runtimes.lock().await;
-                map.entry(project.to_owned())
-                    .or_insert_with(|| Arc::new(Mutex::new(runtime)))
-                    .clone()
+                let entry = map
+                    .entry(project.to_owned())
+                    .or_insert_with(|| Arc::new(Mutex::new(runtime)));
+                Arc::clone(entry)
             };
             return Ok(rt);
         }
@@ -160,9 +167,10 @@ impl ProjectRuntimeManager {
             .map_err(|e| e.to_string())??;
         let rt = {
             let mut map = self.runtimes.lock().await;
-            map.entry(project.to_owned())
-                .or_insert_with(|| Arc::new(Mutex::new(runtime)))
-                .clone()
+            let entry = map
+                .entry(project.to_owned())
+                .or_insert_with(|| Arc::new(Mutex::new(runtime)));
+            Arc::clone(entry)
         };
         self.registry.lock().await.touch(project);
         Ok(rt)
@@ -192,7 +200,7 @@ impl ProjectRuntimeManager {
             .registry
             .lock()
             .await
-            .add(path, name)
+            .add(&path, name)
             .map_err(|e| e.to_string())?;
         let root = entry.path.clone();
         let runtime = tokio::task::spawn_blocking(move || build_runtime(root))
@@ -237,7 +245,7 @@ impl ProjectRuntimeManager {
 
     pub async fn list_sessions(&self, project: &str) -> Result<Vec<SessionEntryWire>, String> {
         let runtime = self.ensure_runtime(project).await?;
-        let catalog = runtime.lock().await.factory.session_catalog.clone();
+        let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
         let entries = tokio::task::spawn_blocking(move || catalog.list())
             .await
             .map_err(|e| e.to_string())?
@@ -285,7 +293,7 @@ impl ProjectRuntimeManager {
         title: &str,
     ) -> Result<(), String> {
         let runtime = self.ensure_runtime(project).await?;
-        let catalog = runtime.lock().await.factory.session_catalog.clone();
+        let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
         let name = name.to_owned();
         let title = title.to_owned();
         tokio::task::spawn_blocking(move || catalog.rename(&name, &title))
@@ -297,7 +305,7 @@ impl ProjectRuntimeManager {
     pub async fn delete_session(&self, project: &str, name: &str) -> Result<(), String> {
         let runtime = self.ensure_runtime(project).await?;
         runtime.lock().await.sessions.delete_session(name)?;
-        let catalog = runtime.lock().await.factory.session_catalog.clone();
+        let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || catalog.delete(&name))
             .await
@@ -327,7 +335,7 @@ impl ProjectRuntimeManager {
             .session_catalog
             .storage_dir()
             .ok_or_else(|| "the target project does not support a session directory".to_owned())?;
-        let catalog = source.lock().await.factory.session_catalog.clone();
+        let catalog = Arc::clone(&source.lock().await.factory.session_catalog);
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || catalog.move_to(&name, &dest_dir))
             .await
@@ -420,16 +428,16 @@ impl ProjectRuntimeManager {
             let status = guard
                 .sessions
                 .session(&session_name)
-                .map(|s| s.status.clone())
+                .map(|s| Arc::clone(&s.status))
                 .ok_or_else(|| "session not found".to_owned())?;
             (agent, memory, session_name, status)
         };
 
-        let catalog = runtime.lock().await.factory.session_catalog.clone();
-        let runtime_for_task = runtime.clone();
-        let sink = self.sink.clone();
-        let status_sink = self.status_sink.clone();
-        let cancels = self.cancels.clone();
+        let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
+        let runtime_for_task = Arc::clone(&runtime);
+        let sink = Arc::clone(&self.sink);
+        let status_sink = Arc::clone(&self.status_sink);
+        let cancels = Arc::clone(&self.cancels);
         let key = route_key(project, &session_name);
         let project_owned = project.to_owned();
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
@@ -438,7 +446,7 @@ impl ProjectRuntimeManager {
         tokio::spawn(async move {
             // Safety net (`docs/agent-status.md` §5.6): if this task is aborted/dropped mid-turn the
             // guard flips the keeper to `Unreachable` + `stale`; disarmed on the normal path below.
-            let mut turn_guard = crate::status::TurnGuard::new(status.clone());
+            let mut turn_guard = crate::status::TurnGuard::new(Arc::clone(&status));
             emit_status(&status_sink, &project_owned, &session_name, &status);
             let terminal = guard_turn(async {
                 let mut cancel_rx = cancel_rx;
@@ -475,7 +483,7 @@ impl ProjectRuntimeManager {
                                 // The cloud cursor and view must advance under the same lock.
                                 sink_event(&sink, &project_owned, &session_name, event);
                                 if is_todo {
-                                    let todo = rt.sessions.session(&session_name).and_then(|s| s.todo_view());
+                                    let todo = rt.sessions.session(&session_name).and_then(super::session::Session::todo_view);
                                     sink_todo(&sink, &project_owned, &session_name, todo);
                                 }
                             }
@@ -577,7 +585,10 @@ impl ProjectRuntimeManager {
             .snapshot(session)
             .ok_or_else(|| format!("session not found: {session}"))?;
         let running = guard.sessions.is_running(session);
-        let todo = guard.sessions.session(session).and_then(|s| s.todo_view());
+        let todo = guard
+            .sessions
+            .session(session)
+            .and_then(super::session::Session::todo_view);
         let snapshot = SessionSnapshotWire::new(session.to_owned(), items, running, todo);
         Ok((rx, snapshot, cursor()))
     }
@@ -601,7 +612,7 @@ impl ProjectRuntimeManager {
 
     pub async fn list_models(&self, project: &str) -> Result<Vec<ModelEntryWire>, String> {
         let runtime = self.ensure_runtime(project).await?;
-        let catalog = runtime.lock().await.factory.model_catalog.clone();
+        let catalog = Arc::clone(&runtime.lock().await.factory.model_catalog);
         let entries = catalog.list().await;
         Ok(entries
             .into_iter()
@@ -623,7 +634,7 @@ impl ProjectRuntimeManager {
         let (factory, session_name) = {
             let guard = runtime.lock().await;
             (
-                guard.factory.clone(),
+                Arc::clone(&guard.factory),
                 target_session
                     .map(str::to_string)
                     .or_else(|| guard.sessions.active_name().map(str::to_string))
@@ -650,13 +661,12 @@ impl ProjectRuntimeManager {
             .agent
             .as_ref()
             .ok_or_else(|| "agent is currently running".to_owned())?;
-        let config = match config {
-            Some(config) => config,
-            None => {
-                let mut config = agent.model_config().clone();
-                config.model = model.into();
-                config
-            }
+        let config = if let Some(config) = config {
+            config
+        } else {
+            let mut config = agent.model_config().clone();
+            config.model = model.into();
+            config
         };
         let key = entry
             .as_ref()
@@ -807,21 +817,18 @@ impl ProjectRuntimeManager {
 /// Build a project runtime from an existing factory (resume the most recent session,
 /// else lazily open an empty one).
 pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime, String> {
-    let catalog = factory.session_catalog.clone();
+    let catalog = Arc::clone(&factory.session_catalog);
     let latest = catalog
         .list()
         .map_err(|e| e.to_string())?
         .into_iter()
         .next();
-    let (name, store, from_disk) = match latest {
-        Some(entry) => {
-            let store = catalog.open(&entry.name).map_err(|e| e.to_string())?;
-            (entry.name, store, true)
-        }
-        None => {
-            let (entry, store) = catalog.create_lazy(None).map_err(|e| e.to_string())?;
-            (entry.name, store, false)
-        }
+    let (name, store, from_disk) = if let Some(entry) = latest {
+        let store = catalog.open(&entry.name).map_err(|e| e.to_string())?;
+        (entry.name, store, true)
+    } else {
+        let (entry, store) = catalog.create_lazy(None).map_err(|e| e.to_string())?;
+        (entry.name, store, false)
     };
     let log = store.load().map_err(|e| e.to_string())?;
     let built = factory.build_agent(log).map_err(|e| e.to_string())?;
@@ -829,7 +836,7 @@ pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime
         built.agent,
         Some(name),
         catalog,
-        factory.clone(),
+        Arc::clone(&factory),
         Some(store),
         Some(built.memory),
         Some(built.skills),
@@ -887,7 +894,7 @@ fn cancelled_event() -> AgentEvent {
     AgentEvent::Finished(RunResult {
         messages: Vec::new(),
         stop_reason: StopReason::Cancelled,
-        usage: Default::default(),
+        usage: Usage::default(),
     })
 }
 
@@ -908,15 +915,14 @@ async fn auto_title_session(
     catalog: &Arc<dyn SessionCatalog>,
     name: &str,
 ) {
-    let probe_catalog = catalog.clone();
+    let probe_catalog = Arc::clone(catalog);
     let probe_name = name.to_owned();
     let already_named = tokio::task::spawn_blocking(move || {
         probe_catalog
             .list()
             .ok()
             .and_then(|entries| entries.into_iter().find(|entry| entry.name == probe_name))
-            .map(|entry| entry.label != entry.name)
-            .unwrap_or(false)
+            .is_some_and(|entry| entry.label != entry.name)
     })
     .await
     .unwrap_or(false);
@@ -937,7 +943,7 @@ async fn auto_title_session(
     let Some(title) = sanitize_title(&raw) else {
         return;
     };
-    let write_catalog = catalog.clone();
+    let write_catalog = Arc::clone(catalog);
     let write_name = name.to_owned();
     let _ = tokio::task::spawn_blocking(move || write_catalog.rename(&write_name, &title)).await;
 }

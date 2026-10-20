@@ -152,7 +152,7 @@ mod tests {
         let found = scan_root(&root);
         let names: Vec<_> = found.iter().map(|s| s.name.as_str()).collect();
         assert_eq!(names, vec!["alpha", "beta"]);
-        std::fs::remove_dir_all(&root).ok();
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]
@@ -176,8 +176,8 @@ mod tests {
         assert_eq!(discovery.conflicts.len(), 1);
         assert_eq!(discovery.conflicts[0].0, "dup");
 
-        std::fs::remove_dir_all(&project).ok();
-        std::fs::remove_dir_all(&home).ok();
+        let _ = std::fs::remove_dir_all(&project);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
@@ -197,6 +197,6 @@ mod tests {
         let found = scan_root(&root);
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].name, "good");
-        std::fs::remove_dir_all(&root).ok();
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

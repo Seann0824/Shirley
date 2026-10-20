@@ -92,7 +92,7 @@ mod tests {
             root: skill_dir.clone(),
         }]));
         let runtime = Arc::new(SkillRuntime::new(catalog));
-        let provider = SkillContextProvider::new(runtime.clone());
+        let provider = SkillContextProvider::new(Arc::clone(&runtime));
 
         assert!(!provider.context().unwrap().contains("BODY-INSTRUCTION"));
         runtime.activate("alpha").unwrap();
@@ -100,6 +100,6 @@ mod tests {
         assert!(text.contains("<skill_content name=\"alpha\">"));
         assert!(text.contains("BODY-INSTRUCTION"));
 
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

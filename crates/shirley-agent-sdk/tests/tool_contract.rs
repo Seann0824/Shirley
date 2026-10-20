@@ -34,7 +34,7 @@ async fn add(
     Ok(left + right)
 }
 
-/// A tool that fails: verifies the error passes through the macro and ToolManager unchanged.
+/// A tool that fails: verifies the error passes through the macro and `ToolManager` unchanged.
 #[tool(description = "always fails")]
 async fn always_fails(
     #[param(description = "failure message")] message: String,

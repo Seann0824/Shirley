@@ -112,6 +112,7 @@ impl SandboxSpec {
     }
 
     // `mut self` means "take ownership and allow mutation", then return it (chained style).
+    #[must_use]
     pub fn arg(mut self, arg: impl Into<String>) -> Self {
         self.args.push(arg.into()); // push: append one to the end of the list
         self // return self so .xxx() can continue
@@ -119,6 +120,7 @@ impl SandboxSpec {
 
     // Generics: I is "anything iterable", S is "the element it yields".
     // The where clause is a constraint: I yields a series of S, and S can turn into a String.
+    #[must_use]
     pub fn args<I, S>(mut self, args: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -130,36 +132,42 @@ impl SandboxSpec {
     }
 
     // Add one environment-variable key-value pair at a time.
+    #[must_use]
     pub fn env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.env.push((key.into(), value.into())); // pack into a tuple (key, value) and push into the list
         self
     }
 
     // Set the working directory.
+    #[must_use]
     pub fn cwd(mut self, dir: impl Into<PathBuf>) -> Self {
         self.cwd = Some(dir.into()); // wrap in Some(...), meaning "it now has a value"
         self
     }
 
     // Set the workspace root.
+    #[must_use]
     pub fn workspace_root(mut self, dir: impl Into<PathBuf>) -> Self {
         self.workspace_root = Some(dir.into());
         self
     }
 
     // Append one writable path.
+    #[must_use]
     pub fn writable(mut self, path: impl Into<PathBuf>) -> Self {
         self.writable_paths.push(path.into());
         self
     }
 
     // Set the timeout.
+    #[must_use]
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = timeout; // overwrite directly
         self
     }
 
     // Set the network policy.
+    #[must_use]
     pub fn network(mut self, policy: NetworkPolicy) -> Self {
         self.network = policy;
         self

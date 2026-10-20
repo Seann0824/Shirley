@@ -19,6 +19,7 @@
 //! and stored in the `query_vector` slot. Without embedding configured -> pure BM25 (honest degradation).
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::sync::{Arc, Mutex};
 
 use shirley_agent_sdk::ContextProvider;
@@ -51,7 +52,10 @@ pub struct MemoryRuntime {
 
 impl MemoryRuntime {
     /// Pure BM25 runtime (no embedding configured). For tests and the "no embedding" scenario.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn new(store: MemoryStore) -> Self {
         Self {
             store,
@@ -88,19 +92,19 @@ impl MemoryRuntime {
     /// When embedding is not configured / the query is empty / the call fails, it is `Ok(())` -- the relevant leg falls back to pure BM25,
     /// **never letting an embedding failure interrupt the conversation** (honest degradation: no pretending there is a semantic leg).
     pub async fn prefetch_query_vector(&self) -> Result<(), EmbedError> {
-        if let Some(global) = self.store.primary_root().parent() {
-            if global.join("remote.json").exists() {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(3),
-                    crate::remote::sync_once(global),
-                )
-                .await
-                {
-                    Ok(Ok(_)) => {}
-                    Ok(Err(error)) => eprintln!("[memory:sync] using offline memory: {error}"),
-                    Err(_) => {
-                        eprintln!("[memory:sync] pre-turn sync timed out; using offline memory")
-                    }
+        if let Some(global) = self.store.primary_root().parent()
+            && global.join("remote.json").exists()
+        {
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(3),
+                crate::remote::sync_once(global),
+            )
+            .await
+            {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => eprintln!("[memory:sync] using offline memory: {error}"),
+                Err(_) => {
+                    eprintln!("[memory:sync] pre-turn sync timed out; using offline memory");
                 }
             }
         }
@@ -142,7 +146,7 @@ impl MemoryRuntime {
                 .filter(|(_, entry)| vectors.get(&entry.id).is_none())
                 .map(|(_, entry)| (entry.id.clone(), embed_text(entry)))
                 .collect();
-            let embedded = if missing.is_empty() {
+            let new_vectors = if missing.is_empty() {
                 Vec::new()
             } else {
                 embedder
@@ -167,7 +171,7 @@ impl MemoryRuntime {
                 .collect();
             let mut latest = VectorStore::load_merged(std::slice::from_ref(root), embedder.model());
             let mut changed = latest.retain_ids(current.keys().map(String::as_str)) > 0;
-            for ((id, text), vector) in missing.into_iter().zip(embedded) {
+            for ((id, text), vector) in missing.into_iter().zip(new_vectors) {
                 if current
                     .get(&id)
                     .is_some_and(|entry| embed_text(entry) == text)
@@ -288,13 +292,14 @@ impl MemoryRuntime {
         if !relevant.is_empty() {
             body.push_str("<relevant>\n");
             for hit in &relevant {
-                body.push_str(&format!(
-                    "- [{}] {} ({}, {})\n",
+                let _ = writeln!(
+                    body,
+                    "- [{}] {} ({}, {})",
                     type_label(hit.entry.entry_type),
                     escape(&hit.entry.summary()),
                     hit.entry.timeline_date(),
                     status_label(hit.entry.status),
-                ));
+                );
             }
             body.push_str("</relevant>\n");
         }
@@ -432,7 +437,7 @@ fn escape(input: &str) -> String {
 fn memory_debug_enabled() -> bool {
     matches!(
         std::env::var("SHIRLEY_MEMORY_DEBUG").as_deref(),
-        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("on")
+        Ok("1" | "true" | "TRUE" | "yes" | "on")
     )
 }
 
@@ -704,7 +709,7 @@ mod tests {
             ))
             .unwrap();
         let runtime = Arc::new(MemoryRuntime::new(store));
-        let provider = MemoryContextProvider::new(runtime.clone());
+        let provider = MemoryContextProvider::new(Arc::clone(&runtime));
         assert!(provider.context().is_none(), "no query, no core -> None");
         runtime.set_query("rust");
         assert!(provider.context().unwrap().contains("Facts about Rust."));

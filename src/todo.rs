@@ -15,6 +15,7 @@
 //!
 //! The ledger is not "summarizing again" (that would be a second loss): what is written in is a fact the model itself confirmed.
 
+use std::fmt::Write as _;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -184,7 +185,7 @@ impl TodoStore {
         let state = self.inner.lock().expect("todo lock poisoned");
         let mut body = String::new();
         if let Some(goal) = &state.goal {
-            body.push_str(&format!("<goal>{}</goal>\n", escape(goal)));
+            let _ = writeln!(body, "<goal>{}</goal>", escape(goal));
         }
         if !state.steps.is_empty() {
             body.push_str("<steps>\n");
@@ -194,21 +195,21 @@ impl TodoStore {
                     TodoStatus::InProgress => "[>]",
                     TodoStatus::Completed => "[x]",
                 };
-                body.push_str(&format!("- {} {}\n", mark, escape(&step.text)));
+                let _ = writeln!(body, "- {} {}", mark, escape(&step.text));
             }
             body.push_str("</steps>\n");
         }
         if !state.findings.is_empty() {
             body.push_str("<findings>\n");
             for finding in &state.findings {
-                body.push_str(&format!("- {}\n", escape(finding)));
+                let _ = writeln!(body, "- {}", escape(finding));
             }
             body.push_str("</findings>\n");
         }
         if !state.open_questions.is_empty() {
             body.push_str("<open_questions>\n");
             for question in &state.open_questions {
-                body.push_str(&format!("- {}\n", escape(question)));
+                let _ = writeln!(body, "- {}", escape(question));
             }
             body.push_str("</open_questions>\n");
         }
@@ -225,7 +226,7 @@ impl TodoStore {
 
     /// Structured read-only view (for UI rendering of task progress). An empty ledger (no goal and no steps) returns `None`.
     ///
-    /// findings / open_questions do not enter the view: the UI task card only cares about "goal + step progress";
+    /// findings / `open_questions` do not enter the view: the UI task card only cares about "goal + step progress";
     /// conclusions and open questions are already conveyed by the model in the body text, and piling them into the status line only dilutes the signal.
     pub fn view(&self) -> Option<TaskView> {
         let state = self.inner.lock().expect("todo lock poisoned");
@@ -317,10 +318,10 @@ impl ContextProvider for TodoContextProvider {
         let revision = self.store.revision.load(Ordering::Acquire);
         let nag = {
             let mut progress = self.progress.lock().expect("todo progress lock poisoned");
-            if progress.0 != revision {
-                *progress = (revision, 0);
-            } else {
+            if progress.0 == revision {
                 progress.1 = progress.1.saturating_add(1);
+            } else {
+                *progress = (revision, 0);
             }
             progress.1 >= TODO_NAG_AFTER_ROUNDS
         };
@@ -454,7 +455,7 @@ mod tests {
     #[test]
     fn provider_injects_ledger_when_non_empty() {
         let store = Arc::new(TodoStore::new());
-        let provider = TodoContextProvider::new(store.clone());
+        let provider = TodoContextProvider::new(Arc::clone(&store));
         assert!(
             provider.context().is_none(),
             "an empty ledger is not injected in the first round"
@@ -498,7 +499,7 @@ mod tests {
                 ..Default::default()
             })
             .unwrap();
-        let provider = TodoContextProvider::new(store.clone());
+        let provider = TodoContextProvider::new(Arc::clone(&store));
         assert!(!provider.context().unwrap().contains("<reminder>"));
         for _ in 0..TODO_NAG_AFTER_ROUNDS {
             // Summary snapshots should not advance/reset the normal request count.

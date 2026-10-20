@@ -19,7 +19,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use shirley_agent_sdk::{AgentEvent, ErrorKind, StopReason};
+use shirley_agent_sdk::{AgentEvent, ErrorKind, StopReason, Usage};
 
 /// Default "alive but not progressing" threshold. Generous on purpose: image / 3D generation and
 /// long compactions legitimately take minutes (ASP §7.2.1 says set it per agent / per task type).
@@ -157,7 +157,7 @@ impl StateKeeper {
     fn lock(&self) -> std::sync::MutexGuard<'_, Inner> {
         self.inner
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     /// A new turn begins. Resets the per-turn progress counter.
@@ -408,7 +408,7 @@ mod tests {
         AgentEvent::Finished(RunResult {
             messages: Vec::new(),
             stop_reason: stop,
-            usage: Default::default(),
+            usage: Usage::default(),
         })
     }
 
@@ -432,7 +432,7 @@ mod tests {
     fn completed_calls_bump_progress() {
         let k = keeper();
         k.begin_turn();
-        k.on_event(&AgentEvent::Usage(Default::default()));
+        k.on_event(&AgentEvent::Usage(Usage::default()));
         k.on_event(&AgentEvent::ToolFinished {
             call_id: "c1".into(),
             name: "bash".into(),
@@ -457,7 +457,7 @@ mod tests {
         assert_eq!(k.snapshot().liveness, Liveness::Stalled);
 
         // Progress rescues it.
-        k.on_event(&AgentEvent::Usage(Default::default()));
+        k.on_event(&AgentEvent::Usage(Usage::default()));
         assert_eq!(k.snapshot().liveness, Liveness::Running);
     }
 
@@ -558,7 +558,7 @@ mod tests {
         let k = Arc::new(keeper());
         k.begin_turn();
         {
-            let _guard = TurnGuard::new(k.clone());
+            let _guard = TurnGuard::new(Arc::clone(&k));
             // Dropped without disarm -> the safety net fires.
         }
         let snap = k.snapshot();
@@ -573,7 +573,7 @@ mod tests {
     fn disarmed_turn_guard_leaves_the_normal_verdict() {
         let k = Arc::new(keeper());
         k.begin_turn();
-        let mut guard = TurnGuard::new(k.clone());
+        let mut guard = TurnGuard::new(Arc::clone(&k));
         k.on_event(&finished(StopReason::Completed));
         guard.disarm();
         drop(guard);

@@ -78,25 +78,30 @@ impl Content {
         Content(vec![ContentPart::Text { text: text.into() }])
     }
 
+    #[must_use]
     pub fn parts(parts: Vec<ContentPart>) -> Self {
         Content(parts)
     }
 
+    #[must_use]
     pub fn as_parts(&self) -> &[ContentPart] {
         &self.0
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
 
     /// True when every part is text (so it can be encoded as a plain string).
+    #[must_use]
     pub fn is_text_only(&self) -> bool {
         self.0
             .iter()
             .all(|part| matches!(part, ContentPart::Text { .. }))
     }
 
+    #[must_use]
     pub fn has_images(&self) -> bool {
         self.0
             .iter()
@@ -105,6 +110,7 @@ impl Content {
 
     /// Concatenated text of all text parts; images are ignored.
     /// Used for display, titles and token estimation.
+    #[must_use]
     pub fn as_text(&self) -> String {
         let mut out = String::new();
         for part in &self.0 {
@@ -133,6 +139,7 @@ impl ImagePart {
         }
     }
 
+    #[must_use]
     pub fn with_detail(mut self, detail: ImageDetail) -> Self {
         self.detail = Some(detail);
         self
@@ -140,6 +147,7 @@ impl ImagePart {
 }
 
 impl ContentPart {
+    #[must_use]
     pub fn image(part: ImagePart) -> Self {
         ContentPart::Image(part)
     }
@@ -260,15 +268,18 @@ impl Usage {
             .or_else(|| self.cached_input_tokens.map(|_| self.input_tokens))
     }
 
+    #[must_use]
     pub fn cached_tokens(&self) -> u64 {
         self.cached_input_tokens.unwrap_or(0)
     }
 
+    #[must_use]
     pub fn missed_input_tokens(&self) -> u64 {
         self.input_tokens.saturating_sub(self.cached_tokens())
     }
 
     // Returns None when unreported; don't treat "can't measure" as a 0% hit rate
+    #[must_use]
     pub fn cache_hit_rate(&self) -> Option<f64> {
         let reported_input = self.reported_input_tokens()?;
         if reported_input == 0 {
@@ -314,7 +325,7 @@ impl fmt::Display for Message {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Message::User { content } => {
-                let _ = write!(f, "👤 User: {}", content);
+                let _ = write!(f, "👤 User: {content}");
                 Ok(())
             }
             Message::Assistant {
@@ -323,10 +334,10 @@ impl fmt::Display for Message {
                 tool_calls,
             } => {
                 if let Some(reasoning) = reasoning_content {
-                    writeln!(f, "\u{1f9e0} Thinking: {}", reasoning)?;
+                    writeln!(f, "\u{1f9e0} Thinking: {reasoning}")?;
                 }
                 if let Some(content) = content {
-                    writeln!(f, "🤖 Assistant: {}", content)?;
+                    writeln!(f, "🤖 Assistant: {content}")?;
                 }
 
                 for call in tool_calls {
@@ -345,17 +356,17 @@ impl fmt::Display for Message {
                     tool_call_id,
                     content
                         .as_ref()
-                        .map(|content| content.to_string())
+                        .map(std::string::ToString::to_string)
                         .unwrap_or_default()
                 );
                 Ok(())
             }
             Message::System { content } => {
-                let _ = write!(f, "🖥️ System: {}", content);
+                let _ = write!(f, "🖥️ System: {content}");
                 Ok(())
             }
             Message::ContextSummary { content } => {
-                let _ = write!(f, "🖥️ Context Summary: {}", content);
+                let _ = write!(f, "🖥️ Context Summary: {content}");
                 Ok(())
             }
         }

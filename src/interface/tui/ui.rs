@@ -87,8 +87,7 @@ impl MessageCache {
         let start_row = app
             .rewind_edit_item()
             .and_then(|item| item_line_offsets.get(item).copied())
-            .map(|line| row_offsets[line])
-            .unwrap_or(0);
+            .map_or(0, |line| row_offsets[line]);
         Self {
             width,
             lines,
@@ -158,7 +157,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     if let Some(item_index) = edit_item {
         // Edit mode: the header (conversation before that message) sits above the input box, and the tail (conversation after it)
         // sits below; new messages only push the bottom out of view and never squeeze the edit box.
-        cursor = draw_rewind_edit(
+        cursor = Some(draw_rewind_edit(
             frame,
             app,
             messages_area,
@@ -169,7 +168,7 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
             prompt,
             prompt_width,
             item_index,
-        );
+        ));
     } else {
         // Normal mode: reuse the existing scrolling.
         let scroll = if app.auto_scroll() {
@@ -260,7 +259,10 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
 /// The header is the conversation before that message (scrolled to the end, so it sits right above the input box); the input box replaces the original message,
 /// and the tail is the conversation after it. The three split the screen height; the header fills the remaining space first and the tail takes the leftovers.
 /// Returns the input-box cursor position (for `draw` to set).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
+)]
 fn draw_rewind_edit(
     frame: &mut Frame,
     app: &App,
@@ -272,7 +274,7 @@ fn draw_rewind_edit(
     prompt: &str,
     prompt_width: usize,
     item_index: usize,
-) -> Option<(u16, u16)> {
+) -> (u16, u16) {
     let cache = app.message_cache.as_ref().unwrap();
     let height = area.height as usize;
     let box_height = (content_lines + 2).min(height);
@@ -333,7 +335,7 @@ fn draw_rewind_edit(
         }
         + cursor_col as u16;
     let cursor_y = box_area.y + 1 + cursor_row as u16;
-    Some((cursor_x, cursor_y))
+    (cursor_x, cursor_y)
 }
 
 /// Turn the soft-wrapped visible input text into `Line`s with the prompt prefix (shared by normal and edit modes).

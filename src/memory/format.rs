@@ -7,6 +7,7 @@
 //! if complex structures are truly needed later, switching to YAML is not too late (do not add dependencies for imagined needs).
 
 use std::fmt;
+use std::fmt::Write as _;
 
 use serde::{Deserialize, Serialize};
 
@@ -155,6 +156,10 @@ impl Domain {
 
 /// One memory entry.
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "`entry_type` avoids colliding with the `EntryType` type name and reads clearly"
+)]
 pub struct Entry {
     /// Stable identifier (e.g. `pref-rust-error-style`). Both the file name and `index.md` reference it.
     pub id: String,
@@ -271,34 +276,34 @@ impl Entry {
     /// Serialize back to entry text (frontmatter + blank line + body).
     pub fn render(&self) -> String {
         let mut out = String::from("---\n");
-        out.push_str(&format!("id: {}\n", self.id));
-        out.push_str(&format!("type: {}\n", self.entry_type.as_str()));
-        out.push_str(&format!("domain: {}\n", self.domain.as_str()));
-        out.push_str(&format!("subject: {}\n", self.subject));
-        out.push_str(&format!("created_at: {}\n", self.created_at));
+        let _ = writeln!(out, "id: {}", self.id);
+        let _ = writeln!(out, "type: {}", self.entry_type.as_str());
+        let _ = writeln!(out, "domain: {}", self.domain.as_str());
+        let _ = writeln!(out, "subject: {}", self.subject);
+        let _ = writeln!(out, "created_at: {}", self.created_at);
         if let Some(valid_from) = &self.valid_from {
-            out.push_str(&format!("valid_from: {valid_from}\n"));
+            let _ = writeln!(out, "valid_from: {valid_from}");
         }
         if let Some(supersedes) = &self.supersedes {
-            out.push_str(&format!("supersedes: {supersedes}\n"));
+            let _ = writeln!(out, "supersedes: {supersedes}");
         }
-        out.push_str(&format!("status: {}\n", self.status.as_str()));
-        out.push_str(&format!("confidence: {}\n", self.confidence.as_str()));
+        let _ = writeln!(out, "status: {}", self.status.as_str());
+        let _ = writeln!(out, "confidence: {}", self.confidence.as_str());
         if let Some(scope) = &self.scope {
-            out.push_str(&format!("scope: {scope}\n"));
+            let _ = writeln!(out, "scope: {scope}");
         }
         if let Some(utility) = self.utility {
-            out.push_str(&format!("utility: {utility}\n"));
+            let _ = writeln!(out, "utility: {utility}");
         }
         if let Some(usage_count) = self.usage_count {
-            out.push_str(&format!("usage_count: {usage_count}\n"));
+            let _ = writeln!(out, "usage_count: {usage_count}");
         }
         if self.source.is_empty() {
             out.push_str("source: []\n");
         } else {
             out.push_str("source:\n");
             for ref_ in &self.source {
-                out.push_str(&format!("  - session: {ref_}\n"));
+                let _ = writeln!(out, "  - session: {ref_}");
             }
         }
         out.push_str("---\n\n");
@@ -368,8 +373,7 @@ fn split_frontmatter(text: &str) -> Result<(&str, &str), MemoryError> {
 
 fn normalize_source(raw: &str) -> String {
     raw.strip_prefix("session:")
-        .map(str::trim)
-        .unwrap_or(raw)
+        .map_or(raw, str::trim)
         .to_string()
 }
 
@@ -380,13 +384,13 @@ fn require<T>(value: Option<T>, field: &str) -> Result<T, MemoryError> {
 fn parse_f64(key: &str, value: &str) -> Result<f64, MemoryError> {
     value
         .parse()
-        .map_err(|_| MemoryError::Parse(format!("field `{key}` is not a number: `{value}`")))
+        .map_err(|_e| MemoryError::Parse(format!("field `{key}` is not a number: `{value}`")))
 }
 
 fn parse_u64(key: &str, value: &str) -> Result<u64, MemoryError> {
     value
         .parse()
-        .map_err(|_| MemoryError::Parse(format!("field `{key}` is not an integer: `{value}`")))
+        .map_err(|_e| MemoryError::Parse(format!("field `{key}` is not an integer: `{value}`")))
 }
 
 impl fmt::Display for EntryType {

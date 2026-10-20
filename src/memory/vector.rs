@@ -62,13 +62,19 @@ impl VectorStore {
     }
 
     /// Number of entries.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn len(&self) -> usize {
         self.vectors.len()
     }
 
     /// Whether it is empty.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn is_empty(&self) -> bool {
         self.vectors.is_empty()
     }
@@ -154,6 +160,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact 0.0 is the documented sentinel for dimension-mismatch / zero-vector"
+    )]
     fn cosine_basics() {
         assert!((cosine(&[1.0, 0.0], &[1.0, 0.0]) - 1.0).abs() < 1e-6);
         assert!((cosine(&[1.0, 0.0], &[0.0, 1.0])).abs() < 1e-6);

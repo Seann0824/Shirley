@@ -122,7 +122,10 @@ impl Session {
     ///
     /// `store` is this session's persistent store (`None` = no persistence); persistence goes through
     /// [`Session::apply_event`]'s event-driven path.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
+    )]
     pub fn new(
         mut agent: Agent,
         name: Option<String>,
@@ -223,25 +226,23 @@ impl Session {
                     }
                     Ok(None) => {
                         self.model_binding_error =
-                            Some("此聊天使用的服务商或模型已被移除，请重新选择模型".into())
+                            Some("此聊天使用的服务商或模型已被移除，请重新选择模型".into());
                     }
                     Err(error) => self.model_binding_error = Some(error),
                 }
             }
             Some(Err(error)) => {
-                self.model_binding_error = Some(format!("聊天模型配置损坏：{error}"))
+                self.model_binding_error = Some(format!("聊天模型配置损坏：{error}"));
             }
             None => {
                 self.model_selection = self.agent.as_ref().and_then(|agent| {
                     crate::model_providers::key_for_config(global, agent.model_config())
                 });
                 if let (Some(path), Some(key)) = (&self.model_selection_path, &self.model_selection)
-                {
-                    if let Err(error) =
+                    && let Err(error) =
                         crate::memory::store::atomic_write(path, &serde_json::to_vec(key).unwrap())
-                    {
-                        self.model_binding_error = Some(error.to_string());
-                    }
+                {
+                    self.model_binding_error = Some(error.to_string());
                 }
             }
         }
@@ -251,10 +252,10 @@ impl Session {
         if let Some(error) = &self.model_binding_error {
             return Err(error.clone());
         }
-        if let (Some(global), Some(key)) = (&self.model_providers_root, &self.model_selection) {
-            if crate::model_providers::resolve(global, key)?.is_none() {
-                return Err("此聊天使用的服务商或模型已被移除，请重新选择模型".into());
-            }
+        if let (Some(global), Some(key)) = (&self.model_providers_root, &self.model_selection)
+            && crate::model_providers::resolve(global, key)?.is_none()
+        {
+            return Err("此聊天使用的服务商或模型已被移除，请重新选择模型".into());
         }
         Ok(())
     }
@@ -330,8 +331,12 @@ impl Session {
             }
             Ok(AgentEvent::ContentDelta(delta)) => self.append_streaming_delta(delta),
             // Thinking (reasoning) is not displayed: digested internally, the user only cares about behavior and results.
-            Ok(AgentEvent::ReasoningDelta(_)) => {}
-            Ok(AgentEvent::Retrying { .. }) => {}
+            Ok(
+                AgentEvent::ReasoningDelta(_)
+                | AgentEvent::Retrying { .. }
+                | AgentEvent::ToolStarted { .. }
+                | AgentEvent::ToolFinished { .. },
+            ) => {}
             // Neutral notice (e.g. silent image degradation): its own view item, muted, not
             // persisted to the session log (it is a per-turn UI hint, not conversation content).
             Ok(AgentEvent::Notice(text)) => self.push_message(Role::Notice, text),
@@ -343,8 +348,6 @@ impl Session {
                 limit_tokens,
             }) => self.record_context_usage(used_tokens, limit_tokens),
             Err(error) => self.add_error(error),
-            // Tool / run-finished events do not produce extra items (the tool group is created when MessageAdded is persisted).
-            Ok(AgentEvent::ToolStarted { .. }) | Ok(AgentEvent::ToolFinished { .. }) => {}
             Ok(AgentEvent::Finished(_)) => {
                 self.streaming_delta_start = None;
                 // Status (liveness / health / compressing) is reduced inside `apply_event`'s prologue;
@@ -549,6 +552,10 @@ impl Session {
         self.last_usage = Some(usage);
     }
 
+    #[expect(
+        clippy::unused_self,
+        reason = "event handlers share a uniform `&mut self` signature"
+    )]
     fn start_compression(&mut self) {
         // Liveness/health for compaction is reduced by the keeper in `apply_event`'s prologue.
     }
@@ -640,7 +647,10 @@ pub struct SessionManager {
 
 impl SessionManager {
     /// Start a manager containing only a single session with an existing `Agent` (no factory, cannot create/switch).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
+    )]
     pub fn single(
         agent: Agent,
         name: Option<String>,
@@ -675,7 +685,10 @@ impl SessionManager {
     }
 
     /// A manager that can create `Agent`s: given a factory and session catalog, supports create / switch.
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
+    )]
     pub fn with_factory(
         agent: Agent,
         name: Option<String>,
@@ -726,9 +739,8 @@ impl SessionManager {
     /// Attach a `SubagentStore` (the session's `.agents/` sidecar) to a freshly built manager, so
     /// `subagent` persistence and the child-transcript preview work. No-op when the session has no
     /// name or the catalog has no storage directory (tests / single-session fallback).
-    fn attach_subagent_store(&self, subagents: &Option<Arc<SubagentManager>>, name: Option<&str>) {
-        let (Some(manager), Some(name), Some(dir)) =
-            (subagents.as_ref(), name, self.catalog.storage_dir())
+    fn attach_subagent_store(&self, subagents: Option<&Arc<SubagentManager>>, name: Option<&str>) {
+        let (Some(manager), Some(name), Some(dir)) = (subagents, name, self.catalog.storage_dir())
         else {
             return;
         };
@@ -777,7 +789,10 @@ impl SessionManager {
     }
 
     /// Insert a session with an existing `Agent`, returning its key (does not change the foreground pointer).
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
+    )]
     fn insert(
         &mut self,
         agent: Agent,
@@ -794,7 +809,7 @@ impl SessionManager {
             .factory
             .as_ref()
             .and_then(|factory| proxy_session_id(&factory.working_dir, name.as_deref()));
-        self.attach_subagent_store(&subagents, name.as_deref());
+        self.attach_subagent_store(subagents.as_ref(), name.as_deref());
         self.sessions.insert(
             id,
             Session::new(
@@ -936,7 +951,13 @@ impl SessionManager {
     /// that have been opened are in memory. There is no in-memory orchestration to do for an unloaded session, and disk deletion is the caller's responsibility -- if
     /// this still reported "session does not exist", it would manifest as "you must open (select) it before deleting". Whether the name actually
     /// exists on disk is decided by the caller's `SessionCatalog::delete`.
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn delete_session(&mut self, name: &str) -> Result<(), String> {
         // Refused while running (to avoid deleting a log being written) -- `forget_session` includes this check.
         self.forget_session(name)
@@ -952,7 +973,13 @@ impl SessionManager {
     /// names it now, does not persist), so the foreground pointer is not dangling and `active_name()` no longer returns the removed name.
     /// **An unloaded session is allowed through directly** -- the list shows all sessions scanned from the catalog, and only those opened are
     /// in memory; there is no in-memory orchestration to do for an unloaded session.
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn forget_session(&mut self, name: &str) -> Result<(), String> {
         let Some(id) = self.id_of_name(name) else {
             return Ok(());
@@ -960,8 +987,7 @@ impl SessionManager {
         if self
             .sessions
             .get(&id)
-            .map(|session| session.status.is_active())
-            .unwrap_or(false)
+            .is_some_and(|session| session.status.is_active())
         {
             return Err("agent is currently running".to_owned());
         }
@@ -982,26 +1008,50 @@ impl SessionManager {
     // have switched away, and fetching by `active` would misattribute events / Agents to another session (the root cause of cross-session bugs).
 
     /// The session named `name` (read-only).
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn session(&self, name: &str) -> Option<&Session> {
         self.id_of_name(name).and_then(|id| self.sessions.get(&id))
     }
 
     /// The session named `name` (mutable).
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn session_mut(&mut self, name: &str) -> Option<&mut Session> {
         self.id_of_name(name)
             .and_then(|id| self.sessions.get_mut(&id))
     }
 
     /// Subscribe to the event stream of the session named `name`. Returns `None` if the session does not exist.
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn subscribe(&self, name: &str) -> Option<broadcast::Receiver<Result<AgentEvent, String>>> {
         self.session(name).map(Session::subscribe)
     }
 
     /// View snapshot of the session named `name` (returns `None` if the session does not exist).
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn snapshot(&self, name: &str) -> Option<Vec<ItemWire>> {
         self.session(name).map(Session::snapshot)
     }
@@ -1015,7 +1065,13 @@ impl SessionManager {
     /// when switching away and back the snapshot rebuild lost the user message (this function's regression test covers this).
     ///
     /// Returns `None` if the session does not exist or is running.
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn begin_turn(&mut self, name: &str, user_message: String) -> Option<Agent> {
         let session = self.session_mut(name)?;
         // Sync the current model name into the mirror first, then `take` the `Agent` away -- the mirror can still answer this session's model during the run.
@@ -1027,7 +1083,13 @@ impl SessionManager {
     }
 
     /// Put the `Agent` back into the session named `name`.
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn restore_agent(&mut self, name: &str, agent: Agent) {
         if let Some(session) = self.session_mut(name) {
             session.agent = Some(agent);
@@ -1046,7 +1108,13 @@ impl SessionManager {
     /// orchestration lives here; the SDK only offers the atomic `Agent::truncate_messages`.
     ///
     /// Returns `None` when the session does not exist, is running, or has no user message.
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn rewind_last_turn(&mut self, name: &str) -> Option<String> {
         let session = self.session_mut(name)?;
         // Do not rewind while a turn is in flight (its `Agent` is out in a background task).
@@ -1069,7 +1137,13 @@ impl SessionManager {
     /// Accumulate one event into the session named `name`, and fan it out to its subscribers.
     ///
     /// Called during a run by the task driving `run_stream` (`SessionManager` acts as the task executor).
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn apply_event(&mut self, name: &str, event: Result<AgentEvent, String>) {
         if let Some(session) = self.session_mut(name) {
             session.apply_event(event.clone());
@@ -1217,22 +1291,39 @@ impl SessionManager {
     }
 
     /// Whether the **loaded** session named `name` is running (its `Agent` moved into a background task).
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn is_running(&self, name: &str) -> bool {
         self.session(name)
-            .map(|session| session.status.is_active())
-            .unwrap_or(false)
+            .is_some_and(|session| session.status.is_active())
     }
 
     /// The foreground session's `Agent` (read-only). Returns `None` while running (moved into a background task).
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn active_agent(&self) -> Option<&Agent> {
         self.active().agent.as_ref()
     }
 
     /// The foreground session's current model name. **Also usable during a run** -- via [`Session::model_name`]'s mirror fallback,
     /// it does not depend on whether the `Agent` is present (the foreground session may be running when desktop switches away and back).
-    #[cfg_attr(not(feature = "desktop"), allow(dead_code))]
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
     pub fn active_model_name(&self) -> Option<&str> {
         self.active().model_name()
     }

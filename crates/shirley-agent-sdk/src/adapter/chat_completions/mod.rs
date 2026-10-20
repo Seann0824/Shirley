@@ -58,13 +58,7 @@ fn encode_messages(messages: &[message::Message]) -> Result<Vec<Value>, AdapterE
 
                 value
             }
-            message::Message::System { content } => {
-                serde_json::json!({
-                    "role": "system",
-                    "content": content,
-                })
-            }
-            message::Message::ContextSummary { content } => {
+            message::Message::System { content } | message::Message::ContextSummary { content } => {
                 serde_json::json!({
                     "role": "system",
                     "content": content,
@@ -80,7 +74,7 @@ fn encode_messages(messages: &[message::Message]) -> Result<Vec<Value>, AdapterE
                 out.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": content.as_ref().map(|content| content.as_text()),
+                    "content": content.as_ref().map(super::super::message::Content::as_text),
                 }));
                 if let Some(images) = content.as_ref().and_then(super::content::images_only) {
                     out.push(serde_json::json!({
@@ -196,6 +190,10 @@ fn apply_extra_body(body: &mut Value, extra: &Value) {
     }
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "decoder signature is fixed by the codec function-pointer contract (fn(serde_json::Value) -> Result<ModelResponse, AdapterError>)"
+)]
 pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, AdapterError> {
     let response = serde_json::from_value::<dto::ModelResponse>(body.clone())
         .map_err(|err| AdapterError::Decode(format!("failed to parse response: {err}")))?;
@@ -231,16 +229,15 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adapter
         })
         .unwrap_or_default();
 
-    let finish_reason = choice
-        .finish_reason
-        .as_ref()
-        .map(|reason| match reason.as_str() {
+    let finish_reason = choice.finish_reason.as_ref().map_or(
+        ModelFinishReason::Other("unknown".to_owned()),
+        |reason| match reason.as_str() {
             "stop" => ModelFinishReason::Stop,
             "tool_calls" => ModelFinishReason::ToolCalls,
             "length" => ModelFinishReason::Length,
             other => ModelFinishReason::Other(other.to_owned()),
-        })
-        .unwrap_or(ModelFinishReason::Other("unknown".to_owned()));
+        },
+    );
 
     // usage needs converting into message::Usage
     let cached_input_tokens = response

@@ -91,7 +91,7 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
     // The event sink the core calls for every wire event: serialise + fan out.
     let sink_tx = events.clone();
     let sequence = Arc::new(AtomicU64::new(0));
-    let sink_sequence = sequence.clone();
+    let sink_sequence = Arc::clone(&sequence);
     let sink: EventSink = Arc::new(move |wire: AgentEventWire| {
         if let Ok(mut json) = serde_json::to_value(&wire) {
             json["sequence"] = sink_sequence
@@ -139,11 +139,10 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
 
     // Serve the desktop React build. `dist` is produced by
     // `cd src/interface/desktop/web && npm run build`; override with `SHIRLEY_WEB_DIST`.
-    let dist = std::env::var_os("SHIRLEY_WEB_DIST")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interface/desktop/web/dist")
-        });
+    let dist = std::env::var_os("SHIRLEY_WEB_DIST").map_or_else(
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interface/desktop/web/dist"),
+        PathBuf::from,
+    );
     let index = dist.join("index.html");
     let static_files = ServeDir::new(&dist).fallback(ServeFile::new(index));
 
@@ -157,10 +156,13 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
             "/api/memory/confirm-personal",
             post(memory_confirm_personal),
         )
-        .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            authorize,
+        ))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .fallback_service(static_files)
-        .with_state(state.clone());
+        .with_state(Arc::clone(&state));
 
     let addr = std::env::var("SHIRLEY_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_owned());
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -287,10 +289,18 @@ impl From<String> for ApiError {
     }
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "handler convention: every route arm returns Result<Response, ApiError> so `?` propagates"
+)]
 fn ok_json<T: Serialize>(value: T) -> Result<Response, ApiError> {
     Ok(Json(value).into_response())
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "handler convention: every route arm returns Result<Response, ApiError> so `?` propagates"
+)]
 fn no_content() -> Result<Response, ApiError> {
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -603,7 +613,7 @@ async fn status_handler(
                     let event = Event::default().event("status").data(json);
                     return Some((Ok::<_, Infallible>(event), rx));
                 }
-                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => return None,
             }
         }
@@ -649,7 +659,10 @@ mod tests {
             )
             .route("/api/events", get(events_handler))
             .route("/api/status", get(status_handler))
-            .route_layer(middleware::from_fn_with_state(state.clone(), authorize))
+            .route_layer(middleware::from_fn_with_state(
+                Arc::clone(&state),
+                authorize,
+            ))
             .with_state(state);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());

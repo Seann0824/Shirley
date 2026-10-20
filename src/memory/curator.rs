@@ -19,6 +19,7 @@
 //! Conflicts are **not forcibly converged** -- if conditions differ, `requalify` adds `scope`; if evidence is insufficient, keep as is.
 
 use std::collections::HashMap;
+use std::fmt::Write as _;
 use std::path::Path;
 
 use serde::Deserialize;
@@ -58,7 +59,10 @@ pub struct CurateOutcome {
 ///
 /// For upper-layer observation (`spawn_curation` prints counts); V1 has no consumer yet, fields kept for diagnostics.
 #[derive(Debug)]
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "kept for tests, diagnostics, or a future scenario"
+)]
 pub struct Rejected {
     pub id: Option<String>,
     pub reason: String,
@@ -94,7 +98,7 @@ fn default_candidate_domain() -> Domain {
     Domain::Project
 }
 
-/// Extract the candidate array from the model text (tolerates ```json code fences and surrounding chatter).
+/// Extract the candidate array from the model text (tolerates JSON code fences and surrounding chatter).
 pub fn parse_candidates(text: &str) -> Result<Vec<Candidate>, CuratorError> {
     let start = text
         .find('[')
@@ -262,17 +266,14 @@ pub fn render_transcript(messages: &[Message]) -> String {
                     out.push_str("\n\n");
                 }
                 for call in tool_calls {
-                    out.push_str(&format!(
-                        "## Tool call: {}\n{}\n\n",
-                        call.name, call.arguments
-                    ));
+                    let _ = write!(out, "## Tool call: {}\n{}\n\n", call.name, call.arguments);
                 }
             }
             Message::Tool {
                 tool_call_id,
                 content,
             } => {
-                out.push_str(&format!("## Tool result ({tool_call_id})\n"));
+                let _ = writeln!(out, "## Tool result ({tool_call_id})");
                 if let Some(content) = content.as_ref() {
                     out.push_str(content.as_text().trim());
                 }
@@ -301,13 +302,14 @@ pub fn build_prompt(transcript: &str, existing: &[(String, Entry)], session_ref:
     } else {
         let mut entries = String::new();
         for (_, entry) in existing {
-            entries.push_str(&format!(
-                "- [{}] ({:?}) {} — {}\n",
+            let _ = writeln!(
+                entries,
+                "- [{}] ({:?}) {} — {}",
                 entry.id,
                 entry.domain,
                 entry.subject,
                 entry.summary()
-            ));
+            );
         }
         let mut section = render(CURATOR_EXISTING_TEMPLATE, &[("entries", &entries)]);
         if !section.ends_with('\n') {
@@ -555,7 +557,7 @@ pub enum ConsolidateOp {
     },
 }
 
-/// Extract the consolidation operation array from the model text (tolerates ```json fences and surrounding chatter).
+/// Extract the consolidation operation array from the model text (tolerates JSON fences and surrounding chatter).
 pub fn parse_consolidate_ops(text: &str) -> Result<Vec<ConsolidateOp>, CuratorError> {
     let start = text
         .find('[')
@@ -579,12 +581,12 @@ pub fn collect_evidence(entries: &[(String, Entry)], sessions_dir: &Path, budget
         if out.chars().count() >= budget {
             break;
         }
-        out.push_str(&format!("### {}\n", entry.id));
+        let _ = writeln!(out, "### {}", entry.id);
         for ref_ in &entry.source {
             if out.chars().count() >= budget {
                 break;
             }
-            out.push_str(&format!("- {}: ", ref_));
+            let _ = write!(out, "- {ref_}: ");
             out.push_str(&evidence_snippet(ref_, sessions_dir));
             out.push('\n');
         }
@@ -642,15 +644,16 @@ fn truncate(text: &str, max: usize) -> String {
 pub fn build_consolidate_prompt(entries: &[(String, Entry)], evidence: &str) -> String {
     let mut entries_text = String::new();
     for (_, entry) in entries {
-        entries_text.push_str(&format!(
-            "- [{}] ({}, {:?}) {} — {}（{}）\n",
+        let _ = writeln!(
+            entries_text,
+            "- [{}] ({}, {:?}) {} — {}（{}）",
             entry.id,
             entry.entry_type,
             entry.domain,
             entry.subject,
             entry.summary(),
             entry.timeline_date()
-        ));
+        );
     }
 
     let evidence_section = if evidence.trim().is_empty() {
@@ -773,7 +776,7 @@ pub fn apply_consolidate_ops(
                     continue;
                 };
                 if replacement.source.is_empty() {
-                    replacement.source = old.source.clone();
+                    replacement.source.clone_from(&old.source);
                 }
                 replacement.supersedes = Some(id.clone());
                 match vet(replacement, &working, today, None, None) {

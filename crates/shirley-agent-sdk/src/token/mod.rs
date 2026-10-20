@@ -44,6 +44,7 @@ const TOOL_MESSAGE_OVERHEAD: u64 = 4;
 /// CJK at 1.0 is deliberately **biased high** (compaction triggers early, on the safe
 /// side); the true value may be 0.5~1.0 and is pulled back by
 /// [`HeuristicCounter::calibrate`].
+#[must_use]
 pub fn count_text(text: &str) -> u64 {
     let mut total = 0.0_f64;
     for ch in text.chars() {
@@ -96,9 +97,10 @@ pub(crate) fn is_cjk_word_char(code: u32) -> bool {
 /// an image-heavy turn. It is a heuristic, like everything else in this module.
 const IMAGE_TOKENS: u64 = 384;
 
-/// Estimate the tokens a [`message::Content`]'s parts occupy (uncalibrated), **without**
-/// the role wrapper. Shared by `User` (adds [`ROLE_OVERHEAD`]) and `Tool` (adds
-/// [`TOOL_MESSAGE_OVERHEAD`] instead), so a text result counts exactly as it did before.
+/// Estimate the tokens a [`message::Content`]'s parts occupy (uncalibrated), **without** the role wrapper.
+///
+/// Shared by `User` (adds [`ROLE_OVERHEAD`]) and `Tool` (adds [`TOOL_MESSAGE_OVERHEAD`] instead), so a text result counts exactly as it did before.
+#[must_use]
 pub fn count_content_parts(content: &message::Content) -> u64 {
     content
         .as_parts()
@@ -111,6 +113,7 @@ pub fn count_content_parts(content: &message::Content) -> u64 {
 }
 
 /// Estimate the tokens a [`message::Content`] occupies (uncalibrated).
+#[must_use]
 pub fn count_content(content: &message::Content) -> u64 {
     count_content_parts(content) + ROLE_OVERHEAD
 }
@@ -120,6 +123,7 @@ pub fn count_content(content: &message::Content) -> u64 {
 /// Only counts fields that are **actually serialized into the request**: `reasoning_content`
 /// is also written out in `encode_messages`, so it must be counted, otherwise assistant
 /// messages with reasoning would be systematically underestimated.
+#[must_use]
 pub fn count_message(message: &message::Message) -> u64 {
     match message {
         message::Message::System { content } | message::Message::ContextSummary { content } => {
@@ -166,6 +170,7 @@ pub fn count_messages(messages: &[message::Message]) -> u64 {
 /// Each tool's JSON Schema is sent with every request, which is "standing overhead" that
 /// doesn't grow with the conversation, but the cut-point budget must subtract it first,
 /// otherwise the window available for conversation would be overestimated.
+#[must_use]
 pub fn count_tools(tools: &[&crate::tool::ToolDefinition]) -> u64 {
     tools
         .iter()
@@ -184,6 +189,7 @@ pub fn count_tools(tools: &[&crate::tool::ToolDefinition]) -> u64 {
 /// [`count_message`]. Because the factor is uniform, the accumulation order is unchanged
 /// and cut-point results are stable; it also lets [`HeuristicCounter::calibrate`] observe
 /// the uncontaminated raw estimate.
+#[must_use]
 pub fn scaled(raw: u64, factor: f64) -> u64 {
     (raw as f64 * factor).round() as u64
 }
@@ -233,6 +239,7 @@ impl HeuristicCounter {
     const EMA_OLD: f64 = 0.7;
     const EMA_NEW: f64 = 0.3;
 
+    #[must_use]
     pub fn new() -> Self {
         Self {
             factor_milli: AtomicU64::new(1000),
@@ -394,6 +401,10 @@ mod tests {
     /// the "estimates exclude factor" design. If someone multiplies `factor` back into
     /// `count_message`, `ratio` would always be 1 and this assertion would fail.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact float equality is the point: the initial/unchanged factor must be exactly 1.0"
+    )]
     fn calibrate_moves_factor_toward_observation() {
         let counter = HeuristicCounter::new();
         assert_eq!(counter.factor(), 1.0);
@@ -415,6 +426,10 @@ mod tests {
 
     /// Invalid observations (estimate 0 / real 0) must not pollute `factor`.
     #[test]
+    #[expect(
+        clippy::float_cmp,
+        reason = "exact float equality is the point: an ignored observation must leave the factor exactly 1.0"
+    )]
     fn calibrate_ignores_invalid_observations() {
         let counter = HeuristicCounter::new();
         assert_eq!(counter.calibrate(100, 0), 1.0);

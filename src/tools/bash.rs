@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -28,7 +29,7 @@ fn render(output: &SandboxOutput, command: &str) -> String {
     let mut text = String::new();
 
     if output.timed_out {
-        text.push_str(&format!("[timeout] command timed out: {command}\n"));
+        let _ = writeln!(text, "[timeout] command timed out: {command}");
     }
 
     if !output.stdout.is_empty() {
@@ -49,17 +50,18 @@ fn render(output: &SandboxOutput, command: &str) -> String {
     if let Some(code) = output.exit_code
         && code != 0
     {
-        text.push_str(&format!("[exit code] {code}\n"));
+        let _ = writeln!(text, "[exit code] {code}");
     }
 
     // Degradation notice: this execution's isolation did not fully take effect.
     // Report honestly, do not silently ignore.
     if !output.is_fully_isolated() {
-        text.push_str(&format!(
-            "[sandbox degraded] isolation strength: {}, the following constraints did not take effect: {}\n",
+        let _ = writeln!(
+            text,
+            "[sandbox degraded] isolation strength: {}, the following constraints did not take effect: {}",
             output.isolation,
             output.degraded.join("; ")
-        ));
+        );
     }
 
     text

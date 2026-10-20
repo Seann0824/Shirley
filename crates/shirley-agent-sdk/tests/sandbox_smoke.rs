@@ -1,5 +1,5 @@
 //! Sandbox pipeline smoke tests: verify the whole spec -> backend -> output chain runs.
-//! Note: this uses ProcessBackend (no isolation); it only verifies the orchestration logic, not
+//! Note: this uses `ProcessBackend` (no isolation); it only verifies the orchestration logic, not
 //! the isolation strength.
 
 use shirley_agent_sdk::sandbox::{NetworkPolicy, Sandbox, SandboxSpec, backend::ProcessBackend};
@@ -85,6 +85,7 @@ async fn enforces_timeout() {
 #[tokio::test]
 async fn env_not_inherited_by_default() {
     // The host sets a variable; it should not be visible inside the sandbox (unless injected explicitly).
+    // SAFETY: test-only; this is the only test that touches SANDBOX_LEAK_TEST.
     unsafe { std::env::set_var("SANDBOX_LEAK_TEST", "secret") };
     let sandbox = Sandbox::new(ProcessBackend);
     let spec = SandboxSpec::new("sh")

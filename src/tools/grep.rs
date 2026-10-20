@@ -1,6 +1,7 @@
 //! Bounded workspace content search. Reuse ripgrep's ignore parser rather than
 //! implementing gitignore precedence/negation ourselves or requiring an rg binary.
 
+use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Read;
 use std::path::Path;
@@ -23,6 +24,10 @@ const MAX_VISITED: usize = 50_000;
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Default)]
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "these mirror independent search flags from the tool schema; a state machine would obscure the mapping"
+)]
 struct SearchOptions {
     path: Option<String>,
     glob: Option<String>,
@@ -36,6 +41,12 @@ struct SearchOptions {
 
 #[tool(
     description = "Search workspace text with a regex (or fixed_strings=true for literal text). Use this instead of bash grep/rg. Respects nested .gitignore, .ignore, .rgignore and Git excludes, including outside Git repositories; glob only narrows results and cannot override ignores. Hidden files are excluded unless include_hidden=true. Ignored files require include_ignored=true, even for an explicit file path. Skips binaries, symlinks, suspected secrets, VCS/runtime state and files over 2 MiB. Returns path:line:text, or paths with files_only=true. Results have hard count, line-length, byte and scan limits; truncation is reported. No shell or external rg installation is needed."
+)]
+// The tool signature is the public schema; splitting it into a struct would change the
+// model-facing JSON schema, so keep the flat argument list.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "tool parameter list is the public schema; grouping would change the model-facing shape"
 )]
 pub async fn grep(
     ctx: &ToolContext,
@@ -90,6 +101,10 @@ pub async fn grep(
         .map_err(|error| ToolError::ExecutionError(format!("search worker failed: {error}")))?
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "SearchOptions is moved into a spawn_blocking closure and read there"
+)]
 fn search(root: &Path, pattern: &str, options: SearchOptions) -> Result<String, ToolError> {
     let deadline = Instant::now() + SEARCH_TIMEOUT;
     if pattern.is_empty() || pattern.len() > 16 * 1024 {
@@ -126,10 +141,10 @@ fn search(root: &Path, pattern: &str, options: SearchOptions) -> Result<String, 
 
     let workspace = WorkSpace::new(root.to_path_buf())
         .map_err(|error| ToolError::ExecutionError(error.to_string()))?;
-    let root = workspace.resolve(".").map_err(path_error)?;
+    let root = workspace.resolve(".").map_err(|e| path_error(&e))?;
     let scope = workspace
         .resolve(options.path.as_deref().unwrap_or("."))
-        .map_err(path_error)?;
+        .map_err(|e| path_error(&e))?;
     let metadata = std::fs::metadata(&scope).map_err(|error| {
         ToolError::ExecutionError(format!("cannot search requested path: {error}"))
     })?;
@@ -175,12 +190,9 @@ fn search(root: &Path, pattern: &str, options: SearchOptions) -> Result<String, 
             stopped = Some("scan limit reached");
             break;
         }
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(_) => {
-                errors += 1;
-                continue;
-            }
+        let Ok(entry) = entry else {
+            errors += 1;
+            continue;
         };
         if entry.error().is_some() {
             errors += 1;
@@ -248,19 +260,23 @@ fn search(root: &Path, pattern: &str, options: SearchOptions) -> Result<String, 
         }
     }
     if let Some(reason) = stopped {
-        output.push_str(&format!(
-            "[results truncated: {reason}; narrow path/glob/pattern]\n"
-        ));
+        let _ = writeln!(
+            output,
+            "[results truncated: {reason}; narrow path/glob/pattern]"
+        );
     } else if matches == 0 {
         output.push_str("[no matches in searched files]\n");
     }
     if skipped_large > 0 || errors > 0 {
-        output.push_str(&format!("[partial search: {skipped_large} files over 2 MiB skipped; {errors} traversal/ignore/read errors]\n"));
+        let _ = writeln!(
+            output,
+            "[partial search: {skipped_large} files over 2 MiB skipped; {errors} traversal/ignore/read errors]"
+        );
     }
     Ok(output)
 }
 
-fn path_error(error: WorkspaceError) -> ToolError {
+fn path_error(error: &WorkspaceError) -> ToolError {
     match error {
         WorkspaceError::OutsideRoot(_) | WorkspaceError::InvalidPath(_) => {
             ToolError::ArgumentsError(error.to_string())

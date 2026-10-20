@@ -5,7 +5,7 @@
 //! differences are contained here so the per-protocol encoders stay thin.
 //!
 //! **Text-only fast path**: when a content carries no image, each protocol keeps
-//! its historical text-only encoding byte-for-byte (ChatCompletions: a plain
+//! its historical text-only encoding byte-for-byte (`ChatCompletions`: a plain
 //! string; Responses: `[{type:input_text}]`; Anthropic: `[{type:text}]`). This
 //! preserves the KV prefix cache for the overwhelmingly common text case.
 
@@ -22,7 +22,7 @@ fn detail_str(detail: ImageDetail) -> &'static str {
     }
 }
 
-/// ChatCompletions: `string` when text-only, otherwise an array of
+/// `ChatCompletions`: `string` when text-only, otherwise an array of
 /// `{type:text}` / `{type:image_url, image_url:{url, detail}}` parts.
 pub(crate) fn chat_content(content: &Content) -> Result<Value, AdapterError> {
     if content.is_text_only() {
@@ -54,9 +54,9 @@ pub(crate) fn chat_content(content: &Content) -> Result<Value, AdapterError> {
 
 /// Responses: `[{type:input_text}]` when text-only (historical shape), otherwise
 /// `{type:input_image, image_url|file_id, detail}` parts alongside the text ones.
-pub(crate) fn responses_content(content: &Content) -> Result<Value, AdapterError> {
+pub(crate) fn responses_content(content: &Content) -> Value {
     if content.is_text_only() {
-        return Ok(json!([{ "type": "input_text", "text": content.as_text() }]));
+        return json!([{ "type": "input_text", "text": content.as_text() }]);
     }
     let mut parts = Vec::new();
     for part in content.as_parts() {
@@ -75,7 +75,7 @@ pub(crate) fn responses_content(content: &Content) -> Result<Value, AdapterError
             }
         }
     }
-    Ok(Value::Array(parts))
+    Value::Array(parts)
 }
 
 /// Anthropic: `[{type:text}]` when text-only (historical shape), otherwise
@@ -127,8 +127,8 @@ fn anthropic_image(image: &ImagePart) -> Result<Value, AdapterError> {
 /// image that the capability guard missed would be sent to a model that cannot read it.
 pub(crate) fn messages_have_images(messages: &[crate::message::Message]) -> bool {
     messages.iter().any(|message| match message {
-        crate::message::Message::User { content } => content.has_images(),
-        crate::message::Message::Tool {
+        crate::message::Message::User { content }
+        | crate::message::Message::Tool {
             content: Some(content),
             ..
         } => content.has_images(),
@@ -179,7 +179,7 @@ fn strip_content_images(content: &Content) -> Content {
 
 /// The image parts of `content` as a fresh content, or `None` when there are none.
 ///
-/// Protocols whose tool-result slot is text-only (ChatCompletions / Responses) split a
+/// Protocols whose tool-result slot is text-only (`ChatCompletions` / Responses) split a
 /// tool result into a text part and a trailing user message; this extracts the images
 /// for that trailing message.
 pub(crate) fn images_only(content: &Content) -> Option<Content> {
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn responses_file_id_maps_to_input_image() {
         let content = Content::parts(vec![ContentPart::Image(ImagePart::file_id("file-1"))]);
-        let value = responses_content(&content).unwrap();
+        let value = responses_content(&content);
         assert_eq!(value[0]["type"], "input_image");
         assert_eq!(value[0]["file_id"], "file-1");
     }

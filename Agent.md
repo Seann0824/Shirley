@@ -342,12 +342,24 @@ Common commands:
 
 ```sh
 cargo build                        # build
-cargo test                         # run all tests
-cargo test -p shirley-agent-sdk    # run only the SDK tests
-cargo clippy --all-targets         # static checks
+cargo build --workspace --all-targets --features server   # what CI builds
+cargo test --workspace --features server                  # run all tests (CI pins --features server)
+cargo test -p shirley-agent-sdk                           # run only the SDK tests
+cargo clippy --workspace --all-targets --features server  # static checks (Tier-1 deny gate)
+cargo fmt --all -- --check                                # rustfmt gate (blocking in CI)
 ```
 
-Test distribution (about 102 in the application layer): `markdown.rs` 13, `app.rs` 28, `ui.rs` 11, `command.rs` 10, `bash.rs` 6 (of which `reports_sandbox_degradation` is a pre-existing red test), `read.rs` 10, `session.rs` 10, `models.rs` 4, `web_search.rs` 11, `todo.rs` 7; SDK integration tests `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 6 each, `tool_lifecycle.rs` 5, `tool_context.rs` 5, `runtime_compaction.rs` 20, `system_prompt_contract.rs` 4 (the `session_contract.rs` was deleted along with the session extraction).
+Test distribution (about 102 in the application layer): `markdown.rs` 13, `app.rs` 28, `ui.rs` 11, `command.rs` 10, `bash.rs` 6, `read.rs` 10, `session.rs` 10, `models.rs` 4, `web_search.rs` 11, `todo.rs` 7; SDK integration tests `error_contract.rs` / `sandbox_smoke.rs` / `tool_contract.rs` 6 each, `tool_lifecycle.rs` 5, `tool_context.rs` 5, `runtime_compaction.rs` 20, `system_prompt_contract.rs` 4 (the `session_contract.rs` was deleted along with the session extraction).
+
+**Toolchain & lint gates (Microsoft Rust Guidelines)** -- full rationale in `docs/rust-guidelines.md`. Lints are adopted **graduated**, not all at once: a green CI is worth more than an aspirational all-deny config. The root `Cargo.toml` `[workspace.lints]` is the single source of truth; every crate opts in with `[lints] workspace = true` (**remember to add it to any new crate**).
+
+- **Tier 1 (hard gate, `deny`)** -- clean today, so a regression fails the build: rustc `ambiguous_negative_literals` / `redundant_lifetimes` / `trivial_numeric_casts` / `unsafe_op_in_unsafe_fn` / `unused_lifetimes` / `missing_debug_implementations` / `redundant_imports`; clippy groups `correctness` / `suspicious` / `style` / `complexity` / `perf`; restriction `allow_attributes_without_reason` / `cargo_common_metadata` / `clone_on_ref_ptr` / `map_err_ignore` / `undocumented_unsafe_blocks` / `unused_result_ok`; plus the cleared pedantic/restriction subsets (batch A/B/C: `uninlined_format_args`, `assigning_clones`, `map_unwrap_or`, `float_cmp`, `match_same_arms`, `trivially_copy_pass_by_ref`, `unnecessary_wraps`, `redundant_closure_for_method_calls`, `needless_pass_by_value`, `missing_errors_doc`, `format_push_string`, ...).
+- **Tier 2 (advisory, `warn`)** -- real debt, fix by ratchet then flip to `deny`: the `cargo` and `pedantic` groups overall, `multiple_crate_versions` (transitive version splits), and the structural `large_futures` / `too_many_lines` (the former is almost entirely `#[tokio::test]` bodies; the latter needs risky splitting -- deliberately left as debt).
+- **Explicitly `allow`ed** -- the numeric-cast family (`cast_possible_truncation` etc.; too noisy on a brownfield codebase, deferred to the ratchet) and `literal_string_with_formatting_args` (so a literal `{...}` inside a log format string is not treated as a format string).
+
+Override style: prefer `#[expect(lint, reason = "...")]` over `#[allow]` (MS `M-LINT-OVERRIDE-EXPECT`); a bare `#[allow]` without a `reason` fails the `allow_attributes_without_reason` gate. `cargo fmt --all` was applied once across the whole tree (591 diffs -> 0) and `fmt --check` is blocking in CI.
+
+CI (`.github/workflows/ci.yml`) has four jobs: `build · test · clippy` (all with `--features server`), `rustfmt` (`fmt --check`, blocking), `cargo-audit` (dependency advisories) and `cargo-hack` (`--feature-powerset --exclude-features desktop`). Note the default (no-feature) `cargo test` does **not** compile: `src/model_providers.rs` references `crate::interface::runtime`, which is gated behind `cfg(any(desktop, server))` -- always pass `--features server` locally too.
 
 ---
 
@@ -384,7 +396,6 @@ Test distribution (about 102 in the application layer): `markdown.rs` 13, `app.r
 - The `adapter::ModelfinishReaon` typo (missing an i, should be `ModelFinishReason`) -- **still present**
 - The `todo: this currently does not handle tool-injection logic or thinking logic.` comment above `encode_request` in `chat_completions/mod.rs` is outdated (both tools and thinking are handled)
 - In `runtime`, when a tool execution fails it stuffs the error `to_string()` into the tool message (there is a TODO noting "this feels a bit off")
-- In `bash.rs`, the degraded hint in `render` is currently commented out, but the unit test `reports_sandbox_degradation` still asserts `[sandbox degraded]` -- **this test should be red**; either restore the rendering or change the test
 - In `bash.rs`, the tool error-message format has no unified convention (there is a TODO)
 
 ---
@@ -397,7 +408,8 @@ Test distribution (about 102 in the application layer): `markdown.rs` 13, `app.r
 4. **Keep the external contract small**. The `pub use` in `lib.rs` is the SDK's facade; before adding something, ask yourself: is this a fundamental capability, or business logic?
 5. **Error classification is stable**. `ErrorKind` is for logs/metrics/retry decisions; the wording can change, the kind cannot be changed casually; to decide retry, look only at `is_retryable`, do not match strings.
 6. **The boundary is in the sandbox, not the blacklist**. `bash`'s string blacklist is only a temporary fallback; do not treat it as a security boundary.
-7. **`plan.md` and `docs/` are living documents**. `plan.md` has a lot of "why I designed it this way" thinking, which explains things better than code comments; `docs/` are the phased plans. Read them before changing the architecture.
+7. **Do not regress the lint gates**. The workspace `[workspace.lints]` is enforced in CI; any Tier-1 `deny` hit fails the build. Silence a single site with `#[expect(lint, reason = "...")]` (never a bare `#[allow]`); when you genuinely clear a Tier-2 backlog item, flip it to `deny` in the same change (ratchet up, never down).
+8. **`plan.md` and `docs/` are living documents**. `plan.md` has a lot of "why I designed it this way" thinking, which explains things better than code comments; `docs/` are the phased plans. Read them before changing the architecture.
 
 ---
 

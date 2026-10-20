@@ -21,7 +21,13 @@
 //! added repeatedly it is deduped by id (if it was previously archived, it is **restored and renamed**, rather than adding a new entry).
 
 // Desktop-only module: no consumer in the default (TUI-only) build; `dead_code` is expected noise.
-#![cfg_attr(not(feature = "desktop"), allow(dead_code))]
+#![cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        reason = "only used when the relevant interface feature is enabled"
+    )
+)]
 
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -90,8 +96,7 @@ fn now_ms() -> u64 {
 fn default_name(path: &Path) -> String {
     path.file_name()
         .and_then(|n| n.to_str())
-        .map(str::to_owned)
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+        .map_or_else(|| path.to_string_lossy().into_owned(), str::to_owned)
 }
 
 impl ProjectRegistry {
@@ -153,12 +158,8 @@ impl ProjectRegistry {
     /// - Registered and not archived -> only refresh `last_opened_ms` (no duplicate registration).
     ///
     /// Returns the registered entry (a clone).
-    pub fn add(
-        &mut self,
-        path: PathBuf,
-        name: Option<String>,
-    ) -> Result<ProjectEntry, ProjectError> {
-        let canonical = std::fs::canonicalize(&path)
+    pub fn add(&mut self, path: &Path, name: Option<String>) -> Result<ProjectEntry, ProjectError> {
+        let canonical = std::fs::canonicalize(path)
             .map_err(|error| ProjectError::Canonicalize(format!("{}: {error}", path.display())))?;
         let id = canonical.to_string_lossy().into_owned();
         let display = name
@@ -201,7 +202,7 @@ impl ProjectRegistry {
             .iter_mut()
             .find(|entry| entry.id == id)
             .ok_or_else(|| ProjectError::NotFound(id.to_owned()))?;
-        entry.name = name.to_owned();
+        name.clone_into(&mut entry.name);
         self.save()
     }
 
@@ -264,8 +265,8 @@ mod tests {
         let (root, mut reg) = temp_registry("add");
         let a = make_dir(&root, "alpha");
         let b = make_dir(&root, "beta");
-        let ea = reg.add(a.clone(), None).unwrap();
-        let eb = reg.add(b.clone(), Some("My Project".into())).unwrap();
+        let ea = reg.add(&a.clone(), None).unwrap();
+        let eb = reg.add(&b.clone(), Some("My Project".into())).unwrap();
         assert_eq!(ea.name, "alpha");
         assert_eq!(eb.name, "My Project");
 
@@ -288,9 +289,9 @@ mod tests {
     fn add_is_idempotent_and_dedupes_by_canonical_path() {
         let (root, mut reg) = temp_registry("dedupe");
         let a = make_dir(&root, "alpha");
-        let first = reg.add(a.clone(), None).unwrap();
+        let first = reg.add(&a.clone(), None).unwrap();
         // Adding the same directory (including a ./ variant) again: no new entry, only a refresh.
-        let again = reg.add(a.join("."), Some("renamed".into())).unwrap();
+        let again = reg.add(&a.join("."), Some("renamed".into())).unwrap();
         assert_eq!(first.id, again.id);
         assert_eq!(reg.list(false).len(), 1);
         assert_eq!(again.name, "renamed");
@@ -300,7 +301,7 @@ mod tests {
     fn archive_hides_and_restore_brings_back() {
         let (root, mut reg) = temp_registry("archive");
         let a = make_dir(&root, "alpha");
-        let entry = reg.add(a, None).unwrap();
+        let entry = reg.add(&a, None).unwrap();
 
         reg.archive(&entry.id).unwrap();
         assert!(reg.list(false).is_empty());
@@ -316,9 +317,9 @@ mod tests {
     fn add_after_archive_restores_instead_of_duplicating() {
         let (root, mut reg) = temp_registry("readd");
         let a = make_dir(&root, "alpha");
-        let entry = reg.add(a.clone(), None).unwrap();
+        let entry = reg.add(&a.clone(), None).unwrap();
         reg.archive(&entry.id).unwrap();
-        let again = reg.add(a, None).unwrap();
+        let again = reg.add(&a, None).unwrap();
         assert_eq!(again.id, entry.id);
         assert!(!again.archived);
         assert_eq!(reg.list(true).len(), 1);
@@ -328,7 +329,7 @@ mod tests {
     fn rename_changes_label_only() {
         let (root, mut reg) = temp_registry("rename");
         let a = make_dir(&root, "alpha");
-        let entry = reg.add(a, None).unwrap();
+        let entry = reg.add(&a, None).unwrap();
         reg.rename(&entry.id, "new name").unwrap();
         let got = reg.get(&entry.id).unwrap();
         assert_eq!(got.name, "new name");
@@ -340,7 +341,7 @@ mod tests {
         let (root, mut reg) = temp_registry("missing");
         let missing = root.join("does-not-exist");
         assert!(matches!(
-            reg.add(missing, None),
+            reg.add(&missing, None),
             Err(ProjectError::Canonicalize(_))
         ));
     }

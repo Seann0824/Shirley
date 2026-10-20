@@ -10,6 +10,7 @@
 //!    pure BM25** (`docs/memory.md` 10).
 
 use std::collections::{HashMap, HashSet};
+use std::fmt::Write as _;
 use std::path::Path;
 
 use super::format::{Entry, IndexLine, MemoryError};
@@ -21,7 +22,10 @@ use super::vector::{VectorStore, cosine};
 pub struct Scored {
     pub entry: Entry,
     /// Relative path (for `read` to fetch the full text; not yet wired in V1, retrieval results only use `entry`).
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub path: String,
     /// Match score (higher = more relevant).
     pub score: f64,
@@ -99,10 +103,11 @@ pub fn write_index(root: &Path, entries: &[(String, Entry)]) -> Result<(), Memor
         text.push_str("_(no memories yet)_\n");
     } else {
         for line in &lines {
-            text.push_str(&format!(
-                "- [{}]({}) · {} · {} · {}\n",
+            let _ = writeln!(
+                text,
+                "- [{}]({}) · {} · {} · {}",
                 line.id, line.path, line.entry_type, line.summary, line.date
-            ));
+            );
         }
     }
     super::store::atomic_write(&root.join(INDEX_FILE), text.as_bytes())?;

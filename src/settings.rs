@@ -32,7 +32,7 @@ use shirley_agent_sdk::{CompressionConfig, ModelProtocol};
 /// Built-in default model: consistent with the old hardcoding in `main.rs`; upgrading does not change default behavior.
 const DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
 /// Built-in default context window: `104858 >> 1` (the value from the old `main.rs`).
-const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 104858 >> 1;
+const DEFAULT_CONTEXT_WINDOW_TOKENS: u64 = 104_858 >> 1;
 /// Built-in default reasoning effort (consistent with the old hardcoding in `bootstrap.rs`).
 const DEFAULT_REASONING_EFFORT: &str = "low";
 
@@ -94,7 +94,7 @@ impl CompressionSettings {
             config.retain_ratio = ratio;
         }
         if let Some(template) = self.template.as_ref().filter(|t| !t.trim().is_empty()) {
-            config.template = template.clone();
+            config.template.clone_from(template);
         }
         config
     }
@@ -752,7 +752,7 @@ mod tests {
         .unwrap();
         let settings = Settings::load(Some(&root.join("config.toml")), &env_of(&[])).unwrap();
         assert_eq!(settings.protocol, ModelProtocol::Responses);
-        assert_eq!(settings.context_window_tokens, 128000);
+        assert_eq!(settings.context_window_tokens, 128_000);
     }
 
     #[test]

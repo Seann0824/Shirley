@@ -13,6 +13,7 @@ pub struct RunResult {
 }
 
 impl RunResult {
+    #[must_use]
     pub fn cache_hit_rate(&self) -> Option<f64> {
         self.usage.cache_hit_rate()
     }
@@ -77,7 +78,9 @@ impl fmt::Display for AgentEvent {
             Self::Retrying { attempt, reason } => {
                 write!(f, "Retrying model request ({attempt}): {reason}")
             }
-            Self::ContentDelta(text) | Self::ReasoningDelta(text) => write!(f, "{text}"),
+            Self::ContentDelta(text) | Self::ReasoningDelta(text) | Self::Notice(text) => {
+                write!(f, "{text}")
+            }
             Self::MessageAdded(message) => write!(f, "{message}"),
             Self::CompressionStarted => write!(f, "compacting context"),
             Self::CompressionFinished => write!(f, "context compaction finished"),
@@ -99,7 +102,6 @@ impl fmt::Display for AgentEvent {
                 let _ = write!(f, "{mark} Tool Finished [{call_id}]: {name}");
                 Ok(())
             }
-            Self::Notice(text) => write!(f, "{text}"),
             Self::Usage(usage) => {
                 let hit = match usage.cache_hit_rate() {
                     Some(rate) => format!("{:.1}%", rate * 100.0),

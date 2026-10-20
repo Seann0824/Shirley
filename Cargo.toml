@@ -2,6 +2,11 @@
 name = "Shirley"
 version = "0.0.2"
 edition = "2024"
+description = "A coding agent written in Rust: TUI + desktop chat interface over the shirley-agent-sdk"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/Seann0824/Shirley"
+keywords = ["agent", "ai", "llm", "coding-agent", "cli"]
+categories = ["command-line-utilities", "development-tools"]
 
 [dependencies]
 serde = { version = "1.0.229", features = ["derive"] }
@@ -77,23 +82,50 @@ redundant_imports = "deny"
 # Tier 2 — advisory (warn) today; the ratchet backlog. CI does not fail on these
 # yet; fix incrementally, then flip CI to `-D warnings`. (MS recommends "warn".)
 cargo = { level = "warn", priority = -1 }
-complexity = { level = "warn", priority = -1 }
+complexity = { level = "deny", priority = -1 }
 # Promoted to deny once the backlog was cleared (ratchet step 2). These groups
 # are the "definitely a bug" class; a hit here now fails the build.
 correctness = { level = "deny", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
-perf = { level = "warn", priority = -1 }
-style = { level = "warn", priority = -1 }
+perf = { level = "deny", priority = -1 }
+style = { level = "deny", priority = -1 }
 suspicious = { level = "deny", priority = -1 }
 # Restriction-group lints explicitly called out by the MS guidelines.
-allow_attributes_without_reason = "warn"
-clone_on_ref_ptr = "warn"
-map_err_ignore = "warn"
-undocumented_unsafe_blocks = "warn"
-unused_result_ok = "warn"
-too_long_first_doc_paragraph = "warn"
+allow_attributes_without_reason = "deny"
+cargo_common_metadata = "deny"   # every crate carries description/license/repository/keywords/categories
+clone_on_ref_ptr = "deny"   # use Arc::clone(&x) instead of x.clone() on ref-counted pointers
+map_err_ignore = "deny"   # name the ignored error (|_e|) so the discard is explicit
+undocumented_unsafe_blocks = "deny"   # every unsafe block carries a // SAFETY: note
+unused_result_ok = "deny"   # prefer `let _ = ...;` over `.ok();` for intentionally ignored Results
 # Structured logging: do not treat literal formatting args as a format string.
 literal_string_with_formatting_args = "allow"
+
+# Pedantic subset cleared and promoted to deny (ratchet step 3). Each of these had a
+# zero backlog after the batch-A cleanups; a hit now fails the build.
+uninlined_format_args = "deny"
+manual_string_new = "deny"
+range_plus_one = "deny"
+checked_conversions = "deny"
+single_char_pattern = "deny"
+semicolon_if_nothing_returned = "deny"
+unnested_or_patterns = "deny"
+unnecessary_join = "deny"
+if_not_else = "deny"
+unreadable_literal = "deny"
+default_trait_access = "deny"
+needless_continue = "deny"
+format_collect = "deny"
+items_after_statements = "deny"
+ref_option = "deny"
+too_long_first_doc_paragraph = "deny"
+# Pedantic/restriction subset cleared and promoted to deny (ratchet step 4).
+assigning_clones = "deny"
+map_unwrap_or = "deny"
+float_cmp = "deny"
+match_same_arms = "deny"
+trivially_copy_pass_by_ref = "deny"
+unnecessary_wraps = "deny"
+redundant_closure_for_method_calls = "deny"
 # Deliberate opt-outs: numeric-cast family is noisy on a brownfield codebase and
 # is deferred to the ratchet rather than blocking the initial adoption.
 cast_possible_truncation = "allow"

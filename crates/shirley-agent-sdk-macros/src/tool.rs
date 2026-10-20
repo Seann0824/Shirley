@@ -58,7 +58,12 @@ fn try_expand(attr: TokenStream, item: TokenStream) -> syn::Result<proc_macro2::
 
     // Generate code from the collected info.
     // generate_tool returns code tokens, wrapped in Ok as a success result.
-    Ok(generate_tool(function, config, parameters, call_arguments))
+    Ok(generate_tool(
+        &function,
+        &config,
+        &parameters,
+        &call_arguments,
+    ))
 }
 
 // Parse the contents inside the #tool[(...)] parentheses
@@ -75,12 +80,12 @@ fn parse_config(attr: TokenStream) -> syn::Result<ToolConfig> {
     // Attribute parser: this closure is called for each comma-separated config item #tool(a=1,b=2,...)
     let parser = syn::meta::parser(|meta| {
         if meta.path.is_ident("on_register") {
-            return read_hook(meta, &mut on_register, "on_register");
+            return read_hook(&meta, &mut on_register, "on_register");
         }
         if meta.path.is_ident("on_unregister") {
-            return read_hook(meta, &mut on_unregister, "on_unregister");
+            return read_hook(&meta, &mut on_unregister, "on_unregister");
         }
-        read_description(meta, &mut description)
+        read_description(&meta, &mut description)
     });
 
     parser.parse(attr)?;
@@ -103,7 +108,7 @@ fn parse_config(attr: TokenStream) -> syn::Result<ToolConfig> {
 
 // Read the value of `on_register` / `on_unregister`: a companion function name (Ident).
 fn read_hook(
-    meta: syn::meta::ParseNestedMeta<'_>,
+    meta: &syn::meta::ParseNestedMeta<'_>,
     slot: &mut Option<Ident>,
     key: &str,
 ) -> syn::Result<()> {
@@ -122,7 +127,7 @@ fn parse_parameter_description(attribute: &Attribute) -> syn::Result<LitStr> {
     attribute.parse_nested_meta(|meta| {
         // Reuse the validation written in the previous round
         // Check the name, duplicate entries, string type and empty string
-        read_description(meta, &mut description)
+        read_description(&meta, &mut description)
     })?;
 
     // If #[param()] was written
@@ -255,7 +260,7 @@ fn extract_parameters(
 
 // Generic reader for #[xxx(description = xxx)]
 fn read_description(
-    meta: syn::meta::ParseNestedMeta<'_>,
+    meta: &syn::meta::ParseNestedMeta<'_>,
     description: &mut Option<LitStr>,
 ) -> syn::Result<()> {
     // path corresponds to the key
@@ -285,10 +290,10 @@ fn read_description(
 }
 
 fn generate_tool(
-    function: ItemFn,
-    config: ToolConfig,
-    parameters: Vec<ToolParameter>,
-    call_arguments: Vec<CallArgument>,
+    function: &ItemFn,
+    config: &ToolConfig,
+    parameters: &[ToolParameter],
+    call_arguments: &[CallArgument],
 ) -> proc_macro2::TokenStream {
     // Original function name
     let name = &function.sig.ident;

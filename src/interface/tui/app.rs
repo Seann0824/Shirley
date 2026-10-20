@@ -67,7 +67,7 @@ pub struct SubagentPreview {
 
 /// Current stage of the `/login` step-by-step flow.
 ///
-/// Fixed order: first confirm the endpoint (base_url), then the key (api_key), and finally the model.
+/// Fixed order: first confirm the endpoint (`base_url`), then the key (`api_key`), and finally the model.
 /// The endpoint comes first because the other two are meaningless without it; the model goes last because
 /// after changing the endpoint one usually wants to set a new default model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,7 +79,7 @@ pub enum LoginStep {
 
 impl LoginStep {
     /// How this step is asked in the prompt.
-    fn prompt(&self) -> &'static str {
+    fn prompt(self) -> &'static str {
         match self {
             LoginStep::BaseUrl => "Enter the model service address base_url",
             LoginStep::ApiKey => {
@@ -95,12 +95,16 @@ impl LoginStep {
 /// Lives only in memory; cleared on `Esc` or when finished -- not persisted until complete, to avoid writing a half-finished config.
 pub struct LoginFlow {
     pub step: LoginStep,
-    /// The confirmed base_url (always present after the first step).
+    /// The confirmed `base_url` (always present after the first step).
     pub base_url: String,
-    /// The confirmed api_key (`None` means no auth).
+    /// The confirmed `api_key` (`None` means no auth).
     pub api_key: Option<String>,
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "App is the TUI state machine; these flags are independent UI toggles, not a state enum"
+)]
 pub struct App {
     /// Multi-session orchestrator: one independent `Agent` per session, `active` points to the foreground.
     /// In single-session mode (tests) there is only one session internally and `active` always points to it.
@@ -180,7 +184,10 @@ impl App {
     /// Construct with the built-in static model catalog (default).
     ///
     /// Mainly for tests and scenarios that do not care about catalog injection; the main program goes through [`App::with_manager`].
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn new(agent: Agent) -> Self {
         Self::with_catalog(agent, Arc::new(StaticCatalog::builtin()))
     }
@@ -188,13 +195,19 @@ impl App {
     /// Construct with an injected model catalog. A remote catalog can be passed in here in the future; the UI needs no changes.
     ///
     /// The session catalog falls back to an empty implementation (nothing persisted, empty list), for scenarios that do not care about session switching.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn with_catalog(agent: Agent, catalog: Arc<dyn ModelCatalog>) -> Self {
         Self::with_catalogs(agent, catalog, Arc::new(EmptySessionCatalog))
     }
 
     /// Construct with an injected model catalog and session catalog (single session, for tests).
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn with_catalogs(
         agent: Agent,
         catalog: Arc<dyn ModelCatalog>,
@@ -748,7 +761,7 @@ impl App {
         self.login.as_ref().map(|flow| flow.step)
     }
 
-    /// Enter step-by-step login: default to the current config and start by asking for base_url.
+    /// Enter step-by-step login: default to the current config and start by asking for `base_url`.
     ///
     /// The input box is pre-filled with the current value; pressing Enter directly means "keep unchanged"; edit to change.
     pub fn start_login(&mut self) {
@@ -830,7 +843,7 @@ impl App {
                     self.prompt_login_step();
                     return;
                 }
-                flow.base_url = trimmed.to_owned();
+                trimmed.clone_into(&mut flow.base_url);
                 flow.step = LoginStep::ApiKey;
                 self.login = Some(flow);
                 self.prompt_login_step();
@@ -1026,7 +1039,7 @@ impl App {
             .suggestion_index
             .min(self.suggestions.len().saturating_sub(1));
         if let Some(name) = self.suggestions.get(index).cloned() {
-            self.input = format!("{}{} ", DEFAULT_PREFIX, name);
+            self.input = format!("{DEFAULT_PREFIX}{name} ");
             self.input_cursor = self.input.len();
             self.suggestions.clear();
             self.suggestion_index = 0;
@@ -1432,15 +1445,15 @@ mod tests {
         let sessions = crate::interface::session::SessionManager::with_factory(
             built.agent,
             None,
-            factory.session_catalog.clone(),
-            factory.clone(),
+            Arc::clone(&factory.session_catalog),
+            Arc::clone(&factory),
             None,
             Some(built.memory),
             Some(built.skills),
             Some(built.todo),
             built.subagents,
         );
-        let catalog = factory.model_catalog.clone();
+        let catalog = Arc::clone(&factory.model_catalog);
         App::with_manager(sessions, catalog)
     }
 

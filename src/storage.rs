@@ -15,9 +15,10 @@ use uuid::Uuid;
 /// `<config_dir>/shirley` root, which was also per-user and therefore already shared;
 /// the explicit home path just makes it predictable and identical across platforms.)
 pub fn global_root() -> PathBuf {
-    dirs::home_dir()
-        .map(|path| path.join(".shirley"))
-        .unwrap_or_else(|| std::env::temp_dir().join("shirley"))
+    dirs::home_dir().map_or_else(
+        || std::env::temp_dir().join("shirley"),
+        |path| path.join(".shirley"),
+    )
 }
 
 /// One-time migration of the legacy state root (`<config_dir>/shirley`) into the unified
@@ -91,12 +92,11 @@ fn migrate_root_from(legacy: &Path, target: &Path) -> io::Result<bool> {
     if let Some(parent) = target.parent() {
         fs::create_dir_all(parent)?;
     }
-    match fs::rename(legacy, target) {
-        Ok(()) => Ok(true),
-        Err(_) => {
-            copy_tree(legacy, target)?;
-            Ok(true)
-        }
+    if let Ok(()) = fs::rename(legacy, target) {
+        Ok(true)
+    } else {
+        copy_tree(legacy, target)?;
+        Ok(true)
     }
 }
 
@@ -288,7 +288,7 @@ fn promote_config(legacy: &Path, target: &Path) -> io::Result<()> {
     }
     let read = |path: &Path| -> io::Result<toml::Value> {
         if !path.exists() {
-            return Ok(toml::Value::Table(Default::default()));
+            return Ok(toml::Value::Table(toml::map::Map::default()));
         }
         let text = fs::read_to_string(path)?;
         // Reject malformed/unknown settings before changing anything.
@@ -368,16 +368,15 @@ fn preflight(source: &Path, target: &Path) -> io::Result<()> {
             source.display()
         )));
     }
-    if let Some(meta) = &target_meta {
-        if source_meta.is_dir() != meta.is_dir()
-            || (source_meta.is_file() && !same_contents(source, target)?)
-        {
-            return Err(io::Error::other(format!(
-                "migration conflict; both files preserved: {} -> {}",
-                source.display(),
-                target.display()
-            )));
-        }
+    if let Some(meta) = &target_meta
+        && (source_meta.is_dir() != meta.is_dir()
+            || (source_meta.is_file() && !same_contents(source, target)?))
+    {
+        return Err(io::Error::other(format!(
+            "migration conflict; both files preserved: {} -> {}",
+            source.display(),
+            target.display()
+        )));
     }
     if source_meta.is_dir() {
         for entry in fs::read_dir(source)? {

@@ -8,7 +8,7 @@
 //!
 //! Zero SDK change: the child is an ordinary `Agent` built by the factory, the dispatch entry is
 //! an ordinary `Tool`, and the "sleep-wakeup" is just the tool future staying `Pending` while the
-//! child runs (the ReAct runtime's `FuturesUnordered` awaits it naturally).
+//! child runs (the `ReAct` runtime's `FuturesUnordered` awaits it naturally).
 //!
 //! P1 adds: `wait` / `detach` / `timeout_ms`, `cancel` wired to a tool action, persistence hooks
 //! (the [`SubagentStore`] sidecar) and a per-subagent `broadcast` channel so the UI can observe a
@@ -353,6 +353,10 @@ impl SubagentManager {
     }
 
     /// Dispatch one subagent. Returns its id. The child runs in a `tokio::spawn` task.
+    #[expect(
+        clippy::needless_pass_by_value,
+        reason = "task is cloned into the child handle and moved into the spawned task"
+    )]
     pub fn dispatch(
         self: &Arc<Self>,
         kind: SubagentKind,
@@ -440,7 +444,7 @@ impl SubagentManager {
         self.events.lock().unwrap().insert(id.clone(), sender);
         self.record_started(&id, kind, &name, &task, started_ms);
 
-        let manager = self.clone();
+        let manager = Arc::clone(self);
         let child_id = id.clone();
         let child_task = task.clone();
         let join = tokio::spawn(async move {
@@ -528,25 +532,24 @@ impl SubagentManager {
                 .lock()
                 .unwrap()
                 .get(id)
-                .map(|sender| sender.subscribe())
+                .map(tokio::sync::broadcast::Sender::subscribe)
                 .ok_or_else(|| SubagentError::NotFound(id.to_owned()))?
         };
         let wait = async {
             loop {
                 match receiver.recv().await {
-                    Ok(SubagentEvent::Status(_)) => break,
-                    Ok(_) => continue,
-                    Err(broadcast::error::RecvError::Lagged(_)) => continue,
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Ok(SubagentEvent::Status(_)) | Err(broadcast::error::RecvError::Closed) => {
+                        break;
+                    }
+                    Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {}
                 }
             }
         };
-        let timed_out = match timeout {
-            Some(duration) => tokio::time::timeout(duration, wait).await.is_err(),
-            None => {
-                wait.await;
-                false
-            }
+        let timed_out = if let Some(duration) = timeout {
+            tokio::time::timeout(duration, wait).await.is_err()
+        } else {
+            wait.await;
+            false
         };
         let info = self
             .info(id)
@@ -560,7 +563,7 @@ impl SubagentManager {
             .lock()
             .unwrap()
             .get(id)
-            .map(|sender| sender.subscribe())
+            .map(tokio::sync::broadcast::Sender::subscribe)
     }
 
     /// A snapshot of one subagent.
@@ -815,7 +818,7 @@ fn summarize(messages: &[Message]) -> String {
         } = message
             && !content.trim().is_empty()
         {
-            last = content.clone();
+            last.clone_from(content);
         }
     }
     last

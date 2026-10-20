@@ -52,6 +52,12 @@ impl From<io::Error> for WorkspaceError {
 }
 
 impl WorkSpace {
+    /// Canonicalize `root` and construct a workspace rooted there.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceError::Io`] when the path cannot be canonicalized, or
+    /// [`WorkspaceError::InvalidPath`] when it is not a directory.
     pub fn new(root: PathBuf) -> Result<Self, WorkspaceError> {
         let root = fs::canonicalize(root)?;
 
@@ -61,7 +67,12 @@ impl WorkSpace {
         Ok(Self { root })
     }
 
-    // resolve a path against the workspace root
+    /// Resolve a relative path against the workspace root.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceError::OutsideRoot`] when `input` is absolute or escapes the
+    /// root via `..`, or [`WorkspaceError::InvalidPath`] when the path itself is unusable.
     pub fn resolve(&self, input: &str) -> Result<PathBuf, WorkspaceError> {
         let input_path = Path::new(input);
 

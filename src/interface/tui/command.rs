@@ -33,7 +33,7 @@ pub enum CommandOutcome {
     /// The list comes from the current session's `SubagentManager`; the command itself does not care
     /// where subagents come from. Confirming an entry opens a read-only child-transcript overlay.
     SubagentPicker,
-    /// TUI local action: enter the step-by-step login flow (asks for base_url / api_key / model in turn).
+    /// TUI local action: enter the step-by-step login flow (asks for `base_url` / `api_key` / model in turn).
     /// The command itself does not care how/where config is written -- that is `App`'s and `settings`' concern.
     Login,
     /// Dynamic slash entry: `/<skill-name> [args]` -- the harness activates that skill directly
@@ -137,7 +137,10 @@ impl CommandManager {
     }
 
     /// Number of registered commands (for tests and UI display).
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn command_count(&self) -> usize {
         self.builtins.len()
     }
@@ -150,6 +153,7 @@ impl CommandManager {
     ///
     /// Example: `/initt` / `/inti` / `/nit` should all recall `init`.
     pub fn fuzzy_match(&self, input: &str, skills: &[String]) -> Vec<(String, f64)> {
+        const MIN_SCORE: f64 = 0.4;
         let trimmed = input.trim_start();
         if !trimmed.starts_with(self.prefix) {
             return Vec::new();
@@ -182,7 +186,6 @@ impl CommandManager {
         // otherwise a normalized edit distance score = 1 - dist/max_len tolerating transpositions/missing/extra characters.
         // Key point: when the fragment is a prefix of a command name, score full marks; otherwise a user who has just typed the first
         // character (e.g. `/i`) would be filtered out by a too-low edit-distance score, making candidates "vanish after one keystroke".
-        const MIN_SCORE: f64 = 0.4;
         let mut scored: Vec<(String, f64)> = names
             .iter()
             .map(|name| {
@@ -254,7 +257,7 @@ fn levenshtein(a: &str, b: &str) -> usize {
     for i in 1..=n {
         cur[0] = i;
         for j in 1..=m {
-            let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
+            let cost = usize::from(a[i - 1] != b[j - 1]);
             cur[j] = (prev[j] + 1).min(cur[j - 1] + 1).min(prev[j - 1] + cost);
         }
         std::mem::swap(&mut prev, &mut cur);
@@ -286,6 +289,7 @@ mod tests {
         // Use a temp directory as the workspace, ensuring there is no Agent.md there.
         let dir = std::env::temp_dir().join(format!("shirley_cmd_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
+        // SAFETY: test-only env mutation confined to this unit test; the variable is not read by another thread while it is set.
         unsafe {
             std::env::set_var("SHIRLEY_WORKSPACE", &dir);
         }
@@ -298,6 +302,7 @@ mod tests {
             other => panic!("expected Prompt, got {other:?}"),
         }
         let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: test-only env mutation confined to this unit test; the variable is not read by another thread while it is set.
         unsafe {
             std::env::remove_var("SHIRLEY_WORKSPACE");
         }
@@ -350,6 +355,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("shirley_cmd_exist_{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         std::fs::write(dir.join(GUIDE_FILE_NAME), "# Project notes\n").unwrap();
+        // SAFETY: test-only env mutation confined to this unit test; the variable is not read by another thread while it is set.
         unsafe {
             std::env::set_var("SHIRLEY_WORKSPACE", &dir);
         }
@@ -359,6 +365,7 @@ mod tests {
             CommandOutcome::SystemMessage(_)
         ));
         let _ = std::fs::remove_dir_all(&dir);
+        // SAFETY: test-only env mutation confined to this unit test; the variable is not read by another thread while it is set.
         unsafe {
             std::env::remove_var("SHIRLEY_WORKSPACE");
         }

@@ -52,7 +52,7 @@ impl RemoteConfig {
     }
 
     pub fn validate(&self) -> Result<(), String> {
-        let url = url::Url::parse(&self.url).map_err(|_| "云端地址无效")?;
+        let url = url::Url::parse(&self.url).map_err(|_e| "云端地址无效")?;
         if url.host_str().is_none()
             || !url.username().is_empty()
             || url.password().is_some()
@@ -258,6 +258,7 @@ impl EventDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
 
     #[test]
     fn cloud_url_requires_https_and_credentials_without_url_secrets() {
@@ -294,12 +295,7 @@ mod tests {
         let bytes = frame.as_bytes();
         let first_chinese = bytes.iter().position(|b| *b >= 128).unwrap();
         let mut decoder = EventDecoder::default();
-        assert!(
-            decoder
-                .push(&bytes[..first_chinese + 1])
-                .unwrap()
-                .is_empty()
-        );
+        assert!(decoder.push(&bytes[..=first_chinese]).unwrap().is_empty());
         assert_eq!(
             decoder.push(&bytes[first_chinese + 1..]).unwrap(),
             vec![json]
@@ -346,9 +342,9 @@ mod tests {
     async fn command_proxy_keeps_remote_project_paths_and_execution_destination() {
         use axum::{Json, Router, extract::Path as ApiPath, routing::post};
         let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<(String, Value)>::new()));
-        let captured = seen.clone();
+        let captured = Arc::clone(&seen);
         let app = Router::new().route("/api/cmd/{command}", post(move |ApiPath(command): ApiPath<String>, Json(args): Json<Value>| {
-            let seen = captured.clone();
+            let seen = Arc::clone(&captured);
             async move {
                 seen.lock().unwrap().push((command.clone(), args.clone()));
                 Json(match command.as_str() {

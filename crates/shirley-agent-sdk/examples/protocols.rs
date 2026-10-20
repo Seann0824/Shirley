@@ -1,7 +1,7 @@
 //! One agent, three wire protocols.
 //!
 //! Everything downstream of `ModelConfig` is protocol-agnostic: the same `Agent`, `Message`
-//! and tool code runs against ChatCompletions, Responses, or Anthropic Messages. `base_url`
+//! and tool code runs against `ChatCompletions`, Responses, or Anthropic Messages. `base_url`
 //! is the full request endpoint — the adapter POSTs to it as-is.
 //!
 //! This example just builds the three configs; it does not send a request (that would need

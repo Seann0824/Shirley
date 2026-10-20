@@ -12,6 +12,7 @@
 //! (`docs/memory.md` decision 3). Returns the **full text** of matching entries (with
 //! `id` / type / status / date / subject), so the model can cite them without re-reading files.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use shirley_agent_sdk::{Tool, ToolContext, ToolDefinition, ToolError, ToolFuture};
@@ -71,7 +72,7 @@ impl Tool for RecallTool {
     }
 
     fn invoke(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolFuture<'_> {
-        let runtime = self.runtime.clone();
+        let runtime = Arc::clone(&self.runtime);
         Box::pin(async move {
             let args: RecallArgs = serde_json::from_value(input).map_err(|error| {
                 ToolError::ArgumentsError(format!("invalid tool arguments: {error}"))
@@ -111,16 +112,17 @@ fn render_hits(query: &str, hits: &[Scored]) -> String {
     );
     for hit in hits {
         let entry = &hit.entry;
-        out.push_str(&format!(
-            "\n## {} [{}] ({}, {})\n",
+        let _ = writeln!(
+            out,
+            "\n## {} [{}] ({}, {})",
             entry.id,
             type_label(entry.entry_type),
             entry.timeline_date(),
             status_label(entry.status),
-        ));
-        out.push_str(&format!("subject: {}\n", entry.subject));
+        );
+        let _ = writeln!(out, "subject: {}", entry.subject);
         if let Some(scope) = &entry.scope {
-            out.push_str(&format!("scope: {scope}\n"));
+            let _ = writeln!(out, "scope: {scope}");
         }
         out.push_str("---\n");
         out.push_str(entry.body.trim());

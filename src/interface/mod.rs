@@ -24,14 +24,14 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
     // first message). Session persistence lives in the app layer: we load an empty working set,
     // hand it to the factory to build the `Agent`, and pass the store along to `SessionManager` —
     // persistence happens through its event-driven path.
-    let session_catalog = factory.session_catalog.clone();
+    let session_catalog = Arc::clone(&factory.session_catalog);
     let (entry, store) = session_catalog
         .create_lazy(None)
         .map_err(|error| std::io::Error::other(error.to_string()))?;
     let log = store
         .load()
         .map_err(|error| std::io::Error::other(error.to_string()))?;
-    let model_catalog = factory.model_catalog.clone();
+    let model_catalog = Arc::clone(&factory.model_catalog);
     let needs_login = factory.needs_login;
     let factory = Arc::new(factory);
     let built = factory

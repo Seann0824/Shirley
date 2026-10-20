@@ -33,9 +33,15 @@ pub use provider::SkillContextProvider;
 pub use runtime::SkillRuntime;
 
 // Public surface of discovery / parsing (used by the existing P0 wiring and tests).
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "public re-export used by tests and downstream modules"
+)]
 pub use discovery::{Discovery, discover};
-#[allow(unused_imports)]
+#[allow(
+    unused_imports,
+    reason = "public re-export used by tests and downstream modules"
+)]
 pub use parse::{ParseError, SkillMeta, parse_skill};
 
 /// User-level root for discovering skills (the parent of `~/.agents/skills` and

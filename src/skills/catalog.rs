@@ -7,6 +7,7 @@
 //! `SkillCatalog` is scanned once at assembly time and shared across sessions (the directory is read-only and unchanging); it is
 //! the data source of [`SkillContextProvider`](super::provider::SkillContextProvider).
 
+use std::fmt::Write as _;
 use std::path::Path;
 
 use super::discovery::discover;
@@ -42,19 +43,28 @@ impl SkillCatalog {
     }
 
     /// Discovered skills (in discovery order).
-    #[allow(dead_code)] // P1: for activation / diagnostics
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )] // P1: for activation / diagnostics
     pub fn skills(&self) -> &[SkillMeta] {
         &self.skills
     }
 
     /// Whether there are no skills at all.
-    #[allow(dead_code)] // P1: for activation / diagnostics
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )] // P1: for activation / diagnostics
     pub fn is_empty(&self) -> bool {
         self.skills.is_empty()
     }
 
     /// Get a skill by name (used by P1's activation / resource reading for enum validation).
-    #[allow(dead_code)] // P1: used for enum validation in activation / resource reading
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )] // P1: used for enum validation in activation / resource reading
     pub fn get(&self, name: &str) -> Option<&SkillMeta> {
         self.skills.iter().find(|skill| skill.name == name)
     }
@@ -88,7 +98,7 @@ impl SkillCatalog {
         if !resources.is_empty() {
             out.push_str("\n<resources>\n");
             for resource in &resources {
-                out.push_str(&format!("  <file>{}</file>\n", escape(resource)));
+                let _ = writeln!(out, "  <file>{}</file>", escape(resource));
             }
             out.push_str("</resources>\n");
             out.push_str(
@@ -119,12 +129,13 @@ impl SkillCatalog {
         body.push('\n');
         for skill in &self.skills {
             let location = skill.root.join("SKILL.md").to_string_lossy().to_string();
-            body.push_str(&format!(
-                "  <skill name=\"{}\" location=\"{}\">{}</skill>\n",
+            let _ = writeln!(
+                body,
+                "  <skill name=\"{}\" location=\"{}\">{}</skill>",
                 escape(&skill.name),
                 escape(&location),
                 escape(&skill.description),
-            ));
+            );
         }
         let mut rendered = format!("<available_skills>\n{body}</available_skills>");
         if rendered.chars().count() > MAX_DIRECTORY_CHARS {

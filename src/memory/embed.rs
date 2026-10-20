@@ -73,7 +73,10 @@ impl Embedder {
     }
 
     /// Endpoint (for diagnostics).
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn endpoint(&self) -> &str {
         &self.config.endpoint
     }
@@ -180,7 +183,7 @@ mod tests {
         let bad_model = Embedder::new(EmbeddingConfig {
             endpoint: "http://x/v1/embeddings".into(),
             api_key: None,
-            model: "".into(),
+            model: String::new(),
         });
         assert!(bad_model.is_err());
     }

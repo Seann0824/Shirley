@@ -1,4 +1,4 @@
-//! ReAct runtime: the Agent main loop, events, errors, and context compaction.
+//! `ReAct` runtime: the Agent main loop, events, errors, and context compaction.
 //!
 //! Split into submodules by responsibility; `mod.rs` only wires them up and re-exports:
 //!

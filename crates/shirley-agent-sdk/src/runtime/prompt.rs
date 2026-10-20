@@ -46,6 +46,7 @@ pub struct SystemPrompt {
 
 impl SystemPrompt {
     /// Resolve the final system-prompt text against the current context.
+    #[must_use]
     pub fn resolve(&self, context: &SystemPromptContext) -> String {
         (self.resolve)(context)
     }
@@ -122,8 +123,7 @@ mod tests {
                 "cwd={}",
                 ctx.working_dir
                     .as_deref()
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|| "<none>".into())
+                    .map_or_else(|| "<none>".into(), |p| p.display().to_string())
             )
         });
         assert_eq!(prompt.resolve(&ctx(Some("/work"))), "cwd=/work");

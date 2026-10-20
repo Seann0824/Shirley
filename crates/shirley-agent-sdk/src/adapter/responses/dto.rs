@@ -6,7 +6,10 @@
 //
 // Unconsumed fields (`id` / `total_tokens` etc.) are kept as part of protocol completeness, not
 // dead code.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "protocol DTO keeps unconsumed fields for wire completeness"
+)]
 
 use serde::Deserialize;
 
@@ -42,7 +45,7 @@ pub struct IncompleteDetails {
 ///
 /// Note: `function_call` is a **sibling item parallel to** `message`, not nested inside an
 /// assistant message — this is the most fundamental structural difference between Responses and
-/// ChatCompletions.
+/// `ChatCompletions`.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum OutputItem {
@@ -65,11 +68,11 @@ pub struct MessageItem {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ReasoningItem {
     /// Reasoning summary (the `summary_text` block). OpenAI-family reasoning models return only
-    /// this by default; `content` (the raw CoT) is usually empty — see `ReasoningItem.summary`
+    /// this by default; `content` (the raw `CoT`) is usually empty — see `ReasoningItem.summary`
     /// (a `required` field in the schema).
     #[serde(default)]
     pub summary: Option<Content>,
-    /// Raw reasoning text (the `reasoning_text` block). Some implementations (e.g. DeepSeek) use this.
+    /// Raw reasoning text (the `reasoning_text` block). Some implementations (e.g. `DeepSeek`) use this.
     #[serde(default)]
     pub content: Option<Content>,
 }
@@ -137,7 +140,7 @@ pub struct OutputTokensDetails {
 
 /// Streaming events.
 ///
-/// Unlike ChatCompletions: **there is no `data: [DONE]`**; the stream ends with
+/// Unlike `ChatCompletions`: **there is no `data: [DONE]`**; the stream ends with
 /// `response.completed` / `incomplete` / `failed`, so the terminal state is driven by event type.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]

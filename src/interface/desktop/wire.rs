@@ -12,7 +12,13 @@
 //!
 //! The wire-format contract lives in `web/src/types/wire.ts`; both sides must stay in sync.
 
-#![cfg_attr(not(feature = "desktop"), allow(dead_code))]
+#![cfg_attr(
+    not(feature = "desktop"),
+    allow(
+        dead_code,
+        reason = "only used when the relevant interface feature is enabled"
+    )
+)]
 
 use serde::Serialize;
 use shirley_agent_sdk::AgentEvent;
@@ -23,7 +29,7 @@ use crate::interface::session::{ItemWire as CoreItemWire, ToolCallWire};
 use crate::status::{Activity, Health, Liveness, StateSnapshot};
 use crate::todo::TaskView;
 
-/// Stable snake_case wire name for an [`ErrorKind`]. The frontend switches on these
+/// Stable `snake_case` wire name for an [`ErrorKind`]. The frontend switches on these
 /// strings; they mirror the enum variant names and must stay in sync with `types/wire.ts`.
 fn error_kind_str(kind: ErrorKind) -> String {
     match kind {
@@ -83,7 +89,7 @@ pub enum AgentEventWire {
         name: String,
         ok: bool,
         output: String,
-        /// Stable error class on failure (`None` on success), as a snake_case string the
+        /// Stable error class on failure (`None` on success), as a `snake_case` string the
         /// frontend switches on. This replaces sniffing the error text for classification.
         error_kind: Option<String>,
         elapsed_ms: u64,
@@ -137,6 +143,10 @@ pub enum AgentEventWire {
 }
 
 #[derive(Debug, Clone, Serialize)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names are the frontend wire contract; the `_tokens` postfix mirrors the SDK Usage type"
+)]
 pub struct UsageWire {
     pub input_tokens: u64,
     pub output_tokens: u64,

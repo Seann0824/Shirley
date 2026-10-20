@@ -69,6 +69,7 @@ impl Default for ModelDefinition {
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[derive(Default)]
 pub struct Provider {
     pub id: String,
     pub name: String,
@@ -79,21 +80,6 @@ pub struct Provider {
     pub default_model: String,
     pub models: Vec<ModelDefinition>,
     pub extra_body: Option<serde_json::Value>,
-}
-impl Default for Provider {
-    fn default() -> Self {
-        Self {
-            id: String::new(),
-            name: String::new(),
-            protocol: Protocol::default(),
-            base_url: String::new(),
-            models_url: None,
-            api_key: None,
-            default_model: String::new(),
-            models: Vec::new(),
-            extra_body: None,
-        }
-    }
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -210,7 +196,7 @@ fn persist(global: &Path, registry: &Registry) -> Result<RegistryView, String> {
 }
 
 fn validate_url(text: &str) -> Result<url::Url, String> {
-    let url = url::Url::parse(text).map_err(|_| "接口地址无效")?;
+    let url = url::Url::parse(text).map_err(|_e| "接口地址无效")?;
     if !matches!(url.scheme(), "http" | "https")
         || url.host_str().is_none()
         || !url.username().is_empty()
@@ -373,7 +359,7 @@ pub fn save(global: &Path, mut input: SaveProvider) -> Result<RegistryView, Stri
     }
     persist(global, &registry)
 }
-pub fn delete(global: &Path, input: DeleteProvider) -> Result<RegistryView, String> {
+pub fn delete(global: &Path, input: &DeleteProvider) -> Result<RegistryView, String> {
     let _lock = crate::memory::store::lock_root(global).map_err(|e| e.to_string())?;
     let mut registry = load(global)?;
     check_revision(&registry, &input.revision)?;
@@ -415,7 +401,9 @@ impl ConfiguredModel {
             .thinking(self.model.thinking)
             .maybe_extra_body(self.provider.extra_body.clone())
             .build();
-        config.reasoning_effort = self.model.reasoning_effort.clone();
+        config
+            .reasoning_effort
+            .clone_from(&self.model.reasoning_effort);
         config.context_window_tokens = Some(self.model.context_window_tokens);
         config.supports_images = self.model.supports_images;
         config.tool_calling = if self.model.tool_mode == "content" {
@@ -514,14 +502,13 @@ pub async fn fetch_models(
     let registry = load(global)?;
     let previous = registry.providers.iter().find(|p| p.id == draft.id);
     merge_key(&mut draft, previous, clear_key);
-    let endpoint = match &draft.models_url {
-        Some(url) => url.clone(),
-        None => {
-            let mut url = url::Url::parse(&endpoint(&draft)?).map_err(|e| e.to_string())?;
-            let path = crate::models::models_endpoint(url.path());
-            url.set_path(&path);
-            url.to_string()
-        }
+    let endpoint = if let Some(url) = &draft.models_url {
+        url.clone()
+    } else {
+        let mut url = url::Url::parse(&endpoint(&draft)?).map_err(|e| e.to_string())?;
+        let path = crate::models::models_endpoint(url.path());
+        url.set_path(&path);
+        url.to_string()
     };
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(10))
@@ -576,8 +563,8 @@ pub async fn fetch_models(
             let context_window_tokens = value
                 .get("context_window_tokens")
                 .or_else(|| value.get("context_length"))
-                .and_then(|v| v.as_u64())
-                .filter(|n| *n > 0 && *n <= u32::MAX as u64)
+                .and_then(serde_json::Value::as_u64)
+                .filter(|n| *n > 0 && u32::try_from(*n).is_ok())
                 .unwrap_or_else(default_context);
             let supports_images = crate::models::normalize_supports_images_from_value(&id, value);
             Some(ModelDefinition {
@@ -654,7 +641,7 @@ pub async fn command(
         )?),
         "delete" => serde_json::to_value(delete(
             global,
-            serde_json::from_value(input).map_err(|e| e.to_string())?,
+            &serde_json::from_value(input).map_err(|e| e.to_string())?,
         )?),
         "import" => serde_json::to_value(import_legacy(
             global,
@@ -754,7 +741,7 @@ mod tests {
         );
         let after = delete(
             &dir.0,
-            DeleteProvider {
+            &DeleteProvider {
                 revision: second.revision,
                 id: "a".into(),
             },
@@ -813,7 +800,7 @@ mod tests {
         write(&dir.0, provider("a"), true);
         let mut b = provider("b");
         b.protocol = Protocol::AnthropicMessages;
-        b.models[0].context_window_tokens = 200000;
+        b.models[0].context_window_tokens = 200_000;
         b.models[0].supports_images = true;
         b.models[0].tool_mode = "content".into();
         b.extra_body = Some(serde_json::json!({"vendor": "b"}));
@@ -831,12 +818,12 @@ mod tests {
         assert_eq!(b.base_url, "https://b.example/v1/messages");
         assert_eq!(b.protocol, ModelProtocol::AnthropicMessages);
         assert_eq!(b.api_key.as_deref(), Some("secret-b"));
-        assert_eq!(b.context_window_tokens, Some(200000));
+        assert_eq!(b.context_window_tokens, Some(200_000));
         assert!(b.supports_images);
         assert!(matches!(b.tool_calling, ToolCallingMode::Tagged));
         assert_eq!(a.extra_body, None);
         assert_eq!(key_for_config(&dir.0, &b), Some(entries[1].value.clone()));
-        assert!(!format!("{:?}", entries).contains("secret-"));
+        assert!(!format!("{entries:?}").contains("secret-"));
     }
 
     #[test]
@@ -893,7 +880,7 @@ mod tests {
         let dir = Temp::new();
         write(&dir.0, provider("a"), true);
         let factory = Arc::new(test_factory(dir.0.clone()));
-        let mut runtime = runtime_from_factory(factory.clone()).unwrap();
+        let mut runtime = runtime_from_factory(Arc::clone(&factory)).unwrap();
         let name = runtime.sessions.active_name().unwrap().to_string();
         let binding = selection("a", "same-model");
         let config = resolve(&dir.0, &binding).unwrap().unwrap().config();
@@ -908,8 +895,8 @@ mod tests {
         let sessions = crate::interface::session::SessionManager::with_factory(
             restored_agent.agent,
             Some(name),
-            factory.session_catalog.clone(),
-            factory.clone(),
+            Arc::clone(&factory.session_catalog),
+            Arc::clone(&factory),
             None,
             Some(restored_agent.memory),
             Some(restored_agent.skills),
@@ -934,7 +921,7 @@ mod tests {
         let registry = get(&dir.0).unwrap();
         delete(
             &dir.0,
-            DeleteProvider {
+            &DeleteProvider {
                 revision: registry.revision,
                 id: "a".into(),
             },
@@ -982,9 +969,9 @@ mod tests {
         use axum::{Json, Router, http::HeaderMap, routing::post};
         let dir = Temp::new();
         let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let request_log = captured.clone();
+        let request_log = Arc::clone(&captured);
         let app = Router::new().route("/v1/chat/completions", post(move |headers: HeaderMap, Json(body): Json<serde_json::Value>| {
-            let log = request_log.clone();
+            let log = Arc::clone(&request_log);
             async move {
                 assert_eq!(headers.get("authorization").unwrap(), "Bearer selected-service-key");
                 log.lock().unwrap().push(body);
@@ -1050,8 +1037,8 @@ mod tests {
     fn conversation_model_binding_moves_and_deletes_with_its_log() {
         use crate::session::{FileSessionCatalog, SessionCatalog};
         let dir = Temp::new();
-        let source = FileSessionCatalog::new(&dir.0.join("source"));
-        let target = FileSessionCatalog::new(&dir.0.join("target"));
+        let source = FileSessionCatalog::new(dir.0.join("source"));
+        let target = FileSessionCatalog::new(dir.0.join("target"));
         let (entry, _) = source.create().unwrap();
         let source_dir = source.storage_dir().unwrap();
         let target_dir = target.storage_dir().unwrap();
@@ -1081,7 +1068,7 @@ mod tests {
             assert_eq!(headers.get("anthropic-version").unwrap(), "2023-06-01");
             assert!(headers.get("authorization").is_none());
             assert!(headers.get("x-api-key").is_none());
-            Json(serde_json::json!({"data":[{"id":"example-model", "context_length":200000, "tool_mode":"content"}]}))
+            Json(serde_json::json!({"data":[{"id":"example-model", "context_length":200_000, "tool_mode":"content"}]}))
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let mut draft = provider("anthropic");
@@ -1092,7 +1079,7 @@ mod tests {
             axum::serve(listener, app).await.unwrap();
         });
         let models = fetch_models(&dir.0, draft, false).await.unwrap();
-        assert_eq!(models[0].context_window_tokens, 200000);
+        assert_eq!(models[0].context_window_tokens, 200_000);
         assert_eq!(models[0].tool_mode, "content");
         task.abort();
     }

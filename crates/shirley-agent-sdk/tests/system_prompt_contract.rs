@@ -38,8 +38,7 @@ fn function_prompt_reads_working_dir() {
             "cwd={}",
             ctx.working_dir
                 .as_deref()
-                .map(|p| p.display().to_string())
-                .unwrap_or_else(|| "<none>".into())
+                .map_or_else(|| "<none>".into(), |p| p.display().to_string())
         )
     });
 

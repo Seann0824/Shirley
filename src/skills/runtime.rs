@@ -207,8 +207,8 @@ mod tests {
         assert!(after_beta.contains("ALPHA-INSTRUCTION"));
         assert!(after_beta.contains("BETA-INSTRUCTION"));
 
-        std::fs::remove_dir_all(&dir_a).ok();
-        std::fs::remove_dir_all(&dir_b).ok();
+        let _ = std::fs::remove_dir_all(&dir_a);
+        let _ = std::fs::remove_dir_all(&dir_b);
     }
 
     #[test]
@@ -223,7 +223,7 @@ mod tests {
             once, twice,
             "re-activation should not change the output (keep the cache stable)"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -240,7 +240,7 @@ mod tests {
             "frontmatter should be stripped"
         );
         assert!(block.contains("<file>scripts/run.py</file>"));
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

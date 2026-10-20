@@ -48,7 +48,7 @@ fn call(name: &str, arguments: &str) -> ToolCall {
 #[tokio::test]
 async fn context_is_injected_into_macro_tool() {
     let session = Arc::new(Mutex::new(Session::default()));
-    let ctx = ToolContext::new().with(session.clone());
+    let ctx = ToolContext::new().with(Arc::clone(&session));
 
     let mut manager = ToolManager::new();
     manager
@@ -73,7 +73,7 @@ async fn context_is_injected_into_macro_tool() {
 #[tokio::test]
 async fn context_is_shared_across_concurrent_calls() {
     let session = Arc::new(Mutex::new(Session::default()));
-    let ctx = ToolContext::new().with(session.clone());
+    let ctx = ToolContext::new().with(Arc::clone(&session));
 
     let mut manager = ToolManager::new();
     manager

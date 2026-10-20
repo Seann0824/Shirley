@@ -151,6 +151,7 @@ pub struct CutPlan {
 
 impl CutPlan {
     /// The range that needs compressing (replaced with a summary).
+    #[must_use]
     pub fn compacted_range(&self) -> std::ops::Range<usize> {
         self.head..self.cut
     }
@@ -161,6 +162,7 @@ impl CutPlan {
     /// (`cut > task_index`); then it is removed from `to_compress` and re-injected at rebuild,
     /// avoiding being summarized away. When the task is already in the retained segment, leave it
     /// alone — otherwise moving it before `remain` would scramble the order.
+    #[must_use]
     pub fn split(&self, messages: &[message::Message]) -> CompactParts {
         let task_index = messages
             .iter()
@@ -291,7 +293,7 @@ mod template_tests {
         }
     }
 
-    /// Root cause B: the template must never **ask** for "next steps" (there is no next_step
+    /// Root cause B: the template must never **ask** for "next steps" (there is no `next_step`
     /// block); it can only explicitly forbid inventing them.
     #[test]
     fn template_never_asks_for_next_steps() {

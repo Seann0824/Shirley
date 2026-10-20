@@ -1,5 +1,5 @@
 //!   without a hard abort.   suppressed;   protocol source text, and feeds the tool result back as a user message;   zero runtime changes;   injected at the front of the system prompt; endpoint and runs the whole runtime". This file fills that gap: real tool call plus a final answer. **End-to-end** contract for the content tool-calling protocol: a model endpoint that only
-//! returns text (never native `tool_calls`), through the full ReAct loop, must be drivable into a
+//! returns text (never native `tool_calls`), through the full `ReAct` loop, must be drivable into a
 //!
 //! Previously this path was covered only by unit tests inside the `tool_calling.rs` module (the
 //! parser / encoder each correct in isolation), with no integration test that "mocks a plain-text
@@ -17,6 +17,7 @@ use serde_json::{Value, json};
 use shirley_agent_sdk::{
     Agent, AgentEvent, Message, ModelConfig, ModelProtocol, StopReason, ToolCallingMode, tool,
 };
+use std::fmt::Write as _;
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::sync::{
@@ -72,9 +73,9 @@ impl Server {
         listener.set_nonblocking(true).unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured = requests.clone();
+        let captured = Arc::clone(&requests);
         let stop = Arc::new(AtomicBool::new(false));
-        let stopping = stop.clone();
+        let stopping = Arc::clone(&stop);
         let worker = thread::spawn(move || {
             'connections: while !stopping.load(Ordering::Relaxed) {
                 let (mut socket, _) = match listener.accept() {
@@ -201,15 +202,17 @@ fn text_response(content: &str) -> Response {
 fn sse_text(pieces: &[&str]) -> Response {
     let mut body = String::new();
     for piece in pieces {
-        body.push_str(&format!(
+        let _ = write!(
+            body,
             "data: {}\n\n",
             json!({"choices": [{"index": 0, "delta": {"content": piece}, "finish_reason": null}]})
-        ));
+        );
     }
-    body.push_str(&format!(
+    let _ = write!(
+        body,
         "data: {}\n\n",
         json!({"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]})
-    ));
+    );
     body.push_str("data: [DONE]\n\n");
     Response::sse(body)
 }
@@ -313,7 +316,7 @@ async fn content_text_is_parsed_into_a_real_tool_call_and_loops_to_completion() 
     );
 }
 
-/// Event layer (non-streaming): consuming `AgentEvent` should show `echo`'s ToolStarted / ToolFinished.
+/// Event layer (non-streaming): consuming `AgentEvent` should show `echo`'s `ToolStarted` / `ToolFinished`.
 #[tokio::test]
 async fn content_mode_emits_the_same_agent_events_as_native() {
     let server = Server::new(vec![
@@ -360,7 +363,7 @@ async fn content_mode_emits_the_same_agent_events_as_native() {
     );
 }
 
-/// Streaming: `<thinking>` -> ReasoningDelta, `<description>` -> ContentDelta, tool block suppressed.
+/// Streaming: `<thinking>` -> `ReasoningDelta`, `<description>` -> `ContentDelta`, tool block suppressed.
 #[tokio::test]
 async fn streaming_hides_the_tool_block_and_surfaces_thinking_and_text() {
     let server = Server::new(vec![
@@ -420,10 +423,10 @@ async fn malformed_tool_block_is_recovered_through_the_protocol_tool() {
     let mut saw_protocol_tool = false;
     let mut stream = agent.run_stream("please echo hi");
     while let Some(event) = stream.next().await {
-        if let AgentEvent::ToolStarted { name, .. } = event.unwrap() {
-            if name == "__protocol__" {
-                saw_protocol_tool = true;
-            }
+        if let AgentEvent::ToolStarted { name, .. } = event.unwrap()
+            && name == "__protocol__"
+        {
+            saw_protocol_tool = true;
         }
     }
     assert!(

@@ -66,7 +66,7 @@ impl Tool for ActivateSkillTool {
     }
 
     fn invoke(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolFuture<'_> {
-        let runtime = self.runtime.clone();
+        let runtime = Arc::clone(&self.runtime);
         Box::pin(async move {
             let name = input
                 .get("name")
@@ -147,7 +147,7 @@ impl Tool for ReadSkillFileTool {
     }
 
     fn invoke(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolFuture<'_> {
-        let catalog = self.catalog.clone();
+        let catalog = Arc::clone(&self.catalog);
         Box::pin(async move {
             let skill = input
                 .get("skill")

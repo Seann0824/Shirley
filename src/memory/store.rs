@@ -40,7 +40,10 @@ impl MemoryStore {
     ///
     /// The V1 production path uniformly uses [`MemoryStore::with_roots`] (global + workspace dual roots);
     /// this constructor is used only by tests and a future "single-root workspace" scenario.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn new(root: impl Into<PathBuf>) -> Self {
         Self {
             roots: vec![root.into()],
@@ -97,7 +100,10 @@ impl MemoryStore {
     /// Create all entry subdirectories (idempotent). `core.md` / `index.md` are created by the writer on demand.
     ///
     /// The write path now uses [`Self::ensure_layout_at`] (selecting a root by domain); this method is kept as a public contract / for tests.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn ensure_layout(&self) -> Result<(), MemoryError> {
         Self::ensure_layout_at(self.primary_root())
     }
@@ -119,8 +125,7 @@ impl MemoryStore {
             Domain::Project => self
                 .roots
                 .get(1)
-                .map(PathBuf::as_path)
-                .unwrap_or_else(|| self.primary_root()),
+                .map_or_else(|| self.primary_root(), PathBuf::as_path),
         }
     }
 
@@ -142,12 +147,19 @@ impl MemoryStore {
     ///
     /// V1's `core.md` is maintained explicitly by the user / app, and the curator does not write it; this method is for tests and
     /// a future "auto-maintain core" use.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn write_core(&self, text: &str) -> Result<(), MemoryError> {
         self.write_core_at(self.primary_root(), text)
     }
 
     /// Write the resident overview to a **specified root** (for per-root rebuilds).
+    #[expect(
+        clippy::unused_self,
+        reason = "kept as an associated method for call-site symmetry with other store methods"
+    )]
     pub fn write_core_at(&self, root: &Path, text: &str) -> Result<(), MemoryError> {
         Self::ensure_layout_at(root)?;
         atomic_write(&root.join(CORE_FILE), text.as_bytes())?;
@@ -195,7 +207,14 @@ impl MemoryStore {
     }
 
     /// Read one entry.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
+    #[expect(
+        clippy::unused_self,
+        reason = "kept as an associated method for call-site symmetry with other store methods"
+    )]
     pub fn read_entry(&self, path: &Path) -> Result<Entry, MemoryError> {
         let text = std::fs::read_to_string(path)?;
         Entry::parse(&text)
@@ -237,6 +256,10 @@ impl MemoryStore {
     ///
     /// Unlike [`Self::list_entries`] (cross-root merge, same-name override): here only the given root is considered, which naturally separates
     /// global (personal) from workspace (project) -- per-root rebuilds each project their own, without bleeding into each other.
+    #[expect(
+        clippy::unused_self,
+        reason = "kept as an associated method for call-site symmetry with other store methods"
+    )]
     pub fn list_entries_in(&self, root: &Path) -> Result<Vec<(PathBuf, Entry)>, MemoryError> {
         let mut by_id: BTreeMap<String, (PathBuf, Entry)> = BTreeMap::new();
         for dir in ENTRY_DIRS {
@@ -280,7 +303,10 @@ impl MemoryStore {
     /// `delete` is one of the curator's actions (when a candidate is falsified by environment probing).
     ///
     /// The V1 curator only does upsert + supersede and does not yet wire deletion; kept as a store contract.
-    #[allow(dead_code)]
+    #[allow(
+        dead_code,
+        reason = "kept for tests, diagnostics, or a future scenario"
+    )]
     pub fn delete_entry(&self, id: &str) -> Result<bool, MemoryError> {
         validate_id(id)?;
         let mut removed = false;

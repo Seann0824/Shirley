@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use shirley_agent_sdk::workspace::{WorkSpace, WorkspaceError};
@@ -49,6 +50,10 @@ pub(crate) fn resolve_workspace_root(ctx: &ToolContext) -> Option<PathBuf> {
 
 /// Suspected secret file: rejected by default, to avoid reading `.env` / private keys into the context and then sending them to the model
 /// (see `docs/security.md` section 3).
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "`name` is lowercased on the line below, so the comparisons are already case-insensitive"
+)]
 pub(crate) fn is_secret_file(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name == ".env"
@@ -276,9 +281,10 @@ pub(crate) async fn read_text_range(
     let mut result = format!("# {display} (lines {start_line}-{last_line})\n{out}");
     if truncated {
         let next = last_line + 1;
-        result.push_str(&format!(
-            "[content truncated; to continue, use start_line={next}]\n"
-        ));
+        let _ = writeln!(
+            result,
+            "[content truncated; to continue, use start_line={next}]"
+        );
     }
     Ok(result)
 }
@@ -327,15 +333,20 @@ mod tests {
             !out.contains("truncated"),
             "should not hint truncation when content is complete: {out}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn supports_start_line_and_continuation() {
+        use std::fmt::Write as _;
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("range");
-        let body: String = (1..=10).map(|n| format!("line{n}\n")).collect();
+        let body: String = (1..=10).fold(String::new(), |mut acc, n| {
+            writeln!(acc, "line{n}").unwrap();
+            acc
+        });
         std::fs::write(dir.join("b.txt"), body).unwrap();
+        // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let out = read(&ToolContext::new(), "b.txt".into(), Some(3), Some(2))
@@ -358,13 +369,14 @@ mod tests {
             out.contains("start_line=5"),
             "should hint the continuation position: {out}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn rejects_outside_workspace() {
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("escape");
+        // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let err = read(&ToolContext::new(), "../etc/passwd".into(), None, None)
@@ -378,13 +390,14 @@ mod tests {
             err.to_string().contains("outside workspace"),
             "should explain the escape: {err}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn rejects_absolute_path() {
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("absolute");
+        // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let err = read(&ToolContext::new(), "/etc/hosts".into(), None, None)
@@ -394,7 +407,7 @@ mod tests {
             matches!(err, ToolError::ArgumentsError(_)),
             "absolute path should be rejected: {err:?}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -402,6 +415,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("secret");
         std::fs::write(dir.join(".env"), "LOCAL_API_KEY=leak").unwrap();
+        // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let err = read(&ToolContext::new(), ".env".into(), None, None)
@@ -411,7 +425,7 @@ mod tests {
             err.to_string().contains("secret"),
             "should reject secret files: {err}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -419,6 +433,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("binary");
         std::fs::write(dir.join("bin"), [0u8, 1, 2, 3, 0, 255]).unwrap();
+        // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let err = read(&ToolContext::new(), "bin".into(), None, None)
@@ -428,7 +443,7 @@ mod tests {
             err.to_string().contains("binary"),
             "should reject binary: {err}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -436,6 +451,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("dir");
         std::fs::create_dir(dir.join("sub")).unwrap();
+        // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let err = read(&ToolContext::new(), "sub".into(), None, None)
@@ -445,7 +461,7 @@ mod tests {
             err.to_string().contains("directory"),
             "should guide to use ls: {err}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -455,6 +471,7 @@ mod tests {
         // A single line already exceeds the byte cap; it must be truncated rather than stuffed into the context whole.
         let big = "a".repeat(MAX_OUTPUT_BYTES * 2);
         std::fs::write(dir.join("big.txt"), big).unwrap();
+        // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         let out = read(&ToolContext::new(), "big.txt".into(), None, None)
@@ -470,7 +487,7 @@ mod tests {
             "output should be bounded by the byte cap, actual {}",
             out.len()
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
@@ -480,6 +497,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("manager");
         std::fs::write(dir.join("m.txt"), "alpha\nbeta\n").unwrap();
+        // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         // Use the macro-generated `tool()` to verify the full path of registration + argument deserialization + invocation.
@@ -520,17 +538,20 @@ mod tests {
             !text.contains("beta"),
             "should be bounded by the line count: {text}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[tokio::test]
     async fn caps_line_count() {
+        use std::fmt::Write as _;
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("lines");
-        let body: String = (1..=MAX_LINE_COUNT + 50)
-            .map(|n| format!("l{n}\n"))
-            .collect();
+        let body: String = (1..=MAX_LINE_COUNT + 50).fold(String::new(), |mut acc, n| {
+            writeln!(acc, "l{n}").unwrap();
+            acc
+        });
         std::fs::write(dir.join("many.txt"), body).unwrap();
+        // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         // Explicitly request far more lines than the cap; still only read up to the cap.
@@ -548,6 +569,6 @@ mod tests {
             out.contains("truncated"),
             "should hint there is more: {out}"
         );
-        std::fs::remove_dir_all(&dir).ok();
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

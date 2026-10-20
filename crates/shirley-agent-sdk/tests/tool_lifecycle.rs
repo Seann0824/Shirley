@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use shirley_agent_sdk::{ToolCall, ToolContext, ToolError, ToolManager, tool};
 
-/// Private data for a stateful tool (a dedicated newtype, to avoid colliding TypeId with other tools).
+/// Private data for a stateful tool (a dedicated newtype, to avoid colliding `TypeId` with other tools).
 struct CounterState {
     value: AtomicUsize,
 }
@@ -26,6 +26,10 @@ static REGISTER_CALLS: AtomicUsize = AtomicUsize::new(0);
 static UNREGISTER_CALLS: AtomicUsize = AtomicUsize::new(0);
 
 /// Register hook: injects state and records the call.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "hook signature is fixed by the #[tool] macro contract (fn(&mut ToolContext) -> Result<(), ToolError>)"
+)]
 fn bump_on_register(ctx: &mut ToolContext) -> Result<(), ToolError> {
     REGISTER_CALLS.fetch_add(1, Ordering::SeqCst);
     ctx.insert(CounterState {
@@ -35,6 +39,10 @@ fn bump_on_register(ctx: &mut ToolContext) -> Result<(), ToolError> {
 }
 
 /// Unregister hook: clears the state it injected and records the call.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "hook signature is fixed by the #[tool] macro contract (fn(&mut ToolContext) -> Result<(), ToolError>)"
+)]
 fn bump_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
     UNREGISTER_CALLS.fetch_add(1, Ordering::SeqCst);
     ctx.remove::<CounterState>();
@@ -56,6 +64,48 @@ async fn bump(
         .ok_or_else(|| ToolError::ExecutionError("state not provided".into()))?;
     let next = state.value.fetch_add(by as usize, Ordering::SeqCst) + by as usize;
     Ok(next as u64)
+}
+
+/// Dedicated tool for the unregister test: its register hook only injects state and
+/// deliberately does NOT bump `REGISTER_CALLS`, so the two tests never share a counter
+/// even when the test harness runs them in parallel.
+#[tool(
+    description = "increment the counter (unregister test)",
+    on_register = cleanup_on_register,
+    on_unregister = cleanup_on_unregister,
+)]
+async fn cleanup(
+    ctx: &ToolContext,
+    #[param(description = "increment")] by: u64,
+) -> Result<u64, ToolError> {
+    let state = ctx
+        .get::<CounterState>()
+        .ok_or_else(|| ToolError::ExecutionError("state not provided".into()))?;
+    let next = state.value.fetch_add(by as usize, Ordering::SeqCst) + by as usize;
+    Ok(next as u64)
+}
+
+/// Register hook for `cleanup`: injects state only (no global counter).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "hook signature is fixed by the #[tool] macro contract (fn(&mut ToolContext) -> Result<(), ToolError>)"
+)]
+fn cleanup_on_register(ctx: &mut ToolContext) -> Result<(), ToolError> {
+    ctx.insert(CounterState {
+        value: AtomicUsize::new(0),
+    });
+    Ok(())
+}
+
+/// Unregister hook for `cleanup`: clears state and records the destroy call.
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "hook signature is fixed by the #[tool] macro contract (fn(&mut ToolContext) -> Result<(), ToolError>)"
+)]
+fn cleanup_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
+    UNREGISTER_CALLS.fetch_add(1, Ordering::SeqCst);
+    ctx.remove::<CounterState>();
+    Ok(())
 }
 
 /// A stateless tool: writes no hooks, verifying backward compatibility.
@@ -119,12 +169,12 @@ fn unregister_runs_on_unregister_and_cleans_context() {
 
     let mut manager = ToolManager::new();
     manager
-        .register(bump::tool())
+        .register(cleanup::tool())
         .expect("registration should succeed");
     assert!(manager.context().get::<CounterState>().is_some());
 
     manager
-        .unregister("bump")
+        .unregister("cleanup")
         .expect("unregister should succeed");
 
     assert_eq!(
@@ -137,10 +187,10 @@ fn unregister_runs_on_unregister_and_cleans_context() {
         "destroy should clear the context entry it injected"
     );
     // The tool has been removed from the table: a further call should be NotFound.
-    assert!(manager.definitions().iter().all(|d| d.name != "bump"));
+    assert!(manager.definitions().iter().all(|d| d.name != "cleanup"));
 }
 
-/// Unregistering an unregistered tool returns NotFoundError.
+/// Unregistering an unregistered tool returns `NotFoundError`.
 #[test]
 fn unregister_unknown_tool_is_not_found() {
     let mut manager = ToolManager::new();

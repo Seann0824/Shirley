@@ -4,9 +4,9 @@
 //! tool ran.
 //!
 //! Usage:
-//!   LOCAL_BASE_URL=... LOCAL_API_KEY=... \
+//!   `LOCAL_BASE_URL`=... `LOCAL_API_KEY`=... \
 //!   NATIVE_MODEL=default-model TAGGED_MODEL=default-model \
-//!   cargo run -p shirley-agent-sdk --example real_tool_calling
+//!   cargo run -p shirley-agent-sdk --example `real_tool_calling`
 
 use futures::StreamExt;
 use shirley_agent_sdk::{

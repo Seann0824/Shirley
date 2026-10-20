@@ -38,6 +38,7 @@ pub enum ErrorKind {
 
 impl ErrorKind {
     /// Whether this class of error is retryable by default.
+    #[must_use]
     pub fn is_retryable(self) -> bool {
         matches!(
             self,

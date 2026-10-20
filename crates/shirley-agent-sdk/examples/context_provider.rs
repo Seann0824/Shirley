@@ -7,7 +7,8 @@
 //!
 //! Because it is appended at the tail, a stable value keeps the prefix cache intact.
 
-use std::sync::Mutex;
+use std::fmt::Write as _;
+use std::sync::{Arc, Mutex};
 
 use shirley_agent_sdk::{Agent, ContextProvider, ModelConfig, ModelProtocol};
 
@@ -32,7 +33,7 @@ impl ContextProvider for Ledger {
         }
         let mut out = String::from("<task_state>\n");
         for (step, done) in steps.iter() {
-            out.push_str(&format!("- [{}] {step}\n", if *done { "x" } else { " " }));
+            let _ = writeln!(out, "- [{}] {step}", if *done { "x" } else { " " });
         }
         out.push_str("</task_state>");
         Some(out)
@@ -49,6 +50,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let ledger = std::sync::Arc::new(Ledger::default());
     ledger.add("Write the migration script");
     ledger.add("Run the test suite");
+    let provider: Arc<dyn ContextProvider> = Arc::<Ledger>::clone(&ledger);
 
     let model_config = ModelConfig::builder()
         .protocol(ModelProtocol::Responses)
@@ -60,7 +62,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let mut agent = Agent::builder()
         .model_config(model_config)
         .system_prompt("You are a concise assistant.")
-        .context_provider(ledger.clone())
+        .context_provider(provider)
         .build()?;
 
     // The provider's text is appended as a system message on every request, without being

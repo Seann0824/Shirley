@@ -109,10 +109,10 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             }
             KeyCode::Char('c') if key_event.modifiers.contains(KeyModifiers::CONTROL) => app.exit(),
             KeyCode::Char('o') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.toggle_tool_args()
+                app.toggle_tool_args();
             }
             KeyCode::Char('s') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.toggle_latest_compact()
+                app.toggle_latest_compact();
             }
             // Tab: accept the first fuzzy command suggestion (e.g. /inti -> /init).
             KeyCode::Tab => app.accept_suggestion(),
@@ -131,25 +131,23 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             KeyCode::PageUp => app.scroll_by(-3),
             KeyCode::PageDown => app.scroll_by(3),
             KeyCode::Char('a') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.move_cursor_home()
+                app.move_cursor_home();
             }
             KeyCode::Char('e') if key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.move_cursor_end()
+                app.move_cursor_end();
             }
             KeyCode::Char(ch) if !key_event.modifiers.contains(KeyModifiers::CONTROL) => {
-                app.push_input(ch)
+                app.push_input(ch);
             }
             _ => {}
         },
-        Event::Key(_) => {}
         // Bracketed paste inserts as a whole: newlines in the pasted text are written to the
         // input box as ordinary characters and never trigger a send, so pasting multiple lines
         // doesn't fire the message off automatically.
         Event::Paste(text) => app.insert_input(&text),
         // Mouse events are handled directly by `Tui::handle_mouse` (it needs the buffer and the
-        // clipboard) and never reach here; this empty arm just exhausts the enum.
-        Event::Mouse(_) => {}
-        Event::Resize(_width, _height) => {}
+        // clipboard) and never reach here; these empty arms just exhaust the enum.
+        Event::Key(_) | Event::Mouse(_) | Event::Resize(..) => {}
     }
     None
 }

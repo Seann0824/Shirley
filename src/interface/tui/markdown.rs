@@ -163,7 +163,7 @@ where
             match event {
                 Event::TaskListMarker(checked) => task = Some(checked),
                 Event::Start(Tag::Paragraph) => {
-                    blocks.push(Block::Paragraph(self.parse_inline(None)))
+                    blocks.push(Block::Paragraph(self.parse_inline(None)));
                 }
                 Event::Start(Tag::List(start)) => blocks.push(self.parse_list(start)),
                 Event::Start(Tag::CodeBlock(kind)) => blocks.push(self.parse_code_block(kind)),
@@ -171,7 +171,7 @@ where
                 Event::End(TagEnd::Item) => break,
                 // In a tight list the text hangs directly under Item, with no Paragraph wrapper.
                 other if is_inline(&other) => {
-                    blocks.push(Block::Paragraph(self.parse_inline(Some(other))))
+                    blocks.push(Block::Paragraph(self.parse_inline(Some(other))));
                 }
                 _ => {}
             }
@@ -208,18 +208,16 @@ where
         let mut rows = Vec::new();
         loop {
             match self.events.next() {
-                Some(Event::Start(Tag::TableHead)) | Some(Event::Start(Tag::TableRow)) => {
+                Some(Event::Start(Tag::TableHead | Tag::TableRow)) => {
                     let mut cells = Vec::new();
                     loop {
                         match self.events.next() {
                             Some(Event::Start(Tag::TableCell)) => {
                                 // A table cell is a single line; hard breaks in the inline content are merged into one line.
-                                cells.push(self.parse_inline(None).concat())
+                                cells.push(self.parse_inline(None).concat());
                             }
-                            Some(Event::End(TagEnd::TableHead))
-                            | Some(Event::End(TagEnd::TableRow)) => break,
+                            Some(Event::End(TagEnd::TableHead | TagEnd::TableRow)) | None => break,
                             Some(_) => {}
-                            None => break,
                         }
                     }
                     rows.push(cells);
@@ -285,7 +283,7 @@ where
                     style_stack.push(current);
                     link = Some((lines.last().unwrap().len(), dest_url.to_string(), true));
                 }
-                Event::End(TagEnd::Link) | Event::End(TagEnd::Image) => {
+                Event::End(TagEnd::Link | TagEnd::Image) => {
                     if let Some((start, dest, _)) = link.take() {
                         let text: String = lines
                             .last()
@@ -311,11 +309,13 @@ where
                 }
                 Event::SoftBreak => push_span(&mut lines, " ", current),
                 Event::HardBreak => lines.push(Vec::new()),
-                Event::End(TagEnd::Strong)
-                | Event::End(TagEnd::Emphasis)
-                | Event::End(TagEnd::Strikethrough)
-                | Event::End(TagEnd::Superscript)
-                | Event::End(TagEnd::Subscript) => {
+                Event::End(
+                    TagEnd::Strong
+                    | TagEnd::Emphasis
+                    | TagEnd::Strikethrough
+                    | TagEnd::Superscript
+                    | TagEnd::Subscript,
+                ) => {
                     style_stack.pop();
                     current = *style_stack.last().unwrap();
                 }
@@ -389,11 +389,13 @@ fn is_inline(event: &Event) -> bool {
             | Event::SoftBreak
             | Event::HardBreak
             | Event::TaskListMarker(_)
-            | Event::Start(Tag::Strong)
-            | Event::Start(Tag::Emphasis)
-            | Event::Start(Tag::Strikethrough)
-            | Event::Start(Tag::Link { .. })
-            | Event::Start(Tag::Image { .. })
+            | Event::Start(
+                Tag::Strong
+                    | Tag::Emphasis
+                    | Tag::Strikethrough
+                    | Tag::Link { .. }
+                    | Tag::Image { .. }
+            )
     )
 }
 
@@ -421,13 +423,7 @@ fn render_blocks(
 ) {
     for block in blocks {
         match block {
-            Block::Heading { lines, .. } => {
-                for line in lines {
-                    out.push(prefixed(line, indent, None));
-                }
-                out.push(Line::default());
-            }
-            Block::Paragraph(lines) => {
+            Block::Heading { lines, .. } | Block::Paragraph(lines) => {
                 for line in lines {
                     out.push(prefixed(line, indent, None));
                 }
@@ -634,9 +630,8 @@ fn render_table(
                 spans.push(Span::styled(" │ ", dim()));
             }
             let cell = row.get(column);
-            let cell_width = cell
-                .map(|spans| spans.iter().map(|span| span.text.width()).sum())
-                .unwrap_or(0);
+            let cell_width =
+                cell.map_or(0, |spans| spans.iter().map(|span| span.text.width()).sum());
             let pad = column_width.saturating_sub(cell_width);
             let align = alignments.get(column).copied().unwrap_or(Alignment::None);
             let (left_pad, right_pad) = match align {
@@ -885,7 +880,7 @@ mod tests {
         let text = render_text("| A | B |\n|---|---|\n| 1 | 2 |\n");
         assert!(
             text.iter()
-                .any(|line| line.contains("A") && line.contains("B"))
+                .any(|line| line.contains('A') && line.contains('B'))
         );
         assert!(text.iter().any(|line| line.contains('┼')));
     }

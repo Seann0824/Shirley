@@ -1,7 +1,7 @@
-//! DeepSeek native web search tool (`docs/web-search.md`).
+//! `DeepSeek` native web search tool (`docs/web-search.md`).
 //!
 //! Migrated from shiwen (`shiwen-open-source`)'s `DeepSeekWebSearch`: it does not go through the main model's
-//! chat-completions route; instead it sends one bounded auxiliary request to DeepSeek's **Anthropic-compatible Messages API**
+//! chat-completions route; instead it sends one bounded auxiliary request to `DeepSeek`'s **Anthropic-compatible Messages API**
 //! using the server-side tool `web_search_20250305` to get back structured sources
 //! (`web_search_tool_result`), which is normalized and then handed to the main model as **untrusted tool data**.
 //!
@@ -25,7 +25,7 @@ use serde::Serialize;
 use serde_json::{Value, json};
 use shirley_agent_sdk::{ToolContext, ToolError, tool};
 
-/// Default search endpoint: DeepSeek's Anthropic-compatible route.
+/// Default search endpoint: `DeepSeek`'s Anthropic-compatible route.
 const DEFAULT_SEARCH_BASE_URL: &str = "https://api.deepseek.com/anthropic/v1";
 /// Default search model.
 const DEFAULT_SEARCH_MODEL: &str = "deepseek-v4-flash";
@@ -172,7 +172,7 @@ impl WebSearchState {
 
         let response = tokio::time::timeout(self.config.timeout, request.send())
             .await
-            .map_err(|_| ToolError::ExecutionError("web search timed out".into()))?
+            .map_err(|_e| ToolError::ExecutionError("web search timed out".into()))?
             .map_err(|error| {
                 ToolError::ExecutionError(format!("web search request failed: {error}"))
             })?;
@@ -185,7 +185,7 @@ impl WebSearchState {
                 "web search service returned {status}: {detail}"
             )));
         }
-        let payload: Value = serde_json::from_slice(&bytes).map_err(|_| {
+        let payload: Value = serde_json::from_slice(&bytes).map_err(|_e| {
             ToolError::ExecutionError("web search service returned invalid JSON".into())
         })?;
         map_response(&payload, self.config.max_results)
@@ -214,6 +214,10 @@ fn web_search_on_register(ctx: &mut ToolContext) -> Result<(), ToolError> {
 ///
 /// [`WebSearchState`] is a state type private to `web_search` (no other tool injects it),
 /// so it cleans up after itself on unregistration, not leaving it to the application layer (`docs/tool-lifecycle.md` 4.1).
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "hook signature is fixed by the #[tool] macro contract (fn(&mut ToolContext) -> Result<(), ToolError>)"
+)]
 fn web_search_on_unregister(ctx: &mut ToolContext) -> Result<(), ToolError> {
     ctx.remove::<WebSearchState>();
     Ok(())
@@ -399,7 +403,7 @@ fn provider_shape_error(detail: &str) -> ToolError {
 fn validate_base_url(value: &str) -> Result<String, String> {
     let trimmed = value.trim().trim_end_matches('/');
     let parsed = url::Url::parse(trimmed)
-        .map_err(|_| "DEEPSEEK_SEARCH_BASE_URL must be a valid HTTPS URL".to_string())?;
+        .map_err(|_e| "DEEPSEEK_SEARCH_BASE_URL must be a valid HTTPS URL".to_string())?;
     if parsed.scheme() != "https"
         || parsed.host_str().is_none()
         || !parsed.username().is_empty()
@@ -434,7 +438,7 @@ fn bounded_u32(name: &str, default: u32, minimum: u32, maximum: u32) -> Result<u
         Ok(value) => value
             .trim()
             .parse::<u32>()
-            .map_err(|_| format!("{name} must be an integer"))?,
+            .map_err(|_e| format!("{name} must be an integer"))?,
         Err(_) => default,
     };
     if !(minimum..=maximum).contains(&value) {
@@ -453,7 +457,7 @@ fn bounded_usize(
         Ok(value) => value
             .trim()
             .parse::<usize>()
-            .map_err(|_| format!("{name} must be an integer"))?,
+            .map_err(|_e| format!("{name} must be an integer"))?,
         Err(_) => default,
     };
     if !(minimum..=maximum).contains(&value) {
@@ -467,7 +471,7 @@ fn bounded_u64(name: &str, default: u64, minimum: u64, maximum: u64) -> Result<u
         Ok(value) => value
             .trim()
             .parse::<u64>()
-            .map_err(|_| format!("{name} must be an integer"))?,
+            .map_err(|_e| format!("{name} must be an integer"))?,
         Err(_) => default,
     };
     if !(minimum..=maximum).contains(&value) {
@@ -488,6 +492,7 @@ mod tests {
     /// The registration hook reads `DEEPSEEK_API_KEY` -- set it to a fixed value in tests so registration succeeds.
     /// The value is the same for all tests, so writing the same value in parallel does not interfere.
     fn enable_env() {
+        // SAFETY: test-only; every test writes the same constant DEEPSEEK_API_KEY value, so concurrent writes do not interfere.
         unsafe { std::env::set_var("DEEPSEEK_API_KEY", "test-key") };
     }
 

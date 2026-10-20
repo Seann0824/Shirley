@@ -1,7 +1,10 @@
 // Protocol DTO: fields fully defined per the ChatCompletions contract, deserialization only.
 // Some fields are currently unconsumed (e.g. `id` / `total_tokens` / the various token details);
 // keeping them is part of protocol completeness, not dead code.
-#![allow(dead_code)]
+#![allow(
+    dead_code,
+    reason = "protocol DTO keeps unconsumed fields for wire completeness"
+)]
 
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct ModelResponse {
@@ -51,6 +54,10 @@ pub struct Usage {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names are the wire contract; the `_tokens` postfix matches the OpenAI API"
+)]
 pub struct CompletionTokensDetails {
     pub reasoning_tokens: Option<u64>,
     pub accepted_prediction_tokens: Option<u64>,
@@ -60,6 +67,10 @@ pub struct CompletionTokensDetails {
 }
 
 #[derive(Debug, Clone, serde::Deserialize)]
+#[expect(
+    clippy::struct_field_names,
+    reason = "field names are the wire contract; the `_tokens` postfix matches the OpenAI API"
+)]
 pub struct PromptTokensDetails {
     pub audio_tokens: Option<u64>,
     pub cached_tokens: Option<u64>,

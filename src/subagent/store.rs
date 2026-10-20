@@ -101,10 +101,10 @@ impl SubagentStore {
 
     /// Append one record to the index (best-effort: the caller decides whether to surface an error).
     pub fn append_index(&self, record: &IndexRecord) -> Result<(), SessionError> {
+        use std::io::Write;
         std::fs::create_dir_all(&self.dir)?;
         let line = serde_json::to_string(record)
             .map_err(|error| SessionError::Backend(error.to_string()))?;
-        use std::io::Write;
         let mut file = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -159,9 +159,8 @@ impl SubagentStore {
 
     /// All subagent ids that have a transcript on disk (excluding the index).
     pub fn transcript_ids(&self) -> Vec<String> {
-        let read = match std::fs::read_dir(&self.dir) {
-            Ok(read) => read,
-            Err(_) => return Vec::new(),
+        let Ok(read) = std::fs::read_dir(&self.dir) else {
+            return Vec::new();
         };
         let mut ids: Vec<String> = read
             .flatten()

@@ -23,14 +23,14 @@ pub fn render(template: &str, vars: &[(&str, &str)]) -> String {
     let bytes = template.as_bytes();
     let mut i = 0;
     while i < template.len() {
-        if bytes[i] == b'{' && bytes.get(i + 1) == Some(&b'{') {
-            if let Some((key, after)) = placeholder_at(template, i) {
-                if let Some((_, value)) = vars.iter().find(|(name, _)| *name == key) {
-                    out.push_str(value);
-                    i = after;
-                    continue;
-                }
-            }
+        if bytes[i] == b'{'
+            && bytes.get(i + 1) == Some(&b'{')
+            && let Some((key, after)) = placeholder_at(template, i)
+            && let Some((_, value)) = vars.iter().find(|(name, _)| *name == key)
+        {
+            out.push_str(value);
+            i = after;
+            continue;
         }
         // Emit one character as-is (advance on UTF-8 boundaries to avoid splitting a multibyte char).
         let ch = template[i..]

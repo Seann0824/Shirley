@@ -1,7 +1,7 @@
 //! Content tool-calling protocol: declares a "text tool format + parsing method" for models
 //! that **do not support native tool calling**.
 //!
-//! Background: Shirley's ReAct loop is driven entirely by the `tool_calls` field of
+//! Background: Shirley's `ReAct` loop is driven entirely by the `tool_calls` field of
 //! [`crate::message::Message::Assistant`]. As long as the model's **plain text** output can be
 //! parsed into `tool_calls`, the loop needs no change. This module provides the pluggable
 //! abstraction for that layer:
@@ -17,6 +17,7 @@
 //! protocol — it is a transport mode, not a protocol. All protocol differences are contained in
 //! the adapter layer; the `Message` model and the runtime main loop are unchanged.
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 
 use serde_json::Value;
@@ -41,7 +42,7 @@ const ERRORS_TEMPLATE: &str = include_str!("../../prompts/tool_calling_errors.md
 ///
 /// The fixed contract text is bounded and always emitted in full; only the catalog section,
 /// which **grows with the number of tools**, gets truncated — with many tools (bash / read /
-/// web_search / todo / skills …) it can expand significantly and crowd out the front of the
+/// `web_search` / todo / skills …) it can expand significantly and crowd out the front of the
 /// context. Over the limit it is truncated at a char boundary and **explicitly flagged** (not
 /// silent), the same strategy as `todo`'s `MAX_RENDER_CHARS`.
 const MAX_INSTRUCTIONS_CHARS: usize = 12_000;
@@ -65,6 +66,7 @@ pub enum ToolCallingMode {
 
 impl ToolCallingMode {
     /// Whether the text protocol is used.
+    #[must_use]
     pub fn is_content(self) -> bool {
         !matches!(self, Self::Native)
     }
@@ -280,25 +282,27 @@ impl ContentToolProtocol for TaggedToolProtocol {
         // context bloats and compression triggers earlier. Only the body and tool blocks are
         // replayed.
         if let Some(content) = content.filter(|text| !text.trim().is_empty()) {
-            out.push_str(&format!(
-                "<{d}>{content}</{d}>\n",
+            let _ = writeln!(
+                out,
+                "<{d}>{content}</{d}>",
                 d = self.description_tag,
                 content = escape_xml(content),
-            ));
+            );
         }
         // Note: `name` / `arguments` are **not escaped** — `arguments` is raw JSON, and escaping
         // would break round-trip parsing (the parse side cannot unescape params; they must stay
         // valid JSON). `<...>` inside strings is restored verbatim by the parser's
         // `params_json_in_string` + noise fallback.
         for call in calls {
-            out.push_str(&format!(
-                "<{tool}>\n<{name}>{n}</{name}>\n<{p}>{args}</{p}>\n</{tool}>\n",
+            let _ = writeln!(
+                out,
+                "<{tool}>\n<{name}>{n}</{name}>\n<{p}>{args}</{p}>\n</{tool}>",
                 tool = self.tool_tag,
                 name = self.name_tag,
                 p = self.params_tag,
                 n = call.name,
                 args = call.arguments,
-            ));
+            );
         }
         out.trim_end().to_string()
     }
@@ -322,14 +326,16 @@ fn render_placeholders(template: &str, pairs: &[(&str, &str)]) -> String {
     let bytes = template.as_bytes();
     let mut index = 0;
     while index < bytes.len() {
-        if bytes[index] == b'{' && index + 1 < bytes.len() && bytes[index + 1] == b'{' {
-            if let Some(offset) = template[index + 2..].find("}}") {
-                let key = &template[index + 2..index + 2 + offset];
-                if let Some((_, value)) = pairs.iter().find(|(name, _)| *name == key) {
-                    out.push_str(value);
-                    index += 2 + offset + 2;
-                    continue;
-                }
+        if bytes[index] == b'{'
+            && index + 1 < bytes.len()
+            && bytes[index + 1] == b'{'
+            && let Some(offset) = template[index + 2..].find("}}")
+        {
+            let key = &template[index + 2..index + 2 + offset];
+            if let Some((_, value)) = pairs.iter().find(|(name, _)| *name == key) {
+                out.push_str(value);
+                index += 2 + offset + 2;
+                continue;
             }
         }
         let ch = template[index..]
@@ -366,9 +372,9 @@ fn error_message(key: &str, pairs: &[(&str, &str)]) -> String {
 fn render_tool_catalog(tools: &[&ToolDefinition]) -> String {
     let mut out = String::new();
     for (index, tool) in tools.iter().enumerate() {
-        out.push_str(&format!("## {}. {}\n\n", index + 1, tool.name));
+        let _ = write!(out, "## {}. {}\n\n", index + 1, tool.name);
         if !tool.description.is_empty() {
-            out.push_str(&format!("Description: {}\n\n", tool.description));
+            let _ = write!(out, "Description: {}\n\n", tool.description);
         }
         out.push_str("Parameters:\n```\n");
         out.push_str(&render_schema_doc(&tool.parameters));
@@ -485,14 +491,14 @@ fn is_object_schema(node: &Value) -> bool {
 
 fn is_array_of_objects(node: &Value) -> bool {
     node.get("type").and_then(|value| value.as_str()) == Some("array")
-        && node.get("items").map(is_object_schema).unwrap_or(false)
+        && node.get("items").is_some_and(is_object_schema)
 }
 
 fn type_label(node: &Value) -> String {
     if let Some(values) = node.get("enum").and_then(|value| value.as_array()) {
         return values
             .iter()
-            .map(|value| value.to_string())
+            .map(std::string::ToString::to_string)
             .collect::<Vec<_>>()
             .join(" | ");
     }
@@ -540,11 +546,10 @@ fn type_label(node: &Value) -> String {
         "array" => {
             let item = node
                 .get("items")
-                .map(type_label)
-                .unwrap_or_else(|| "any".to_string());
+                .map_or_else(|| "any".to_string(), type_label);
             let min_items = node
                 .get("minItems")
-                .and_then(|value| value.as_u64())
+                .and_then(serde_json::Value::as_u64)
                 .map(|count| format!(", >={count} items"))
                 .unwrap_or_default();
             format!("{item}[]{min_items}")
@@ -564,7 +569,7 @@ fn meaningful_bound(value: f64) -> bool {
 
 fn number_constraints(node: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
-    let bound = |key: &str| node.get(key).and_then(|value| value.as_f64());
+    let bound = |key: &str| node.get(key).and_then(serde_json::Value::as_f64);
     if let Some(value) = bound("minimum").filter(|value| meaningful_bound(*value)) {
         parts.push(format!(">={value}"));
     }
@@ -582,10 +587,10 @@ fn number_constraints(node: &Value) -> String {
 
 fn string_constraints(node: &Value) -> String {
     let mut parts: Vec<String> = Vec::new();
-    if let Some(value) = node.get("minLength").and_then(|value| value.as_u64()) {
+    if let Some(value) = node.get("minLength").and_then(serde_json::Value::as_u64) {
         parts.push(format!("len>={value}"));
     }
-    if let Some(value) = node.get("maxLength").and_then(|value| value.as_u64()) {
+    if let Some(value) = node.get("maxLength").and_then(serde_json::Value::as_u64) {
         parts.push(format!("len<={value}"));
     }
     if let Some(value) = node.get("format").and_then(|value| value.as_str()) {
@@ -700,7 +705,7 @@ pub(crate) fn encode_messages_for_content(
                     };
                     let output = content
                         .as_ref()
-                        .map(|content| content.as_text())
+                        .map(super::super::message::Content::as_text)
                         .unwrap_or_default();
                     let rendered = protocol.render_result(&call, &output);
                     // The built-in protocol feeds back user text; non-text rendering (a custom
@@ -901,7 +906,7 @@ enum Mode {
     Tag,
 }
 
-/// Visible-increment channel: `Thinking` (-> ReasoningDelta) / `Content` (-> ContentDelta).
+/// Visible-increment channel: `Thinking` (-> `ReasoningDelta`) / `Content` (-> `ContentDelta`).
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum VisibleChannel {
     Thinking,
@@ -1089,10 +1094,9 @@ impl TagParser {
     /// tags no longer leak out as `ContentDelta`.
     fn visible_channel(&self) -> Option<VisibleChannel> {
         match self.stack.last() {
-            None => None,
             Some(top) if top.name == self.cfg.thinking => Some(VisibleChannel::Thinking),
             Some(top) if top.name == self.cfg.description => Some(VisibleChannel::Content),
-            Some(_) => None,
+            _ => None,
         }
     }
 
@@ -1606,9 +1610,7 @@ mod tests {
         let (_, streamed) = collect_visible(&protocol(), &[&wrapped]);
         assert_eq!(streamed, example);
 
-        let outside = format!(
-            "<description>Example</description>\n```xml\n<tool><name>bash</name><params>{{}}</params></tool>\n```"
-        );
+        let outside = "<description>Example</description>\n```xml\n<tool><name>bash</name><params>{}</params></tool>\n```".to_string();
         assert!(protocol().parse(&outside).calls.is_empty());
 
         let inline = "<description>call example:\n<tool><name>bash</name><params>{}</params></tool></description>";
@@ -1790,15 +1792,14 @@ mod tests {
         let mut parser = protocol.stream_parser();
         let mut thinking = String::new();
         let mut content = String::new();
-        let mut absorb =
-            |chunks: Vec<VisibleChunk>, thinking: &mut String, content: &mut String| {
-                for chunk in chunks {
-                    match chunk {
-                        VisibleChunk::Thinking(text) => thinking.push_str(&text),
-                        VisibleChunk::Content(text) => content.push_str(&text),
-                    }
+        let absorb = |chunks: Vec<VisibleChunk>, thinking: &mut String, content: &mut String| {
+            for chunk in chunks {
+                match chunk {
+                    VisibleChunk::Thinking(text) => thinking.push_str(&text),
+                    VisibleChunk::Content(text) => content.push_str(&text),
                 }
-            };
+            }
+        };
         for piece in pieces {
             absorb(parser.push(piece), &mut thinking, &mut content);
         }
@@ -1958,7 +1959,7 @@ mod tests {
         assert_eq!(doc.calls[0].arguments, args);
     }
 
-    /// Replay preserves tags: a plain assistant (no tool_calls) is also re-rendered into protocol
+    /// Replay preserves tags: a plain assistant (no `tool_calls`) is also re-rendered into protocol
     /// text, rather than passing through the shell-stripped plain text — otherwise the
     /// `<description>` tag would be lost and the KV prefix would drift every turn.
     #[test]

@@ -1,6 +1,6 @@
 //! Sandbox execution result.
 //!
-//! stderr / exit_code / degradation info are deliberately kept here:
+//! stderr / `exit_code` / degradation info are deliberately kept here:
 //! the model needs to see failure details to self-correct (see docs/security.md 6.1),
 //! and auditing needs to know "whether isolation was actually in effect at the time".
 
@@ -30,7 +30,7 @@ pub struct SandboxOutput {
     pub isolation: String,
 
     /// Descriptions of constraints that could not be satisfied at runtime and were degraded.
-    /// For example ProcessBackend fills in "no filesystem isolation / no network isolation".
+    /// For example `ProcessBackend` fills in "no filesystem isolation / no network isolation".
     /// The caller can use this to decide whether to reject the result (it should in high-risk
     /// scenarios).
     pub degraded: Vec<String>, // a list of descriptions of "things I failed to do"
@@ -41,6 +41,7 @@ impl SandboxOutput {
     /// Whether "full isolation" is met — no degradation entries at all.
     // &self: borrow self to read it (does not take ownership, just a look).
     // -> bool: returns true/false.
+    #[must_use]
     pub fn is_fully_isolated(&self) -> bool {
         // degraded is an empty list -> no degradation entries -> fully isolated.
         // .is_empty() returns true when the list is empty.
@@ -48,6 +49,7 @@ impl SandboxOutput {
     }
 
     /// Whether the command exited successfully.
+    #[must_use]
     pub fn success(&self) -> bool {
         // Both conditions must hold to count as success:
         // 1. the exit code is exactly 0 (exit_code is Some(0))

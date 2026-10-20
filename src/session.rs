@@ -202,13 +202,13 @@ impl LazySessionStore {
     fn materialize(&self) -> Result<Arc<JsonlSessionStore>, SessionError> {
         let mut inner = self.inner.lock().expect("session lock poisoned");
         if let Some(store) = inner.as_ref() {
-            return Ok(store.clone());
+            return Ok(Arc::clone(store));
         }
         let store = Arc::new(JsonlSessionStore::open(self.catalog.path_for(&self.name))?);
         if let Some(title) = self.title.as_deref() {
             self.catalog.write_title(&self.name, title)?;
         }
-        *inner = Some(store.clone());
+        *inner = Some(Arc::clone(&store));
         Ok(store)
     }
 }
@@ -547,8 +547,7 @@ impl SessionCatalog for FileSessionCatalog {
                 .and_then(|m| m.modified())
                 .ok()
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
+                .map_or(0, |d| d.as_millis() as u64);
             // The title is always re-read from the tiny `.title` sidecar, so `rename` (which only
             // touches `.title`, not the `.jsonl` mtime) takes effect immediately with no hook.
             let label = self.read_title(name).unwrap_or_else(|| name.to_owned());
@@ -808,7 +807,10 @@ const AUTO_TITLE_MAX_CHARS: usize = 40;
 /// Empty session catalog: the default for `App::new`, for tests and default construction that do not care about session switching.
 ///
 /// Lists as empty; open / create both error -- no disk writes, no side effects.
-#[allow(dead_code)]
+#[allow(
+    dead_code,
+    reason = "kept for tests, diagnostics, or a future scenario"
+)]
 pub struct EmptySessionCatalog;
 
 impl SessionCatalog for EmptySessionCatalog {

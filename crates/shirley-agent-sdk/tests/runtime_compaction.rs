@@ -115,7 +115,7 @@ fn always_keeps_at_least_one_message() {
     // The last message (the over-budget one) must be in the retained segment.
     assert_eq!(plan.cut, messages.len() - 1);
 }
-/// Core fix: the first message of the retained segment must not be a `Tool`, or the orphan tool_call gets a 400 from the API.
+/// Core fix: the first message of the retained segment must not be a `Tool`, or the orphan `tool_call` gets a 400 from the API.
 #[test]
 fn never_cuts_between_assistant_tool_calls_and_tool_results() {
     let mut messages = vec![system("s"), user("take a look for me")];
@@ -192,7 +192,7 @@ fn compaction_still_fires_when_one_task_has_a_long_tool_chain() {
     // The task itself is still extracted correctly (so the rebuild stage can decide how to retain it; see step 4).
     match &plan.current_task {
         Some(Message::User { content }) => {
-            assert_eq!(content, "help me refactor the whole project")
+            assert_eq!(content, "help me refactor the whole project");
         }
         other => panic!("current_task should be the last User, got {other:?}"),
     }

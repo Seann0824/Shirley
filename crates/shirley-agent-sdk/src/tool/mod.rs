@@ -67,7 +67,7 @@ pub type ToolFuture<'a> =
 
 /// The tool runtime context.
 ///
-/// Tools run **concurrently** inside the ReAct loop (`runtime/agent.rs` uses
+/// Tools run **concurrently** inside the `ReAct` loop (`runtime/agent.rs` uses
 /// `FuturesUnordered`), so the context can't be `&mut Session` — several tools running at
 /// once and all wanting a mutable borrow of the same session would necessarily conflict.
 /// The only workable shape is an **interior-mutability handle** (`Arc<Mutex<Session>>` and
@@ -101,11 +101,13 @@ impl std::fmt::Debug for ToolContext {
 }
 
 impl ToolContext {
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Store a piece of application data (chainable). A later store of the same type wins.
+    #[must_use]
     pub fn with<T: Any + Send + Sync>(mut self, value: T) -> Self {
         self.insert(value);
         self
@@ -120,10 +122,11 @@ impl ToolContext {
     }
 
     /// Take out the application data. Returns `None` when the type doesn't match or was never injected.
+    #[must_use]
     pub fn get<T: Any + Send + Sync>(&self) -> Option<Arc<T>> {
         self.inner
             .get(&TypeId::of::<T>())
-            .and_then(|value| value.clone().downcast::<T>().ok())
+            .and_then(|value| Arc::clone(value).downcast::<T>().ok())
     }
 
     /// Remove a piece of application data, returning the removed value (`None` when absent
@@ -174,6 +177,10 @@ pub trait Tool: Send + Sync {
     ///
     /// Defaults to a no-op: stateless tools need no change. Synchronous (registration happens
     /// at construction time; no async introduced).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] to abort registration; the tool then does not enter the table.
     fn on_register(&mut self, _ctx: &mut ToolContext) -> Result<(), ToolError> {
         Ok(())
     }
@@ -187,6 +194,10 @@ pub trait Tool: Send + Sync {
     /// already been removed from the table; `Err` only tells the caller "cleanup failed" and
     /// does not resurrect the tool.
     /// Defaults to a no-op: stateless tools need no change.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] to signal cleanup failure; the tool is already removed from the table.
     fn on_unregister(&mut self, _ctx: &mut ToolContext) -> Result<(), ToolError> {
         Ok(())
     }
@@ -217,6 +228,7 @@ impl Default for ToolManager {
 }
 
 impl ToolManager {
+    #[must_use]
     pub fn new() -> Self {
         Self {
             tools: HashMap::new(),
@@ -224,6 +236,7 @@ impl ToolManager {
         }
     }
 
+    #[must_use]
     pub fn definitions(&self) -> Vec<&ToolDefinition> {
         let mut definitions = self
             .tools
@@ -235,6 +248,12 @@ impl ToolManager {
         definitions
     }
 
+    /// Register a tool, running its `on_register` hook before insertion.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::RepetitionError`] when a tool with the same name is already
+    /// registered, or a [`ToolError`] from the tool's `on_register` hook.
     pub fn register(&mut self, mut tool: impl Tool + 'static) -> Result<(), ToolError> {
         // 1. Check whether the tool is a duplicate; throw if so
         let tool_name = tool.definition().name.clone();
@@ -261,6 +280,11 @@ impl ToolManager {
     /// callback errors, the tool does not come back, so there is no inconsistent state of
     /// "destroy was called but it's still in the table". Returns [`ToolError::NotFoundError`]
     /// when the name isn't registered.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError::NotFoundError`] when the name isn't registered, or a
+    /// [`ToolError`] from the tool's `on_unregister` hook.
     pub fn unregister(&mut self, name: &str) -> Result<(), ToolError> {
         let mut tool = self
             .tools
@@ -271,6 +295,7 @@ impl ToolManager {
     }
 
     /// A read-only view of the tool runtime context (the runtime clones it for dispatch before a call).
+    #[must_use]
     pub fn context(&self) -> &ToolContext {
         &self.context
     }
@@ -286,6 +311,11 @@ impl ToolManager {
     ///
     /// Returns `ToolError`: if the caller (the runtime) needs `AgentError`, it can converge
     /// automatically with `?` rather than wrapping here prematurely.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ToolError`] when the tool is not found, its arguments are invalid,
+    /// or the tool's execution fails.
     pub async fn invoke(
         &self,
         input: &message::ToolCall,

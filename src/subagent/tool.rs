@@ -120,7 +120,7 @@ impl Tool for SubagentTool {
     }
 
     fn invoke(&self, input: serde_json::Value, _ctx: ToolContext) -> ToolFuture<'_> {
-        let manager = self.manager.clone();
+        let manager = Arc::clone(&self.manager);
         Box::pin(async move {
             let args: SubagentArgs = serde_json::from_value(input).map_err(|error| {
                 ToolError::ArgumentsError(format!("invalid tool arguments: {error}"))
@@ -146,7 +146,7 @@ impl Tool for SubagentTool {
                             args.deny_tools,
                             0,
                         )
-                        .map_err(map_error)?;
+                        .map_err(|e| map_error(&e))?;
                     if args.detach.unwrap_or(false) {
                         // Non-blocking: hand back the handle; the child runs on.
                         let info = manager
@@ -169,7 +169,10 @@ impl Tool for SubagentTool {
                 "wait" => {
                     let timeout = resolve_timeout(&args)?;
                     if let Some(id) = args.id {
-                        let outcome = manager.wait(&id, Some(timeout)).await.map_err(map_error)?;
+                        let outcome = manager
+                            .wait(&id, Some(timeout))
+                            .await
+                            .map_err(|e| map_error(&e))?;
                         Ok(wait_json(&outcome, timeout))
                     } else {
                         // Wait for every currently-running subagent, bounded by the deadline.
@@ -208,7 +211,7 @@ impl Tool for SubagentTool {
                     let id = args
                         .id
                         .ok_or_else(|| ToolError::ArgumentsError("`id` is required".into()))?;
-                    manager.cancel(&id).map_err(map_error)?;
+                    manager.cancel(&id).map_err(|e| map_error(&e))?;
                     let info = manager.info(&id);
                     Ok(match info {
                         Some(info) => serde_json::json!({
@@ -280,7 +283,7 @@ fn usage_json(usage: Usage) -> serde_json::Value {
 
 /// Map a dispatch error to a `ToolError`. Unknown tool names / missing ids / the caps are
 /// `ArgumentsError` (the model can fix its own call); a build failure is an execution failure.
-fn map_error(error: SubagentError) -> ToolError {
+fn map_error(error: &SubagentError) -> ToolError {
     match error {
         SubagentError::UnknownTool(_)
         | SubagentError::TaskRequired
@@ -303,7 +306,7 @@ mod tests {
     use std::sync::Mutex;
     use std::thread;
 
-    /// A minimal non-streaming ChatCompletions mock. Each request body is recorded, and the response
+    /// A minimal non-streaming `ChatCompletions` mock. Each request body is recorded, and the response
     /// is produced by `route` (so the parent's first call, the child's call, and the parent's final
     /// call can be told apart by inspecting the request).
     fn mock_model(
@@ -312,7 +315,7 @@ mod tests {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let requests = Arc::new(Mutex::new(Vec::new()));
-        let captured = requests.clone();
+        let captured = Arc::clone(&requests);
         thread::spawn(move || {
             for stream in listener.incoming() {
                 let Ok(mut stream) = stream else { break };
@@ -396,14 +399,11 @@ mod tests {
     }
 
     fn request_has_subagent_tool(body: &Value) -> bool {
-        body["tools"]
-            .as_array()
-            .map(|tools| {
-                tools
-                    .iter()
-                    .any(|tool| tool["function"]["name"] == "subagent")
-            })
-            .unwrap_or(false)
+        body["tools"].as_array().is_some_and(|tools| {
+            tools
+                .iter()
+                .any(|tool| tool["function"]["name"] == "subagent")
+        })
     }
 
     fn roles(body: &Value) -> Vec<String> {
@@ -417,7 +417,7 @@ mod tests {
 
     /// spawn: the child gets a **clean** context `[system, user]` (only the task is visible), its
     /// tool table has no `subagent` (recursion guard), and the parent's `messages` grow by exactly
-    /// one tool_call + one tool_result pair.
+    /// one `tool_call` + one `tool_result` pair.
     #[tokio::test]
     async fn spawn_child_has_clean_context_and_parent_grows_by_one_tool_pair() {
         let (url, requests) = mock_model(|body| {

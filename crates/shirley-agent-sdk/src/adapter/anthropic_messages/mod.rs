@@ -7,7 +7,7 @@
 //! Three critical differences from the other two protocols:
 //! 1. **Tool results go in a `user` message** (Anthropic has no tool role), as a `tool_result` block;
 //! 2. thinking is carried via `reasoning_content` (`signature` need not be echoed back; in practice it isn't validated);
-//! 3. **`input_tokens` does not include cache reads** (opposite of OpenAI); add `cache_read` back when mapping.
+//! 3. **`input_tokens` does not include cache reads** (opposite of `OpenAI`); add `cache_read` back when mapping.
 
 mod dto;
 
@@ -46,8 +46,9 @@ fn encode_messages(
 
     for message in messages {
         match message {
-            message::Message::System { content } => system.push(content.clone()),
-            message::Message::ContextSummary { content } => system.push(content.clone()),
+            message::Message::System { content } | message::Message::ContextSummary { content } => {
+                system.push(content.clone());
+            }
 
             message::Message::User { content } => encoded.push(serde_json::json!({
                 "role": "user",
@@ -111,7 +112,7 @@ fn encode_messages(
                         "tool_use_id": tool_call_id,
                         "content": other
                             .as_ref()
-                            .map(|content| content.as_text())
+                            .map(super::super::message::Content::as_text)
                             .unwrap_or_default(),
                     }),
                 };
@@ -225,7 +226,7 @@ fn apply_extra_body(body: &mut Value, extra: &Value) {
 /// `content[]` -> internal assistant message.
 ///
 /// Multiple blocks combine into one: thinking -> `reasoning_content`,
-/// text -> `content` (concatenated), tool_use -> `ToolCall`.
+/// text -> `content` (concatenated), `tool_use` -> `ToolCall`.
 fn decode_content(content: &[dto::ContentBlock]) -> message::Message {
     let mut text = String::new();
     let mut thinking = String::new();
@@ -282,7 +283,7 @@ fn finish_reason(response: &dto::MessageResponse) -> ModelFinishReason {
 }
 
 /// usage mapping. **Here `cache_read` must be added back to `input_tokens`** —
-/// Anthropic's `input_tokens` does not include cache reads (opposite of OpenAI).
+/// Anthropic's `input_tokens` does not include cache reads (opposite of `OpenAI`).
 fn decode_usage(usage: Option<&dto::Usage>) -> message::Usage {
     let Some(usage) = usage else {
         return message::Usage::default();
@@ -364,15 +365,14 @@ where
                             yield AdapterEvent::ReasoningDelta(chunk);
                         }
                         // signature is not echoed back; ignore it (the server doesn't validate it in practice).
-                        dto::Delta::Signature { .. } => {}
+                        dto::Delta::Signature { .. } | dto::Delta::Other => {}
                         dto::Delta::InputJson { partial_json } => {
                             if let Some(entry) = tools.iter_mut().find(|(i, ..)| *i == index) {
                                 entry.3.push_str(&partial_json);
                             }
                         }
-                        dto::Delta::Other => {}
                     },
-                    dto::StreamEvent::ContentBlockStop { .. } => {}
+                    dto::StreamEvent::ContentBlockStop { .. } | dto::StreamEvent::Other => {}
                     dto::StreamEvent::MessageDelta { delta, usage } => {
                         stop_reason = delta.stop_reason;
                         output_usage = usage;
@@ -382,14 +382,13 @@ where
                             &text,
                             &thinking,
                             &tools,
-                            stop_reason.clone(),
+                            stop_reason.as_deref(),
                             input_usage.as_ref(),
                             output_usage.as_ref(),
                         );
                         yield AdapterEvent::Finished(response);
                         return;
                     }
-                    dto::StreamEvent::Other => {}
                 }
             }
         }
@@ -397,12 +396,11 @@ where
 }
 
 /// Assemble the in-stream aggregation state into the final response.
-#[allow(clippy::too_many_arguments)]
 fn assemble_stream_response(
     text: &str,
     thinking: &str,
     tools: &[(usize, String, String, String)],
-    stop_reason: Option<String>,
+    stop_reason: Option<&str>,
     input_usage: Option<&dto::Usage>,
     output_usage: Option<&dto::Usage>,
 ) -> ModelResponse {
@@ -432,7 +430,7 @@ fn assemble_stream_response(
     let finish = if has_tool_use {
         ModelFinishReason::ToolCalls
     } else {
-        match stop_reason.as_deref() {
+        match stop_reason {
             Some("max_tokens") => ModelFinishReason::Length,
             Some("refusal") => ModelFinishReason::Other("refusal".to_owned()),
             Some("pause_turn") => ModelFinishReason::Other("pause_turn".to_owned()),
@@ -456,7 +454,7 @@ fn merge_stream_usage(
         // With no input side, fall back to the output side (at least get output_tokens).
         return decode_usage(output_usage);
     };
-    let output_tokens = output_usage.map(|u| u.output_tokens).unwrap_or(0);
+    let output_tokens = output_usage.map_or(0, |u| u.output_tokens);
     let total_input = input.input_tokens + input.cache_read_input_tokens.unwrap_or(0);
     message::Usage {
         input_tokens: total_input,
@@ -953,7 +951,7 @@ mod tests {
             tools,
             session_id: None,
         };
-        let mut stream = crate::adapter::invoke(client, config, request).await;
+        let mut stream = crate::adapter::invoke(client, config, request);
         while let Some(event) = stream.next().await {
             if let AdapterEvent::Finished(response) = event.expect("the request should not error") {
                 return response;
@@ -983,17 +981,16 @@ mod tests {
             session_id: None,
         };
         let client = reqwest::Client::new();
-        use futures::StreamExt;
-        let mut stream = crate::adapter::invoke(&client, &config, request).await;
+        let mut stream = crate::adapter::invoke(&client, &config, request);
 
         let mut content = String::new();
         let mut finished = None;
         while let Some(event) = stream.next().await {
             match event.expect("streaming events should not error") {
-                AdapterEvent::Retrying { .. } => {}
-                AdapterEvent::ImagesDropped { .. } => {}
+                AdapterEvent::Retrying { .. }
+                | AdapterEvent::ImagesDropped { .. }
+                | AdapterEvent::ReasoningDelta(_) => {}
                 AdapterEvent::ContentDelta(delta) => content.push_str(&delta),
-                AdapterEvent::ReasoningDelta(_) => {}
                 AdapterEvent::Finished(response) => {
                     finished = Some(response);
                     break;
@@ -1126,17 +1123,16 @@ mod tests {
             tools: &tools,
             session_id: None,
         };
-        use futures::StreamExt;
         let client = reqwest::Client::new();
-        let mut stream = crate::adapter::invoke(&client, &config, request).await;
+        let mut stream = crate::adapter::invoke(&client, &config, request);
         let mut reasoning = String::new();
         let mut finished = None;
         while let Some(event) = stream.next().await {
             match event.expect("streaming events should not error") {
-                AdapterEvent::Retrying { .. } => {}
-                AdapterEvent::ImagesDropped { .. } => {}
+                AdapterEvent::Retrying { .. }
+                | AdapterEvent::ImagesDropped { .. }
+                | AdapterEvent::ContentDelta(_) => {}
                 AdapterEvent::ReasoningDelta(delta) => reasoning.push_str(&delta),
-                AdapterEvent::ContentDelta(_) => {}
                 AdapterEvent::Finished(response) => {
                     finished = Some(response);
                     break;

@@ -476,6 +476,7 @@ mod tests {
     use super::super::format::{Confidence, EntryStatus, EntryType};
     use super::*;
     use std::path::PathBuf;
+    use std::sync::Arc;
 
     struct Temp(PathBuf);
     impl Temp {
@@ -722,7 +723,7 @@ mod tests {
             .map(|body| {
                 let path = root.0.clone();
                 let base = base.clone();
-                let barrier = barrier.clone();
+                let barrier = Arc::clone(&barrier);
                 std::thread::spawn(move || {
                     barrier.wait();
                     exchange(
