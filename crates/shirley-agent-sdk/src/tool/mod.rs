@@ -48,16 +48,15 @@ pub enum ToolError {
 impl SdkError for ToolError {
     fn kind(&self) -> ErrorKind {
         match self {
-            // The tool itself failed: the model should see the details and change strategy,
-            // but retrying the same arguments is pointless.
-            Self::ExecutionError(_) => ErrorKind::ToolFailure,
+            // The tool itself failed, or the call was refused: the model should see the
+            // details and change strategy, but retrying the same arguments is pointless.
+            // (A refusal is not retryable: repeating the same call will be refused again.)
+            Self::ExecutionError(_) | Self::Denied(_) => ErrorKind::ToolFailure,
             // Tool missing / invalid arguments / duplicate registration: the caller's (or the
             // model's) request is at fault.
             Self::RepetitionError(_) | Self::NotFoundError(_) | Self::ArgumentsError(_) => {
                 ErrorKind::BadRequest
             }
-            // A refusal is not retryable: repeating the same call will be refused again.
-            Self::Denied(_) => ErrorKind::ToolFailure,
         }
     }
 }

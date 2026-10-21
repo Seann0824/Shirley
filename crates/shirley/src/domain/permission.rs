@@ -24,8 +24,12 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 use std::time::Duration;
 
-use shirley_agent_sdk::{ApprovalFuture, Approver, Decision, PermissionRequest, Verdict};
+use shirley_agent_sdk::{
+    ApprovalFuture, Approver, ClassifyFuture, Decision, PermissionRequest, Verdict,
+};
 use tokio::sync::{broadcast, oneshot};
+
+use crate::sidecar::Sidecar;
 
 /// Coarse capability ceiling, chosen once per deployment/profile.
 ///
@@ -64,6 +68,15 @@ impl CapabilityProfile {
         Self::WorkspaceWrite
     }
 
+    /// A stable label for logging / passing to the sidecar as policy context.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::ReadOnly => "read-only",
+            Self::WorkspaceWrite => "workspace-write",
+            Self::Full => "full",
+        }
+    }
+
     /// Resolve a risk class into a verdict under this profile.
     fn resolve(self, risk: RiskClass) -> Verdict {
         match (self, risk) {
@@ -74,16 +87,15 @@ impl CapabilityProfile {
                          narrow it down and retry"
                     .to_string(),
             },
-            (Self::ReadOnly, RiskClass::Safe) => Verdict::Allow,
             (Self::ReadOnly, RiskClass::Network | RiskClass::Destructive) => Verdict::Deny {
                 reason: "the current capability profile is read-only; writes and network access \
                          are disabled"
                     .to_string(),
             },
-            (Self::WorkspaceWrite, RiskClass::Safe) => Verdict::Allow,
-            (Self::WorkspaceWrite, RiskClass::Network | RiskClass::Destructive) => Verdict::Ask,
-            (Self::Full, RiskClass::Safe | RiskClass::Network) => Verdict::Allow,
-            (Self::Full, RiskClass::Destructive) => Verdict::Ask,
+            (Self::ReadOnly | Self::WorkspaceWrite, RiskClass::Safe)
+            | (Self::Full, RiskClass::Safe | RiskClass::Network) => Verdict::Allow,
+            (Self::WorkspaceWrite, RiskClass::Network | RiskClass::Destructive)
+            | (Self::Full, RiskClass::Destructive) => Verdict::Ask,
         }
     }
 }
@@ -130,6 +142,9 @@ pub struct ApprovalBroker {
     route: Mutex<(Option<String>, Option<String>)>,
     /// Optional audit log (JSONL). Best-effort: a write failure never blocks a decision.
     audit: Option<PathBuf>,
+    /// Optional sidecar decision model (Jev). Consulted only for grey-zone calls; when absent
+    /// or failing, the heuristic `classify` verdict stands (backwards compatible).
+    sidecar: Option<std::sync::Arc<Sidecar>>,
 }
 
 impl std::fmt::Debug for ApprovalBroker {
@@ -138,6 +153,7 @@ impl std::fmt::Debug for ApprovalBroker {
             .field("policy", &self.policy)
             .field("timeout", &self.timeout)
             .field("route", &self.route.lock().ok().map(|r| r.clone()))
+            .field("sidecar", &self.sidecar.is_some())
             .finish_non_exhaustive()
     }
 }
@@ -151,6 +167,7 @@ impl ApprovalBroker {
         project: Option<String>,
         session: Option<String>,
         audit: Option<PathBuf>,
+        sidecar: Option<std::sync::Arc<Sidecar>>,
     ) -> Self {
         let (prompts, _) = broadcast::channel(64);
         Self {
@@ -160,6 +177,7 @@ impl ApprovalBroker {
             timeout,
             route: Mutex::new((project, session)),
             audit,
+            sidecar,
         }
     }
 
@@ -171,6 +189,7 @@ impl ApprovalBroker {
             Duration::from_secs(120),
             project,
             session,
+            None,
             None,
         )
     }
@@ -190,7 +209,11 @@ impl ApprovalBroker {
 
     /// Resolve a pending approval. Returns `true` if a live prompt was waiting.
     pub fn resolve(&self, call_id: &str, decision: Decision) -> bool {
-        let sender = self.pending.lock().ok().and_then(|mut map| map.remove(call_id));
+        let sender = self
+            .pending
+            .lock()
+            .ok()
+            .and_then(|mut map| map.remove(call_id));
         if let Some(sender) = sender {
             let allowed = matches!(decision, Decision::Allow);
             self.audit(call_id, allowed);
@@ -208,6 +231,7 @@ impl ApprovalBroker {
     }
 
     fn audit(&self, call_id: &str, allowed: bool) {
+        use std::io::Write;
         let Some(path) = &self.audit else {
             return;
         };
@@ -221,7 +245,6 @@ impl ApprovalBroker {
         if let Some(parent) = path.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        use std::io::Write;
         if let Ok(mut file) = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
@@ -233,9 +256,41 @@ impl ApprovalBroker {
 }
 
 impl Approver for ApprovalBroker {
+    /// Baseline heuristic: cheap, synchronous, no I/O. This is both the first-pass filter and
+    /// the fallback the async path degrades to.
     fn classify(&self, request: &PermissionRequest) -> Verdict {
         let risk = classify_call(&request.tool_name, &request.arguments);
         self.policy.resolve(risk)
+    }
+
+    /// Heuristic-first, sidecar-on-the-grey-zone.
+    ///
+    /// - A confident heuristic verdict (`Allow` from a safe read, or a hard `Deny`) is final —
+    ///   we never spend a sidecar token on it.
+    /// - Only when the heuristic lands on `Ask` (an ambiguous `Network` / `Destructive` call)
+    ///   do we escalate to the decision model. Its answer (mapped to a `Verdict`) replaces the
+    ///   heuristic one.
+    /// - If the sidecar is absent, errors, or times out, we fall back to the heuristic `Ask` —
+    ///   i.e. behaviour is exactly what it was before the sidecar existed.
+    fn classify_async<'a>(&'a self, request: &'a PermissionRequest) -> ClassifyFuture<'a> {
+        Box::pin(async move {
+            let baseline = self.classify(request);
+            // Only the grey zone is worth a model call.
+            if !matches!(baseline, Verdict::Ask) {
+                return baseline;
+            }
+            let Some(sidecar) = &self.sidecar else {
+                return baseline;
+            };
+            match sidecar.review(request, self.policy.label()).await {
+                Ok(verdict) => verdict,
+                Err(error) => {
+                    // Fail safe and quiet: a broken sidecar must not change behaviour.
+                    eprintln!("[sidecar] review failed, falling back to heuristic: {error}");
+                    baseline
+                }
+            }
+        })
     }
 
     fn approve<'a>(&'a self, request: &'a PermissionRequest) -> ApprovalFuture<'a> {
@@ -379,8 +434,22 @@ fn classify_bash(command: &str) -> RiskClass {
 
     // Network verbs: ask (or allow under Full).
     let network = [
-        "curl", "wget", "nc ", "ncat", "ssh ", "scp ", "rsync", "sftp", "telnet", "git clone",
-        "git fetch", "git pull", "npm install", "pnpm install", "yarn install", "pip download",
+        "curl",
+        "wget",
+        "nc ",
+        "ncat",
+        "ssh ",
+        "scp ",
+        "rsync",
+        "sftp",
+        "telnet",
+        "git clone",
+        "git fetch",
+        "git pull",
+        "npm install",
+        "pnpm install",
+        "yarn install",
+        "pip download",
     ];
     let first = lower.split_whitespace().next().unwrap_or("");
     if network
@@ -392,13 +461,54 @@ fn classify_bash(command: &str) -> RiskClass {
 
     // Known-safe read / build / inspection verbs: allow.
     let safe = [
-        "ls", "cat", "head", "tail", "grep", "rg", "find", "wc", "pwd", "cd", "echo", "printf",
-        "sed", "awk", "sort", "uniq", "jq", "tree", "which", "env", "date", "stat", "file",
-        "diff", "git status", "git log", "git diff", "git show", "git branch", "cargo build",
-        "cargo test", "cargo check", "cargo clippy", "cargo fmt", "cargo run", "npm run",
-        "npm test", "python", "python3", "node", "make", "go build", "go test",
+        "ls",
+        "cat",
+        "head",
+        "tail",
+        "grep",
+        "rg",
+        "find",
+        "wc",
+        "pwd",
+        "cd",
+        "echo",
+        "printf",
+        "sed",
+        "awk",
+        "sort",
+        "uniq",
+        "jq",
+        "tree",
+        "which",
+        "env",
+        "date",
+        "stat",
+        "file",
+        "diff",
+        "git status",
+        "git log",
+        "git diff",
+        "git show",
+        "git branch",
+        "cargo build",
+        "cargo test",
+        "cargo check",
+        "cargo clippy",
+        "cargo fmt",
+        "cargo run",
+        "npm run",
+        "npm test",
+        "python",
+        "python3",
+        "node",
+        "make",
+        "go build",
+        "go test",
     ];
-    if safe.iter().any(|pat| first == pat.trim() || lower.starts_with(pat)) {
+    if safe
+        .iter()
+        .any(|pat| first == pat.trim() || lower.starts_with(pat))
+    {
         return RiskClass::Safe;
     }
 
@@ -422,7 +532,10 @@ mod tests {
     fn destructive_commands_ask() {
         assert_eq!(classify_bash("rm -rf target"), RiskClass::Destructive);
         assert_eq!(classify_bash("sudo apt install x"), RiskClass::Destructive);
-        assert_eq!(classify_bash("git push origin main"), RiskClass::Destructive);
+        assert_eq!(
+            classify_bash("git push origin main"),
+            RiskClass::Destructive
+        );
     }
 
     #[test]
@@ -441,7 +554,10 @@ mod tests {
 
     #[test]
     fn network_commands() {
-        assert_eq!(classify_bash("curl https://example.com"), RiskClass::Network);
+        assert_eq!(
+            classify_bash("curl https://example.com"),
+            RiskClass::Network
+        );
         assert_eq!(classify_bash("git clone repo"), RiskClass::Network);
     }
 

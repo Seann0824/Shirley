@@ -8,6 +8,13 @@
    "unstyled", inconsistent with shiwen (shiwen's index.css has the matching @source). */
 @source "../../node_modules/streamdown/dist/*.js";
 
+/* Dark theme variant: the app switches themes via the `data-theme="dark"` attribute on
+   <html> (see tokens.css), not via the OS `prefers-color-scheme`. Tailwind 4's default
+   `dark:` variant keys off `prefers-color-scheme`, so shiki's dark-mode utilities emitted
+   by streamdown (`dark:text-[var(--shiki-dark)]`, `dark:bg-[var(--shiki-dark-bg)]`) would
+   never activate. Bind `dark:` to the attribute instead. */
+@custom-variant dark (&:where([data-theme="dark"], [data-theme="dark"] *));
+
 /* Shirley desktop UI: keeps only the base styles needed for conversation rendering,
    with shiwen's article-body / annotation / space customization layers stripped. */
 
@@ -190,8 +197,45 @@
   border-color: var(--color-line);
 }
 [data-ai-markdown] [data-streamdown="code-block-body"] {
+  /* Shiki writes the theme background onto the inner <pre> via --sdm-bg; keep the
+     container on the canvas token so the highlighted body blends with the panel. */
   background: var(--color-canvas);
   border-color: var(--color-line);
+}
+/* The highlighted <pre> carries its own background from the shiki theme (--sdm-bg for
+   light, --shiki-dark-bg for dark). Align it with the panel background so a code block
+   does not show a mismatched rectangle inside the bordered container. */
+[data-ai-markdown] [data-streamdown="code-block-body"] pre {
+  background: transparent !important;
+  margin: 0;
+  padding: 0;
+  font-size: 0.8125rem;
+  line-height: 1.6;
+}
+
+/* Math (KaTeX): keep display math scrollable on narrow widths and inherit the
+   body text color. katex.min.css is imported from AiMarkdown.tsx (Streamdown does
+   not auto-inject the plugin's getStyles). */
+[data-ai-markdown] .katex {
+  color: var(--color-ink);
+  font-size: 1.05em;
+}
+[data-ai-markdown] .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.25rem 0;
+}
+
+/* Mermaid diagram block: same panel chrome as a code block (sidebar bg + line border),
+   the SVG is centered and never overflows horizontally. */
+[data-ai-markdown] [data-streamdown="mermaid-block"] {
+  background: var(--color-sidebar);
+  border-color: var(--color-line);
+}
+[data-ai-markdown] [data-streamdown="mermaid-block"] svg {
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
 }
 
 @media (prefers-reduced-motion: reduce) {

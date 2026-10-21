@@ -516,7 +516,9 @@ impl Agent {
                                         // blocks here on the approver (e.g. a human UI) — the
                                         // rest of this tool group runs concurrently, so one
                                         // pending approval does not stall the others.
-                                        let approver = ctx.get::<crate::permission::ApproverHandle>().map(|handle| handle.0.clone());
+                                        let approver = ctx
+                                            .get::<crate::permission::ApproverHandle>()
+                                            .map(|handle| std::sync::Arc::clone(&handle.0));
 
                                         tasks.push(async move {
                                             let started = std::time::Instant::now();
@@ -526,7 +528,7 @@ impl Agent {
                                                     tool_name: call.name.clone(),
                                                     arguments: call.arguments.clone(),
                                                 };
-                                                match approver.classify(&request) {
+                                                match approver.classify_async(&request).await {
                                                     crate::permission::Verdict::Allow => Ok(()),
                                                     crate::permission::Verdict::Deny { reason } => {
                                                         Err(tool::ToolError::Denied(reason))

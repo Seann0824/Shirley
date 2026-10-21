@@ -11,10 +11,10 @@ pub fn update(app: &mut App, event: Event) -> Option<String> {
             && key_event.kind == KeyEventKind::Press
         {
             match key_event.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     app.resolve_pending_approval(true);
                 }
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                KeyCode::Char('n' | 'N') | KeyCode::Esc => {
                     app.resolve_pending_approval(false);
                 }
                 _ => {}

@@ -64,6 +64,13 @@ pub struct PermissionRequest {
 /// Resolves a [`Verdict::Ask`] into a final [`Decision`], possibly by blocking on a human.
 pub type ApprovalFuture<'a> = Pin<Box<dyn Future<Output = Decision> + Send + 'a>>;
 
+/// Resolves a [`Verdict`] for a tool call, possibly by consulting a model or other I/O.
+///
+/// This is the async counterpart of [`Approver::classify`]. A pure heuristic can stay
+/// synchronous; a *sidecar* classifier (a separate lightweight model asked "is this tool call
+/// safe?") needs `await`, so the runtime calls this instead.
+pub type ClassifyFuture<'a> = Pin<Box<dyn Future<Output = Verdict> + Send + 'a>>;
+
 /// The application-provided permission authority.
 ///
 /// Implementors decide the policy (`classify`) and, when the policy says "ask", collect a
@@ -76,8 +83,23 @@ pub type ApprovalFuture<'a> = Pin<Box<dyn Future<Output = Decision> + Send + 'a>
 /// resolves, it must resolve to a concrete [`Decision`] — a hung approval would stall the
 /// whole turn.
 pub trait Approver: Send + Sync {
-    /// Classify the call. Pure and fast: no I/O, no blocking.
+    /// Classify the call **synchronously**. Pure and fast: no I/O, no blocking.
+    ///
+    /// This is the cheap first-pass filter. The runtime calls [`Approver::classify_async`]
+    /// (which by default just delegates here), so a heuristic that never needs I/O only
+    /// implements this.
     fn classify(&self, request: &PermissionRequest) -> Verdict;
+
+    /// Classify the call, possibly with I/O (e.g. an out-of-band *sidecar* model).
+    ///
+    /// The default implementation simply forwards to [`Approver::classify`], so existing
+    /// approvers keep working unchanged. Override this to add a semantic second opinion —
+    /// typically: run the cheap [`classify`](Approver::classify) first, and only when it
+    /// lands in the grey zone (neither a confident allow nor a hard deny) consult the
+    /// sidecar, falling back to the heuristic verdict if the sidecar is unavailable or fails.
+    fn classify_async<'a>(&'a self, request: &'a PermissionRequest) -> ClassifyFuture<'a> {
+        Box::pin(async move { self.classify(request) })
+    }
 
     /// Collect a human decision for an `Ask`. May block (await) — the runtime is waiting.
     fn approve<'a>(&'a self, request: &'a PermissionRequest) -> ApprovalFuture<'a>;

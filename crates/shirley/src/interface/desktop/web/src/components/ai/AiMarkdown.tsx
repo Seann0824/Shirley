@@ -8,6 +8,11 @@ import {
   type StreamdownTranslations,
 } from "streamdown";
 import "streamdown/styles.css";
+import { code } from "@streamdown/code";
+import { math } from "@streamdown/math";
+import { mermaid } from "@streamdown/mermaid";
+import { cjk } from "@streamdown/cjk";
+import "katex/dist/katex.min.css";
 import { cn } from "@/ui/utils";
 import { FlightMapRenderer } from "@/components/ai/FlightMapRenderer";
 
@@ -32,6 +37,15 @@ const AI_MARKDOWN_TRANSLATIONS = {
   downloadTable: "Download table",
   downloadTableAsCsv: "Download as CSV",
   downloadTableAsMarkdown: "Download as Markdown",
+  downloadDiagram: "Download diagram",
+  downloadDiagramAsMmd: "Download as Mermaid",
+  downloadDiagramAsPng: "Download as PNG",
+  downloadDiagramAsSvg: "Download as SVG",
+  mermaidFormatMmd: "Mermaid source",
+  mermaidFormatPng: "PNG",
+  mermaidFormatSvg: "SVG",
+  viewFullscreen: "View fullscreen",
+  exitFullscreen: "Exit fullscreen",
 } satisfies Partial<StreamdownTranslations>;
 
 export function aiMarkdownExternalLinkProps(className: string | undefined) {
@@ -45,11 +59,19 @@ export function aiMarkdownExternalLinkProps(className: string | undefined) {
   };
 }
 
-// Custom fenced-code-block renderer: a ```flightmap block is handed to FlightMap to draw
-// a static map. This is streamdown's public extension point (plugins.renderers) and does
-// not touch the Message / event protocol — the map is just a code block in the body
-// markdown, flowing through the existing text pipeline.
+// Code highlighting (Shiki), math (KaTeX), diagrams (Mermaid) and CJK-aware
+// emphasis parsing are shipped as separate Streamdown plugin packages. They are
+// wired here through Streamdown's public `plugins` extension point; none of them
+// touch the Message / event protocol — a fenced block is still just a code block
+// in the body markdown flowing through the existing text pipeline.
+//
+// `flightmap` stays a custom fenced-block renderer (a ```flightmap block is
+// handed to FlightMap to draw a static map) and shares the same renderer slot.
 const MARKDOWN_PLUGINS: StreamdownProps["plugins"] = {
+  code,
+  math,
+  mermaid,
+  cjk,
   renderers: [{ language: "flightmap", component: FlightMapRenderer }],
 };
 

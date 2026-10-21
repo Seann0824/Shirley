@@ -10,11 +10,11 @@ pub mod workspace;
 
 pub use adapter::{AdapterError, ModelConfig, ModelProtocol, ToolCallingMode};
 pub use error::{ErrorKind, SdkError};
-pub use permission::{
-    ApprovalFuture, Approver, ApproverHandle, Decision, PermissionRequest, Verdict,
-};
 pub use message::{
     Content, ContentPart, ImageDetail, ImagePart, ImageSource, Message, ToolCall, Usage,
+};
+pub use permission::{
+    ApprovalFuture, Approver, ApproverHandle, ClassifyFuture, Decision, PermissionRequest, Verdict,
 };
 pub use runtime::{
     Agent, AgentError, AgentEvent, CompactParts, CompressionConfig, ContextProvider, CutPlan,

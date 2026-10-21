@@ -31,6 +31,7 @@ use crate::permission::{ApprovalBroker, CapabilityProfile};
 use crate::prompt;
 use crate::session::{self, SessionCatalog};
 use crate::settings::Settings;
+use crate::sidecar::Sidecar;
 use crate::skills::{self, SkillCatalog, SkillContextProvider, SkillRuntime};
 use crate::subagent::{
     DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH, DEFAULT_PER_TASK_MAX_STEPS, DEFAULT_WAIT_TIMEOUT_MS,
@@ -106,6 +107,9 @@ pub struct AgentFactory {
     approval_timeout_secs: u64,
     /// Optional JSONL audit log path for approval decisions.
     approval_audit_path: Option<PathBuf>,
+    /// Optional sidecar decision model (Jev). `None` when `JEV_API_KEY` / `SHIRLEY_SIDECAR_API_KEY`
+    /// is unset — the permission layer then behaves exactly as before (heuristic only).
+    sidecar: Option<Arc<Sidecar>>,
 }
 
 impl AgentFactory {
@@ -265,6 +269,9 @@ impl AgentFactory {
                 .ok()
                 .filter(|raw| !raw.trim().is_empty())
                 .map(PathBuf::from),
+            // Sidecar safety review (Jev decision model). Disabled unless a key is configured;
+            // when absent the permission layer falls back to the heuristic classifier unchanged.
+            sidecar: Sidecar::from_env().map(Arc::new),
         })
     }
 
@@ -344,10 +351,11 @@ impl AgentFactory {
             None,
             None,
             self.approval_audit_path.clone(),
+            self.sidecar.clone(),
         ));
-        tool_manager
-            .context_mut()
-            .insert(ApproverHandle(Arc::clone(&approval) as Arc<dyn shirley_agent_sdk::Approver>));
+        tool_manager.context_mut().insert(ApproverHandle(
+            Arc::clone(&approval) as Arc<dyn shirley_agent_sdk::Approver>
+        ));
         let _ = tool_manager.register(tools::TodoTool::new(Arc::clone(&todo_store)));
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
         // Memory writes go **through no** tool; they are done only by the background curator (`docs/memory.md` decision 3).
@@ -831,6 +839,7 @@ pub(crate) mod test_support {
             capability_profile: CapabilityProfile::WorkspaceWrite,
             approval_timeout_secs: 120,
             approval_audit_path: None,
+            sidecar: None,
         }
     }
 
@@ -887,6 +896,7 @@ mod tests {
             capability_profile: CapabilityProfile::WorkspaceWrite,
             approval_timeout_secs: 120,
             approval_audit_path: None,
+            sidecar: None,
         }
     }
 

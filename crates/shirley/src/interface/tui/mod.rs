@@ -28,6 +28,10 @@ use crate::models::ModelCatalog;
 use crate::permission::{ApprovalBroker, ApprovalPrompt};
 use std::sync::Arc;
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "one cohesive per-turn worker task; splitting would only shuffle the same state"
+)]
 async fn run_agent(
     mut agent: Agent,
     prompt: String,

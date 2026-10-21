@@ -513,7 +513,7 @@ impl ProjectRuntimeManager {
                         // An approval prompt arrived: forward it to the UI (does not end the turn).
                         prompt = async {
                             match approval_rx.as_mut() {
-                                Some(rx) => rx.recv().await.map_err(|_| ()),
+                                Some(rx) => rx.recv().await.map_err(|_err| ()),
                                 None => std::future::pending().await,
                             }
                         } => {

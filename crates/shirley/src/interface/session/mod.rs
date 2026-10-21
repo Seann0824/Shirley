@@ -687,7 +687,9 @@ impl SessionManager {
         }
         sessions.insert(
             0,
-            Session::new(agent, name, None, store, memory, skills, todo, subagents, approval),
+            Session::new(
+                agent, name, None, store, memory, skills, todo, subagents, approval,
+            ),
         );
         Self {
             sessions,
