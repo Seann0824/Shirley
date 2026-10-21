@@ -37,6 +37,12 @@ pub enum ToolError {
 
     #[error("[invalid arguments]: {0}")]
     ArgumentsError(String),
+
+    /// The permission layer refused the call (policy `Deny` or a human said no / approval
+    /// timed out). The tool never ran. This is a deliberate refusal, not a failure — the
+    /// model should read `reason` and choose a different approach rather than retry.
+    #[error("[permission denied]: {0}")]
+    Denied(String),
 }
 
 impl SdkError for ToolError {
@@ -50,6 +56,8 @@ impl SdkError for ToolError {
             Self::RepetitionError(_) | Self::NotFoundError(_) | Self::ArgumentsError(_) => {
                 ErrorKind::BadRequest
             }
+            // A refusal is not retryable: repeating the same call will be refused again.
+            Self::Denied(_) => ErrorKind::ToolFailure,
         }
     }
 }

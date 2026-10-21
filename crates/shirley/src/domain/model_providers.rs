@@ -902,6 +902,7 @@ mod tests {
             Some(restored_agent.skills),
             Some(restored_agent.todo),
             restored_agent.subagents,
+            Some(restored_agent.approval),
         );
         assert_eq!(
             sessions.active().model_selection.as_deref(),
@@ -1002,6 +1003,7 @@ mod tests {
             None,
             None,
             built.subagents,
+            Some(built.approval),
         );
         let selected = ModelConfig::builder()
             .protocol(ModelProtocol::ChatCompletions)

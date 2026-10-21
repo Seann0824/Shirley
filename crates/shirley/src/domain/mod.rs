@@ -7,6 +7,7 @@
 
 pub mod model_providers;
 pub mod models;
+pub mod permission;
 pub mod project;
 pub mod session;
 pub mod status;

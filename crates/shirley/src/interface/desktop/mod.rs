@@ -12,6 +12,9 @@
 
 pub mod wire;
 
+#[cfg(feature = "desktop")]
+pub mod browser;
+
 use crate::bootstrap::AgentFactory;
 
 #[cfg(feature = "desktop")]

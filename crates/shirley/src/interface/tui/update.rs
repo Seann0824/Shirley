@@ -3,6 +3,25 @@ use crossterm::event::{KeyCode, KeyEventKind, KeyModifiers};
 use super::{app::App, event::Event};
 
 pub fn update(app: &mut App, event: Event) -> Option<String> {
+    // A sensitive tool call is parked awaiting the human's decision (C 档体感): while a prompt is
+    // shown, only the decision keys act (`y`/`Enter` allow, `n`/`Esc` deny). Everything else is
+    // swallowed so the user cannot accidentally type over / submit while the runtime is blocked.
+    if app.is_pending_approval() {
+        if let Event::Key(key_event) = &event
+            && key_event.kind == KeyEventKind::Press
+        {
+            match key_event.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') | KeyCode::Enter => {
+                    app.resolve_pending_approval(true);
+                }
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => {
+                    app.resolve_pending_approval(false);
+                }
+                _ => {}
+            }
+        }
+        return None;
+    }
     match event {
         // When the model picker is open, keys go to the panel first (up/down to move,
         // Enter to confirm, Esc to cancel). Other keys are swallowed so the input box isn't

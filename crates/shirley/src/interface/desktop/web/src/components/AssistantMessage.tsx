@@ -4,7 +4,7 @@ import { AiMarkdown } from "@/components/ai/AiMarkdown";
 import { AiAssistantMarkdown } from "@/components/ai/AiAssistantMarkdown";
 import { AiToolActivityDisclosure } from "@/components/ai/AiToolActivityDisclosure";
 import { TextDisclosure } from "@/components/ai/TextDisclosure";
-import type { AiSegment } from "@/types/ai";
+import type { AiSegment, AiToolExecution } from "@/types/ai";
 import type { StopReason } from "@/types/wire";
 
 /** A turn has only one process disclosure; compact is a process event and is no longer split into an outer group. */
@@ -15,6 +15,7 @@ export function AssistantMessage({
   durationMs,
   failed = false,
   stopReason,
+  onToolDecision,
 }: {
   content: string;
   streaming: boolean;
@@ -22,6 +23,8 @@ export function AssistantMessage({
   durationMs?: number;
   failed?: boolean;
   stopReason?: StopReason;
+  /** Approve/reject a paused sensitive tool call (C 档体感). Omitted in read-only views. */
+  onToolDecision?: (execution: AiToolExecution, decision: "approve" | "reject") => void;
 }) {
   const [open, setOpen] = useState(streaming);
   useEffect(() => {
@@ -59,7 +62,12 @@ export function AssistantMessage({
           contentClassName="flex min-w-0 flex-col gap-4 pt-4 pb-1"
         >
           {process.map((segment, index) => (
-            <SegmentView key={index} segment={segment} streaming={streaming && index === process.length - 1} />
+            <SegmentView
+              key={index}
+              segment={segment}
+              streaming={streaming && index === process.length - 1}
+              onToolDecision={onToolDecision}
+            />
           ))}
         </TextDisclosure>
       )}
@@ -83,7 +91,15 @@ function formatDuration(durationMs?: number): string | null {
     : minutes ? `${minutes}m ${remainder}s` : `${seconds}s`;
 }
 
-function SegmentView({ segment, streaming }: { segment: AiSegment; streaming: boolean }) {
+function SegmentView({
+  segment,
+  streaming,
+  onToolDecision,
+}: {
+  segment: AiSegment;
+  streaming: boolean;
+  onToolDecision?: (execution: AiToolExecution, decision: "approve" | "reject") => void;
+}) {
   if (segment.kind === "compact") {
     return (
       <TextDisclosure
@@ -97,7 +113,13 @@ function SegmentView({ segment, streaming }: { segment: AiSegment; streaming: bo
     );
   }
   if (segment.kind === "tools") {
-    return <AiToolActivityDisclosure executions={segment.executions} decidingToolIds={new Set<number>()} onToolDecision={() => {}} />;
+    return (
+      <AiToolActivityDisclosure
+        executions={segment.executions}
+        decidingToolIds={new Set<number>()}
+        onToolDecision={onToolDecision ?? (() => {})}
+      />
+    );
   }
   return <AiAssistantMarkdown content={segment.text} streaming={streaming} />;
 }

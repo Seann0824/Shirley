@@ -437,7 +437,7 @@ impl ProjectRuntimeManager {
         user_content: Content,
     ) -> Result<(), String> {
         let runtime = self.ensure_runtime(project).await?;
-        let (mut agent, memory, session_name, status) = {
+        let (mut agent, memory, session_name, status, approval) = {
             let mut guard = runtime.lock().await;
             let session_name = match session {
                 Some(name) => name,
@@ -468,7 +468,11 @@ impl ProjectRuntimeManager {
                 .session(&session_name)
                 .map(|s| Arc::clone(&s.status))
                 .ok_or_else(|| "session not found".to_owned())?;
-            (agent, memory, session_name, status)
+            let approval = guard
+                .sessions
+                .session(&session_name)
+                .and_then(|s| s.approval.clone());
+            (agent, memory, session_name, status, approval)
         };
 
         let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
@@ -489,6 +493,11 @@ impl ProjectRuntimeManager {
             let terminal = guard_turn(async {
                 let mut cancel_rx = cancel_rx;
                 let mut stream = agent.run_stream_content(user_content);
+                // Out-of-band approval prompts (C 档体感): the runtime blocks inside a tool
+                // awaiting the decision, so this can never arrive on `stream`; we listen on the
+                // broker's broadcast and forward each prompt to the UI, which answers via the
+                // `agent_approve` command (`broker.resolve`).
+                let mut approval_rx = approval.as_ref().map(|broker| broker.subscribe());
                 let mut hb = tokio::time::interval(std::time::Duration::from_secs(1));
                 if let Some(memory) = memory.as_ref() {
                     tokio::select! {
@@ -501,6 +510,30 @@ impl ProjectRuntimeManager {
                     tokio::select! {
                         biased;
                         _ = &mut cancel_rx => return Ok(cancelled_event()),
+                        // An approval prompt arrived: forward it to the UI (does not end the turn).
+                        prompt = async {
+                            match approval_rx.as_mut() {
+                                Some(rx) => rx.recv().await.map_err(|_| ()),
+                                None => std::future::pending().await,
+                            }
+                        } => {
+                            if let Ok(prompt) = prompt {
+                                // Prefer the broker's own route tag (set by `Session::new`) so a
+                                // prompt always lands on the session that owns it; fall back to
+                                // the driver's route if the broker has none.
+                                sink(AgentEventWire::ApprovalRequested {
+                                    project: Some(
+                                        prompt.project.clone().unwrap_or_else(|| project_owned.clone()),
+                                    ),
+                                    session: Some(
+                                        prompt.session.clone().unwrap_or_else(|| session_name.clone()),
+                                    ),
+                                    call_id: prompt.call_id,
+                                    tool_name: prompt.tool_name,
+                                    arguments: prompt.arguments,
+                                });
+                            }
+                        }
                         // Heartbeat: the only thing that ticks when no AgentEvent arrives, so a silent
                         // turn still flips Running -> Stalled (docs §5.2).
                         _ = hb.tick() => {
@@ -573,6 +606,33 @@ impl ProjectRuntimeManager {
         if let Some(tx) = self.cancels.lock().await.remove(&key) {
             let _ = tx.send(());
         }
+    }
+
+    /// Resolve a pending approval prompt for a session (the human's decision). Returns
+    /// `true` if a live prompt was waiting. Out-of-band counterpart to the `ApprovalRequested`
+    /// wire event: the UI calls this with the `call_id` it received.
+    pub async fn approve(
+        &self,
+        project: &str,
+        session: &str,
+        call_id: &str,
+        allow: bool,
+    ) -> Result<bool, String> {
+        let runtime = self.ensure_runtime(project).await?;
+        let guard = runtime.lock().await;
+        let broker = guard
+            .sessions
+            .session(session)
+            .and_then(|s| s.approval.clone())
+            .ok_or_else(|| format!("session has no permission broker: {session}"))?;
+        let decision = if allow {
+            shirley_agent_sdk::Decision::Allow
+        } else {
+            shirley_agent_sdk::Decision::Deny {
+                reason: "the user rejected this action".to_owned(),
+            }
+        };
+        Ok(broker.resolve(call_id, decision))
     }
 
     // -----------------------------------------------------------------------
@@ -884,6 +944,7 @@ pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime
         Some(built.skills),
         Some(built.todo),
         built.subagents,
+        Some(built.approval),
     );
     if from_disk {
         sessions.active_mut().rebuild_items_from_agent();

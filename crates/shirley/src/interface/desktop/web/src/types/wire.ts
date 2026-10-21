@@ -63,6 +63,15 @@ export type AgentEventWire =
   | ({ type: "todo_updated"; todo: TaskViewWire | null } & SessionTag)
   | ({ type: "error"; message: string } & SessionTag)
   | ({ type: "notice"; text: string } & SessionTag)
+  /** A sensitive tool call is paused awaiting the human's decision (C 档体感). Out-of-band:
+   *  it does not come from the AgentEvent stream. Answer via the `agent_approve` command with
+   *  `call_id` + `allow`. The matching tool card shows the pending state until resolved. */
+  | ({
+      type: "approval_requested";
+      call_id: string;
+      tool_name: string;
+      arguments: string;
+    } & SessionTag)
   | ({ type: "finished"; stop_reason: StopReason } & SessionTag);
 
 /** One UI item in a snapshot (aligned with `ItemWire` in the Rust `desktop/wire.rs`). */

@@ -177,7 +177,7 @@ export function SettingsDialog() {
               <div className="mt-2">
                 {page === "general" && <GeneralPage />}
                 {page === "models" && <ProviderSettingsPanel />}
-                {page === "connection" && <ConnectionSettingsPanel canReload />}
+                {page === "connection" && <ConnectionSettingsPanel />}
                 {page === "about" && <AboutPage />}
               </div>
             </div>

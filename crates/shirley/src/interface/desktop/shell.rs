@@ -24,6 +24,7 @@ use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::sync::Mutex;
 
+use super::browser::BrowserState;
 use super::wire::{AgentEventWire, SessionSnapshotWire, StateSnapshotWire, TaskViewWire};
 use crate::interface::runtime::{
     FileEntryWire, HistoryMessageWire, ModelEntryWire, ProjectEntryWire, ProjectRuntimeManager,
@@ -489,6 +490,23 @@ async fn agent_cancel(
     Ok(())
 }
 
+/// Resolve a pending approval prompt (C 档体感). The UI receives an `ApprovalRequested`
+/// wire event carrying the `call_id`, shows it on the matching tool card, and calls this with
+/// the human's decision. Out-of-band: it unblocks the tool call that is parked awaiting it.
+#[tauri::command]
+async fn agent_approve(
+    state: State<'_, DesktopState>,
+    project: String,
+    session: String,
+    call_id: String,
+    allow: bool,
+) -> Result<bool, String> {
+    state
+        .manager
+        .approve(&project, &session, &call_id, allow)
+        .await
+}
+
 #[tauri::command]
 async fn agent_model_name(
     state: State<'_, DesktopState>,
@@ -691,6 +709,7 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .manage(state)
+        .manage(BrowserState::default())
         .invoke_handler(tauri::generate_handler![
             agent_model_providers,
             agent_remote_info,
@@ -712,6 +731,7 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
             agent_subscribe,
             agent_unsubscribe,
             agent_cancel,
+            agent_approve,
             agent_model_name,
             agent_list_models,
             agent_set_model,
@@ -728,7 +748,17 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
             agent_load_history,
             agent_list_subagents,
             agent_load_subagent,
-            agent_cancel_subagent
+            agent_cancel_subagent,
+            super::browser::agent_browser_create,
+            super::browser::agent_browser_set_bounds,
+            super::browser::agent_browser_navigate,
+            super::browser::agent_browser_back,
+            super::browser::agent_browser_forward,
+            super::browser::agent_browser_reload,
+            super::browser::agent_browser_activate,
+            super::browser::agent_browser_close,
+            super::browser::agent_browser_destroy_all,
+            super::browser::agent_browser_hide_all
         ])
         .run(tauri::generate_context!())
         .map_err(|error| std::io::Error::other(error.to_string()))

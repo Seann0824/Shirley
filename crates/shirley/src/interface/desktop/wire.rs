@@ -123,6 +123,17 @@ pub enum AgentEventWire {
         session: Option<String>,
         todo: Option<TaskViewWire>,
     },
+    /// A sensitive tool call is paused awaiting a human decision (C 档体感). Out-of-band:
+    /// this does **not** come from the `AgentEvent` stream (the runtime is blocked awaiting
+    /// the decision and cannot yield). The driver forwards it from the session's
+    /// `ApprovalBroker`. The UI answers via the `agent_approve` command with `call_id`.
+    ApprovalRequested {
+        project: Option<String>,
+        session: Option<String>,
+        call_id: String,
+        tool_name: String,
+        arguments: String,
+    },
     /// A neutral, human-readable notice (not an error, not model content). The frontend shows
     /// it inline as muted text. Used for silent image degradation.
     Notice {
@@ -428,6 +439,9 @@ impl AgentEventWire {
             | Self::CompressionStarted { project, session }
             | Self::CompressionFinished { project, session }
             | Self::TodoUpdated {
+                project, session, ..
+            }
+            | Self::ApprovalRequested {
                 project, session, ..
             }
             | Self::Finished {

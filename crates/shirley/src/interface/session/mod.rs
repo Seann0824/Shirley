@@ -115,6 +115,13 @@ pub struct Session {
     /// It also holds the fork snapshot source (`parent_view`), fed here in [`Session::apply_event`]
     /// so a `fork` child inherits the parent's conversation (see `docs/subagent.md`).
     pub subagents: Option<Arc<SubagentManager>>,
+    /// This session's permission broker (`None` = no permission layer, for tests / child agents).
+    ///
+    /// **Shares the same `Arc`** with the runtime's injected `Approver` (created by
+    /// `build_agent`). The driver subscribes to it each turn to receive approval prompts and
+    /// calls [`crate::permission::ApprovalBroker::resolve`] with the human's decision. The
+    /// routing key (project/session) is set here once the session name is known.
+    pub approval: Option<Arc<crate::permission::ApprovalBroker>>,
 }
 
 impl Session {
@@ -135,8 +142,13 @@ impl Session {
         skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
         subagents: Option<Arc<SubagentManager>>,
+        approval: Option<Arc<crate::permission::ApprovalBroker>>,
     ) -> Self {
         agent.set_request_session_id(request_session_id);
+        // Route approval prompts to this session (the Agent is anonymous; identity lives here).
+        if let Some(broker) = approval.as_ref() {
+            broker.set_route(None, name.clone());
+        }
         let model = Some(agent.model_config().model.clone());
         // Seed the fork snapshot source from the restored working set (system included; the fork
         // snapshot strips the leading `System` when it is actually used).
@@ -168,6 +180,7 @@ impl Session {
             skills,
             todo,
             subagents,
+            approval,
         }
     }
 
@@ -660,6 +673,7 @@ impl SessionManager {
         skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
         subagents: Option<Arc<SubagentManager>>,
+        approval: Option<Arc<crate::permission::ApprovalBroker>>,
     ) -> Self {
         let mut sessions = HashMap::new();
         // Attach the `.agents/` sidecar before the session starts using the manager.
@@ -673,7 +687,7 @@ impl SessionManager {
         }
         sessions.insert(
             0,
-            Session::new(agent, name, None, store, memory, skills, todo, subagents),
+            Session::new(agent, name, None, store, memory, skills, todo, subagents, approval),
         );
         Self {
             sessions,
@@ -699,6 +713,7 @@ impl SessionManager {
         skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
         subagents: Option<Arc<SubagentManager>>,
+        approval: Option<Arc<crate::permission::ApprovalBroker>>,
     ) -> Self {
         let mut sessions = HashMap::new();
         let request_session_id = proxy_session_id(&factory.working_dir, name.as_deref());
@@ -721,6 +736,7 @@ impl SessionManager {
                 skills,
                 todo,
                 subagents,
+                approval,
             ),
         );
         sessions
@@ -793,6 +809,10 @@ impl SessionManager {
         clippy::too_many_arguments,
         reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
     )]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
+    )]
     fn insert(
         &mut self,
         agent: Agent,
@@ -802,6 +822,7 @@ impl SessionManager {
         skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
         subagents: Option<Arc<SubagentManager>>,
+        approval: Option<Arc<crate::permission::ApprovalBroker>>,
     ) -> u64 {
         let id = self.next_id;
         self.next_id += 1;
@@ -821,6 +842,7 @@ impl SessionManager {
                 skills,
                 todo,
                 subagents,
+                approval,
             ),
         );
         if let Some(factory) = &self.factory {
@@ -880,6 +902,7 @@ impl SessionManager {
             Some(built.skills),
             Some(built.todo),
             built.subagents,
+            Some(built.approval),
         );
         // A session restored from disk: rebuild view items from its history so the snapshot / render has content.
         if let Some(session) = self.sessions.get_mut(&id) {
@@ -932,6 +955,7 @@ impl SessionManager {
             Some(built.skills),
             Some(built.todo),
             built.subagents,
+            Some(built.approval),
         );
         self.active = id;
         if let Some(previous) = previous.filter(|p| p != entry.name.as_str()) {
@@ -1366,6 +1390,7 @@ mod tests {
             test_agent(),
             Some("s".into()),
             Arc::new(EmptySessionCatalog),
+            None,
             None,
             None,
             None,

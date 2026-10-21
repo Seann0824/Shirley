@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  ArrowLeft, ArrowRight, Folder, FolderPlus, House,
+  ArrowLeft, ArrowRight, Folder, FolderPlus, Globe, House,
   MessageSquarePlus, Moon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Settings2, SquarePen, Sun,
 } from "lucide-react";
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from "@/ui/context-menu";
@@ -38,7 +38,7 @@ function IconButton({ label, children, active, className, ...props }: {
 export function DesktopChrome({
   title, projectName, sidebarCollapsed, canGoBack, canGoForward,
   navigationBusy, onBack, onForward, onToggleSidebar, onHome,
-  onNewChat, onAddProject, topContent, canReloadConnection = true, children,
+  onNewChat, onAddProject, topContent, onNewBrowserTab, children,
 }: {
   title: string;
   projectName?: string;
@@ -52,11 +52,12 @@ export function DesktopChrome({
   onHome: () => void;
   onNewChat: () => void;
   onAddProject: () => void;
+  /** Open a new in-app browser tab; the button is hidden when not provided. */
+  onNewBrowserTab?: () => void;
   /** Custom content for the content-area top bar; falls back to the default
    *  "folder icon + title + project name". Lets different pages (Home / sessions)
    *  customize the top-bar right area. */
   topContent?: ReactNode;
-  canReloadConnection?: boolean;
   children: ReactNode;
 }) {
   const mobile = useMobileLayout();
@@ -179,6 +180,9 @@ export function DesktopChrome({
             </>
           )}
         </div>
+        {onNewBrowserTab && (
+          <IconButton label="New browser tab" onClick={onNewBrowserTab}><Globe className="size-4" /></IconButton>
+        )}
         <IconButton label="Settings" onClick={() => openSettings("general")}><Settings2 className="size-4" /></IconButton>
         <ContextMenu menu={
           <>

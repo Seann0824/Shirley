@@ -509,10 +509,46 @@ impl Agent {
                                         // just take one clone and hand it down.
                                         let ctx = self.tools.context().clone();
 
+                                        // Permission gate: if the application installed an
+                                        // `Approver`, classify the call before running it. This
+                                        // lives in the runtime (transport-agnostic) so TUI /
+                                        // desktop / server all get identical semantics. `Ask`
+                                        // blocks here on the approver (e.g. a human UI) — the
+                                        // rest of this tool group runs concurrently, so one
+                                        // pending approval does not stall the others.
+                                        let approver = ctx.get::<crate::permission::ApproverHandle>().map(|handle| handle.0.clone());
+
                                         tasks.push(async move {
                                             let started = std::time::Instant::now();
-                                            let (ok, content, error_kind) =
-                                                match tools.invoke(call, ctx).await {
+                                            let gated = if let Some(approver) = approver {
+                                                let request = crate::permission::PermissionRequest {
+                                                    call_id: call.id.clone(),
+                                                    tool_name: call.name.clone(),
+                                                    arguments: call.arguments.clone(),
+                                                };
+                                                match approver.classify(&request) {
+                                                    crate::permission::Verdict::Allow => Ok(()),
+                                                    crate::permission::Verdict::Deny { reason } => {
+                                                        Err(tool::ToolError::Denied(reason))
+                                                    }
+                                                    crate::permission::Verdict::Ask => {
+                                                        match approver.approve(&request).await {
+                                                            crate::permission::Decision::Allow => Ok(()),
+                                                            crate::permission::Decision::Deny { reason } => {
+                                                                Err(tool::ToolError::Denied(reason))
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            } else {
+                                                Ok(())
+                                            };
+                                            let (ok, content, error_kind) = match gated {
+                                                Err(error) => {
+                                                    let kind = crate::SdkError::kind(&error);
+                                                    (false, message::Content::text(error.to_string()), Some(kind))
+                                                }
+                                                Ok(()) => match tools.invoke(call, ctx).await {
                                                     Ok(output) => {
                                                         (true, value_to_content(&output), None)
                                                     }
@@ -528,7 +564,8 @@ impl Agent {
                                                             Some(kind),
                                                         )
                                                     }
-                                                };
+                                                },
+                                            };
                                             (call, ok, content, error_kind, started.elapsed().as_millis() as u64)
                                         });
                                     }

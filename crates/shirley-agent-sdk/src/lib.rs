@@ -1,6 +1,7 @@
 mod adapter;
 pub mod error;
 mod message;
+pub mod permission;
 mod runtime;
 pub mod sandbox;
 pub mod token;
@@ -9,6 +10,9 @@ pub mod workspace;
 
 pub use adapter::{AdapterError, ModelConfig, ModelProtocol, ToolCallingMode};
 pub use error::{ErrorKind, SdkError};
+pub use permission::{
+    ApprovalFuture, Approver, ApproverHandle, Decision, PermissionRequest, Verdict,
+};
 pub use message::{
     Content, ContentPart, ImageDetail, ImagePart, ImageSource, Message, ToolCall, Usage,
 };

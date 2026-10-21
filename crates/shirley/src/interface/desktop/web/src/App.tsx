@@ -13,6 +13,8 @@ import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
 import { EditProjectDialog } from "@/components/ai/EditProjectDialog";
+import { WorkspaceTabs, type WorkspaceTabsHandle } from "@/components/ai/WorkspaceTabs";
+import { browserBridge } from "@/lib/browser-bridge";
 import { NewChatControls } from "@/components/ai/NewChatControls";
 import { SubagentSection } from "@/components/ai/SubagentSection";
 import { AiConversationSkeleton } from "@/components/ai/AiConversationSkeleton";
@@ -28,7 +30,15 @@ import { useSkillSlashSearch } from "@/lib/slash/useSkillSlashSearch";
 import { SkillSlashPopover } from "@/lib/slash/SkillSlashPopover";
 import { CHIP_TOKEN, stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
-import { agentBridge, type ProjectEntry, type SessionSubscription } from "@/lib/bridge";
+import {
+  agentBridge,
+  projectSource,
+  splitProject,
+  tagProject,
+  type DataSource,
+  type ProjectEntry,
+  type SessionSubscription,
+} from "@/lib/bridge";
 import type { AgentEventWire, SessionSnapshot, StateSnapshotWire, TaskViewWire, UsageWire } from "@/types/wire";
 import type { AiSegment, AiToolExecution } from "@/types/ai";
 import { cn } from "@/ui/utils";
@@ -284,6 +294,12 @@ export function App() {
   const [editingProjectEntry, setEditingProjectEntry] = useState<ProjectEntry | null>(null);
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState<string | null>(null);
+  // Which runtime a NEW send / new chat targets. Existing projects & sessions keep their own
+  // source (encoded in the namespaced project id `local::<id>` / `cloud::<id>`); this only seeds
+  // the composer's Local/Cloud choice and which `__chat__` pseudo project is foreground.
+  const [preferredSource, setPreferredSource] = useState<DataSource>("local");
+  // Sources the hybrid bridge can reach (cloud is best-effort; may be local-only).
+  const [availableSources, setAvailableSources] = useState<DataSource[]>(["local"]);
   const [input, setInput] = useState("");
   const [references, setReferences] = useState<FileReference[]>([]);
   // "Edit the last user message and resend" mode: which session view + which message id
@@ -315,11 +331,21 @@ export function App() {
       return { entries, index: entries.length - 1 };
     });
   }, [activeProject, sessionName]);
+  // Switching sessions always brings the chat tab to the foreground (open web tabs stay open).
+  useEffect(() => {
+    if (activeProject || sessionName) workspaceTabsRef.current?.showChat();
+  }, [activeProject, sessionName]);
   // Sidebar collapse: user's manual preference (persisted). Auto-collapsed when the window is too narrow; can still be manually expanded afterward.
   const mobile = useMobileLayout();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     window.matchMedia(MOBILE_LAYOUT_QUERY).matches || readBool(SIDEBAR_STORAGE_KEY, false),
   );
+  // In-app browser as a workspace tab (top-level tab architecture): the chat is one
+  // tab, every web page is its own tab. Desktop-only; the "new tab" button only
+  // renders when the browser is available (Tauri shell). The handle is driven
+  // imperatively (Globe button / session switches call `showChat`).
+  const workspaceTabsRef = useRef<WorkspaceTabsHandle>(null);
+  const browserAvailable = browserBridge.available;
   // Task ledger panel: **not resident** — the user opens it from the composer toggle.
   // Resets to closed when switching sessions (keyed by `project::session`), so a new
   // session never inherits a stale "open" state.
@@ -331,7 +357,14 @@ export function App() {
   // project `__chat__` => Chat (no associated project), otherwise => Work. There is no
   // separate mode state — switching projects / switching to Chat switches the mode,
   // avoiding two sources of truth.
-  const mode: AppMode = activeProject === CHAT_PROJECT_ID ? "chat" : "work";
+  const isChatProject = (id: string | null): boolean =>
+    id != null && splitProject(id).rawId === CHAT_PROJECT_ID;
+  const mode: AppMode = isChatProject(activeProject) ? "chat" : "work";
+  // Chat pseudo project for the preferred source (both runtimes expose `__chat__`; the
+  // namespaced id keeps the local and cloud ones distinct in one merged view).
+  const chatProjectId = tagProject(preferredSource, CHAT_PROJECT_ID);
+  // Source of the foreground context (drives the composer toggle + source badges).
+  const activeSource: DataSource = activeProject ? projectSource(activeProject) : preferredSource;
 
   const closeSidebar = useCallback(() => setSidebarCollapsed(true), []);
   const toggleSidebar = useCallback(() => {
@@ -520,6 +553,47 @@ export function App() {
     });
   }, []);
 
+  // Answer a pending approval prompt (C 档体感). Optimistically mark the execution's
+  // approval_state so the card updates immediately, then forward to the backend; the tool
+  // only actually resumes after `agent_approve`. Fail-closed: a dropped request or timeout
+  // denies on the backend, so a swallowed error here is safe.
+  const decideTool = useCallback(
+    (project: string, session: string, execution: AiToolExecution, decision: "approve" | "reject") => {
+      const callId = execution.call_id;
+      if (!callId) return;
+      const key = viewKey(project, session);
+      const allow = decision === "approve";
+      setViews((prev) => {
+        const view = prev[key];
+        if (!view) return prev;
+        let assistantId: string | null = null;
+        for (const [id, segs] of Object.entries(view.turnSegments)) {
+          if (segs.some((seg) => seg.kind === "tools" && seg.executions.some((e) => e.call_id === callId))) {
+            assistantId = id;
+            break;
+          }
+        }
+        if (!assistantId) return prev;
+        return {
+          ...prev,
+          [key]: {
+            ...view,
+            turnSegments: setApprovalState(view.turnSegments, assistantId, callId, allow ? "approved" : "rejected"),
+          },
+        };
+      });
+      void (async () => {
+        try {
+          const bridge = await agentBridge();
+          await bridge.approve(project, session, callId, allow);
+        } catch {
+          // Ignore: the backend will fail-closed (deny) if the prompt is gone.
+        }
+      })();
+    },
+    [],
+  );
+
   // Respond to interaction first: immediately switch the foreground session and enter
   // the loading state (render a skeleton), without waiting for the backend round trip.
   // Both opening and switching sessions call this **before** fetching the history
@@ -679,6 +753,7 @@ export function App() {
   useEffect(() => {
     void (async () => {
       const bridge = await agentBridge();
+      setAvailableSources(bridge.capabilities().sources ?? ["local"]);
       const active = await reloadProjects();
       const first = active[0]?.id ?? null;
       if (!first) return;
@@ -843,18 +918,63 @@ export function App() {
     async (next: AppMode) => {
       if (next === mode) return;
       if (next === "chat") {
-        await newSession(CHAT_PROJECT_ID);
+        await newSession(tagProject(preferredSource, CHAT_PROJECT_ID));
         return;
       }
-      const first = projects[0]?.id;
+      const first =
+        projects.find((entry) => projectSource(entry.id) === preferredSource)?.id ?? projects[0]?.id;
       if (!first) {
         await addProject();
         return;
       }
       await newSession(first);
     },
-    [mode, projects, newSession, addProject],
+    [mode, projects, newSession, addProject, preferredSource],
   );
+
+  // Switch the send target between local and cloud. Chat mode jumps to that source's
+  // `__chat__`; Work mode jumps to the same-path sibling project when the other runtime has it.
+  const switchSource = useCallback(
+    async (next: DataSource) => {
+      setPreferredSource(next);
+      if (!availableSources.includes(next) || !activeProject) return;
+      if (splitProject(activeProject).rawId === CHAT_PROJECT_ID) {
+        await newSession(tagProject(next, CHAT_PROJECT_ID));
+        return;
+      }
+      const activeEntry = projects.find((entry) => entry.id === activeProject);
+      const sibling = activeEntry
+        ? projects.find((entry) => projectSource(entry.id) === next && entry.path === activeEntry.path)
+        : undefined;
+      if (sibling && sibling.id !== activeProject) await selectProject(sibling.id);
+    },
+    [availableSources, activeProject, projects, newSession, selectProject],
+  );
+
+  // Local / Cloud segmented control shown in the composer (only when both are reachable).
+  const sourceToggleNode =
+    availableSources.length > 1 ? (
+      <div className="flex items-center gap-0.5 rounded-control bg-inset p-0.5" role="tablist" aria-label="Send via">
+        {(["local", "cloud"] as const).map((s) =>
+          availableSources.includes(s) ? (
+            <button
+              key={s}
+              type="button"
+              role="tab"
+              aria-selected={activeSource === s}
+              title={s === "cloud" ? "Send via cloud" : "Send via local"}
+              className={cn(
+                "rounded-[6px] px-2 py-1 text-caption font-medium transition-colors",
+                activeSource === s ? "bg-canvas text-ink shadow-sm" : "text-muted hover:text-ink",
+              )}
+              onClick={() => void switchSource(s)}
+            >
+              {s === "cloud" ? "Cloud" : "Local"}
+            </button>
+          ) : null,
+        )}
+      </div>
+    ) : null;
 
   const renameSession = useCallback(
     async (project: string, name: string, title: string) => {
@@ -1346,7 +1466,10 @@ export function App() {
           </>
         }
         trailingAction={
-          <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
+          <div className="flex items-center gap-1.5">
+            {sourceToggleNode}
+            <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
+          </div>
         }
         inputSlot={
           <MentionEditor
@@ -1375,8 +1498,11 @@ export function App() {
       <ImageHoverPreview />
       <DesktopChrome
       title={(activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
-      canReloadConnection={!input.trim() && references.length === 0 && !Object.values(views).some((view) => view.pending.length > 0)}
-      projectName={mode === "chat" ? "Chat" : projects.find((entry) => entry.id === activeProject)?.name}
+      projectName={
+        mode === "chat"
+          ? `Chat · ${activeSource === "cloud" ? "Cloud" : "Local"}`
+          : `${projects.find((entry) => entry.id === activeProject)?.name ?? ""}${activeSource === "cloud" ? " · Cloud" : ""}`
+      }
       sidebarCollapsed={sidebarCollapsed}
       canGoBack={navigationHistory.index > 0}
       canGoForward={navigationHistory.index < navigationHistory.entries.length - 1}
@@ -1390,6 +1516,7 @@ export function App() {
       }}
       onNewChat={() => { if (mobile) setSidebarCollapsed(true); activeProject ? void newSession(activeProject) : void addProject(); }}
       onAddProject={() => void addProject()}
+      onNewBrowserTab={browserAvailable ? () => workspaceTabsRef.current?.openWebTab() : undefined}
     >
       {/* Left sidebar: NewChat / pinned / projects (multi-project + session navigation). */}
       {mobile && !sidebarCollapsed && (
@@ -1398,7 +1525,7 @@ export function App() {
       <SessionSidebar
         onClose={closeSidebar}
         collapsed={sidebarCollapsed}
-        chatProjectId={CHAT_PROJECT_ID}
+        chatProjectIds={availableSources.map((source) => tagProject(source, CHAT_PROJECT_ID))}
         onCurrentTitleChange={updateCurrentTitle}
         projects={projects}
         activeProject={activeProject}
@@ -1415,6 +1542,11 @@ export function App() {
       />
       {/* Right main area: fixed-width centered (aligned with shiwen AiConversationSurface's max-w-190 = 760px).
           Neither the chat area nor the input stretches with the window; long text wraps at a comfortable reading width. */}
+      <WorkspaceTabs
+        ref={workspaceTabsRef}
+        browserAvailable={browserAvailable}
+        chatTitle={(activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
+      >
       <main ref={mainRef} aria-label="Conversation" className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Full-width column: the scroll viewport must span the whole right area so the
             wheel works over the side gutters too. The reading column itself stays 760px
@@ -1467,6 +1599,11 @@ export function App() {
                 durationMs={message.durationMs}
                 failed={message.status === "error"}
                 stopReason={message.stopReason}
+                onToolDecision={
+                  activeProject && sessionName
+                    ? (execution, decision) => decideTool(activeProject, sessionName, execution, decision)
+                    : undefined
+                }
               />
             ) : (
               <InlineReferences content={message.content} references={message.references ?? []} />
@@ -1534,6 +1671,7 @@ export function App() {
           />
         )}
       </main>
+      </WorkspaceTabs>
       </DesktopChrome>
       {editingProjectEntry && (
         <EditProjectDialog
@@ -1608,6 +1746,16 @@ function applyWireEvent(
             },
           ],
         }),
+      };
+    }
+    case "approval_requested": {
+      // A sensitive tool call is paused awaiting the human (C 档体感). Mark the matching
+      // execution pending so its card shows the approve/reject buttons; the tool itself
+      // has NOT run yet (ToolStarted already created the running row).
+      if (!assistantId) return view;
+      return {
+        ...view,
+        turnSegments: setApprovalState(view.turnSegments, assistantId, event.call_id, "pending"),
       };
     }
     case "tool_finished": {
@@ -1709,6 +1857,28 @@ function appendSegment(
     };
   }
   return { ...segments, [assistantId]: [...current, segment] };
+}
+
+/** Set the approval state of the execution matching `callId` (used by approval_requested
+ *  and by the local decision handler for immediate feedback). */
+function setApprovalState(
+  segments: Record<string, AiSegment[]>,
+  assistantId: string,
+  callId: string,
+  state: "pending" | "approved" | "rejected",
+): Record<string, AiSegment[]> {
+  const current = segments[assistantId] ?? [];
+  const next = current.map((segment) => {
+    if (segment.kind !== "tools") return segment;
+    if (!segment.executions.some((execution) => execution.call_id === callId)) return segment;
+    return {
+      ...segment,
+      executions: segment.executions.map((execution) =>
+        execution.call_id === callId ? { ...execution, approval_state: state } : execution,
+      ),
+    };
+  });
+  return { ...segments, [assistantId]: next };
 }
 
 function updateTool(

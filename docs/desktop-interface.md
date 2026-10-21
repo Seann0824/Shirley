@@ -483,6 +483,70 @@ The frontend view key = `project::session` (a session name is unique only within
 collide across projects); events carry both `project` and `session` fields for routing. The registry
 and command contract are in section 6.
 
+### 4.6 Workspace tabs + in-app browser (**landed**)
+
+The right-hand workspace area is a **top-level tab architecture**: "everything is a tab".
+The chat is **one tab**; every in-app web page is **its own tab**. Exactly one tab is shown at
+a time, **full width** — there is **no default left/right split**. A future "split right" is an
+*extra capability of an individual tab*, not the base layout. This is deliberately different from
+an "Open browser" side panel: opening a page adds a tab next to the conversation, and the chat is
+never squeezed into a narrow column.
+
+- **Structure**: `WorkspaceTabs.tsx` owns the tab strip (`role=tab` per tab) and renders the chat
+  tab's content (the whole conversation surface passed in as `children`) plus one `BrowserView`
+  per web tab. Only the active tab is `flex`; the others are `hidden` (CSS), so chat scroll/state
+  survives tab switches. The chat tab is permanent and cannot be closed; web tabs have a `×`.
+- **Why a child webview, not an iframe**: most sites send `X-Frame-Options` / CSP
+  `frame-ancestors` and refuse to be framed; and an iframe cannot give a real address bar,
+  back/forward history, or a browser user-agent. The equivalent of Electron's `<webview>` tag is
+  Tauri 2's **child webview**: `tauri::webview::WebviewBuilder` + `Window::add_child(builder,
+  position, size)` (`tauri` built with the `unstable` feature). This renders a real engine
+  (WKWebView on macOS) that can load any `http(s)` URL.
+- **One tab = one child webview** (`label = browser-<tabId>`). Switching to a web tab calls
+  `agent_browser_activate` (shows that webview, hides the rest); switching back to the chat tab
+  calls `agent_browser_hide_all` (hides every native webview, since none belongs to the chat).
+  Closing a tab calls `close()` on its webview.
+- **Layout / geometry**: React only paints the **chrome** (tab strip + address bar + nav
+  buttons); the native webview **floats on top of** the `BrowserView` content rectangle. The
+  rectangle is measured with `getBoundingClientRect()` (CSS px == Tauri logical px) and pushed
+  down via `agent_browser_set_bounds`; a `ResizeObserver` keeps it in sync as the window / sidebar
+  resizes. Inactive web tabs are CSS-hidden and their webviews are hidden by the backend.
+- **History**: Tauri 2 exposes no `back()` / `forward()` / `can_go_back()` on `Webview`, so
+  back/forward are a **Rust-side navigation stack** (`history: Vec<String>` + `cursor` + a one-shot
+  `suppress` flag). `on_navigation` records each committed URL (or, when `suppress` is set, just
+  re-syncs the current entry during a programmatic replay); `back` / `forward` set `suppress` then
+  `navigate` to the target entry. `can_go_back` / `can_go_forward` are derived from the stack.
+- **State push**: the remote child webview has **no IPC**, so tab state (`url` / `title` /
+  `loading` / `can_go_back` / `can_go_forward`) is emitted by Rust to the **main** webview via
+  `emit_to("main", "browser://state", payload)`; `browser-bridge.ts` listens and each `BrowserView`
+  filters by `tabId`, mirroring the live title/loading up so the tab strip can render it.
+- **`target=_blank` / `window.open`**: `on_new_window` returns `NewWindowResponse::Deny` and
+  navigates the **current tab** to the URL (mirrors GoodPractice's `setWindowOpenHandler` behavior).
+  A uniform Chrome UA string is set so sites serve their normal desktop experience.
+- **Address bar**: `normalize_url` adds `https://` to bare hosts and rejects any scheme other than
+  `http` / `https`.
+- **Entry points**: the top-bar `Globe` button (`DesktopChrome` → `onNewBrowserTab`) opens a new
+  web tab; the `+` at the end of the tab strip does the same. **Switching sessions always brings
+  the chat tab back to the foreground** (open web tabs stay open in the background).
+- **Security boundary**: the child webview's label (`browser-<tabId>`) is **not** in
+  `capabilities/default.json`'s `windows: ["main"]`, and that capability has no `remote` field, so
+  remote content loaded in the child webview **has no Tauri IPC permissions**. The page is sandboxed
+  from the app by the ACL, not by the renderer.
+- **Availability**: the browser is **desktop-only**. `browserBridge.available` is `true` only inside
+  the Tauri shell; in cloud / mock modes `WorkspaceTabs` renders **no tab strip at all** (the chat
+  simply fills the area) and the `Globe` button is not rendered, so the feature degrades to
+  "absent" rather than a broken tab.
+- **Commands** (all `async`, registered in `shell.rs`; module `interface/desktop/browser.rs`):
+  `agent_browser_create { tabId, url, x, y, width, height }` /
+  `agent_browser_set_bounds { tabId, x, y, width, height }` / `agent_browser_navigate { tabId, url }` /
+  `agent_browser_back { tabId }` / `agent_browser_forward { tabId }` / `agent_browser_reload { tabId }` /
+  `agent_browser_activate { tabId }` / `agent_browser_close { tabId }` /
+  `agent_browser_hide_all` (hide all webviews without destroying them; used when the chat tab is
+  foreground) / `agent_browser_destroy_all`.
+- **Not yet done**: `split right` (side-by-side of two tabs) — the tab architecture is the base it
+  will plug into; per-project browser state / URL persistence; runtime geometry verification under
+  window zoom / fullscreen / sidebar collapse animation.
+
 ---
 
 **5. Technology choices**

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Cloud, HardDrive, LoaderCircle, RefreshCw } from "lucide-react";
+import { LoaderCircle, RefreshCw } from "lucide-react";
 import { Button } from "@/ui/button";
 import { SettingsRow, SettingsSection } from "@/components/settings/controls";
 
@@ -20,18 +20,18 @@ type RemoteInfo = {
 type MemoryReview = { id: string; revision: string; subject: string; body: string };
 
 const native = "__TAURI_INTERNALS__" in window;
-const remote = localStorage.getItem("shirley.connectionSource") === "remote";
 const fieldClass = "mt-1 w-full rounded-control border border-line bg-canvas px-3 py-2 text-body-sm text-ink focus:outline-2 focus:outline-ink";
 
 /**
  * Local / cloud connection configuration, embedded inside the unified Settings dialog.
  *
- * Extracted from the former standalone RemoteConnection modal. Behaviour is unchanged:
- * switch source (reloads the page), save endpoint + token, sync now, and review legacy
- * memories. In non-native (plain-browser debug) builds the connection settings are not
- * applicable, so it renders a short notice.
+ * Local and cloud are no longer mutually exclusive: both runtimes are shown in one merged
+ * view and the send target is picked per message in the composer. This panel therefore only
+ * configures the cloud endpoint + token, syncs personal memory, and reviews legacy memories
+ * — there is no "switch source / reload" step. In non-native (plain-browser debug) builds the
+ * connection settings are not applicable, so it renders a short notice.
  */
-export function ConnectionSettingsPanel({ canReload }: { canReload: boolean }) {
+export function ConnectionSettingsPanel() {
   const [info, setInfo] = useState<RemoteInfo | null>(null);
   const [url, setUrl] = useState("");
   const [token, setToken] = useState("");
@@ -57,19 +57,6 @@ export function ConnectionSettingsPanel({ canReload }: { canReload: boolean }) {
     setInfo(next);
     if (populate) { setUrl(next.url); setSync(next.sync_personal_memory); setToken(""); }
   };
-  const switchSource = async (source: "local" | "remote") => {
-    if (!canReload || busy) return;
-    setBusy(true);
-    setError("");
-    try {
-      if (source === "remote") {
-        const { invoke } = await import("@tauri-apps/api/core");
-        await invoke("agent_remote_call", { command: "agent_list_projects", args: {} });
-      }
-      localStorage.setItem("shirley.connectionSource", source);
-      window.location.reload();
-    } catch (e) { setError(String(e)); setBusy(false); }
-  };
   const save = async () => {
     setBusy(true);
     setError("");
@@ -79,8 +66,8 @@ export function ConnectionSettingsPanel({ canReload }: { canReload: boolean }) {
       setReviewRemote(null);
       setMemories([]);
       setSelected(new Set());
-      if (remote) window.location.reload();
-      else { await refresh(true); setBusy(false); }
+      await refresh(true);
+      setBusy(false);
     } catch (e) { setError(String(e)); setBusy(false); }
   };
   const syncNow = async () => {
@@ -124,26 +111,13 @@ export function ConnectionSettingsPanel({ canReload }: { canReload: boolean }) {
 
   return (
     <div className="flex flex-col gap-2">
-      <SettingsSection title="Execution location">
-        <SettingsRow
-          title="Current runtime"
-          description="Once a remote chat is loaded, it keeps running in the remote project. Project memory stays on the machine that hosts the project."
-        >
-          <div className="flex gap-2">
-            <Button size="sm" variant={!remote ? "primary" : "secondary"} disabled={busy || !canReload || !remote} onClick={() => void switchSource("local")}><HardDrive />Use local</Button>
-            <Button size="sm" variant={remote ? "primary" : "secondary"} disabled={busy || !canReload || remote || !info?.url} onClick={() => void switchSource("remote")}><Cloud />Load remote</Button>
-          </div>
-        </SettingsRow>
-      </SettingsSection>
-      <p className="px-1 text-caption text-muted">Switching reloads the page; a running conversation continues on the original machine.{!canReload && " Send or clear the draft / queued messages first."}</p>
-
       <SettingsSection title="Cloud connection">
         <form className="flex flex-col gap-3 px-4 py-3.5" onSubmit={(event) => { event.preventDefault(); void save(); }}>
           <label className="text-body-sm">Cloud endpoint<input className={fieldClass} type="url" placeholder="https://shirley.example.com" value={url} onChange={(e) => setUrl(e.target.value)} disabled={busy} /></label>
           <label className="text-body-sm">Access token<input className={fieldClass} type="password" autoComplete="new-password" placeholder={info?.has_token ? "Saved; leave blank to keep the current token" : "Enter the cloud access token"} value={token} onChange={(e) => setToken(e.target.value)} disabled={busy} /></label>
           <label className="flex items-start gap-2 text-body-sm"><input className="mt-1" type="checkbox" checked={sync} onChange={(e) => setSync(e.target.checked)} disabled={busy} /><span>Share personal memory<span className="mt-1 block text-caption text-muted">Shared across projects and devices; a local copy is used when offline.</span></span></label>
           <div className="flex flex-wrap gap-2">
-            <Button type="submit" size="sm" disabled={busy || (remote && !canReload)}>{busy && <LoaderCircle className="animate-spin" />}{remote ? "Save and reload" : "Save and check connection"}</Button>
+            <Button type="submit" size="sm" disabled={busy}>{busy && <LoaderCircle className="animate-spin" />}Save and check connection</Button>
             <Button size="sm" onClick={() => void syncNow()} disabled={busy || !info?.url || !info.sync_personal_memory}><RefreshCw />Sync now</Button>
           </div>
         </form>

@@ -325,6 +325,10 @@ struct CmdArgs {
     archived: Option<bool>,
     #[serde(rename = "targetProject")]
     target_project: Option<String>,
+    /// Approval prompt id (matches the `call_id` on the `ApprovalRequested` wire event).
+    call_id: Option<String>,
+    /// The human's decision for a pending approval (`agent_approve`).
+    allow: Option<bool>,
 }
 
 impl CmdArgs {
@@ -434,6 +438,18 @@ async fn dispatch(
                 .ok_or_else(|| ApiError::bad("missing session"))?;
             manager.cancel(&project, &session).await;
             no_content()
+        }
+        // C 档体感: resolve a pending approval prompt. Out-of-band from the event stream —
+        // the tool call is parked awaiting this decision. `allow=false` denies.
+        "agent_approve" => {
+            let project = args.project()?;
+            let session = args.session()?;
+            let call_id = args
+                .call_id
+                .ok_or_else(|| ApiError::bad("missing call_id"))?;
+            let allow = args.allow.ok_or_else(|| ApiError::bad("missing allow"))?;
+            let resolved = manager.approve(&project, &session, &call_id, allow).await?;
+            ok_json(resolved)
         }
 
         // -- subscription (events are broadcast globally on the SSE stream) -----------

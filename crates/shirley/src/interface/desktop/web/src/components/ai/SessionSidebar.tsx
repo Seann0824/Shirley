@@ -24,7 +24,7 @@ import { ScrollArea } from "@/ui/scroll-area";
 import { HoverScrollLabel } from "@/ui/hover-scroll-label";
 import { cn } from "@/ui/utils";
 import { useMobileLayout } from "@/lib/use-mobile-layout";
-import type { ProjectEntry, SessionEntry } from "@/lib/bridge";
+import { projectSource, type ProjectEntry, type SessionEntry } from "@/lib/bridge";
 
 /**
  * Left sidebar: multi-project + session navigation.
@@ -100,6 +100,15 @@ function writeBool(key: string, value: boolean) {
   }
 }
 
+/** Small inline marker so cloud-hosted projects / sessions are distinguishable in the merged view. */
+function CloudBadge() {
+  return (
+    <span className="shrink-0 rounded-[4px] border border-line bg-inset px-1 text-[0.625rem] font-medium uppercase leading-4 tracking-wide text-muted">
+      cloud
+    </span>
+  );
+}
+
 /** A project group: project metadata + its sessions (the current project passed from App decides whether to fetch). */
 type ProjectGroup = {
   entry: ProjectEntry;
@@ -121,7 +130,7 @@ export function SessionSidebar({
   onMove,
   collapsed = false,
   onClose,
-  chatProjectId,
+  chatProjectIds = [],
   onCurrentTitleChange,
   className,
 }: {
@@ -148,8 +157,9 @@ export function SessionSidebar({
   /** Collapsed: hidden entirely (width zero), expanded via the top toolbar. */
   collapsed?: boolean;
   onClose?: () => void;
-  /** Pseudo project id hosting the "no associated project" Chat session (aligned with Rust `CHAT_PROJECT_ID`). */
-  chatProjectId?: string;
+  /** Pseudo project ids hosting the "no associated project" Chat sessions, one per reachable source
+   *  (namespaced: `local::__chat__` / `cloud::__chat__`). */
+  chatProjectIds?: string[];
   onCurrentTitleChange: (title: string) => void;
   className?: string;
 }) {
@@ -197,7 +207,7 @@ export function SessionSidebar({
   useEffect(() => onCurrentTitleChange(currentTitle), [currentTitle, onCurrentTitleChange]);
 
   // Unified list: chat pseudo project + all projects (sessions all go into "Recent"; project groups also need their own lists).
-  const projectIdsKey = [chatProjectId, ...projects.map((entry) => entry.id)]
+  const projectIdsKey = [...chatProjectIds, ...projects.map((entry) => entry.id)]
     .filter((id): id is string => Boolean(id))
     .join("\n");
   useEffect(() => {
@@ -309,9 +319,9 @@ export function SessionSidebar({
     projects.map((entry) => [entry.id, entry.name]),
   );
   const recent = [
-    ...(chatProjectId
-      ? (sessionsByProject[chatProjectId] ?? []).map((entry) => ({ project: chatProjectId, entry }))
-      : []),
+    ...chatProjectIds.flatMap((id) =>
+      (sessionsByProject[id] ?? []).map((entry) => ({ project: id, entry })),
+    ),
     ...projects.flatMap((project) =>
       (sessionsByProject[project.id] ?? []).map((entry) => ({ project: project.id, entry })),
     ),
@@ -322,7 +332,7 @@ export function SessionSidebar({
 
   // Candidates for "move to project": the Chat pseudo project + all projects (excluding the source project).
   const moveTargets = [
-    ...(chatProjectId ? [{ id: chatProjectId, name: "Chat" }] : []),
+    ...chatProjectIds.map((id) => ({ id, name: "Chat" })),
     ...projects.map((entry) => ({ id: entry.id, name: entry.name })),
   ];
 
@@ -484,6 +494,7 @@ export function SessionSidebar({
                       {projectName}
                     </span>
                   )}
+                  {projectSource(project) === "cloud" && <CloudBadge />}
                   {entry.running && (
                     <Loader2 className="size-3.5 shrink-0 animate-spin text-muted" aria-label="Running" />
                   )}
@@ -522,7 +533,7 @@ export function SessionSidebar({
           onClick={() => {
             // New Chat = Codex-style empty session: create a lazy empty session in the current context (project or Chat).
             if (activeProject) onNew(activeProject);
-            else if (chatProjectId) onNew(chatProjectId);
+            else if (chatProjectIds.length) onNew(chatProjectIds[0]);
             else onAddProject();
           }}
         >
@@ -541,7 +552,7 @@ export function SessionSidebar({
                   entry,
                   "pinned",
                   project,
-                  project === chatProjectId ? undefined : projectNameById[project],
+                  chatProjectIds.includes(project) ? undefined : projectNameById[project],
                 ),
               )}
             </div>
@@ -669,6 +680,7 @@ export function SessionSidebar({
                               <span className="min-w-0 flex-1 truncate text-body-sm text-ink">
                                 {entry.name}
                               </span>
+                              {projectSource(entry.id) === "cloud" && <CloudBadge />}
                               <span className="shrink-0 text-caption text-muted">
                                 {projectSessions.length}
                               </span>
@@ -731,7 +743,7 @@ export function SessionSidebar({
               <CollapsibleContent>
                 <div role="listbox" aria-label="Recent sessions" className="flex flex-col gap-0.5">
                   {recent.map(({ project, entry }) =>
-                    renderRow(entry, "recent", project, project === chatProjectId ? undefined : projectNameById[project]),
+                    renderRow(entry, "recent", project, chatProjectIds.includes(project) ? undefined : projectNameById[project]),
                   )}
                 </div>
               </CollapsibleContent>
