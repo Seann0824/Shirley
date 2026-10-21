@@ -166,6 +166,63 @@ pub fn search_files(root: &Path, query: &str, limit: Option<usize>) -> Vec<FileE
         .collect()
 }
 
+/// Multi-root file search: a project may attach several local checkouts, so `@` references should
+/// see files from every root. Each root is searched independently and the results are merged by
+/// match quality. A single root is a thin pass-through to [`search_files`].
+pub fn search_files_multi(
+    roots: &[std::path::PathBuf],
+    query: &str,
+    limit: Option<usize>,
+) -> Vec<FileEntry> {
+    match roots {
+        [] => Vec::new(),
+        [only] => search_files(only, query, limit),
+        many => {
+            let per_root = limit.unwrap_or(DEFAULT_LIMIT);
+            let mut merged: Vec<FileEntry> = Vec::new();
+            for root in many {
+                merged.extend(search_files(root, query, Some(per_root)));
+            }
+            // Preserve the same ranking contract as `search_files`: when a query is present,
+            // re-rank the merged set by the same scoring rules; otherwise keep traversal order.
+            let query = query.trim().to_lowercase();
+            if query.is_empty() {
+                merged.truncate(per_root);
+                return merged;
+            }
+            let mut scored: Vec<(u8, usize, FileEntry)> = merged
+                .into_iter()
+                .filter_map(|entry| {
+                    let path_lower = entry.path.to_lowercase();
+                    let name_lower = entry.name.to_lowercase();
+                    let score = if name_lower.starts_with(&query) {
+                        0
+                    } else if name_lower.contains(&query) {
+                        1
+                    } else if path_lower.contains(&query) {
+                        2
+                    } else if is_subsequence(&query, &path_lower) {
+                        3
+                    } else {
+                        return None;
+                    };
+                    Some((score, entry.path.len(), entry))
+                })
+                .collect();
+            scored.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then(a.1.cmp(&b.1))
+                    .then(a.2.path.cmp(&b.2.path))
+            });
+            scored
+                .into_iter()
+                .take(per_root)
+                .map(|(_, _, entry)| entry)
+                .collect()
+        }
+    }
+}
+
 /// Whether `needle` is a subsequence of `haystack` (case already normalized).
 fn is_subsequence(needle: &str, haystack: &str) -> bool {
     let mut chars = haystack.chars();

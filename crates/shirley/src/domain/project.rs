@@ -48,14 +48,28 @@ pub enum ProjectError {
 }
 
 /// A registered project.
+///
+/// A project may attach **several local source folders** -- e.g. a Rust service plus the
+/// TypeScript frontend it talks to. Exactly one of them is the **primary** root
+/// ([`ProjectEntry::path`]); the rest live in [`ProjectEntry::extra_paths`]. The primary root is
+/// the one with runtime consequences: it is the Agent's `working_dir`, and it is the key the
+/// session storage is derived from (`crate::storage` hashes the canonical path). Extra folders
+/// only extend what the Agent can reach; they never move sessions.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ProjectEntry {
-    /// Canonical path string -- the project's stable identity (dedupe key).
+    /// Stable identity (dedupe key / frontend route key). Set once at registration to the
+    /// primary root's canonical path and **never rewritten afterwards** -- changing the primary
+    /// folder keeps the same id so the frontend's `project::session` routes and the runtime
+    /// cache stay valid.
     pub id: String,
     /// Display name (renameable).
     pub name: String,
-    /// Workspace root directory.
+    /// **Primary** workspace root: the Agent's working dir and the session-storage key.
     pub path: PathBuf,
+    /// Additional source folders attached to this project. Never affects session storage; only
+    /// widens what the Agent's file tools can resolve.
+    #[serde(default)]
+    pub extra_paths: Vec<PathBuf>,
     /// Whether archived (archived projects are hidden by default and can be restored).
     #[serde(default)]
     pub archived: bool,
@@ -65,6 +79,22 @@ pub struct ProjectEntry {
     /// Most recently opened time (milliseconds) -- the list is sorted by it in descending order.
     #[serde(default)]
     pub last_opened_ms: u64,
+}
+
+impl ProjectEntry {
+    /// Every source folder of this project, **primary first**. Used by the file tools' multi-root
+    /// resolution and by the system prompt's folder listing.
+    pub fn folders(&self) -> Vec<PathBuf> {
+        let mut folders = Vec::with_capacity(1 + self.extra_paths.len());
+        folders.push(self.path.clone());
+        folders.extend(self.extra_paths.iter().cloned());
+        folders
+    }
+
+    /// Whether `canonical` is one of this project's folders (primary or extra).
+    fn owns(&self, canonical: &Path) -> bool {
+        self.path == canonical || self.extra_paths.iter().any(|p| p == canonical)
+    }
 }
 
 /// On-disk registry structure (versioned, to ease future migration).
@@ -163,15 +193,27 @@ impl ProjectRegistry {
             .map_err(|error| ProjectError::Canonicalize(format!("{}: {error}", path.display())))?;
         let id = canonical.to_string_lossy().into_owned();
         let display = name
-            .map(|n| n.trim().to_owned())
+            .as_deref()
+            .map(str::trim)
             .filter(|n| !n.is_empty())
-            .unwrap_or_else(|| default_name(&canonical));
+            .map_or_else(|| default_name(&canonical), str::to_owned);
         let ts = now_ms();
 
-        if let Some(existing) = self.projects.iter_mut().find(|entry| entry.id == id) {
+        // Dedupe by "is this directory already attached to a project" -- the primary root or any
+        // extra source folder. A multi-folder project means a path is not necessarily the id, so
+        // comparing against `id` alone would let the same directory be registered twice.
+        if let Some(existing) = self
+            .projects
+            .iter_mut()
+            .find(|entry| entry.owns(&canonical))
+        {
+            let was_primary = existing.path == canonical;
             existing.archived = false;
-            existing.name = display;
-            existing.path = canonical;
+            // Only overwrite the display name when the caller asked for one, or when the path is
+            // the primary root (matching the historical "re-add = rename to the folder name").
+            if name.is_some() || was_primary {
+                existing.name = display;
+            }
             existing.last_opened_ms = ts;
             let out = existing.clone();
             self.save()?;
@@ -182,6 +224,7 @@ impl ProjectRegistry {
             id,
             name: display,
             path: canonical,
+            extra_paths: Vec::new(),
             archived: false,
             created_ms: ts,
             last_opened_ms: ts,
@@ -204,6 +247,113 @@ impl ProjectRegistry {
             .ok_or_else(|| ProjectError::NotFound(id.to_owned()))?;
         name.clone_into(&mut entry.name);
         self.save()
+    }
+
+    /// Replace a project's folder set and/or display name ("Edit project" dialog).
+    ///
+    /// `folders` is a **whole replacement** of the source-folder list. The folder that equals
+    /// `primary` becomes [`ProjectEntry::path`] (agent working dir + session-storage key), the
+    /// rest become [`ProjectEntry::extra_paths`]. When `primary` is `None`, the current primary is
+    /// kept if it is still present, otherwise the first folder becomes primary.
+    ///
+    /// The `id` is **never** rewritten: it is the stable identity the frontend routes by
+    /// (`project::session`) and the runtime cache is keyed on.
+    ///
+    /// # Errors
+    ///
+    /// - [`ProjectError::NotFound`] if `id` is unknown.
+    /// - [`ProjectError::Canonicalize`] if a folder does not exist, the list is empty, `primary`
+    ///   is not one of the folders, or the resulting primary root already belongs to another project.
+    pub fn update(
+        &mut self,
+        id: &str,
+        name: Option<String>,
+        primary: Option<PathBuf>,
+        folders: Option<Vec<PathBuf>>,
+    ) -> Result<ProjectEntry, ProjectError> {
+        let canonical_folders = match folders {
+            Some(list) => {
+                let mut out: Vec<PathBuf> = Vec::new();
+                for folder in list {
+                    let canonical = std::fs::canonicalize(&folder).map_err(|error| {
+                        ProjectError::Canonicalize(format!("{}: {error}", folder.display()))
+                    })?;
+                    if !out.contains(&canonical) {
+                        out.push(canonical);
+                    }
+                }
+                if out.is_empty() {
+                    return Err(ProjectError::Canonicalize(
+                        "at least one source folder is required".into(),
+                    ));
+                }
+                Some(out)
+            }
+            None => None,
+        };
+        let explicit_primary = match primary {
+            Some(path) => Some(std::fs::canonicalize(&path).map_err(|error| {
+                ProjectError::Canonicalize(format!("{}: {error}", path.display()))
+            })?),
+            None => None,
+        };
+
+        let index = self
+            .projects
+            .iter()
+            .position(|entry| entry.id == id)
+            .ok_or_else(|| ProjectError::NotFound(id.to_owned()))?;
+
+        let folders = canonical_folders.unwrap_or_else(|| self.projects[index].folders());
+        let current_primary = self.projects[index].path.clone();
+        let primary = match explicit_primary {
+            Some(primary) => {
+                if !folders.contains(&primary) {
+                    return Err(ProjectError::Canonicalize(
+                        "the primary folder must be one of the source folders".into(),
+                    ));
+                }
+                primary
+            }
+            None => {
+                if folders.contains(&current_primary) {
+                    current_primary
+                } else {
+                    folders[0].clone()
+                }
+            }
+        };
+
+        // A primary root is the session-storage key, so it must stay unique across projects.
+        if self
+            .projects
+            .iter()
+            .enumerate()
+            .any(|(other, entry)| other != index && entry.owns(&primary))
+        {
+            return Err(ProjectError::Canonicalize(format!(
+                "{} is already attached to another project",
+                primary.display()
+            )));
+        }
+
+        let entry = &mut self.projects[index];
+        if let Some(name) = name {
+            let trimmed = name.trim();
+            if !trimmed.is_empty() {
+                trimmed.clone_into(&mut entry.name);
+            }
+        }
+        entry.extra_paths = folders
+            .iter()
+            .filter(|folder| **folder != primary)
+            .cloned()
+            .collect();
+        entry.path = primary;
+        entry.last_opened_ms = now_ms();
+        let out = entry.clone();
+        self.save()?;
+        Ok(out)
     }
 
     /// Archive (does not delete on-disk data, only sets a flag).
@@ -342,6 +492,88 @@ mod tests {
         let missing = root.join("does-not-exist");
         assert!(matches!(
             reg.add(&missing, None),
+            Err(ProjectError::Canonicalize(_))
+        ));
+    }
+
+    #[test]
+    fn add_attaches_multiple_folders_and_dedupes_by_any_folder() {
+        let (root, mut reg) = temp_registry("extra");
+        let primary = make_dir(&root, "primary");
+        let sibling = make_dir(&root, "sibling");
+        let entry = reg.add(&primary, None).unwrap();
+        assert!(entry.extra_paths.is_empty());
+
+        let updated = reg
+            .update(
+                &entry.id,
+                None,
+                Some(primary.clone()),
+                Some(vec![primary.clone(), sibling.clone()]),
+            )
+            .unwrap();
+        assert_eq!(updated.path, std::fs::canonicalize(&primary).unwrap());
+        assert_eq!(
+            updated.extra_paths,
+            vec![std::fs::canonicalize(&sibling).unwrap()]
+        );
+        assert_eq!(updated.folders().len(), 2);
+
+        // Re-adding the extra folder must dedupe into the same project, not create a second one.
+        let again = reg.add(&sibling, None).unwrap();
+        assert_eq!(again.id, entry.id);
+        assert_eq!(reg.list(false).len(), 1);
+    }
+
+    #[test]
+    fn update_switches_primary_and_keeps_id() {
+        let (root, mut reg) = temp_registry("primary");
+        let a = make_dir(&root, "a");
+        let b = make_dir(&root, "b");
+        let entry = reg.add(&a, Some("Proj".into())).unwrap();
+        let updated = reg
+            .update(
+                &entry.id,
+                Some("Renamed".into()),
+                Some(b.clone()),
+                Some(vec![a.clone(), b.clone()]),
+            )
+            .unwrap();
+        // id is stable, the primary folder moved to `b`, `a` demoted to extra.
+        assert_eq!(updated.id, entry.id);
+        assert_eq!(updated.name, "Renamed");
+        assert_eq!(updated.path, std::fs::canonicalize(&b).unwrap());
+        assert_eq!(
+            updated.extra_paths,
+            vec![std::fs::canonicalize(&a).unwrap()]
+        );
+    }
+
+    #[test]
+    fn update_rejects_primary_not_in_folders_and_empty_list() {
+        let (root, mut reg) = temp_registry("bad_primary");
+        let a = make_dir(&root, "a");
+        let b = make_dir(&root, "b");
+        let entry = reg.add(&a, None).unwrap();
+        assert!(matches!(
+            reg.update(&entry.id, None, Some(b), Some(vec![a.clone()])),
+            Err(ProjectError::Canonicalize(_))
+        ));
+        assert!(matches!(
+            reg.update(&entry.id, None, None, Some(Vec::new())),
+            Err(ProjectError::Canonicalize(_))
+        ));
+    }
+
+    #[test]
+    fn update_rejects_primary_already_owned_by_another_project() {
+        let (root, mut reg) = temp_registry("collide");
+        let a = make_dir(&root, "a");
+        let b = make_dir(&root, "b");
+        let first = reg.add(&a, None).unwrap();
+        reg.add(&b, None).unwrap();
+        assert!(matches!(
+            reg.update(&first.id, None, Some(b.clone()), Some(vec![a, b])),
             Err(ProjectError::Canonicalize(_))
         ));
     }

@@ -37,6 +37,7 @@ export function AiConversationTranscript({
   onEditMessage,
   editingMessageId,
   renderEditContent,
+  contentClassName,
 }: {
   messages: AiTranscriptMessage[];
   conversationKey: string;
@@ -59,6 +60,9 @@ export function AiConversationTranscript({
   editingMessageId?: Key | null;
   /** Inline editor rendered in place of the message whose id equals `editingMessageId`. */
   renderEditContent?: (message: AiTranscriptMessage, index: number) => ReactNode;
+  /** Extra classes for the scrolled content column (e.g. centering / max-width so the
+   *  viewport can span the full layout width while the reading column stays narrow). */
+  contentClassName?: string;
 }) {
   const contentKey = messages
     .map(
@@ -80,7 +84,7 @@ export function AiConversationTranscript({
         viewportClassName="pb-4"
         viewportRef={viewportRef}
       >
-        <MessageScrollerContent className="px-1 py-6 md:px-3">
+        <MessageScrollerContent className={`px-1 py-6 md:px-3 ${contentClassName ?? ""}`}>
           {messages.length === 0 && !pendingLabel && emptyContent}
           {messages.map((message, index) => {
             const isAssistant = message.role === "assistant";

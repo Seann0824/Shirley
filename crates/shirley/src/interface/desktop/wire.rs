@@ -206,10 +206,11 @@ impl StateSnapshotWire {
                 "slow_tool".to_owned(),
                 Some(format!("{name} · {elapsed_ms} ms")),
             ),
-            Health::Retrying { attempt, reason } => (
-                "retrying".to_owned(),
-                Some(format!("attempt {attempt} · {reason}")),
-            ),
+            // Only the attempt count is user-facing: the raw upstream error body
+            // (HTTP status + JSON) is noise to a user, so it never reaches the wire.
+            Health::Retrying { attempt, .. } => {
+                ("retrying".to_owned(), Some(format!("attempt {attempt}")))
+            }
             Health::Compacting => ("compacting".to_owned(), None),
             Health::Failed { message, .. } => ("failed".to_owned(), Some(message.clone())),
         };
@@ -637,6 +638,6 @@ mod tests {
             Some(Activity::ModelCall),
         ));
         assert_eq!(wire.health, "retrying");
-        assert_eq!(wire.health_detail.as_deref(), Some("attempt 2 · 429"));
+        assert_eq!(wire.health_detail.as_deref(), Some("attempt 2"));
     }
 }

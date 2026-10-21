@@ -39,13 +39,31 @@ pub(crate) fn workspace_root() -> Option<PathBuf> {
 #[derive(Clone, Debug)]
 pub struct WorkspaceRoot(pub PathBuf);
 
-/// Resolve the workspace root the tools should operate against, preferring the [`ToolContext`]
-/// value the application layer injected, then falling back to the legacy `SHIRLEY_WORKSPACE` env
-/// var / process CWD (so the tools still work when invoked without a context, e.g. unit tests).
-pub(crate) fn resolve_workspace_root(ctx: &ToolContext) -> Option<PathBuf> {
+/// The full set of roots a project exposes to its file tools: the **primary** workspace root
+/// first, followed by any additional source folders attached to the project. A project can span
+/// several local checkouts (e.g. a Rust service plus its TypeScript frontend); a relative path is
+/// resolved against the first root that actually contains it.
+///
+/// The SDK's [`WorkSpace`] stays single-root by contract -- multi-root is an application-layer
+/// composition, so this type lives here and the tools try each root in turn.
+#[derive(Clone, Debug)]
+pub struct WorkspaceRoots(pub Vec<PathBuf>);
+
+/// Resolve the roots the tools should operate against, preferring the multi-root
+/// [`WorkspaceRoots`] the application layer injected, then the single [`WorkspaceRoot`], then the
+/// legacy `SHIRLEY_WORKSPACE` env var / process CWD (so the tools still work when invoked without
+/// a context, e.g. unit tests).
+pub(crate) fn resolve_workspace_roots(ctx: &ToolContext) -> Option<Vec<PathBuf>> {
+    if let Some(roots) = ctx.get::<WorkspaceRoots>() {
+        let mut roots = roots.0.clone();
+        roots.retain(|root| !root.as_os_str().is_empty());
+        if !roots.is_empty() {
+            return Some(roots);
+        }
+    }
     ctx.get::<WorkspaceRoot>()
-        .map(|root| root.0.clone())
-        .or_else(workspace_root)
+        .map(|root| vec![root.0.clone()])
+        .or_else(|| workspace_root().map(|root| vec![root]))
 }
 
 /// Suspected secret file: rejected by default, to avoid reading `.env` / private keys into the context and then sending them to the model
@@ -103,9 +121,25 @@ pub async fn read(
     #[param(description = "maximum number of lines to read, defaults to 200, hard cap 2000")]
     line_count: Option<usize>,
 ) -> Result<String, ToolError> {
-    let root = resolve_workspace_root(ctx)
+    let roots = resolve_workspace_roots(ctx)
         .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
-    read_text_range(&root, &path, &path, start_line, line_count).await
+    // Pick the first root that actually contains the requested path. Falling through to the
+    // primary root when nothing matches keeps the error message accurate (it will report the
+    // missing file relative to the primary root).
+    for root in &roots {
+        if WorkSpace::new(root.clone())
+            .ok()
+            .and_then(|workspace| workspace.resolve(&path).ok())
+            .is_some_and(|resolved| resolved.exists())
+        {
+            return read_text_range(root, &path, &path, start_line, line_count).await;
+        }
+    }
+    let primary = roots
+        .first()
+        .cloned()
+        .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
+    read_text_range(&primary, &path, &path, start_line, line_count).await
 }
 
 /// Controlled read kernel: reads the relative path `path` under `root` by line, returning a line-numbered excerpt.

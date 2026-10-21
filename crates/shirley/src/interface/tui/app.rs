@@ -1438,8 +1438,12 @@ mod tests {
         ));
         let _ = std::fs::create_dir_all(&root);
         let factory = std::sync::Arc::new(
-            crate::bootstrap::AgentFactory::assemble_at(root.clone(), root.join("app-data"))
-                .expect("assemble factory"),
+            crate::bootstrap::AgentFactory::assemble_at(
+                root.clone(),
+                Vec::new(),
+                root.join("app-data"),
+            )
+            .expect("assemble factory"),
         );
         let built = factory.build_agent(Vec::new()).expect("build agent");
         let sessions = crate::interface::session::SessionManager::with_factory(

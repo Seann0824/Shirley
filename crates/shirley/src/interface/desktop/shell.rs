@@ -285,6 +285,40 @@ async fn agent_restore_project(
     state.manager.restore_project(&project).await
 }
 
+/// Edit a project: rename and/or replace its source folders (the "Edit project" dialog).
+///
+/// `folders` is a whole replacement; `primary` (when given) must be one of them. Changing the
+/// primary folder rebuilds the project runtime (sessions live under the primary's storage key).
+#[tauri::command]
+async fn agent_update_project(
+    state: State<'_, DesktopState>,
+    project: String,
+    name: Option<String>,
+    primary: Option<String>,
+    folders: Option<Vec<String>>,
+) -> Result<ProjectEntryWire, String> {
+    let primary = primary.map(PathBuf::from);
+    let folders = folders.map(|list| list.into_iter().map(PathBuf::from).collect());
+    state
+        .manager
+        .update_project(&project, name, primary, folders)
+        .await
+}
+
+/// Open the native folder picker and return the chosen absolute path **without registering it**.
+/// Used by the "Add folder" button inside the Edit-project dialog, which accumulates folders before
+/// saving them all at once via `agent_update_project`.
+#[tauri::command]
+async fn agent_pick_folder(app: AppHandle) -> Result<Option<String>, String> {
+    let picked =
+        tauri::async_runtime::spawn_blocking(move || app.dialog().file().blocking_pick_folder())
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(picked
+        .and_then(|file| file.into_path().ok())
+        .map(|path| path.to_string_lossy().into_owned()))
+}
+
 // ---------------------------------------------------------------------------
 // Session / run commands
 // ---------------------------------------------------------------------------
@@ -671,6 +705,8 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
             agent_rename_project,
             agent_archive_project,
             agent_restore_project,
+            agent_update_project,
+            agent_pick_folder,
             agent_send,
             agent_resend,
             agent_subscribe,

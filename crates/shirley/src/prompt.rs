@@ -31,6 +31,10 @@ const GUIDE_MISSING_TEMPLATE: &str = include_str!("../prompts/project_guide_miss
 /// A child agent has no `subagent` tool (structural recursion guard), so telling it about one would
 /// be a factual lie; hence this block is conditional.
 const SUBAGENT_GUIDE_TEMPLATE: &str = include_str!("../prompts/subagent_guide.md");
+/// Additional source folders block, injected only when a project attaches extra folders beyond
+/// its primary root. `plan.md` records that an AI without the workspace root wanders from the
+/// filesystem root; the same applies to every attached folder, so they must be told explicitly.
+const EXTRA_ROOTS_TEMPLATE: &str = include_str!("../prompts/extra_roots.md");
 
 /// Resolve the coding agent's workspace root.
 ///
@@ -62,13 +66,25 @@ fn read_guide(root: &Path) -> Option<String> {
 /// `subagents = true` is passed only for the **top-level** agent when the `subagent` tool is
 /// registered; child agents (and a disabled config) get `false`, so the guidance never appears
 /// where the tool does not exist.
+#[cfg(test)]
 pub fn build_with_subagents(working_dir: PathBuf, subagents: bool) -> SystemPrompt {
+    build_with_roots(working_dir, Vec::new(), subagents)
+}
+
+/// Build the system prompt for a project that may attach **extra source folders** beyond its
+/// primary root. The extra roots are captured at construction time (they are fixed per project)
+/// and listed explicitly so the model knows relative paths may resolve against any of them.
+pub fn build_with_roots(
+    working_dir: PathBuf,
+    extra_roots: Vec<PathBuf>,
+    subagents: bool,
+) -> SystemPrompt {
     SystemPrompt::from(move |context: &SystemPromptContext| {
         let root = context
             .working_dir
             .clone()
             .unwrap_or_else(|| working_dir.clone());
-        render_with_subagents(&root, subagents)
+        render_with_roots(&root, &extra_roots, subagents)
     })
 }
 
@@ -83,7 +99,13 @@ fn render(root: &Path) -> String {
 }
 
 /// Assemble the final prompt. `subagents` controls whether the subagent guidance block is injected.
+#[cfg(test)]
 fn render_with_subagents(root: &Path, subagents: bool) -> String {
+    render_with_roots(root, &[], subagents)
+}
+
+/// Assemble the final prompt, listing any extra source folders attached to the project.
+fn render_with_roots(root: &Path, extra_roots: &[PathBuf], subagents: bool) -> String {
     // Project guide block: inline the original text if present, otherwise give a "explore on your own first" hint.
     let guide_block = match read_guide(root) {
         Some(guide) => render_template(
@@ -102,6 +124,20 @@ fn render_with_subagents(root: &Path, subagents: bool) -> String {
         String::new()
     };
 
+    // Extra source folders: rendered as a bullet list, or empty (placeholder substituted away) when
+    // the project has a single root.
+    let extra_block = if extra_roots.is_empty() {
+        String::new()
+    } else {
+        let mut list = String::new();
+        for path in extra_roots {
+            list.push_str("- ");
+            list.push_str(&path.display().to_string());
+            list.push('\n');
+        }
+        render_template(EXTRA_ROOTS_TEMPLATE, &[("extra_roots", list.trim_end())])
+    };
+
     let working_dir = root.display().to_string();
     render_template(
         SYSTEM_TEMPLATE,
@@ -109,6 +145,7 @@ fn render_with_subagents(root: &Path, subagents: bool) -> String {
             ("working_dir", &working_dir),
             ("project_guide", &guide_block),
             ("subagent_guide", &subagent_block),
+            ("extra_roots", &extra_block),
         ],
     )
 }

@@ -162,9 +162,11 @@ impl ProjectRuntimeManager {
             .cloned()
             .ok_or_else(|| format!("project not found: {project}"))?;
         let path = entry.path.clone();
-        let runtime = tokio::task::spawn_blocking(move || build_runtime(path))
-            .await
-            .map_err(|e| e.to_string())??;
+        let extra_paths = entry.extra_paths.clone();
+        let runtime =
+            tokio::task::spawn_blocking(move || build_runtime_with_extra_paths(path, extra_paths))
+                .await
+                .map_err(|e| e.to_string())??;
         let rt = {
             let mut map = self.runtimes.lock().await;
             let entry = map
@@ -203,13 +205,49 @@ impl ProjectRuntimeManager {
             .add(&path, name)
             .map_err(|e| e.to_string())?;
         let root = entry.path.clone();
-        let runtime = tokio::task::spawn_blocking(move || build_runtime(root))
-            .await
-            .map_err(|e| e.to_string())??;
+        let extra_paths = entry.extra_paths.clone();
+        let runtime =
+            tokio::task::spawn_blocking(move || build_runtime_with_extra_paths(root, extra_paths))
+                .await
+                .map_err(|e| e.to_string())??;
         self.runtimes
             .lock()
             .await
             .insert(entry.id.clone(), Arc::new(Mutex::new(runtime)));
+        Ok(ProjectEntryWire::from(&entry))
+    }
+
+    /// Edit a project: rename and/or replace its source-folder set (the "Edit project" dialog).
+    ///
+    /// `folders` is a **whole replacement**; `primary` (when given) must be one of them. The
+    /// primary folder becomes the agent working dir + session-storage key, so when it changes the
+    /// cached runtime is dropped and will be rebuilt on next use (its sessions live under the new
+    /// primary's storage namespace). The project `id` never changes, so the frontend route key and
+    /// the runtime cache key stay stable.
+    pub async fn update_project(
+        &self,
+        project: &str,
+        name: Option<String>,
+        primary: Option<PathBuf>,
+        folders: Option<Vec<PathBuf>>,
+    ) -> Result<ProjectEntryWire, String> {
+        let previous_primary = self
+            .registry
+            .lock()
+            .await
+            .get(project)
+            .map(|entry| entry.path.clone());
+        let entry = self
+            .registry
+            .lock()
+            .await
+            .update(project, name, primary, folders)
+            .map_err(|e| e.to_string())?;
+        // The primary root decides session storage and the agent working dir; when it changed the
+        // in-memory runtime is stale, so release it and let the next `ensure_runtime` rebuild.
+        if previous_primary.as_deref() != Some(entry.path.as_path()) {
+            self.runtimes.lock().await.remove(project);
+        }
         Ok(ProjectEntryWire::from(&entry))
     }
 
@@ -686,9 +724,12 @@ impl ProjectRuntimeManager {
         query: String,
     ) -> Result<Vec<FileEntryWire>, String> {
         let runtime = self.ensure_runtime(project).await?;
-        let root = runtime.lock().await.factory.working_dir.clone();
+        let guard = runtime.lock().await;
+        let mut roots = vec![guard.factory.working_dir.clone()];
+        roots.extend(guard.factory.extra_paths.iter().cloned());
+        drop(guard);
         let entries = tokio::task::spawn_blocking(move || {
-            crate::workspace_search::search_files(&root, &query, None)
+            crate::workspace_search::search_files_multi(&roots, &query, None)
         })
         .await
         .map_err(|e| e.to_string())?;
@@ -852,7 +893,19 @@ pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime
 
 /// Assemble a new factory for an arbitrary directory and build its runtime.
 pub fn build_runtime(root: PathBuf) -> Result<ProjectRuntime, String> {
-    let factory = Arc::new(AgentFactory::assemble(root).map_err(|e| e.to_string())?);
+    build_runtime_with_extra_paths(root, Vec::new())
+}
+
+/// Assemble a project runtime whose primary root is `root` and which also attaches `extra_paths`
+/// (additional source folders). The primary root owns session storage; extra folders only widen
+/// the file tools' scope and are listed in the system prompt.
+pub fn build_runtime_with_extra_paths(
+    root: PathBuf,
+    extra_paths: Vec<PathBuf>,
+) -> Result<ProjectRuntime, String> {
+    let factory = Arc::new(
+        AgentFactory::assemble_with_extra_paths(root, extra_paths).map_err(|e| e.to_string())?,
+    );
     runtime_from_factory(factory)
 }
 
@@ -957,7 +1010,10 @@ async fn auto_title_session(
 pub struct ProjectEntryWire {
     pub id: String,
     pub name: String,
+    /// The primary folder (agent working dir + session-storage key).
     pub path: String,
+    /// Additional source folders attached to this project (primary excluded).
+    pub extra_paths: Vec<String>,
     pub archived: bool,
     pub last_opened_ms: u64,
 }
@@ -968,6 +1024,11 @@ impl From<&ProjectEntry> for ProjectEntryWire {
             id: entry.id.clone(),
             name: entry.name.clone(),
             path: entry.path.to_string_lossy().into_owned(),
+            extra_paths: entry
+                .extra_paths
+                .iter()
+                .map(|path| path.to_string_lossy().into_owned())
+                .collect(),
             archived: entry.archived,
             last_opened_ms: entry.last_opened_ms,
         }

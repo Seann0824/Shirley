@@ -231,13 +231,22 @@ structure, the relative path of this `@source` line must be adjusted accordingly
 
 ### 4.3.2 Fixed chat width + consecutive tool-call collection (**aligned**)
 
-shiwen's `AiConversationSurface` wraps **the transcript area + input box** together in
-`<section className="mx-auto flex h-full w-full max-w-190 min-h-0 flex-col">`
-(`max-w-190` = `calc(var(--spacing) * 190)` = 760px). Shirley originally lacked this wrapper, so the
-chat area stretched to fill the window. Fix: `App.tsx` adds the same
-`<section className="mx-auto w-full max-w-190 min-h-0 flex-1 flex-col">` wrapping
-`AiConversationTranscript` + the error line + the input box, so both the chat area and the input box
-are fixed-width and centered.
+shiwen's `AiConversationSurface` wraps **the transcript area + input box** together in a
+`max-w-190` (`calc(var(--spacing) * 190)` = 760px) centered column. Shirley originally lacked this
+wrapper, so the chat area stretched to fill the window. The reading column is still fixed-width and
+centered, but **the scroll viewport must span the whole right area** — otherwise the mouse wheel only
+works over the 760px column and the side gutters (left/right whitespace of `<main>`) do not scroll.
+
+Final structure in `App.tsx`: `<main>` holds a **full-width** `<section className="flex w-full min-h-0
+flex-1 flex-col">`; inside it the scroll viewport (`AiConversationTranscript`'s `MessageScroller`) is
+also full-width, and its content column is centered via `contentClassName="mx-auto w-full max-w-190"`.
+The pinned bottom stack (subagents / status line / task card / pending queue / composer) is wrapped in
+its own `mx-auto w-full max-w-190 shrink-0 flex-col` so it stays centered and does not scroll. The
+new-chat (empty session) flow uses the same `mx-auto max-w-190` inner wrapper for hero + composer +
+controls. So the whole right area responds to the wheel while the reading column stays 760px.
+
+> Note: `AiConversationTranscript` gained a `contentClassName` prop for exactly this — the viewport
+> spans full width, the content column carries the `max-w-190` centering.
 
 "Collect consecutive tool calls together": shiwen's `FreeChatAssistantMessage` only makes the
 **user-visible** execution items (`pending` / approving / completed items with an `entity_url`) into
@@ -436,6 +445,16 @@ a second time inside the menu**.
   previously archived one is **restored** rather than added.
 - **Rename a project**: right-click a project row -> "Rename" -> inline edit, changing only the
   display name (not the path / session data).
+- **Edit a project (multiple source folders)**: right-click a project row -> "Edit project" opens the
+  `EditProjectDialog` -- a rename field plus a **"Source folders"** list. A project may span several
+  local checkouts; exactly one folder is the **primary** (agent working dir + session-storage key,
+  marked "Primary folder"; click another row to make it primary). "Add folder" opens the native picker
+  and appends to the list (not registering a new project); the "x" removes a folder (at least one must
+  remain); "Remove local project" archives the project (same semantics as Archive -- on-disk data is
+  kept); "Save" sends the whole folder set to `agent_update_project`. **Non-primary folders are
+  additional roots**: `read` / `grep` / `@`-file-search resolve against all of them, and the system
+  prompt lists them so the model knows relative paths may resolve against any root. Changing the
+  primary folder rebuilds the project runtime (sessions live under the primary's storage key).
 - **Archive a project** (= what the user calls "remove"): right-click a project row -> "Archive" ->
   confirm a second time in the menu. **Only sets `archived = true` and releases the in-memory
   runtime, not deleting on-disk data**; the project moves from the "Projects" group to the "Archived"
@@ -562,6 +581,8 @@ from the `runtimes` table), with on-disk data untouched, lazily loaded again nex
 | `agent_rename_project { project, name }` | rename a project (only the display name, not the path / session data) |
 | `agent_archive_project { project }` | **archive** a project (= what the user calls "remove"): only sets `archived = true` + releases the in-memory runtime, **not deleting on-disk data** |
 | `agent_restore_project { project }` | restore a project from archived (lazily loaded next time) |
+| `agent_update_project { project, name?, primary?, folders? }` | edit a project: rename and/or replace its source folders (whole replacement; `primary` must be one of `folders`); `path = primary`, `extra_paths` = the rest; changing the primary folder drops the cached runtime so it rebuilds under the new storage key |
+| `agent_pick_folder` | open the native folder picker and return the chosen absolute path **without registering it** (used by the dialog's "Add folder" to accumulate folders before one save) |
 | `agent_send { project, text, references?, session? }` | start a round of `run_stream` (`session` defaults to that project's foreground session), with events pushed via `agent://event` |
 | `agent_model_name { project }` | that project's current model name (footer / selector display) |
 | `agent_list_models` | list selectable models (forwards `ModelCatalog`, global) |

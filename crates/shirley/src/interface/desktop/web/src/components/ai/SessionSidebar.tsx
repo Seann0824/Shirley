@@ -11,6 +11,7 @@ import {
   MessageSquarePlus,
   Pencil,
   Pin,
+  Settings2,
   PinOff,
   Plus,
   Trash2,
@@ -110,6 +111,7 @@ export function SessionSidebar({
   activeProject,
   current,
   onAddProject,
+  onEditProject,
   onRenameProject,
   onArchiveProject,
   onSelect,
@@ -130,6 +132,8 @@ export function SessionSidebar({
   /** Current session name (null if none). */
   current: string | null;
   onAddProject: () => void;
+  /** Open the "Edit project" dialog (rename + manage source folders). */
+  onEditProject: (entry: ProjectEntry) => void;
   onRenameProject: (id: string, name: string) => void;
   onArchiveProject: (id: string) => void;
   /** Select a session: session names are unique only within a project, so `project` is included. */
@@ -589,6 +593,12 @@ export function SessionSidebar({
                   const isConfirming = confirmingArchive === entry.id;
                   const projectMenu = (
                     <>
+                      <ContextMenuItem
+                        icon={<Settings2 className="size-3.5" />}
+                        onSelect={() => onEditProject(entry)}
+                      >
+                        Edit project
+                      </ContextMenuItem>
                       <ContextMenuItem
                         icon={<Pencil className="size-3.5" />}
                         onSelect={() => {

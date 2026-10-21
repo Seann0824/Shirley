@@ -47,12 +47,25 @@ export type ProjectEntry = {
   id: string;
   /** Display name (renameable). */
   name: string;
-  /** Display path of the workspace root. */
+  /** Display path of the primary workspace root (agent working dir + session-storage key). */
   path: string;
+  /**
+   * Additional source folders attached to this project (primary excluded). A project may span
+   * several local checkouts; file tools / `@` search resolve paths against the primary root first,
+   * then these. Session storage stays keyed on the primary `path`.
+   */
+  extra_paths?: string[];
   /** Whether archived (archived projects are hidden by default and can be restored from the archive list). */
   archived: boolean;
   /** Last opened time (Unix ms) — the list is sorted by it descending. */
   last_opened_ms: number;
+  /**
+   * Which runtime this project lives in. Set only by the hybrid bridge (local + cloud
+   * composed): the project id is namespaced `local::<path>` / `cloud::<path>` and this
+   * is the denormalised source for display (a sidebar badge). Omitted by single-source
+   * bridges (backwards compatible).
+   */
+  source?: "local" | "cloud";
 };
 
 /** A session (aligned with Rust's `SessionEntryWire`). */
@@ -102,6 +115,12 @@ export type BridgeCapabilities = {
   configurationScope: "local" | "remote" | "demo";
   /** Whether a native folder picker exists (Tauri desktop = true; cloud HTTP = false, use manual path input). */
   nativeFolderPicker: boolean;
+  /**
+   * Data sources this bridge can reach. A single-source bridge has one entry; the hybrid
+   * desktop bridge is `["local", "cloud"]` when the cloud runtime is connected. The UI
+   * uses this to decide whether to offer a per-send source toggle.
+   */
+  sources?: Array<"local" | "cloud">;
 };
 
 export type AgentBridge = {
@@ -127,6 +146,22 @@ export type AgentBridge = {
   archiveProject: (project: string) => Promise<void>;
   /** Restore a project from the archive. */
   restoreProject: (project: string) => Promise<void>;
+  /**
+   * Edit a project (the "Edit project" dialog): rename and/or replace its source-folder set.
+   * `folders` is a whole replacement; `primary` (when given) must be one of them. Changing the
+   * primary folder moves the agent working dir + session storage, so the runtime is rebuilt.
+   * Returns the updated entry (with `extra_paths` recomputed).
+   */
+  updateProject: (
+    project: string,
+    changes: { name?: string; primary?: string; folders?: string[] },
+  ) => Promise<ProjectEntry>;
+  /**
+   * Open the native folder picker and return the chosen absolute path **without registering it**
+   * (used by the "Add folder" button inside the Edit-project dialog). Returns `null` if cancelled
+   * or when no native picker is available (cloud / mock modes).
+   */
+  pickFolder: () => Promise<string | null>;
 
   /**
    * Start a turn for the given session. Events are pushed back via that session's
@@ -310,6 +345,18 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
     async restoreProject(project) {
       await invoke("agent_restore_project", { project });
     },
+    async updateProject(project, changes) {
+      return invoke<ProjectEntry>("agent_update_project", {
+        project,
+        name: changes.name ?? null,
+        primary: changes.primary ?? null,
+        folders: changes.folders ?? null,
+      });
+    },
+    async pickFolder() {
+      if (remote) return null;
+      return invoke<string | null>("agent_pick_folder");
+    },
     async send(project, session, text, references, images) {
       await invoke("agent_send", { project, text, references, images, session });
     },
@@ -440,6 +487,25 @@ function createMockBridge(): AgentBridge {
         entry.archived = false;
         entry.last_opened_ms = Date.now();
       }
+    },
+    async updateProject(project, changes) {
+      const entry = mockProjects.find((p) => p.id === project);
+      if (!entry) throw new Error(`unknown project: ${project}`);
+      const folders = changes.folders ?? [entry.path, ...(entry.extra_paths ?? [])];
+      if (folders.length === 0) throw new Error("at least one source folder is required");
+      const primary = changes.primary ?? entry.path;
+      if (!folders.includes(primary)) {
+        throw new Error("the primary folder must be one of the source folders");
+      }
+      if (changes.name !== undefined && changes.name.trim()) entry.name = changes.name.trim();
+      entry.path = primary;
+      entry.extra_paths = folders.filter((folder) => folder !== primary);
+      entry.last_opened_ms = Date.now();
+      return { ...entry };
+    },
+    async pickFolder() {
+      // No native picker in the browser mock: synthesise a unique fake absolute path.
+      return `/projects/added-folder-${++mockProjectSeq}`;
     },
     async send(project, session, text, references, images) {
       const key = routeKey(project, session);
@@ -735,6 +801,18 @@ async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
     async restoreProject(project) {
       await httpCall(baseUrl, "agent_restore_project", { project });
     },
+    async updateProject(project, changes) {
+      return httpCall<ProjectEntry>(baseUrl, "agent_update_project", {
+        project,
+        name: changes.name ?? null,
+        primary: changes.primary ?? null,
+        folders: changes.folders ?? null,
+      });
+    },
+    async pickFolder() {
+      // Cloud mode has no native folder picker.
+      return null;
+    },
     async send(project, session, text, references, images) {
       await httpCall(baseUrl, "agent_send", { project, text, references, images, session });
     },
@@ -818,6 +896,225 @@ async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
   };
 }
 
+// ---------------------------------------------------------------------------
+// Hybrid bridge (desktop): local + cloud composed into ONE view
+//
+// The desktop can reach two independent runtime processes: the local one (Tauri
+// `invoke`) and the cloud one (proxied through `agent_remote_call`). Each has its own
+// ProjectRegistry + storage root, so a project / session only exists in one of them.
+// To show them **mixed in one view** (not as an exclusive switch), every project id is
+// namespaced with a source prefix (`local::<path>` / `cloud::<path>`), both project
+// lists are merged, and each project-scoped call is routed back to the bridge that owns
+// it. Events are re-tagged with the namespaced id before reaching the App, so the App's
+// `project::session` view key stays globally unique with no further change.
+//
+// Memory is intentionally **not** part of this: personal memory stays cloud-authoritative
+// (a single copy, synced to the local host by the existing sync path). This layer only
+// decides "which runtime handles this send", never "which memory store is the truth".
+// ---------------------------------------------------------------------------
+
+export type DataSource = "local" | "cloud";
+
+/** Namespace a raw project id with its source. Idempotent for already-tagged ids. */
+export function tagProject(source: DataSource, rawId: string): string {
+  return rawId.startsWith(`${source}::`) ? rawId : `${source}::${rawId}`;
+}
+
+/** Split a (possibly namespaced) project id into its source + raw id. Untagged ids default to local. */
+export function splitProject(id: string): { source: DataSource; rawId: string } {
+  if (id.startsWith("cloud::")) return { source: "cloud", rawId: id.slice("cloud::".length) };
+  if (id.startsWith("local::")) return { source: "local", rawId: id.slice("local::".length) };
+  return { source: "local", rawId: id };
+}
+
+/** Source of a (possibly namespaced) project id. */
+export function projectSource(id: string): DataSource {
+  return splitProject(id).source;
+}
+
+async function createHybridBridge(): Promise<AgentBridge> {
+  const local = await createTauriBridge(false);
+  // Cloud is best-effort: when it is not configured / unreachable the app still runs with
+  // local only (no source toggle offered). Opening the cloud event stream is what proves
+  // the connection is usable.
+  let cloud: AgentBridge | null = null;
+  try {
+    cloud = await createTauriBridge(true);
+  } catch {
+    cloud = null;
+  }
+
+  /** Resolve a namespaced project id to its delegate bridge + raw id. */
+  const route = (project: string): { bridge: AgentBridge; rawId: string; source: DataSource } => {
+    const { source, rawId } = splitProject(project);
+    if (source === "cloud") {
+      if (!cloud) throw new Error("The cloud runtime is not connected. Configure the cloud endpoint in Settings first.");
+      return { bridge: cloud, rawId, source };
+    }
+    return { bridge: local, rawId, source };
+  };
+
+  const tagEntry = (entry: ProjectEntry, source: DataSource): ProjectEntry => ({
+    ...entry,
+    id: tagProject(source, entry.id),
+    source,
+  });
+
+  return {
+    providers: local.providers,
+    async listProjects(archived) {
+      const [locals, clouds] = await Promise.all([
+        local.listProjects(archived).catch(() => [] as ProjectEntry[]),
+        cloud ? cloud.listProjects(archived).catch(() => [] as ProjectEntry[]) : Promise.resolve([] as ProjectEntry[]),
+      ]);
+      return [
+        ...locals.map((entry) => tagEntry(entry, "local")),
+        ...clouds.map((entry) => tagEntry(entry, "cloud")),
+      ].sort((a, b) => b.last_opened_ms - a.last_opened_ms);
+    },
+    async addProject() {
+      // The native folder picker only exists locally; adding a cloud project uses addProjectByPath.
+      const entry = await local.addProject();
+      return entry ? tagEntry(entry, "local") : null;
+    },
+    async addProjectByPath(path, name) {
+      // Prefer the cloud runtime (the local one uses the native picker).
+      if (cloud) {
+        const entry = await cloud.addProjectByPath(path, name);
+        return entry ? tagEntry(entry, "cloud") : null;
+      }
+      const entry = await local.addProjectByPath(path, name);
+      return entry ? tagEntry(entry, "local") : null;
+    },
+    capabilities() {
+      return {
+        nativeFolderPicker: true,
+        configurationScope: "local",
+        sources: cloud ? ["local", "cloud"] : ["local"],
+      };
+    },
+    async renameProject(project, name) {
+      const { bridge, rawId } = route(project);
+      await bridge.renameProject(rawId, name);
+    },
+    async archiveProject(project) {
+      const { bridge, rawId } = route(project);
+      await bridge.archiveProject(rawId);
+    },
+    async restoreProject(project) {
+      const { bridge, rawId } = route(project);
+      await bridge.restoreProject(rawId);
+    },
+    async updateProject(project, changes) {
+      const { bridge, rawId } = route(project);
+      const entry = await bridge.updateProject(rawId, changes);
+      return tagEntry(entry, route(project).source);
+    },
+    async pickFolder() {
+      return local.pickFolder();
+    },
+    async send(project, session, text, references, images) {
+      const { bridge, rawId } = route(project);
+      await bridge.send(rawId, session, text, references, images);
+    },
+    async resend(project, session, text, references, images) {
+      const { bridge, rawId } = route(project);
+      await bridge.resend(rawId, session, text, references, images);
+    },
+    async cancel(project, session) {
+      const { bridge, rawId } = route(project);
+      await bridge.cancel(rawId, session);
+    },
+    async subscribeStatus(onStatus) {
+      // Only the local runtime emits a status channel; re-tag its snapshots so the App
+      // keys them by the namespaced project id (matching the event stream).
+      return local.subscribeStatus((snapshot) =>
+        onStatus(
+          snapshot.project == null ? snapshot : { ...snapshot, project: tagProject("local", snapshot.project) },
+        ),
+      );
+    },
+    async openSession(project, session, onEvent) {
+      const { bridge, rawId, source } = route(project);
+      const tagged = tagProject(source, rawId);
+      // Re-tag events to the namespaced id so the App routes them to the right view.
+      return bridge.openSession(rawId, session, (event) => onEvent({ ...event, project: tagged }));
+    },
+    async modelName(project) {
+      const { bridge, rawId } = route(project);
+      return bridge.modelName(rawId);
+    },
+    async listModels(project) {
+      const { bridge, rawId } = route(project);
+      return bridge.listModels(rawId);
+    },
+    async setModel(project, value, session) {
+      const { bridge, rawId } = route(project);
+      await bridge.setModel(rawId, value, session);
+    },
+    async searchFiles(project, query) {
+      const { bridge, rawId } = route(project);
+      return bridge.searchFiles(rawId, query);
+    },
+    async listSkills(project) {
+      const { bridge, rawId } = route(project);
+      return bridge.listSkills(rawId);
+    },
+    async activateSkill(project, session, name) {
+      const { bridge, rawId } = route(project);
+      await bridge.activateSkill(rawId, session, name);
+    },
+    async listSessions(project) {
+      const { bridge, rawId } = route(project);
+      return bridge.listSessions(rawId);
+    },
+    async currentSession(project) {
+      const { bridge, rawId } = route(project);
+      return bridge.currentSession(rawId);
+    },
+    async newSession(project, title) {
+      const { bridge, rawId } = route(project);
+      return bridge.newSession(rawId, title);
+    },
+    async switchSession(project, name) {
+      const { bridge, rawId } = route(project);
+      await bridge.switchSession(rawId, name);
+    },
+    async renameSession(project, name, title) {
+      const { bridge, rawId } = route(project);
+      await bridge.renameSession(rawId, name, title);
+    },
+    async deleteSession(project, name) {
+      const { bridge, rawId } = route(project);
+      await bridge.deleteSession(rawId, name);
+    },
+    async moveSession(project, name, targetProject) {
+      const src = route(project);
+      const dst = route(targetProject);
+      if (src.source !== dst.source) {
+        throw new Error("Cannot move a session across local / cloud runtimes.");
+      }
+      await src.bridge.moveSession(src.rawId, name, dst.rawId);
+    },
+    async loadHistory(project) {
+      const { bridge, rawId } = route(project);
+      return bridge.loadHistory(rawId);
+    },
+    async listSubagents(project, session) {
+      const { bridge, rawId } = route(project);
+      return bridge.listSubagents(rawId, session);
+    },
+    async loadSubagent(project, session, id) {
+      const { bridge, rawId } = route(project);
+      return bridge.loadSubagent(rawId, session, id);
+    },
+    async cancelSubagent(project, session, id) {
+      const { bridge, rawId } = route(project);
+      await bridge.cancelSubagent(rawId, session, id);
+    },
+  };
+}
+
 let cached: Promise<AgentBridge> | null = null;
 
 export function agentBridge(): Promise<AgentBridge> {
@@ -827,9 +1124,10 @@ export function agentBridge(): Promise<AgentBridge> {
   // - plain browser dev                -> mock (debug the UI standalone with `npm run dev`)
   // - plain browser prod               -> HTTP/SSE (same-origin, the cloud web build served by the Rust server)
   const dev = Boolean((import.meta as unknown as { env?: { DEV?: boolean } }).env?.DEV);
-  const remote = localStorage.getItem("shirley.connectionSource") === "remote";
+  // Inside the desktop app we always compose local + cloud into one hybrid view; the
+  // per-send Local/Cloud choice is made in the composer, not by an exclusive reload switch.
   cached ??= isTauri
-    ? createTauriBridge(remote)
+    ? createHybridBridge()
     : dev
       ? Promise.resolve(createMockBridge())
       : createHttpBridge();

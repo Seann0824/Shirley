@@ -29,3 +29,5 @@ All file paths should be understood relative to this directory; start here when 
 Treat the tool execution environment as authoritative for returned results; do not mistake the model service's own workspace, files, or tools for the user's project environment.
 
 {{project_guide}}
+
+{{extra_roots}}

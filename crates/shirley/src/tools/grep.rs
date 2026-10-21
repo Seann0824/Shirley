@@ -4,7 +4,7 @@
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use globset::Glob;
@@ -13,7 +13,7 @@ use regex::bytes::RegexBuilder;
 use shirley_agent_sdk::workspace::{WorkSpace, WorkspaceError};
 use shirley_agent_sdk::{ToolContext, ToolError, tool};
 
-use super::read::{clip_to_budget, is_secret_file, resolve_workspace_root};
+use super::read::{clip_to_budget, is_secret_file, resolve_workspace_roots};
 
 const DEFAULT_RESULTS: usize = 100;
 const MAX_RESULTS: usize = 500;
@@ -23,7 +23,7 @@ const MAX_FILE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_VISITED: usize = 50_000;
 const SEARCH_TIMEOUT: Duration = Duration::from_secs(10);
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 #[expect(
     clippy::struct_excessive_bools,
     reason = "these mirror independent search flags from the tool schema; a state machine would obscure the mapping"
@@ -83,7 +83,7 @@ pub async fn grep(
     )]
     include_hidden: Option<bool>,
 ) -> Result<String, ToolError> {
-    let root = resolve_workspace_root(ctx)
+    let roots = resolve_workspace_roots(ctx)
         .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
     let options = SearchOptions {
         path,
@@ -96,9 +96,65 @@ pub async fn grep(
         include_hidden: include_hidden.unwrap_or(false),
     };
     // Filesystem traversal and regex matching must not block the async executor.
-    tokio::task::spawn_blocking(move || search(&root, &pattern, options))
+    tokio::task::spawn_blocking(move || search_roots(&roots, &pattern, options))
         .await
         .map_err(|error| ToolError::ExecutionError(format!("search worker failed: {error}")))?
+}
+
+/// Multi-root search: a project may attach several local checkouts, so a relative `path` is
+/// searched under whichever roots actually contain it. With a single root this is just [`search`].
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "SearchOptions is moved into a spawn_blocking closure and read there"
+)]
+fn search_roots(
+    roots: &[PathBuf],
+    pattern: &str,
+    options: SearchOptions,
+) -> Result<String, ToolError> {
+    let Some(primary) = roots.first() else {
+        return Err(ToolError::ExecutionError(
+            "cannot determine the workspace root".into(),
+        ));
+    };
+    if roots.len() == 1 {
+        return search(primary, pattern, options);
+    }
+    // Restrict to the roots that contain the requested path; a bare `.` means every root.
+    let requested = options.path.as_deref().unwrap_or(".");
+    let selected: Vec<&PathBuf> = roots
+        .iter()
+        .filter(|root| {
+            WorkSpace::new((*root).clone())
+                .ok()
+                .and_then(|workspace| workspace.resolve(requested).ok())
+                .is_some_and(|resolved| resolved.exists())
+        })
+        .collect();
+    match selected.as_slice() {
+        // Nothing contains it: search the primary so the error names a concrete path.
+        [] => search(primary, pattern, options),
+        [only] => search(only, pattern, options),
+        many => {
+            let mut combined = String::new();
+            for root in many {
+                let output = search(root, pattern, options.clone())?;
+                // Drop the per-root empty placeholder; a real combined footer is added below.
+                if output.trim() == "[no matches in searched files]" {
+                    continue;
+                }
+                if combined.len() + output.len() > MAX_OUTPUT_BYTES {
+                    combined.push_str("[results truncated: combined output byte limit reached]\n");
+                    break;
+                }
+                combined.push_str(&output);
+            }
+            if combined.is_empty() {
+                combined.push_str("[no matches in searched files]\n");
+            }
+            Ok(combined)
+        }
+    }
 }
 
 #[expect(
@@ -323,7 +379,6 @@ fn line_preview(line: &[u8], match_start: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
     use std::sync::atomic::{AtomicU64, Ordering};
 
     static NEXT_FIXTURE: AtomicU64 = AtomicU64::new(0);

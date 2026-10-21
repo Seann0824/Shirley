@@ -12,6 +12,7 @@ import { ImageHoverPreview } from "@/components/ImageHoverPreview";
 import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
+import { EditProjectDialog } from "@/components/ai/EditProjectDialog";
 import { NewChatControls } from "@/components/ai/NewChatControls";
 import { SubagentSection } from "@/components/ai/SubagentSection";
 import { AiConversationSkeleton } from "@/components/ai/AiConversationSkeleton";
@@ -177,60 +178,12 @@ function removeLocations(history: NavigationHistory, remove: (entry: SessionLoca
  * `Worked for Ns` is derived from the backend's `seconds_since_turn_start`; the stall hint
  * from `seconds_since_progress` (last *real* progress: a completed model or tool call).
  */
-function StatusPill({ status }: { status: StateSnapshotWire | null }) {
-  if (!status) return null;
-  if (status.liveness === "idle") return null;
-  const seconds = status.seconds_since_turn_start;
-  const stalled = status.liveness === "stalled" || status.liveness === "unreachable";
-  const tone = status.stale || status.liveness === "unreachable"
-    ? "text-danger-ink"
-    : stalled
-      ? "text-warn-ink"
-      : "text-muted";
-  const label = status.stale
-    ? "stale · last known state"
-    : status.liveness === "unreachable"
-      ? "connection lost"
-      : status.liveness === "stalled"
-        ? `stalled · no progress for ${status.seconds_since_progress ?? 0}s`
-        : status.health === "compacting"
-          ? "compacting context"
-          : status.health === "retrying"
-            ? `retrying${status.health_detail ? ` · ${status.health_detail}` : ""}`
-            : status.health === "slow_tool"
-              ? `slow tool${status.health_detail ? ` · ${status.health_detail}` : ""}`
-              : status.activity === "tool_call"
-                ? "running tool"
-                : status.activity === "model_call"
-                  ? "thinking"
-                  : "working";
-  return (
-    <div className={cn("mx-3 mb-1 flex items-center gap-2 text-caption", tone)} role="status" aria-live="polite">
-      {!stalled && (
-        <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
-      )}
-      <span>{label}</span>
-      {seconds !== null && !stalled && (
-        <span className="font-utility">· worked for {seconds}s</span>
-      )}
-    </div>
-  );
-}
-
-/**
- * Runtime status line: compressing / context usage. Placed above the input, below the task card.
- *
- * Mirrors the TUI footer's context-usage hint: desktop previously did not handle
- * `compression_*` / `context_usage` events at all, so the UI was silent during
- * compression and the user did not know what was happening. This gives a lightweight,
- * unobtrusive feedback — the whole line takes no space when there is nothing to show.
- */
-function SessionStatusLine({
+function StatusPill({
+  status,
   compressing,
   contextUsage,
-  retryStatus,
 }: {
-  retryStatus: string | null;
+  status: StateSnapshotWire | null;
   compressing: boolean;
   contextUsage: { used: number; limit: number } | null;
 }) {
@@ -238,20 +191,50 @@ function SessionStatusLine({
     contextUsage && contextUsage.limit > 0
       ? Math.round((contextUsage.used / contextUsage.limit) * 100)
       : null;
-  if (!compressing && percent === null && !retryStatus) return null;
+  const idle = !status || status.liveness === "idle";
+  // Nothing to show at all: no live status, no compression, no context usage.
+  if (idle && !compressing && percent === null) return null;
+
+  const seconds = status?.seconds_since_turn_start ?? null;
+  const stalled = status ? status.liveness === "stalled" || status.liveness === "unreachable" : false;
+  const tone = !status
+    ? "text-muted"
+    : status.stale || status.liveness === "unreachable"
+      ? "text-danger-ink"
+      : stalled
+        ? "text-warn-ink"
+        : "text-muted";
+  const label = !status || status.liveness === "idle"
+    ? null
+    : status.stale
+      ? "stale · last known state"
+      : status.liveness === "unreachable"
+        ? "connection lost"
+        : status.liveness === "stalled"
+          ? `stalled · no progress for ${status.seconds_since_progress ?? 0}s`
+          : status.health === "compacting"
+            ? "compacting context"
+            : status.health === "retrying"
+              ? "retrying"
+              : status.health === "slow_tool"
+                ? `slow tool${status.health_detail ? ` · ${status.health_detail}` : ""}`
+                : status.activity === "tool_call"
+                  ? "running tool"
+                  : status.activity === "model_call"
+                    ? "thinking"
+                    : "working";
+  const spinning = compressing || (status ? !stalled && status.liveness !== "idle" : false);
   return (
-    <div className="mx-3 mb-1 flex items-center gap-2 text-caption text-muted">
-      {retryStatus && <span role="status">{retryStatus}</span>}
-      {compressing && (
-        <span className="inline-flex items-center gap-1.5">
-          <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
-          Compressing context
-        </span>
+    <div className={cn("mx-3 mb-1 flex items-center gap-2 text-caption", tone)} role="status" aria-live="polite">
+      {spinning && (
+        <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
       )}
+      {label && <span>{label}</span>}
       {percent !== null && (
-        <span className="font-utility">
-          Context {percent}%
-        </span>
+        <span className="font-utility">Context {percent}%</span>
+      )}
+      {seconds !== null && !stalled && (
+        <span className="font-utility">· worked for {seconds}s</span>
       )}
     </div>
   );
@@ -297,6 +280,8 @@ export function App() {
   const [views, setViews] = useState<Record<string, SessionView>>({});
   // Project list (active) and current project.
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
+  // Project being edited in the "Edit project" dialog (rename + source folders); null = closed.
+  const [editingProjectEntry, setEditingProjectEntry] = useState<ProjectEntry | null>(null);
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState<string | null>(null);
   const [input, setInput] = useState("");
@@ -761,6 +746,32 @@ export function App() {
       }
     },
     [activeProject, reloadProjects, selectProject],
+  );
+
+  // Save the "Edit project" dialog: rename + replace source folders (one of them primary).
+  // If the primary folder changed, the backend rebuilds the runtime and the project's sessions
+  // move to the new folder; we reload the project list so the sidebar reflects the new state.
+  const updateProject = useCallback(
+    async (project: string, changes: { name: string; primary: string; folders: string[] }) => {
+      const bridge = await agentBridge();
+      const updated = await bridge.updateProject(project, changes);
+      await reloadProjects();
+      // The active project's working dir may have moved: reopen its current session so the
+      // conversation / tool context reflects the new primary folder.
+      if (updated.id === activeProject) {
+        setActiveProject(updated.id);
+      }
+    },
+    [activeProject, reloadProjects],
+  );
+
+  // "Remove local project" = archive (no on-disk data is deleted), reusing the archive flow.
+  const removeProjectFromDialog = useCallback(
+    async (project: string) => {
+      setEditingProjectEntry(null);
+      await archiveProject(project);
+    },
+    [archiveProject],
   );
 
   const switchSession = useCallback(
@@ -1393,6 +1404,7 @@ export function App() {
         activeProject={activeProject}
         current={sessionName}
         onAddProject={() => void addProject()}
+        onEditProject={(entry) => setEditingProjectEntry(entry)}
         onRenameProject={(id, name) => void renameProject(id, name)}
         onArchiveProject={(id) => void archiveProject(id)}
         onSelect={(project, name) => { if (mobile) setSidebarCollapsed(true); void switchSession(project, name); }}
@@ -1404,10 +1416,13 @@ export function App() {
       {/* Right main area: fixed-width centered (aligned with shiwen AiConversationSurface's max-w-190 = 760px).
           Neither the chat area nor the input stretches with the window; long text wraps at a comfortable reading width. */}
       <main ref={mainRef} aria-label="Conversation" className="relative flex min-h-0 min-w-0 flex-1 flex-col">
-        <section className="mx-auto flex w-full max-w-190 min-h-0 flex-1 flex-col">
+        {/* Full-width column: the scroll viewport must span the whole right area so the
+            wheel works over the side gutters too. The reading column itself stays 760px
+            (`max-w-190`) and centered via the per-child wrappers below. */}
+        <section className="flex w-full min-h-0 flex-1 flex-col">
         {view.loading ? (
           // History snapshot not yet arrived: render a skeleton first, giving the user immediate "loading message history" feedback.
-          <div className="min-h-0 flex-1 overflow-hidden">
+          <div className="mx-auto w-full max-w-190 min-h-0 flex-1 overflow-hidden">
             <AiConversationSkeleton />
           </div>
         ) : isNewChat ? (
@@ -1415,16 +1430,18 @@ export function App() {
           // centered input + Chat/Work and associated-project switching below. It
           // automatically degrades to the normal session layout once the first message is sent.
           <div className="flex min-h-0 flex-1 flex-col items-center justify-start md:justify-center gap-2 overflow-y-auto">
-            {heroNode}
-            {composerNode}
-            <NewChatControls
-              mode={mode}
-              projects={projects}
-              activeProject={activeProject}
-              onSelectMode={(next) => void switchNewChatMode(next)}
-              onSelectProject={(project) => void newSession(project)}
-              onAddProject={() => void addProject()}
-            />
+            <div className="mx-auto flex w-full max-w-190 flex-col items-center gap-2">
+              {heroNode}
+              {composerNode}
+              <NewChatControls
+                mode={mode}
+                projects={projects}
+                activeProject={activeProject}
+                onSelectMode={(next) => void switchNewChatMode(next)}
+                onSelectProject={(project) => void newSession(project)}
+                onAddProject={() => void addProject()}
+              />
+            </div>
           </div>
         ) : (
         <AiConversationTranscript
@@ -1455,8 +1472,12 @@ export function App() {
               <InlineReferences content={message.content} references={message.references ?? []} />
             )
           }
+          contentClassName="mx-auto w-full max-w-190"
         />
         )}
+        {/* Bottom stack (subagents / status / task / pending / composer): stays pinned
+            under the scroll viewport, centered at the same 760px reading width. */}
+        <div className="mx-auto flex w-full max-w-190 shrink-0 flex-col">
         {!isNewChat && activeProject && sessionName && (
           // Subagents dispatched in this session (docs/subagent.md decision 10): shown inline
           // in the session page (not as a separate sidebar panel). Click a row to expand the
@@ -1483,11 +1504,10 @@ export function App() {
                 onClose={() => setTaskPanelKey(null)}
               />
             )}
-            {/* Content-free runtime status pill (liveness / health / worked-for), from the separate status channel. */}
-            <StatusPill status={status} />
-            {/* Runtime status line: compressing / context usage. Gives the "process" visible feedback instead of a silent UI. */}
-            <SessionStatusLine
-              retryStatus={view.retryStatus}
+            {/* Single runtime status row: liveness / health / worked-for (status channel) +
+                compressing / context usage (render channel). One row, no duplication. */}
+            <StatusPill
+              status={status}
               compressing={view.compressing}
               contextUsage={view.contextUsage}
             />
@@ -1502,6 +1522,7 @@ export function App() {
             {!editing && composerNode}
           </>
         )}
+        </div>
         </section>
         {/* Minimap: attached to the left edge of the chat area's outermost container (main), hover to preview past user turns.
             Shown only when the left gutter fits it — hidden outright when the window cannot fit it, never overlapping the chat content. */}
@@ -1514,6 +1535,18 @@ export function App() {
         )}
       </main>
       </DesktopChrome>
+      {editingProjectEntry && (
+        <EditProjectDialog
+          project={editingProjectEntry}
+          onCancel={() => setEditingProjectEntry(null)}
+          onPickFolder={() => agentBridge().then((bridge) => bridge.pickFolder())}
+          onSave={async (changes) => {
+            await updateProject(editingProjectEntry.id, changes);
+            setEditingProjectEntry(null);
+          }}
+          onRemove={() => void removeProjectFromDialog(editingProjectEntry.id)}
+        />
+      )}
     </>
   );
 }

@@ -89,7 +89,7 @@ export function AiChatComposer({
       }}
     >
       {children}
-      <div className="order-1 min-w-0 px-1.5 pt-1">
+      <div className="order-1 min-w-0 px-0.5 pt-0.5">
         {inputSlot ?? (
           <>
             <label className="sr-only" htmlFor={id}>

@@ -568,7 +568,7 @@ export const MentionEditor = forwardRef<
       data-empty={empty ? "true" : undefined}
       data-placeholder={placeholder}
       className={cn(
-        "max-h-40 min-h-12 overflow-y-auto whitespace-pre-wrap break-words px-2 py-2 text-base leading-relaxed text-ink outline-none",
+        "max-h-40 min-h-10 overflow-y-auto whitespace-pre-wrap break-words px-1 py-1.5 text-sm leading-relaxed text-ink outline-none",
         disabled && "cursor-not-allowed opacity-45",
         className,
       )}

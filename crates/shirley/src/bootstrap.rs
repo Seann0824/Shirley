@@ -63,6 +63,11 @@ pub struct AgentFactory {
         )
     )]
     pub working_dir: PathBuf,
+    /// Additional source folders attached to the project (beyond the primary `working_dir`).
+    /// A project may span several local checkouts; `read` / `grep` / `@`-search resolve a relative
+    /// path against the primary root first, then these. The primary root alone owns session storage,
+    /// so attaching folders never moves a project's sessions.
+    pub extra_paths: Vec<PathBuf>,
     /// Model catalog (for `/model`), fetched asynchronously, falling back to a static list on failure.
     pub model_catalog: Arc<dyn ModelCatalog>,
     /// Session catalog (for `/session`).
@@ -97,7 +102,17 @@ pub struct AgentFactory {
 impl AgentFactory {
     /// Assemble all runtime dependencies. The working dir is decided by [`crate::prompt::workspace_root`].
     pub fn assemble(working_dir: PathBuf) -> Result<Self, AgentError> {
-        Self::assemble_at(working_dir, crate::storage::global_root())
+        Self::assemble_with_extra_paths(working_dir, Vec::new())
+    }
+
+    /// Assemble a project that also attaches **extra source folders** beyond its primary root.
+    /// The primary root owns session storage; extra folders only widen the file tools' search scope
+    /// and are listed in the system prompt.
+    pub fn assemble_with_extra_paths(
+        working_dir: PathBuf,
+        extra_paths: Vec<PathBuf>,
+    ) -> Result<Self, AgentError> {
+        Self::assemble_at(working_dir, extra_paths, crate::storage::global_root())
     }
 
     /// Explicit application-data root for isolated tests and assembly.
@@ -107,6 +122,7 @@ impl AgentFactory {
     )]
     pub(crate) fn assemble_at(
         working_dir: PathBuf,
+        extra_paths: Vec<PathBuf>,
         global_root: PathBuf,
     ) -> Result<Self, AgentError> {
         let paths = crate::storage::StoragePaths::new(global_root, &working_dir)
@@ -207,10 +223,15 @@ impl AgentFactory {
 
         Ok(Self {
             model_config,
-            system_prompt: prompt::build_with_subagents(working_dir.clone(), subagent_enabled),
+            system_prompt: prompt::build_with_roots(
+                working_dir.clone(),
+                extra_paths.clone(),
+                subagent_enabled,
+            ),
             compression_config,
             max_steps: settings.max_steps,
             working_dir: working_dir.clone(),
+            extra_paths,
             model_catalog,
             session_catalog,
             needs_login,
@@ -248,7 +269,7 @@ impl AgentFactory {
     /// left out (it would be a factual lie where the tool does not exist). For the test factories
     /// that install a fixed prompt this still yields a valid (non-empty) system message.
     fn system_prompt_without_subagents(&self) -> SystemPrompt {
-        prompt::build_with_subagents(self.working_dir.clone(), false)
+        prompt::build_with_roots(self.working_dir.clone(), self.extra_paths.clone(), false)
     }
 
     /// Build one `Agent`, optionally as a **child** with a filtered tool table (`docs/subagent.md` P0).
@@ -286,9 +307,11 @@ impl AgentFactory {
         // back to the `SHIRLEY_WORKSPACE` env var / process CWD, which is decoupled from the
         // Agent's `working_dir` (e.g. the desktop interface's multi-project mode: one process,
         // several project roots), so a relative path resolved against the wrong directory.
+        let mut workspace_roots = vec![self.working_dir.clone()];
+        workspace_roots.extend(self.extra_paths.iter().cloned());
         tool_manager
             .context_mut()
-            .insert(tools::read::WorkspaceRoot(self.working_dir.clone()));
+            .insert(tools::read::WorkspaceRoots(workspace_roots));
         let _ = tool_manager.register(tools::TodoTool::new(Arc::clone(&todo_store)));
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
         // Memory writes go **through no** tool; they are done only by the background curator (`docs/memory.md` decision 3).
@@ -751,6 +774,7 @@ pub(crate) mod test_support {
             compression_config: CompressionConfig::default(),
             max_steps: 64,
             working_dir: root.clone(),
+            extra_paths: Vec::new(),
             model_catalog: Arc::new(StaticCatalog::builtin()) as Arc<dyn ModelCatalog>,
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
             needs_login: false,
@@ -803,6 +827,7 @@ mod tests {
             compression_config: CompressionConfig::default(),
             max_steps: 64,
             working_dir: root.clone(),
+            extra_paths: Vec::new(),
             model_catalog: Arc::new(StaticCatalog::builtin()) as Arc<dyn ModelCatalog>,
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
             needs_login: false,
@@ -836,7 +861,8 @@ mod tests {
         .unwrap();
         std::fs::write(legacy.join("sessions/existing.title"), "Existing title").unwrap();
         std::fs::write(legacy.join("memory/facts/project.md"), "---\nid: fact-project\ntype: fact\ndomain: project\nsubject: project\ncreated_at: 2026-10-16\nstatus: active\nconfidence: high\nsource:\n  - session: existing.jsonl#turn:1\n---\n\nExisting project fact.\n").unwrap();
-        let factory = AgentFactory::assemble_at(workspace.clone(), root.join("global")).unwrap();
+        let factory =
+            AgentFactory::assemble_at(workspace.clone(), Vec::new(), root.join("global")).unwrap();
         let sessions = factory.session_catalog.list().unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].label, "Existing title");
@@ -861,7 +887,7 @@ mod tests {
             serde_json::to_value(vec![message]).unwrap()
         );
         assert!(!legacy.exists());
-        let _ = AgentFactory::assemble_at(workspace, root.join("global")).unwrap();
+        let _ = AgentFactory::assemble_at(workspace, Vec::new(), root.join("global")).unwrap();
         assert!(!legacy.exists());
         std::fs::remove_dir_all(root).unwrap();
     }
