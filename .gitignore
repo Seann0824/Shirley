@@ -18,3 +18,4 @@ crates/*/Cargo.lock
 outputs
 # 本地构建/zig 缓存（交叉编译临时目录）
 .tmp
+.agent

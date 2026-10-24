@@ -451,8 +451,20 @@ script points at another host without editing it.
 | release tree owner | `shirley:shirley`, binary `755` | `SHIRLEY_DEPLOY_USER` |
 | systemd unit | `shirley.service` | `SHIRLEY_DEPLOY_SERVICE` |
 | served dist | `<root>/current/web` (`SHIRLEY_WEB_DIST` in the unit) | — |
-| health URL (from the server) | `http://127.0.0.1:8787/` (server default) | `SHIRLEY_DEPLOY_HEALTH` |
+| health URL (from the server) | derived from the unit's `SHIRLEY_SERVER_ADDR` | `SHIRLEY_DEPLOY_HEALTH` |
 | API token | read from `<root>/cloud.env` if present | `SHIRLEY_DEPLOY_TOKEN` |
+
+**Upload transport.** The binary goes up with a single `scp`; the web dist (~450 small files) goes
+up as **one streamed `tar`** over a single ssh connection (`tar -cf - . | ssh ... tar -xf -`). Copying
+the dist file-by-file with `scp -r` is slow and, on a flaky link, gets cut mid-transfer
+(`Connection closed by remote host`); a streamed tar is one connection, much faster, and is retried
+as a whole. Every upload is wrapped in `retry 3`, so a transient drop does not abort the deploy.
+
+**Health URL derivation.** Rather than hard-code a probe address, the script reads the unit's
+`SHIRLEY_SERVER_ADDR` (`systemctl show -p Environment shirley`) and probes that host:port — a
+wildcard bind (`0.0.0.0`) is rewritten to `127.0.0.1`. This matters because a *wrong* probe URL does
+not just warn: the health check fails and the deploy auto-rolls back. `SHIRLEY_DEPLOY_HEALTH`
+overrides the derivation when the service is fronted differently (e.g. behind a reverse proxy).
 
 **Why the artifact must be static.** The target hosts are CentOS 7 (glibc 2.17). A glibc-linked
 build either refuses to start or needs a newer libc than the host ships. `cargo zigbuild --target

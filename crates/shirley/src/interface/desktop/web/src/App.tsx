@@ -14,7 +14,7 @@ import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
 import { EditProjectDialog } from "@/components/ai/EditProjectDialog";
 import { WorkspaceTabs, type WebTab } from "@/components/ai/WorkspaceTabs";
-import { HeaderTabs, type SessionTab } from "@/components/HeaderTabs";
+import { HeaderTabs } from "@/components/HeaderTabs";
 import type { BrowserTabMeta } from "@/components/ai/BrowserView";
 import { browserBridge } from "@/lib/browser-bridge";
 import { NewChatControls } from "@/components/ai/NewChatControls";
@@ -333,24 +333,29 @@ export function App() {
       return { entries, index: entries.length - 1 };
     });
   }, [activeProject, sessionName]);
-  // Switching sessions always brings the chat surface to the foreground (open web tabs stay open).
-  useEffect(() => {
-    if (activeProject || sessionName) setActiveWebTabId(null);
-  }, [activeProject, sessionName]);
   // Sidebar collapse: user's manual preference (persisted). Auto-collapsed when the window is too narrow; can still be manually expanded afterward.
   const mobile = useMobileLayout();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     window.matchMedia(MOBILE_LAYOUT_QUERY).matches || readBool(SIDEBAR_STORAGE_KEY, false),
   );
-  // Top-bar tabs (rendered inside the header, not a separate row): session tabs (one
-  // per open session) + web tabs (in-app browser pages). `activeWebTabId === null`
-  // means a session (chat) is foreground; otherwise that web tab is.
+  // Top-bar tabs follow the **session** (Codex desktop model): each session owns its own
+  // independent tab space — its chat tab plus the web pages it has opened. Switching the
+  // session (from the sidebar) swaps the whole strip; tabs never leak across sessions.
+  // `activeWebTabId === null` means the session's chat tab is foreground, otherwise that
+  // web tab is. Both maps are keyed by `project::session`.
   const browserAvailable = browserBridge.available;
-  const [webTabs, setWebTabs] = useState<WebTab[]>([]);
-  const [activeWebTabId, setActiveWebTabId] = useState<string | null>(null);
+  const [sessionWebTabs, setSessionWebTabs] = useState<Record<string, WebTab[]>>({});
+  const [sessionActiveWebTab, setSessionActiveWebTab] = useState<Record<string, string | null>>({});
   const webTabSeqRef = useRef(0);
-  // Open session tabs, in order. The foreground session is always one of them.
-  const [sessionTabs, setSessionTabs] = useState<SessionTab[]>([]);
+  // Foreground session key (null when nothing is open yet). All tab reads derive from it.
+  const currentKey = activeProject && sessionName ? viewKey(activeProject, sessionName) : null;
+  const webTabs = currentKey ? (sessionWebTabs[currentKey] ?? []) : [];
+  const activeWebTabId = currentKey ? (sessionActiveWebTab[currentKey] ?? null) : null;
+  // Every session's web tabs, flattened, so `WorkspaceTabs` keeps all of their native
+  // `BrowserView`s mounted (unmounting a tab would orphan its Rust child webview — it
+  // would not be hidden/destroyed and could float over the chat). Only the current
+  // session's active tab is actually visible.
+  const allWebTabs = Object.values(sessionWebTabs).flat();
   // Task ledger panel: **not resident** — the user opens it from the composer toggle.
   // Resets to closed when switching sessions (keyed by `project::session`), so a new
   // session never inherits a stale "open" state.
@@ -566,12 +571,6 @@ export function App() {
   const beginSessionLoad = useCallback((project: string, session: string, silent = false) => {
     const key = viewKey(project, session);
     setSessionName(session);
-    // Register (or refresh) this session as a top-bar tab; order = first opened.
-    setSessionTabs((prev) =>
-      prev.some((tab) => tab.project === project && tab.session === session)
-        ? prev
-        : [...prev, { project, session }],
-    );
     setViews((prev) => {
       const existing = prev[key];
       // Cached content already exists (a background session has run): reuse it without flashing a skeleton; otherwise show a loading placeholder.
@@ -881,50 +880,53 @@ export function App() {
     [openSession, beginSessionLoad],
   );
 
-  // Web tabs (in-app browser pages) live in the same header strip as session tabs.
+  // Web tabs (in-app browser pages) live in the **current session's** tab space.
   // Opening one foregrounds it; closing the active one falls back to its neighbor
-  // (or the chat when none remain). Each tab keeps its own native BrowserView.
+  // (or the session's chat when none remain). Each tab keeps its own native BrowserView.
   const openWebTab = useCallback((initialUrl?: string) => {
+    if (!currentKey) return;
+    const key = currentKey;
     const id = `web-${++webTabSeqRef.current}`;
-    setWebTabs((prev) => [...prev, { id, initialUrl }]);
-    setActiveWebTabId(id);
-  }, []);
+    setSessionWebTabs((prev) => ({ ...prev, [key]: [...(prev[key] ?? []), { id, initialUrl }] }));
+    setSessionActiveWebTab((prev) => ({ ...prev, [key]: id }));
+  }, [currentKey]);
 
   const closeWebTab = useCallback(
     (id: string) => {
-      const index = webTabs.findIndex((tab) => tab.id === id);
-      const next = webTabs.filter((tab) => tab.id !== id);
-      setWebTabs(next);
+      if (!currentKey) return;
+      const key = currentKey;
+      const tabs = sessionWebTabs[key] ?? [];
+      const index = tabs.findIndex((tab) => tab.id === id);
+      const next = tabs.filter((tab) => tab.id !== id);
+      setSessionWebTabs((prev) => ({ ...prev, [key]: next }));
       if (activeWebTabId === id) {
-        setActiveWebTabId(next.length ? next[Math.min(index, next.length - 1)].id : null);
+        setSessionActiveWebTab((prev) => ({
+          ...prev,
+          [key]: next.length ? next[Math.min(index, next.length - 1)].id : null,
+        }));
       }
       void browserBridge.close(id).catch(() => {});
     },
-    [webTabs, activeWebTabId],
+    [currentKey, sessionWebTabs, activeWebTabId],
   );
 
+  // Every session's BrowserViews stay mounted, so a meta push must be routed to
+  // whichever session owns that tab id (ids are globally unique).
   const onWebTabMeta = useCallback((meta: BrowserTabMeta) => {
-    setWebTabs((prev) =>
-      prev.map((tab) => (tab.id === meta.tabId ? { ...tab, meta } : tab)),
-    );
-  }, []);
-
-  // Close a session tab. Closing the foreground session moves to the nearest
-  // remaining session tab (or opens a fresh session when none are left).
-  const closeSessionTab = useCallback(
-    (project: string, session: string) => {
-      const remaining = sessionTabs.filter(
-        (tab) => !(tab.project === project && tab.session === session),
-      );
-      setSessionTabs(remaining);
-      if (project === activeProject && session === sessionName) {
-        const next = remaining[remaining.length - 1];
-        if (next) void switchSession(next.project, next.session);
-        else if (project) void newSession(project);
+    setSessionWebTabs((prev) => {
+      let changed = false;
+      const next: Record<string, WebTab[]> = {};
+      for (const [key, tabs] of Object.entries(prev)) {
+        const mapped = tabs.map((tab) => {
+          if (tab.id !== meta.tabId) return tab;
+          changed = true;
+          return { ...tab, meta };
+        });
+        next[key] = mapped;
       }
-    },
-    [sessionTabs, activeProject, sessionName, switchSession, newSession],
-  );
+      return changed ? next : prev;
+    });
+  }, []);
 
   // Switching Chat / Work within the new-chat flow: create a lazy empty session in the
   // target context (the Chat pseudo project or the first project), thereby switching the
@@ -1538,24 +1540,24 @@ export function App() {
       onNewBrowserTab={browserAvailable ? () => openWebTab() : undefined}
       topContent={
         <HeaderTabs
-          sessionTabs={sessionTabs}
-          activeProject={activeProject}
-          sessionName={sessionName}
-          sessionTitles={sessionTitles}
-          onSelectSession={(project, session) => {
-            setActiveWebTabId(null);
-            void switchSession(project, session);
+          sessionTitle={
+            (currentKey && sessionTitles[currentKey]) || (sessionName ? "New session" : "")
+          }
+          chatActive={activeWebTabId === null}
+          onSelectChat={() => {
+            if (currentKey) setSessionActiveWebTab((prev) => ({ ...prev, [currentKey]: null }));
           }}
-          onCloseSession={closeSessionTab}
+          webTabs={webTabs}
+          activeWebTabId={activeWebTabId}
+          onSelectWebTab={(id) => {
+            if (currentKey) setSessionActiveWebTab((prev) => ({ ...prev, [currentKey]: id }));
+          }}
+          onCloseWebTab={closeWebTab}
           onNewSession={() => {
             if (mobile) setSidebarCollapsed(true);
             if (activeProject) void newSession(activeProject);
             else void addProject();
           }}
-          webTabs={webTabs}
-          activeWebTabId={activeWebTabId}
-          onSelectWebTab={(id) => setActiveWebTabId(id)}
-          onCloseWebTab={closeWebTab}
           canNewSession={!!activeProject}
         />
       }
@@ -1585,7 +1587,7 @@ export function App() {
       {/* Right main area: fixed-width centered (aligned with shiwen AiConversationSurface's max-w-190 = 760px).
           Neither the chat area nor the input stretches with the window; long text wraps at a comfortable reading width. */}
       <WorkspaceTabs
-        webTabs={webTabs}
+        webTabs={allWebTabs}
         activeWebTabId={activeWebTabId}
         onMeta={onWebTabMeta}
         onCloseWebTab={closeWebTab}

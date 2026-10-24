@@ -6,8 +6,9 @@
 // paints that content and keeps every web tab's `BrowserView` mounted (the active one
 // visible). The tab *state* is owned by `App` so the header can render it.
 
-import type { ReactNode } from "react";
+import { useEffect, type ReactNode } from "react";
 import { BrowserView, type BrowserTabMeta } from "@/components/ai/BrowserView";
+import { browserBridge } from "@/lib/browser-bridge";
 import { cn } from "@/ui/utils";
 
 /** One in-app web tab (native child webview per tab). Owned by `App`. */
@@ -35,6 +36,14 @@ export function WorkspaceTabs({
   onCloseWebTab: (id: string) => void;
 }) {
   const chatActive = activeWebTabId === null;
+
+  // Every session's web tabs stay mounted (unmounting would orphan the Rust child
+  // webview), so when the chat tab becomes foreground we must explicitly hide all
+  // native webviews — otherwise a previously-active page from another session would
+  // keep floating over the chat.
+  useEffect(() => {
+    if (chatActive && browserBridge.available) void browserBridge.hideAll().catch(() => {});
+  }, [chatActive]);
 
   return (
     <div className="relative flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">

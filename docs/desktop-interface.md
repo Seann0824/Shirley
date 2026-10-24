@@ -497,10 +497,21 @@ a time, **full width** — there is **no default left/right split**. A future "s
 an "Open browser" side panel: opening a page adds a tab next to the conversation, and the chat is
 never squeezed into a narrow column.
 
-- **Structure**: `WorkspaceTabs.tsx` owns the tab strip (`role=tab` per tab) and renders the chat
-  tab's content (the whole conversation surface passed in as `children`) plus one `BrowserView`
-  per web tab. Only the active tab is `flex`; the others are `hidden` (CSS), so chat scroll/state
-  survives tab switches. The chat tab is permanent and cannot be closed; web tabs have a `×`.
+- **The tab strip follows the session** (Codex desktop model): each session owns an **independent
+  tab space** — its chat tab (labelled with the session title, permanent, not closable) plus the
+  web pages opened *within that session*. Switching the session (from the sidebar) swaps the whole
+  strip; tabs never leak across sessions. This replaced the earlier global strip that piled *every
+  opened session* into one bar. State lives in `App.tsx` as two maps keyed by `project::session`
+  (`sessionWebTabs: Record<key, WebTab[]>`, `sessionActiveWebTab: Record<key, string | null>`);
+  `webTabs` / `activeWebTabId` are derived from the foreground key.
+- **Structure**: `HeaderTabs.tsx` paints the strip (chat tab + this session's web tabs + `+` new
+  session); `WorkspaceTabs.tsx` paints the content: the chat surface (the whole conversation
+  surface passed in as `children`) plus one `BrowserView` per web tab. Only the active tab is
+  `flex`; the others are `hidden` (CSS), so chat scroll/state survives tab switches.
+  **Every session's `BrowserView`s stay mounted** (a flat `allWebTabs` list), because unmounting a
+  tab would orphan its Rust child webview — it would not be hidden/destroyed and could float over
+  the chat. Only the current session's active tab is actually `active`; when the chat tab is
+  foreground `WorkspaceTabs` calls `agent_browser_hide_all` so no stale webview stays on top.
 - **Why a child webview, not an iframe**: most sites send `X-Frame-Options` / CSP
   `frame-ancestors` and refuse to be framed; and an iframe cannot give a real address bar,
   back/forward history, or a browser user-agent. The equivalent of Electron's `<webview>` tag is
@@ -531,8 +542,9 @@ never squeezed into a narrow column.
 - **Address bar**: `normalize_url` adds `https://` to bare hosts and rejects any scheme other than
   `http` / `https`.
 - **Entry points**: the top-bar `Globe` button (`DesktopChrome` → `onNewBrowserTab`) opens a new
-  web tab; the `+` at the end of the tab strip does the same. **Switching sessions always brings
-  the chat tab back to the foreground** (open web tabs stay open in the background).
+  web tab in the **current session's** space; the `+` at the end of the tab strip creates a new
+  session. Each session remembers its own foreground tab, so switching away and back restores the
+  page it had open (the chat tab is brought back only when that session had no web tab active).
 - **Security boundary**: the child webview's label (`browser-<tabId>`) is **not** in
   `capabilities/default.json`'s `windows: ["main"]`, and that capability has no `remote` field, so
   remote content loaded in the child webview **has no Tauri IPC permissions**. The page is sandboxed

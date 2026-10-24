@@ -77,7 +77,9 @@ DEPLOY_PORT="${SHIRLEY_DEPLOY_PORT:-22}"
 REMOTE_ROOT="${SHIRLEY_DEPLOY_ROOT:-/opt/shirley}"
 REMOTE_USER="${SHIRLEY_DEPLOY_USER:-shirley}"
 SERVICE="${SHIRLEY_DEPLOY_SERVICE:-shirley}"
-HEALTH_URL="${SHIRLEY_DEPLOY_HEALTH:-http://127.0.0.1:8787/}"
+# Empty means "derive it from the unit" (see resolve_health_url): hard-coding 127.0.0.1:8787 would
+# silently fail on any host that binds elsewhere, and a failed health check triggers an auto-rollback.
+HEALTH_URL="${SHIRLEY_DEPLOY_HEALTH:-}"
 HEALTH_TOKEN="${SHIRLEY_DEPLOY_TOKEN:-}"
 
 COMMAND="deploy"
@@ -109,13 +111,52 @@ ssh_run() {
       "$DEPLOY_HOST" "$@"
 }
 
+# Retry a remote-facing command a couple of times. Long uploads over a flaky link can be cut by the
+# server ("Connection closed by remote host"); a single retry turns that into a non-event.
+retry() {
+  local tries="${1:?retry needs a count}"; shift
+  local n=1
+  until "$@"; do
+    if (( n >= tries )); then
+      warn "gave up after ${tries} attempt(s): $*"
+      return 1
+    fi
+    warn "attempt ${n}/${tries} failed, retrying: $*"
+    n=$((n + 1))
+    sleep 2
+  done
+}
+
 scp_put() {
   local src="$1" dst="$2"
   if (( DRY_RUN )); then
     printf '  \033[2m[dry-run] scp -r %s -> %s:%s\033[0m\n' "$src" "$DEPLOY_HOST" "$dst"
     return 0
   fi
-  scp -o BatchMode=yes -o ConnectTimeout=10 -p "$DEPLOY_PORT" -qr "$src" "${DEPLOY_HOST}:${dst}"
+  # NOTE: scp's port flag is capital -P (lowercase -p means "preserve times" and would make the
+  # port number be parsed as a source file -> "scp: stat local \"22\": No such file or directory").
+  retry 3 scp -o BatchMode=yes -o ConnectTimeout=10 -P "$DEPLOY_PORT" -q "$src" "${DEPLOY_HOST}:${dst}"
+}
+
+# Upload a directory as a single tar stream over one ssh connection. Per-file scp of the web dist
+# (~450 small files) is slow and gets cut by the server mid-transfer; a streamed tar is one
+# connection, much faster, and restarts cleanly via `retry`.
+put_dir_tar() {
+  local src="$1" dst="$2"
+  if (( DRY_RUN )); then
+    printf '  \033[2m[dry-run] tar | ssh %s -- tar -x -C %s (from %s)\033[0m\n' "$DEPLOY_HOST" "$dst" "$src"
+    return 0
+  fi
+  retry 3 tar_stream "$src" "$dst"
+}
+
+tar_stream() {
+  local src="$1" dst="$2"
+  # `tar -C src -cf - .` keeps relative paths; the remote extracts into an already-existing dir.
+  # If the stream dies halfway, retry re-extracts over the partial tree (tar overwrites files).
+  tar -C "$src" -cf - . \
+    | ssh -o BatchMode=yes -o ConnectTimeout=10 -o ServerAliveInterval=15 -p "$DEPLOY_PORT" \
+        "$DEPLOY_HOST" "tar -xf - -C '$dst'"
 }
 
 # ---------------------------------------------------------------------------------------------
@@ -175,9 +216,18 @@ build_binary() {
   rustup target list --installed 2>/dev/null | grep -qx "$TARGET" \
     || die "rust target not installed: rustup target add $TARGET"
 
-  # zig cannot resolve its cache dir when HOME is unset (AppDataDirUnavailable), which is exactly
-  # the case inside sandboxed shells. Pin HOME + both cache dirs explicitly.
-  export HOME="${SHIRLEY_BUILD_HOME:-${HOME:-/tmp}}"
+  # zig cannot resolve its cache dir when HOME is unset (AppDataDirUnavailable), and rustup cannot
+  # find the toolchain without a real HOME (~/.rustup) -- both happen in sandboxed shells where HOME
+  # is empty. So: honour SHIRLEY_BUILD_HOME, else keep a non-empty HOME, else derive the real home
+  # from the passwd entry (do NOT fall back to /tmp: rustup then says "no default toolchain").
+  if [[ -z "${SHIRLEY_BUILD_HOME:-}" && -z "${HOME:-}" ]]; then
+    local real_home
+    real_home="$(python3 -c 'import pwd, os; print(pwd.getpwuid(os.getuid()).pw_dir)' 2>/dev/null || true)"
+    [[ -n "$real_home" ]] || die "HOME is unset and cannot be derived; set SHIRLEY_BUILD_HOME to your home directory"
+    export HOME="$real_home"
+  else
+    export HOME="${SHIRLEY_BUILD_HOME:-$HOME}"
+  fi
   export ZIG_LOCAL_CACHE_DIR="${ZIG_LOCAL_CACHE_DIR:-/tmp/zig-cache}"
   export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-/tmp/zig-global}"
   mkdir -p "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
@@ -221,8 +271,7 @@ deploy() {
 
   log "upload binary + web dist"
   scp_put "$bin" "${release_dir}/shirley"
-  # Trailing `/.` copies the *contents* of dist (index.html, assets/, sw.js, ...) into web/.
-  scp_put "${dist}/." "${release_dir}/web/"
+  put_dir_tar "$dist" "${release_dir}/web"
 
   log "fix ownership"
   ssh_run "set -e; chown -R '${REMOTE_USER}:${REMOTE_USER}' '${release_dir}'; chmod 755 '${release_dir}/shirley'"
@@ -265,9 +314,32 @@ deploy() {
 # ---------------------------------------------------------------------------------------------
 # health check (bounded; never touches /api/status -- it is an SSE stream and would hang)
 # ---------------------------------------------------------------------------------------------
+# Resolve the URL to probe. Order: explicit SHIRLEY_DEPLOY_HEALTH > the unit's SHIRLEY_SERVER_ADDR
+# (that is where the server actually listens) > 127.0.0.1:8787 as a last resort. Deriving it from the
+# unit means the script works on a fresh host without the operator having to pass a private address.
+resolve_health_url() {
+  if [[ -n "$HEALTH_URL" ]]; then return 0; fi
+  local addr=""
+  if (( ! DRY_RUN )); then
+    addr="$(ssh_run "systemctl show -p Environment '${SERVICE}' 2>/dev/null" 2>/dev/null \
+      | tr ' ' '\n' | sed -n 's/^SHIRLEY_SERVER_ADDR=//p' | head -n1 | tr -d '\r')"
+  fi
+  if [[ -z "$addr" ]]; then
+    warn "cannot derive SHIRLEY_SERVER_ADDR from unit ${SERVICE}; set SHIRLEY_DEPLOY_HEALTH"
+    HEALTH_URL="http://127.0.0.1:8787/"
+    return 0
+  fi
+  # A wildcard bind is not directly curl-able; probe loopback on the same port instead.
+  local host="${addr%:*}" port="${addr##*:}"
+  case "$host" in 0.0.0.0|'*'|'') host="127.0.0.1" ;; esac
+  HEALTH_URL="http://${host}:${port}/"
+}
+
 health_check() {
   log "health check"
   if (( DRY_RUN )); then printf '  \033[2m[dry-run] health check skipped\033[0m\n'; return 0; fi
+  resolve_health_url
+  log "probe ${HEALTH_URL}"
 
   # 1) unit is active (give it a moment to come up)
   local state="" code refs missing="" base
