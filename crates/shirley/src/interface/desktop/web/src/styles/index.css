@@ -262,6 +262,33 @@
   margin: 0 auto;
 }
 
+/* Mermaid fullscreen viewer. The fullscreen dialog is portaled to <body>
+   (data-streamdown="mermaid-fullscreen"), so it sits OUTSIDE [data-ai-markdown] and
+   none of the rules above apply. Streamdown renders the *raw* mermaid svg here:
+   `width="100%"` plus an inline `style="max-width:<n>px"` and NO height attribute.
+   Its wrapper asks for `[&_svg]:h-auto [&_svg]:w-auto`. Chromium derives an intrinsic
+   height from the viewBox and shows the diagram, but WebKit (the engine behind the
+   Tauri WKWebView on macOS) does not — the svg resolves to 0x0 and the overlay looks
+   blank. That is the "renders inline, blank when enlarged" bug: the non-fullscreen
+   path rewrites the svg to explicit px, the fullscreen path does not.
+   Fix: give the chart svg an explicit fill of its container instead of `auto`. The
+   svg keeps its viewBox and the default preserveAspectRatio="xMidYMid meet", so it
+   scales proportionally and never distorts. `!important` beats mermaid's inline
+   max-width, which would otherwise clamp the enlarged diagram to its inline size. */
+[data-streamdown="mermaid-fullscreen"] [aria-label="Mermaid chart"] svg {
+  width: 100% !important;
+  height: 100% !important;
+  max-width: 100% !important;
+  max-height: 100% !important;
+}
+[data-streamdown="mermaid-fullscreen"] [data-streamdown="mermaid"] {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

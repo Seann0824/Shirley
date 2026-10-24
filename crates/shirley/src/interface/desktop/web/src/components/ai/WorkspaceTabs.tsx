@@ -117,14 +117,16 @@ export const WorkspaceTabs = forwardRef<
 
   const chatActive = activeId === CHAT_TAB_ID;
 
-  // Browser unavailable (cloud / mock): no tab chrome, chat fills the workspace.
-  if (!browserAvailable) {
-    return <div className="flex min-h-0 min-w-0 flex-1 flex-col">{children}</div>;
-  }
+  // The tab strip only exists to switch between the chat and web tabs. With no web
+  // tab open there is exactly one surface (the chat), so the strip would just be a
+  // duplicate of the title bar — skip it and let the chat fill the whole area. Web
+  // tabs can still be opened from the header's Globe button.
+  const showTabStrip = browserAvailable && webTabs.length > 0;
 
   return (
     <div className="flex min-h-0 min-w-0 flex-1 flex-col bg-canvas">
       {/* Tab strip */}
+      {showTabStrip && (
       <div className="flex h-10 shrink-0 items-center gap-1 border-b border-line bg-frame px-2">
         <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
           {/* Chat tab (permanent) */}
@@ -184,6 +186,7 @@ export const WorkspaceTabs = forwardRef<
           <Plus className="size-4" />
         </button>
       </div>
+      )}
 
       {/* Content: chat tab + one BrowserView per web tab, only one visible. */}
       <div className="relative flex min-h-0 flex-1">
