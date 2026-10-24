@@ -341,8 +341,8 @@ impl Session {
             // persisted to the session log (it is a per-turn UI hint, not conversation content).
             Ok(AgentEvent::Notice(text)) => self.push_message(Role::Notice, text),
             Ok(AgentEvent::Usage(usage)) => self.record_usage(usage),
-            Ok(AgentEvent::CompressionStarted) => self.start_compression(),
-            Ok(AgentEvent::CompressionFinished) => self.finish_compression(),
+            Ok(AgentEvent::CompactionStarted) => self.start_compression(),
+            Ok(AgentEvent::CompactionFinished) => self.finish_compression(),
             Ok(AgentEvent::ContextUsage {
                 used_tokens,
                 limit_tokens,

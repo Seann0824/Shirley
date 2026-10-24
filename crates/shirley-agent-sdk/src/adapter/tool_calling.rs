@@ -705,7 +705,7 @@ pub(crate) fn encode_messages_for_content(
                     };
                     let output = content
                         .as_ref()
-                        .map(super::super::message::Content::as_text)
+                        .map(super::super::message::MessageContent::as_text)
                         .unwrap_or_default();
                     let rendered = protocol.render_result(&call, &output);
                     // The built-in protocol feeds back user text; non-text rendering (a custom

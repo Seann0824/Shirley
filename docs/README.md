@@ -23,6 +23,7 @@ This set of documents is a technical design proposal for the current repository 
 | `responses-api.md` | Responses protocol adapter: request item expansion / response decoding / streaming events / how it lands | P1 |
 | `anthropic-messages-api.md` | Anthropic Messages protocol adapter: content block / thinking echo / usage semantics (**implemented**) | P1 |
 | `sdk-gaps.md` | SDK capability gap fixes: tool-context injection (landed) / request-body escape hatch (landed) / tool-order preservation (not doing) | P0 |
+| `sdk-refactor-0.0.3.md` | SDK 0.0.3 refactor: naming redesign (Compress→Compact, `Content`→`MessageContent`) + protocol-wire-encoding stays in adapters (encode_messages decision) / the 5-seam extension contract (`ContextProvider` / `OutboundTransform` / `ToolContext` / `ToolProgress` / `Cancellation`) / 4-batch migration path + release checklist + landed-vs-deferred status (**0.0.3 landed; rest deferred to 0.0.4**) | P0 |
 | `tool-lifecycle.md` | Tool lifecycle: `ToolContext` belongs to `ToolManager` / `on_register` (created) / `on_unregister` (destroy) / `unregister` (**implemented**) | P0 |
 | `tool-macro.md` | Tool macro expressiveness: function macro extended with optional companion hooks (`on_register` / `on_unregister`), lifecycle wired by the macro (**implemented**) | P1 |
 | `testing.md` | SDK unit-test strategy, cache hit-rate benchmarks | P1 |

@@ -8,7 +8,7 @@ pub enum Message {
         content: String,
     },
     User {
-        content: Content,
+        content: MessageContent,
     },
     Assistant {
         content: Option<String>,
@@ -20,9 +20,9 @@ pub enum Message {
     Tool {
         tool_call_id: String,
         // Symmetric with `User`: a tool result may carry text and/or images (e.g. a
-        // computer-use screenshot). `Content`'s Serialize keeps a text-only result a plain
+        // computer-use screenshot). `MessageContent`'s Serialize keeps a text-only result a plain
         // string, so historical logs round-trip and text-only requests keep the prefix cache.
-        content: Option<Content>,
+        content: Option<MessageContent>,
     },
     // Never shown; downgraded to a system message when encoding a request
     ContextSummary {
@@ -38,7 +38,11 @@ pub enum Message {
 /// image becomes a JSON array of parts. This keeps old session logs readable and
 /// keeps the request bytes for a text-only message identical (KV prefix cache).
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct Content(Vec<ContentPart>);
+pub struct MessageContent(Vec<ContentPart>);
+
+/// Deprecated alias kept for one release (`0.0.3`); use [`MessageContent`].
+#[deprecated(note = "renamed to `MessageContent` in 0.0.3; the alias will be removed in 0.0.4")]
+pub type Content = MessageContent;
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -72,15 +76,15 @@ pub enum ImageDetail {
     Auto,
 }
 
-impl Content {
+impl MessageContent {
     /// Build a text-only content (the common case).
     pub fn text(text: impl Into<String>) -> Self {
-        Content(vec![ContentPart::Text { text: text.into() }])
+        MessageContent(vec![ContentPart::Text { text: text.into() }])
     }
 
     #[must_use]
     pub fn parts(parts: Vec<ContentPart>) -> Self {
-        Content(parts)
+        MessageContent(parts)
     }
 
     #[must_use]
@@ -153,39 +157,39 @@ impl ContentPart {
     }
 }
 
-impl From<String> for Content {
+impl From<String> for MessageContent {
     fn from(value: String) -> Self {
-        Content(vec![ContentPart::Text { text: value }])
+        MessageContent(vec![ContentPart::Text { text: value }])
     }
 }
 
-impl From<&str> for Content {
+impl From<&str> for MessageContent {
     fn from(value: &str) -> Self {
-        Content(vec![ContentPart::Text {
+        MessageContent(vec![ContentPart::Text {
             text: value.to_owned(),
         }])
     }
 }
 
-impl From<Vec<ContentPart>> for Content {
+impl From<Vec<ContentPart>> for MessageContent {
     fn from(value: Vec<ContentPart>) -> Self {
-        Content(value)
+        MessageContent(value)
     }
 }
 
-impl PartialEq<str> for Content {
+impl PartialEq<str> for MessageContent {
     fn eq(&self, other: &str) -> bool {
         self.as_text() == other
     }
 }
 
-impl PartialEq<&str> for Content {
+impl PartialEq<&str> for MessageContent {
     fn eq(&self, other: &&str) -> bool {
         self.as_text() == *other
     }
 }
 
-impl Serialize for Content {
+impl Serialize for MessageContent {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
@@ -200,7 +204,7 @@ impl Serialize for Content {
     }
 }
 
-impl<'de> Deserialize<'de> for Content {
+impl<'de> Deserialize<'de> for MessageContent {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
@@ -212,13 +216,13 @@ impl<'de> Deserialize<'de> for Content {
             Parts(Vec<ContentPart>),
         }
         Ok(match Repr::deserialize(deserializer)? {
-            Repr::Text(text) => Content(vec![ContentPart::Text { text }]),
-            Repr::Parts(parts) => Content(parts),
+            Repr::Text(text) => MessageContent(vec![ContentPart::Text { text }]),
+            Repr::Parts(parts) => MessageContent(parts),
         })
     }
 }
 
-impl fmt::Display for Content {
+impl fmt::Display for MessageContent {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let mut first = true;
         for part in &self.0 {

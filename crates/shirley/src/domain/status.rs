@@ -222,11 +222,11 @@ impl StateKeeper {
                     reason: reason.clone(),
                 };
             }
-            AgentEvent::CompressionStarted => {
+            AgentEvent::CompactionStarted => {
                 s.health = Health::Compacting;
                 s.activity = Some(Activity::Compacting);
             }
-            AgentEvent::CompressionFinished => {
+            AgentEvent::CompactionFinished => {
                 if matches!(s.health, Health::Compacting) {
                     s.health = Health::Healthy;
                 }

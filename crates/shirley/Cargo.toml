@@ -1,6 +1,6 @@
 [package]
 name = "Shirley"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 description = "A coding agent written in Rust: TUI + desktop chat interface over the shirley-agent-sdk"
 license = "MIT OR Apache-2.0"

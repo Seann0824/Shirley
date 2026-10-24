@@ -11,13 +11,13 @@ pub(super) const DEFAULT_TRIGGER_RATIO: f64 = 0.80;
 /// The compaction-policy config: turns "when to compact, how much to keep, what the summary
 /// looks like" from hardcoded into tunable.
 ///
-/// The defaults are the SDK's current built-in policy ([`CompressionConfig::default`]). The
+/// The defaults are the SDK's current built-in policy ([`CompactionConfig::default`]). The
 /// application layer can override as needed — e.g. lower the trigger threshold (compact
 /// earlier, save tokens) or replace the summary template (change language / focus).
-/// `compression_instruction` (the domain-relevant trade-offs) is still passed separately on
+/// `compaction_instruction` (the domain-relevant trade-offs) is still passed separately on
 /// `Agent`; this config only covers **policy parameters**, not business trade-offs.
 #[derive(Debug, Clone, PartialEq)]
-pub struct CompressionConfig {
+pub struct CompactionConfig {
     /// Trigger threshold (fraction of the context window, 0 < r <= 1). Default `0.80`.
     ///
     /// When this turn's usage `(input_tokens + output_tokens)` reaches
@@ -29,12 +29,12 @@ pub struct CompressionConfig {
     /// The tail kept after compaction (the recent conversation) is estimated against a token
     /// budget of `context_window * retain_ratio`.
     pub retain_ratio: f64,
-    /// The summary output template, **appended** after the caller's `compression_instruction`.
+    /// The summary output template, **appended** after the caller's `compaction_instruction`.
     /// Default [`COMPACTION_TEMPLATE`] (structured XML + no speculation about "next steps").
     pub template: String,
 }
 
-impl Default for CompressionConfig {
+impl Default for CompactionConfig {
     fn default() -> Self {
         Self {
             trigger_ratio: DEFAULT_TRIGGER_RATIO,
@@ -46,8 +46,8 @@ impl Default for CompressionConfig {
 
 /// The output template and hard rules for the compaction summary (`docs/compaction.md` 5.3).
 ///
-/// When [`super::agent::Agent::compress_context`] builds the compaction request, it **appends**
-/// this after the caller-supplied `compression_instruction`, guaranteeing the summary is always
+/// When [`super::agent::Agent::compact_context`] builds the compaction request, it **appends**
+/// this after the caller-supplied `compaction_instruction`, guaranteeing the summary is always
 /// a structured XML block that doesn't fabricate content out of bounds.
 ///
 /// The reason for putting "structure" in the SDK rather than the caller: which tags exist and

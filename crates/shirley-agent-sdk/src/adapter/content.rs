@@ -12,7 +12,7 @@
 use serde_json::{Value, json};
 
 use super::AdapterError;
-use crate::message::{Content, ContentPart, ImageDetail, ImagePart, ImageSource};
+use crate::message::{ContentPart, ImageDetail, ImagePart, ImageSource, MessageContent};
 
 fn detail_str(detail: ImageDetail) -> &'static str {
     match detail {
@@ -24,7 +24,7 @@ fn detail_str(detail: ImageDetail) -> &'static str {
 
 /// `ChatCompletions`: `string` when text-only, otherwise an array of
 /// `{type:text}` / `{type:image_url, image_url:{url, detail}}` parts.
-pub(crate) fn chat_content(content: &Content) -> Result<Value, AdapterError> {
+pub(crate) fn chat_content(content: &MessageContent) -> Result<Value, AdapterError> {
     if content.is_text_only() {
         return Ok(Value::String(content.as_text()));
     }
@@ -54,7 +54,7 @@ pub(crate) fn chat_content(content: &Content) -> Result<Value, AdapterError> {
 
 /// Responses: `[{type:input_text}]` when text-only (historical shape), otherwise
 /// `{type:input_image, image_url|file_id, detail}` parts alongside the text ones.
-pub(crate) fn responses_content(content: &Content) -> Value {
+pub(crate) fn responses_content(content: &MessageContent) -> Value {
     if content.is_text_only() {
         return json!([{ "type": "input_text", "text": content.as_text() }]);
     }
@@ -81,7 +81,7 @@ pub(crate) fn responses_content(content: &Content) -> Value {
 /// Anthropic: `[{type:text}]` when text-only (historical shape), otherwise
 /// `{type:image, source:{type:base64|url, ...}}` parts. A `data:` URL is split
 /// into the base64 source shape Anthropic expects; a plain URL becomes a url source.
-pub(crate) fn anthropic_content(content: &Content) -> Result<Value, AdapterError> {
+pub(crate) fn anthropic_content(content: &MessageContent) -> Result<Value, AdapterError> {
     if content.is_text_only() {
         return Ok(json!([{ "type": "text", "text": content.as_text() }]));
     }
@@ -163,7 +163,7 @@ pub(crate) fn strip_images(messages: &[crate::message::Message]) -> Vec<crate::m
         .collect()
 }
 
-fn strip_content_images(content: &Content) -> Content {
+fn strip_content_images(content: &MessageContent) -> MessageContent {
     let kept: Vec<ContentPart> = content
         .as_parts()
         .iter()
@@ -171,9 +171,9 @@ fn strip_content_images(content: &Content) -> Content {
         .cloned()
         .collect();
     if kept.is_empty() {
-        Content::text("[image omitted: this model cannot read images]")
+        MessageContent::text("[image omitted: this model cannot read images]")
     } else {
-        Content::parts(kept)
+        MessageContent::parts(kept)
     }
 }
 
@@ -182,22 +182,22 @@ fn strip_content_images(content: &Content) -> Content {
 /// Protocols whose tool-result slot is text-only (`ChatCompletions` / Responses) split a
 /// tool result into a text part and a trailing user message; this extracts the images
 /// for that trailing message.
-pub(crate) fn images_only(content: &Content) -> Option<Content> {
+pub(crate) fn images_only(content: &MessageContent) -> Option<MessageContent> {
     let images: Vec<ContentPart> = content
         .as_parts()
         .iter()
         .filter(|part| matches!(part, ContentPart::Image(_)))
         .cloned()
         .collect();
-    (!images.is_empty()).then(|| Content::parts(images))
+    (!images.is_empty()).then(|| MessageContent::parts(images))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn mixed() -> Content {
-        Content::parts(vec![
+    fn mixed() -> MessageContent {
+        MessageContent::parts(vec![
             ContentPart::Text {
                 text: "look".to_owned(),
             },
@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn text_only_stays_plain_string_on_chat() {
-        let value = chat_content(&Content::text("hi")).unwrap();
+        let value = chat_content(&MessageContent::text("hi")).unwrap();
         assert_eq!(value, Value::String("hi".to_owned()));
     }
 
@@ -222,7 +222,7 @@ mod tests {
 
     #[test]
     fn responses_file_id_maps_to_input_image() {
-        let content = Content::parts(vec![ContentPart::Image(ImagePart::file_id("file-1"))]);
+        let content = MessageContent::parts(vec![ContentPart::Image(ImagePart::file_id("file-1"))]);
         let value = responses_content(&content);
         assert_eq!(value[0]["type"], "input_image");
         assert_eq!(value[0]["file_id"], "file-1");
@@ -237,7 +237,7 @@ mod tests {
         assert!(!messages_have_images(&text_only));
 
         let with_image = vec![Message::User {
-            content: Content::parts(vec![
+            content: MessageContent::parts(vec![
                 ContentPart::Text {
                     text: "look".to_owned(),
                 },
@@ -249,7 +249,7 @@ mod tests {
 
     #[test]
     fn anthropic_data_url_becomes_base64_source() {
-        let content = Content::parts(vec![ContentPart::Image(ImagePart::url(
+        let content = MessageContent::parts(vec![ContentPart::Image(ImagePart::url(
             "data:image/png;base64,AAAA",
         ))]);
         let value = anthropic_content(&content).unwrap();

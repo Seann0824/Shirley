@@ -16,7 +16,7 @@ mod event;
 mod prompt;
 
 pub use agent::Agent;
-pub use compaction::{CompactParts, CompressionConfig, CutPlan, plan_cut};
+pub use compaction::{CompactParts, CompactionConfig, CutPlan, plan_cut};
 pub use context::ContextProvider;
 pub use error::AgentError;
 pub use event::{AgentEvent, RunResult, StopReason};

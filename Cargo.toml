@@ -17,8 +17,8 @@ resolver = "3"
 
 # Intra-workspace dependencies resolve to a single canonical version (M-CRATES-IN-WORKSPACE).
 [workspace.dependencies]
-shirley-agent-sdk = { version = "0.0.2", path = "crates/shirley-agent-sdk" }
-shirley-agent-sdk-macros = { version = "0.0.2", path = "crates/shirley-agent-sdk-macros" }
+shirley-agent-sdk = { version = "0.0.3", path = "crates/shirley-agent-sdk" }
+shirley-agent-sdk-macros = { version = "0.0.3", path = "crates/shirley-agent-sdk-macros" }
 
 # ---------------------------------------------------------------------------
 # Lint policy: Microsoft "Pragmatic Rust Guidelines"

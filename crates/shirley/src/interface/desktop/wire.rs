@@ -105,11 +105,11 @@ pub enum AgentEventWire {
         used_tokens: u64,
         limit_tokens: u64,
     },
-    CompressionStarted {
+    CompactionStarted {
         project: Option<String>,
         session: Option<String>,
     },
-    CompressionFinished {
+    CompactionFinished {
         project: Option<String>,
         session: Option<String>,
     },
@@ -367,11 +367,11 @@ impl AgentEventWire {
                 used_tokens,
                 limit_tokens,
             },
-            AgentEvent::CompressionStarted => Self::CompressionStarted {
+            AgentEvent::CompactionStarted => Self::CompactionStarted {
                 project: None,
                 session: None,
             },
-            AgentEvent::CompressionFinished => Self::CompressionFinished {
+            AgentEvent::CompactionFinished => Self::CompactionFinished {
                 project: None,
                 session: None,
             },
@@ -425,8 +425,8 @@ impl AgentEventWire {
             | Self::ContextUsage {
                 project, session, ..
             }
-            | Self::CompressionStarted { project, session }
-            | Self::CompressionFinished { project, session }
+            | Self::CompactionStarted { project, session }
+            | Self::CompactionFinished { project, session }
             | Self::TodoUpdated {
                 project, session, ..
             }

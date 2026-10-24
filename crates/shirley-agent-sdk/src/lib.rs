@@ -9,11 +9,16 @@ pub mod workspace;
 
 pub use adapter::{AdapterError, ModelConfig, ModelProtocol, ToolCallingMode};
 pub use error::{ErrorKind, SdkError};
+#[expect(
+    deprecated,
+    reason = "re-export the deprecated `Content` alias so 0.0.3 callers keep compiling; removed in 0.0.4"
+)]
+pub use message::Content;
 pub use message::{
-    Content, ContentPart, ImageDetail, ImagePart, ImageSource, Message, ToolCall, Usage,
+    ContentPart, ImageDetail, ImagePart, ImageSource, Message, MessageContent, ToolCall, Usage,
 };
 pub use runtime::{
-    Agent, AgentError, AgentEvent, CompactParts, CompressionConfig, ContextProvider, CutPlan,
+    Agent, AgentError, AgentEvent, CompactParts, CompactionConfig, ContextProvider, CutPlan,
     RunResult, StopReason, SystemPrompt, SystemPromptContext, plan_cut,
 };
 pub use shirley_agent_sdk_macros::tool;

@@ -35,8 +35,8 @@ pub enum AgentEvent {
     ContentDelta(String),
     ReasoningDelta(String),
     MessageAdded(message::Message),
-    CompressionStarted,
-    CompressionFinished,
+    CompactionStarted,
+    CompactionFinished,
     ContextUsage {
         used_tokens: u64,
         limit_tokens: u64,
@@ -82,8 +82,8 @@ impl fmt::Display for AgentEvent {
                 write!(f, "{text}")
             }
             Self::MessageAdded(message) => write!(f, "{message}"),
-            Self::CompressionStarted => write!(f, "compacting context"),
-            Self::CompressionFinished => write!(f, "context compaction finished"),
+            Self::CompactionStarted => write!(f, "compacting context"),
+            Self::CompactionFinished => write!(f, "context compaction finished"),
             Self::ContextUsage {
                 used_tokens,
                 limit_tokens,

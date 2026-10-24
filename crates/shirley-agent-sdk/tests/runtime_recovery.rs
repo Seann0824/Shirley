@@ -586,7 +586,7 @@ async fn successive_compactions_inherit_findings_evidence_and_ledger() {
     let mut agent = Agent::builder()
         .model_config(model)
         .messages(history)
-        .compression_instruction("Preserve findings and evidence")
+        .compaction_instruction("Preserve findings and evidence")
         .context_provider(Arc::new(Ledger) as Arc<dyn ContextProvider>)
         .tools(evidence_tools())
         .max_steps(3)
@@ -674,7 +674,7 @@ async fn compaction_does_not_reset_execution_budget() {
     model.context_window_tokens = Some(10_000);
     let mut agent = Agent::builder()
         .model_config(model)
-        .compression_instruction("Preserve progress")
+        .compaction_instruction("Preserve progress")
         .messages(vec![Message::User {
             content: "prior task ".repeat(400).into(),
         }])
@@ -710,7 +710,7 @@ async fn provider_rejection_keeps_original_context_without_local_estimate_gate()
     model.context_window_tokens = Some(10_000);
     let mut agent = Agent::builder()
         .model_config(model)
-        .compression_instruction("Preserve progress")
+        .compaction_instruction("Preserve progress")
         .messages(vec![Message::User {
             content: "constraint ".repeat(5000).into(),
         }])
@@ -775,7 +775,7 @@ async fn restored_archive_compacts_only_latest_working_set() {
     let mut agent = Agent::builder()
         .model_config(model)
         .messages(history)
-        .compression_instruction("Preserve findings")
+        .compaction_instruction("Preserve findings")
         .tools(evidence_tools())
         .build()
         .unwrap();
@@ -839,7 +839,7 @@ async fn over_budget_scratchpad_is_removed_before_tool_evidence() {
     let mut agent = Agent::builder()
         .model_config(model)
         .messages(history)
-        .compression_instruction("Preserve findings")
+        .compaction_instruction("Preserve findings")
         .tools(evidence_tools())
         .build()
         .unwrap();

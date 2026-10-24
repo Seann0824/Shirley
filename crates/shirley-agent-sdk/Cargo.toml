@@ -1,6 +1,6 @@
 [package]
 name = "shirley-agent-sdk"
-version = "0.0.2"
+version = "0.0.3"
 edition = "2024"
 description = "Agent SDK for building LLM agents: messages, tools, protocol adapters, ReAct runtime, sandbox and workspace"
 license = "MIT OR Apache-2.0"
@@ -20,7 +20,7 @@ futures = "0.3.34"
 bytes = "1"
 async-stream = "0.3"
 dotenvy = "0.15.7"
-tokio = { version = "1.53.1", features = ["process", "time", "io-util", "fs"] }
+tokio = { version = "1.53.1", features = ["process", "time", "io-util", "fs", "macros"] }
 thiserror = "2.0.21"
 uuid = { version = "1", features = ["v4"] }
 

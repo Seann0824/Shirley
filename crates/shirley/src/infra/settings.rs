@@ -27,7 +27,7 @@
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use shirley_agent_sdk::{CompressionConfig, ModelProtocol};
+use shirley_agent_sdk::{CompactionConfig, ModelProtocol};
 
 /// Built-in default model: consistent with the old hardcoding in `main.rs`; upgrading does not change default behavior.
 const DEFAULT_MODEL: &str = "deepseek-v4.1-flash";
@@ -66,7 +66,7 @@ pub struct RuntimeSettings {
 /// Compression strategy config (the `[compression]` table in the config file).
 ///
 /// All `Option`: `None` means "this layer does not manage this key", and merging yields to lower priority / built-in defaults.
-/// The default value is the SDK's [`CompressionConfig::default`] (trigger `0.80` / retain `0.20` /
+/// The default value is the SDK's [`CompactionConfig::default`] (trigger `0.80` / retain `0.20` /
 /// built-in summary template). Changing this only affects **when to compress, how much to retain, what the summary looks like**; domain-related
 /// trade-offs still live in the `Agent`'s `compression_instruction` (`bootstrap.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -81,12 +81,12 @@ pub struct CompressionSettings {
 }
 
 impl CompressionSettings {
-    /// Merge into the SDK's [`CompressionConfig`]: `None` falls back to the SDK default.
+    /// Merge into the SDK's [`CompactionConfig`]: `None` falls back to the SDK default.
     ///
     /// Invalid values (out-of-range `trigger_ratio`) are **clamped to the legal range** here rather than erroring:
     /// compression is a background capability, and a misconfiguration should not block startup; after clamping it degrades to default behavior.
-    pub fn to_sdk(&self) -> CompressionConfig {
-        let mut config = CompressionConfig::default();
+    pub fn to_sdk(&self) -> CompactionConfig {
+        let mut config = CompactionConfig::default();
         if let Some(ratio) = self.trigger_ratio.filter(|r| *r > 0.0 && *r <= 1.0) {
             config.trigger_ratio = ratio;
         }

@@ -279,7 +279,7 @@ impl<'a> Tui<'a> {
                 Some(update) = updates_rx.recv(), if response.is_some() => {
                     let mut next = update;
                     loop {
-                        let show_compression = matches!(next, Ok(AgentEvent::CompressionStarted));
+                        let show_compression = matches!(next, Ok(AgentEvent::CompactionStarted));
                         self.apply(next);
                         if show_compression { break; }
                         match updates_rx.try_recv() {

@@ -21,8 +21,8 @@ pub enum AgentError {
     #[error(transparent)]
     Workspace(#[from] crate::workspace::WorkspaceError),
 
-    #[error("[compression failed]: {0}")]
-    Compression(String),
+    #[error("[compaction failed]: {0}")]
+    Compaction(String),
 
     /// Fallback variant: collects errors that don't fit the layers above (e.g. an
     /// application-level config / IO error).
@@ -45,9 +45,9 @@ impl crate::error::SdkError for AgentError {
             // only thing that helps; retrying is pointless.
             Self::Sandbox(_) => ErrorKind::Unsupported,
             Self::Workspace(_) => ErrorKind::BadRequest,
-            // A compression failure aborts the whole turn, but retrying the same context
+            // A compaction failure aborts the whole turn, but retrying the same context
             // usually won't help.
-            Self::Compression(_) | Self::Other(_) => ErrorKind::Internal,
+            Self::Compaction(_) | Self::Other(_) => ErrorKind::Internal,
         }
     }
 }

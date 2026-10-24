@@ -18,7 +18,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use shirley_agent_sdk::{
-    Agent, AgentError, CompressionConfig, ContextProvider, Message, ModelConfig, SystemPrompt,
+    Agent, AgentError, CompactionConfig, ContextProvider, Message, ModelConfig, SystemPrompt,
     ToolCallingMode, ToolManager,
 };
 
@@ -38,8 +38,8 @@ use crate::subagent::{
 use crate::todo::{TodoContextProvider, TodoStore};
 use crate::tools;
 
-/// Compression instruction: shared by all sessions (does not vary by session). The text lives in `prompts/compression_instruction.md`.
-const COMPRESSION_INSTRUCTION: &str = include_str!("../prompts/compression_instruction.md");
+/// Compression instruction: shared by all sessions (does not vary by session). The text lives in `prompts/compaction_instruction.md`.
+const COMPRESSION_INSTRUCTION: &str = include_str!("../prompts/compaction_instruction.md");
 
 /// The assembled runtime dependencies: both interfaces can use it to bring up their UI.
 ///
@@ -51,7 +51,7 @@ pub struct AgentFactory {
     /// System prompt (function form: each resolution reads the current working dir and the project's `Agent.md`).
     system_prompt: SystemPrompt,
     /// Compression strategy (trigger threshold / retain ratio / summary template). From config, shared by all sessions.
-    compression_config: CompressionConfig,
+    compaction_config: CompactionConfig,
     max_steps: usize,
     /// Working dir (workspace root). The desktop interface uses it for `@` file search (`workspace_search`);
     /// under a TUI-only build nobody reads it, so allow `dead_code`.
@@ -172,8 +172,8 @@ impl AgentFactory {
         model_config.context_window_tokens = Some(settings.context_window_tokens);
         model_config.supports_images = settings.supports_images;
 
-        // Compression strategy: if config does not specify it, follow the SDK default (`CompressionConfig::default`).
-        let compression_config = settings.compression.to_sdk();
+        // Compression strategy: if config does not specify it, follow the SDK default (`CompactionConfig::default`).
+        let compaction_config = settings.compression.to_sdk();
 
         // All runtime data lives globally; canonical project identity isolates sessions.
         let file_catalog = session::FileSessionCatalog::new(&paths.state);
@@ -228,7 +228,7 @@ impl AgentFactory {
                 extra_paths.clone(),
                 subagent_enabled,
             ),
-            compression_config,
+            compaction_config,
             max_steps: settings.max_steps,
             working_dir: working_dir.clone(),
             extra_paths,
@@ -384,8 +384,8 @@ impl AgentFactory {
             .model_config(self.default_model_config()?)
             .system_prompt(system_prompt)
             .working_dir(self.working_dir.clone())
-            .compression_instruction(COMPRESSION_INSTRUCTION)
-            .compression_config(self.compression_config.clone())
+            .compaction_instruction(COMPRESSION_INSTRUCTION)
+            .compaction_config(self.compaction_config.clone())
             .max_steps(max_steps.unwrap_or(self.max_steps))
             .context_provider(Arc::new(provider) as Arc<dyn ContextProvider>)
             .tools(tool_manager)
@@ -772,7 +772,7 @@ pub(crate) mod test_support {
                 .stream(stream)
                 .build(),
             system_prompt: SystemPrompt::from("test"),
-            compression_config: CompressionConfig::default(),
+            compaction_config: CompactionConfig::default(),
             max_steps: 64,
             working_dir: root.clone(),
             extra_paths: Vec::new(),
@@ -825,7 +825,7 @@ mod tests {
                 .model("test")
                 .build(),
             system_prompt: SystemPrompt::from("test"),
-            compression_config: CompressionConfig::default(),
+            compaction_config: CompactionConfig::default(),
             max_steps: 64,
             working_dir: root.clone(),
             extra_paths: Vec::new(),

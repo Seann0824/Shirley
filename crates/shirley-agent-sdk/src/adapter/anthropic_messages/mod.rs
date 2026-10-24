@@ -112,7 +112,7 @@ fn encode_messages(
                         "tool_use_id": tool_call_id,
                         "content": other
                             .as_ref()
-                            .map(super::super::message::Content::as_text)
+                            .map(super::super::message::MessageContent::as_text)
                             .unwrap_or_default(),
                     }),
                 };

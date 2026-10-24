@@ -14,8 +14,11 @@ use crate::{
     message, tool,
 };
 
-// Honestly this conversion logic feels like it belongs on the message side, rather than being
-// written here in the adapter layer for message handling.
+// Internal `Message` -> OpenAI ChatCompletions wire format. This is protocol-specific on purpose:
+// the wire shape (role/tool_calls/reasoning_content keys) is an adapter concern, not a property
+// of `message::Message` (whose serde form is protocol-agnostic). Each protocol owns its own
+// encoder (`anthropic_messages::encode_messages`, `responses::encode_input`); see
+// docs/sdk-refactor-0.0.3.md for why this stays in the adapter layer.
 fn encode_messages(messages: &[message::Message]) -> Result<Vec<Value>, AdapterError> {
     let mut out = Vec::with_capacity(messages.len());
     for msg in messages {
@@ -74,7 +77,7 @@ fn encode_messages(messages: &[message::Message]) -> Result<Vec<Value>, AdapterE
                 out.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
-                    "content": content.as_ref().map(super::super::message::Content::as_text),
+                    "content": content.as_ref().map(super::super::message::MessageContent::as_text),
                 }));
                 if let Some(images) = content.as_ref().and_then(super::content::images_only) {
                     out.push(serde_json::json!({

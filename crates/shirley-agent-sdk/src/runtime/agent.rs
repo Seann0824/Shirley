@@ -1,4 +1,4 @@
-use super::compaction::{CompressionConfig, CutPlan, plan_cut};
+use super::compaction::{CompactionConfig, CutPlan, plan_cut};
 use super::context::ContextProvider;
 use super::error::AgentError;
 use super::event::{AgentEvent, RunResult, StopReason};
@@ -34,17 +34,17 @@ pub struct Agent {
     /// App-owned session identity, sent only to local model proxies for conversation reuse.
     request_session_id: Option<String>,
     /// User input and assistant deltas not yet committed when the stream is dropped, for the
-    /// driver to flush into storage. The user turn is structured [`message::Content`] so it can
+    /// driver to flush into storage. The user turn is structured [`message::MessageContent`] so it can
     /// carry images alongside text.
-    pending_user: Option<message::Content>,
+    pending_user: Option<message::MessageContent>,
     pending_content: String,
     pending_reasoning: String,
     tools: tool::ToolManager,
-    compression_instruction: Option<String>,
-    compression_pending: bool,
+    compaction_instruction: Option<String>,
+    compaction_pending: bool,
     /// Compaction policy (trigger threshold / retain ratio / summary template). Defaults to the
     /// SDK built-in policy.
-    compression_config: CompressionConfig,
+    compaction_config: CompactionConfig,
     /// Provider of the appended context at the end of each request (the application layer may
     /// inject one, e.g. a task ledger). The returned text is appended as a system message at the
     /// end of this turn's request — it does not enter `self.messages`, survives compaction, and
@@ -80,8 +80,8 @@ impl Agent {
         #[builder(into)] working_dir: Option<PathBuf>,
         #[builder(default)] mut messages: Vec<message::Message>,
         #[builder(default = tool::ToolManager::new())] tools: tool::ToolManager,
-        #[builder(into)] compression_instruction: Option<String>,
-        #[builder(default)] compression_config: CompressionConfig,
+        #[builder(into)] compaction_instruction: Option<String>,
+        #[builder(default)] compaction_config: CompactionConfig,
         context_provider: Option<Arc<dyn ContextProvider>>,
         #[builder(default = 64)] max_steps: usize,
     ) -> Result<Self, AgentError> {
@@ -110,9 +110,9 @@ impl Agent {
             pending_content: String::new(),
             pending_reasoning: String::new(),
             tools,
-            compression_instruction,
-            compression_pending: false,
-            compression_config,
+            compaction_instruction,
+            compaction_pending: false,
+            compaction_config,
             context_provider,
             token_counter: token::HeuristicCounter::new(),
             max_steps,
@@ -280,16 +280,19 @@ impl Agent {
     /// Returns [`AgentError`] when the model request, tool execution, or context
     /// compaction fails, or when the event stream ends without a final result.
     pub async fn run(&mut self, task: &str) -> Result<RunResult, AgentError> {
-        self.run_content(message::Content::text(task)).await
+        self.run_content(message::MessageContent::text(task)).await
     }
 
-    /// Like [`Agent::run`], but the user turn is structured [`message::Content`] (text plus
+    /// Like [`Agent::run`], but the user turn is structured [`message::MessageContent`] (text plus
     /// image parts). The `&str` version delegates here.
     ///
     /// # Errors
     ///
     /// Returns [`AgentError`] under the same conditions as [`Agent::run`].
-    pub async fn run_content(&mut self, task: message::Content) -> Result<RunResult, AgentError> {
+    pub async fn run_content(
+        &mut self,
+        task: message::MessageContent,
+    ) -> Result<RunResult, AgentError> {
         let mut events = self.run_stream_content(task);
         while let Some(event) = events.next().await {
             if let AgentEvent::Finished(result) = event? {
@@ -361,10 +364,10 @@ impl Agent {
         &'a mut self,
         task: &'a str,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + Send + 'a>> {
-        self.run_stream_content(message::Content::text(task))
+        self.run_stream_content(message::MessageContent::text(task))
     }
 
-    /// Like [`Agent::run_stream`], but the user turn is structured [`message::Content`] (text
+    /// Like [`Agent::run_stream`], but the user turn is structured [`message::MessageContent`] (text
     /// parts plus image parts). The `&str` version delegates here, so a text-only turn produces
     /// byte-identical bytes as before (the plain-string fast path keeps the KV prefix cache).
     ///
@@ -374,19 +377,19 @@ impl Agent {
     /// set immediately before the stream starts, so this cannot happen in practice).
     pub fn run_stream_content(
         &mut self,
-        task: message::Content,
+        task: message::MessageContent,
     ) -> Pin<Box<dyn futures::Stream<Item = Result<AgentEvent, AgentError>> + Send + '_>> {
         self.pending_user = Some(task);
         Box::pin(async_stream::try_stream! {
             let client = self.client.clone();
             let mut total_usage = message::Usage::default();
-            if self.compression_pending {
-                yield AgentEvent::CompressionStarted;
-                let (usage, summary) = self.compress_context(&client).await?;
+            if self.compaction_pending {
+                yield AgentEvent::CompactionStarted;
+                let (usage, summary) = self.compact_context(&client).await?;
                 if let Some(summary) = summary {
                     yield AgentEvent::MessageAdded(summary);
                 }
-                yield AgentEvent::CompressionFinished;
+                yield AgentEvent::CompactionFinished;
                 total_usage = total_usage + usage;
                 yield AgentEvent::Usage(usage);
             }
@@ -418,13 +421,13 @@ impl Agent {
                     break;
                 }
                 steps += 1;
-                if self.compression_pending {
-                    yield AgentEvent::CompressionStarted;
-                    let (usage, summary) = self.compress_context(&client).await?;
+                if self.compaction_pending {
+                    yield AgentEvent::CompactionStarted;
+                    let (usage, summary) = self.compact_context(&client).await?;
                     if let Some(summary) = summary {
                         yield AgentEvent::MessageAdded(summary);
                     }
-                    yield AgentEvent::CompressionFinished;
+                    yield AgentEvent::CompactionFinished;
                     total_usage = total_usage + usage;
                     yield AgentEvent::Usage(usage);
 
@@ -477,7 +480,7 @@ impl Agent {
                             self.pending_content.clear();
                             self.pending_reasoning.clear();
                             total_usage = total_usage + response.usage;
-                            self.compression_pending = self.should_schedule_compression(&response.usage);
+                            self.compaction_pending = self.should_schedule_compaction(&response.usage);
                             let response_message = response.message;
                             self.messages.push(response_message.clone());
                             yield AgentEvent::MessageAdded(response_message.clone());
@@ -523,7 +526,7 @@ impl Agent {
                                                     let kind = crate::SdkError::kind(&error);
                                                     (
                                                         false,
-                                                        message::Content::text(error.to_string()),
+                                                        message::MessageContent::text(error.to_string()),
                                                         Some(kind),
                                                     )
                                                 }
@@ -609,7 +612,7 @@ impl Agent {
     /// Returns `None` when no window is configured (or it is 0), meaning **no compaction**.
     fn retain_budget(&self) -> Option<u64> {
         let window = self.model_config.context_window_tokens.filter(|&w| w > 0)?;
-        Some(((window as f64) * self.compression_config.retain_ratio).round() as u64)
+        Some(((window as f64) * self.compaction_config.retain_ratio).round() as u64)
     }
 
     /// Compute the compaction cut point and extract the user's latest question.
@@ -621,7 +624,7 @@ impl Agent {
         plan_cut(messages, budget, &self.token_counter)
     }
 
-    fn should_schedule_compression(&self, usage: &message::Usage) -> bool {
+    fn should_schedule_compaction(&self, usage: &message::Usage) -> bool {
         let Some(limit) = self
             .model_config
             .context_window_tokens
@@ -630,7 +633,7 @@ impl Agent {
             return false;
         };
         if self
-            .compression_instruction
+            .compaction_instruction
             .as_deref()
             .is_none_or(|text| text.trim().is_empty())
         {
@@ -640,7 +643,7 @@ impl Agent {
         // precision and overflow: threshold = limit * trigger_ratio, turned into the integer test
         // (used / limit >= ratio).
         let used = usage.input_tokens.saturating_add(usage.output_tokens);
-        let ratio = self.compression_config.trigger_ratio;
+        let ratio = self.compaction_config.trigger_ratio;
         if !(ratio > 0.0 && ratio <= 1.0) {
             return false;
         }
@@ -707,7 +710,7 @@ impl Agent {
     /// Difference from the old implementation: the old one **appended** the summary at the end
     /// (effectively eating the tail too), and the summarizer saw the whole conversation without
     /// knowing "what this turn's task is", so it forgot the task and invented next steps.
-    async fn compress_context(
+    async fn compact_context(
         &mut self,
         client: &reqwest::Client,
     ) -> Result<(message::Usage, Option<message::Message>), AgentError> {
@@ -716,7 +719,7 @@ impl Agent {
         let Some(mut plan) = self.compute_cut(&history) else {
             // Nothing compressible (no window / only background left / already fits): no
             // compaction, pass through.
-            self.compression_pending = false;
+            self.compaction_pending = false;
             return Ok((message::Usage::default(), None));
         };
         // The summary event is only appended to the log; the running original task may not be at
@@ -763,14 +766,14 @@ impl Agent {
         {
             messages.push(message::Message::System { content: text });
         }
-        let instruction = self.compression_instruction.clone().ok_or_else(|| {
-            AgentError::Compression("compression instruction is not configured".into())
+        let instruction = self.compaction_instruction.clone().ok_or_else(|| {
+            AgentError::Compaction("compression instruction is not configured".into())
         })?;
         // The caller supplies the domain-relevant trade-offs; the SDK appends the structural
         // template (`docs/compaction.md` 5.3): the summary is always XML blocks and speculation
         // about "next steps" is forbidden. The template can be overridden via
-        // `compression_config`.
-        let content = format!("{instruction}\n\n{}", self.compression_config.template);
+        // `compaction_config`.
+        let content = format!("{instruction}\n\n{}", self.compaction_config.template);
         messages.push(message::Message::System { content });
 
         // The compaction trigger ratio is not the capacity limit of the summary request. Reserve
@@ -817,7 +820,7 @@ impl Agent {
                             ..
                         } if !content.trim().is_empty() && tool_calls.is_empty() => content,
                         _ => {
-                            return Err(AgentError::Compression(
+                            return Err(AgentError::Compaction(
                                 "compression response contained no usable summary".into(),
                             ));
                         }
@@ -839,7 +842,7 @@ impl Agent {
                     // task, remain]. The application layer writes storage itself based on the
                     // `MessageAdded(summary)` event (the SDK does not hold the session log).
                     self.messages = next;
-                    self.compression_pending = false;
+                    self.compaction_pending = false;
 
                     // 4. Calibrate the estimation factor (L2) with the real input_tokens. The
                     //    estimation basis must match the request: to-compress segment + task +
@@ -857,7 +860,7 @@ impl Agent {
             }
         }
 
-        Err(AgentError::Compression(
+        Err(AgentError::Compaction(
             "compression produced no usage report".into(),
         ))
     }
@@ -916,7 +919,7 @@ fn trim_compaction_tool_outputs(
         );
         let new_cost = token::count_text(&excerpt);
         if new_cost < cost {
-            *content = message::Content::text(excerpt);
+            *content = message::MessageContent::text(excerpt);
             total = total.saturating_sub(cost - new_cost);
         }
     }
@@ -925,19 +928,19 @@ fn trim_compaction_tool_outputs(
 /// Convert a tool's JSON output into message content.
 ///
 /// A tool may return **structured content**: a JSON array that deserializes into
-/// [`message::Content`] and carries at least one image (a computer-use screenshot). That is
+/// [`message::MessageContent`] and carries at least one image (a computer-use screenshot). That is
 /// kept structured so the image reaches the model. Everything else becomes text, using the
 /// compact JSON rendering (`Value::to_string`) — for a plain string result that is the
 /// quoted form the runtime always produced, so the request bytes (and the prefix cache) are
 /// unchanged for every existing tool.
-fn value_to_content(output: &serde_json::Value) -> message::Content {
+fn value_to_content(output: &serde_json::Value) -> message::MessageContent {
     if output.is_array()
-        && let Ok(content) = serde_json::from_value::<message::Content>(output.clone())
+        && let Ok(content) = serde_json::from_value::<message::MessageContent>(output.clone())
         && content.has_images()
     {
         return content;
     }
-    message::Content::text(output.to_string())
+    message::MessageContent::text(output.to_string())
 }
 
 fn text_prefix_for_tokens(text: &str, budget: u64) -> &str {
