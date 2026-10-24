@@ -3,7 +3,6 @@ use shirley_agent_sdk::{Agent, AgentEvent, Message, Usage};
 use std::sync::Arc;
 
 use crate::models::{ModelCatalog, ModelEntry, StaticCatalog};
-use crate::permission::ApprovalPrompt;
 use crate::session::{EmptySessionCatalog, SessionCatalog, SessionEntry};
 use crate::subagent::SubagentInfo;
 use crate::todo::TaskView;
@@ -164,10 +163,6 @@ pub struct App {
     /// Mouse drag selection; `None` means no text is currently selected.
     /// The `selection` module renders the highlight and extracts the text; releasing the left button copies.
     selection: Option<Selection>,
-    /// A sensitive tool call parked awaiting the human's decision (C 档体感). Out-of-band from
-    /// the `AgentEvent` stream: it arrives on the session's approval broker. `y`/`n` (or
-    /// `Enter`/`Esc`) resolves it; the broker's `oneshot` unblocks the tool call.
-    pending_approval: Option<ApprovalPrompt>,
 }
 
 impl std::ops::Deref for App {
@@ -219,17 +214,7 @@ impl App {
         session_catalog: Arc<dyn SessionCatalog>,
     ) -> Self {
         Self::with_manager(
-            SessionManager::single(
-                agent,
-                None,
-                session_catalog,
-                None,
-                None,
-                None,
-                None,
-                None,
-                None,
-            ),
+            SessionManager::single(agent, None, session_catalog, None, None, None, None, None),
             catalog,
         )
     }
@@ -262,7 +247,6 @@ impl App {
             login: None,
             config_path: None,
             selection: None,
-            pending_approval: None,
         }
     }
 
@@ -973,48 +957,6 @@ impl App {
         self.push_message(Role::System, content);
     }
 
-    // ---- Approval (C 档体感) ----
-
-    /// A sensitive tool call is waiting for the human's decision. Show it inline and take over
-    /// the input hint; `y`/`n` will resolve it. Only one prompt is shown at a time (the runtime
-    /// serialises sensitive calls), so a later prompt replaces an earlier one.
-    pub fn set_pending_approval(&mut self, prompt: ApprovalPrompt) {
-        let summary = format!(
-            "⚠ sensitive action needs approval · {}\n  {}\n  y = allow · n = deny",
-            prompt.tool_name, prompt.arguments
-        );
-        self.add_system_message(summary);
-        self.command_hint = Some(" ⚠ approval needed · y allow · n deny ".to_owned());
-        self.pending_approval = Some(prompt);
-    }
-
-    pub fn is_pending_approval(&self) -> bool {
-        self.pending_approval.is_some()
-    }
-
-    /// Resolve the parked approval with the human's decision and clear the prompt. Returns the
-    /// `call_id` that was resolved (for a status line), or `None` if nothing was pending.
-    pub fn resolve_pending_approval(&mut self, allow: bool) -> Option<String> {
-        let prompt = self.pending_approval.take()?;
-        if let Some(broker) = self.sessions.active().approval.as_ref() {
-            let decision = if allow {
-                shirley_agent_sdk::Decision::Allow
-            } else {
-                shirley_agent_sdk::Decision::Deny {
-                    reason: "the user rejected this action".to_owned(),
-                }
-            };
-            broker.resolve(&prompt.call_id, decision);
-        }
-        self.command_hint = None;
-        self.add_system_message(if allow {
-            format!("✓ approved · {}", prompt.tool_name)
-        } else {
-            format!("✕ denied · {}", prompt.tool_name)
-        });
-        Some(prompt.call_id)
-    }
-
     /// Refresh the fuzzy command suggestions from the current input. Only offered when the input starts with the prefix and has no exact match.
     /// Cleared when there are no suggestions. Called after every input edit.
     pub fn refresh_suggestions(&mut self) {
@@ -1514,7 +1456,6 @@ mod tests {
             Some(built.skills),
             Some(built.todo),
             built.subagents,
-            Some(built.approval),
         );
         let catalog = Arc::clone(&factory.model_catalog);
         App::with_manager(sessions, catalog)

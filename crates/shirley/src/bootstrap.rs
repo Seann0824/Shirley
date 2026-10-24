@@ -18,8 +18,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use shirley_agent_sdk::{
-    Agent, AgentError, ApproverHandle, CompressionConfig, ContextProvider, Message, ModelConfig,
-    SystemPrompt, ToolCallingMode, ToolManager,
+    Agent, AgentError, CompressionConfig, ContextProvider, Message, ModelConfig, SystemPrompt,
+    ToolCallingMode, ToolManager,
 };
 
 use crate::memory::{
@@ -27,11 +27,9 @@ use crate::memory::{
     MemoryRuntime, MemoryStore,
 };
 use crate::models::{self, ModelCatalog, ModelEntry};
-use crate::permission::{ApprovalBroker, CapabilityProfile};
 use crate::prompt;
 use crate::session::{self, SessionCatalog};
 use crate::settings::Settings;
-use crate::sidecar::Sidecar;
 use crate::skills::{self, SkillCatalog, SkillContextProvider, SkillRuntime};
 use crate::subagent::{
     DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH, DEFAULT_PER_TASK_MAX_STEPS, DEFAULT_WAIT_TIMEOUT_MS,
@@ -99,17 +97,6 @@ pub struct AgentFactory {
     subagent_default_tools: Option<Vec<String>>,
     /// Default `wait` / blocking-dispatch timeout (ms).
     subagent_default_timeout_ms: u64,
-    /// Capability ceiling for the permission layer (`SHIRLEY_CAPABILITY_PROFILE` env var,
-    /// default `workspace-write`). Same tools under every profile; the profile only decides
-    /// how a risky call resolves (Allow / Ask / Deny).
-    capability_profile: CapabilityProfile,
-    /// How long an approval prompt waits for a human before failing closed (seconds).
-    approval_timeout_secs: u64,
-    /// Optional JSONL audit log path for approval decisions.
-    approval_audit_path: Option<PathBuf>,
-    /// Optional sidecar decision model (Jev). `None` when `JEV_API_KEY` / `SHIRLEY_SIDECAR_API_KEY`
-    /// is unset — the permission layer then behaves exactly as before (heuristic only).
-    sidecar: Option<Arc<Sidecar>>,
 }
 
 impl AgentFactory {
@@ -257,21 +244,6 @@ impl AgentFactory {
             subagent_limits,
             subagent_default_tools,
             subagent_default_timeout_ms,
-            capability_profile: std::env::var("SHIRLEY_CAPABILITY_PROFILE")
-                .ok()
-                .and_then(|raw| CapabilityProfile::parse(&raw))
-                .unwrap_or_else(CapabilityProfile::default_profile),
-            approval_timeout_secs: std::env::var("SHIRLEY_APPROVAL_TIMEOUT_SECS")
-                .ok()
-                .and_then(|raw| raw.parse().ok())
-                .unwrap_or(120),
-            approval_audit_path: std::env::var("SHIRLEY_APPROVAL_AUDIT")
-                .ok()
-                .filter(|raw| !raw.trim().is_empty())
-                .map(PathBuf::from),
-            // Sidecar safety review (Jev decision model). Disabled unless a key is configured;
-            // when absent the permission layer falls back to the heuristic classifier unchanged.
-            sidecar: Sidecar::from_env().map(Arc::new),
         })
     }
 
@@ -341,21 +313,6 @@ impl AgentFactory {
             .context_mut()
             .insert(tools::read::WorkspaceRoots(workspace_roots));
 
-        // Permission broker (C 档体感): one per `Agent`, shared with the runtime via the
-        // tool context as an `Approver`. The runtime calls `classify` before every tool and
-        // awaits `approve` on `Ask`. The route (project/session) is set later by the
-        // `Session`; a headless build with no UI subscriber fails closed on any `Ask`.
-        let approval = Arc::new(ApprovalBroker::new(
-            self.capability_profile,
-            std::time::Duration::from_secs(self.approval_timeout_secs),
-            None,
-            None,
-            self.approval_audit_path.clone(),
-            self.sidecar.clone(),
-        ));
-        tool_manager.context_mut().insert(ApproverHandle(
-            Arc::clone(&approval) as Arc<dyn shirley_agent_sdk::Approver>
-        ));
         let _ = tool_manager.register(tools::TodoTool::new(Arc::clone(&todo_store)));
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
         // Memory writes go **through no** tool; they are done only by the background curator (`docs/memory.md` decision 3).
@@ -440,7 +397,6 @@ impl AgentFactory {
             memory,
             skills: skill_runtime,
             subagents,
-            approval,
         })
     }
 
@@ -711,10 +667,6 @@ pub struct BuiltAgent {
     /// Shares the same `Arc` as the `subagent` tool, so the interface can read subagent status
     /// (`docs/subagent.md` P0). `None` when this `Agent` was built as a child.
     pub subagents: Option<Arc<SubagentManager>>,
-    /// Permission broker (one per session): the driver subscribes to it each turn to receive
-    /// approval prompts and calls `resolve` with the human's decision. Shares the same `Arc`
-    /// as the runtime's injected `Approver`.
-    pub approval: Arc<ApprovalBroker>,
 }
 
 /// Concatenate multiple [`ContextProvider`]s into one: joins each `context()` in order; all-empty returns `None`.
@@ -836,10 +788,6 @@ pub(crate) mod test_support {
             subagent_limits: SubagentLimits::default(),
             subagent_default_tools: None,
             subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
-            capability_profile: CapabilityProfile::WorkspaceWrite,
-            approval_timeout_secs: 120,
-            approval_audit_path: None,
-            sidecar: None,
         }
     }
 
@@ -893,10 +841,6 @@ mod tests {
             subagent_limits: SubagentLimits::default(),
             subagent_default_tools: None,
             subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
-            capability_profile: CapabilityProfile::WorkspaceWrite,
-            approval_timeout_secs: 120,
-            approval_audit_path: None,
-            sidecar: None,
         }
     }
 
@@ -1041,7 +985,6 @@ mod tests {
             Some("s".into()),
             catalog,
             Arc::new(factory(root.clone())),
-            None,
             None,
             None,
             None,
@@ -1240,7 +1183,6 @@ mod tests {
             Some("s".into()),
             catalog,
             Arc::new(factory(root.clone())),
-            None,
             None,
             None,
             None,

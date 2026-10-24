@@ -490,23 +490,6 @@ async fn agent_cancel(
     Ok(())
 }
 
-/// Resolve a pending approval prompt (C 档体感). The UI receives an `ApprovalRequested`
-/// wire event carrying the `call_id`, shows it on the matching tool card, and calls this with
-/// the human's decision. Out-of-band: it unblocks the tool call that is parked awaiting it.
-#[tauri::command]
-async fn agent_approve(
-    state: State<'_, DesktopState>,
-    project: String,
-    session: String,
-    call_id: String,
-    allow: bool,
-) -> Result<bool, String> {
-    state
-        .manager
-        .approve(&project, &session, &call_id, allow)
-        .await
-}
-
 #[tauri::command]
 async fn agent_model_name(
     state: State<'_, DesktopState>,
@@ -731,7 +714,6 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
             agent_subscribe,
             agent_unsubscribe,
             agent_cancel,
-            agent_approve,
             agent_model_name,
             agent_list_models,
             agent_set_model,

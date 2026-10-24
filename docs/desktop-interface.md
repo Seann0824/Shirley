@@ -2,6 +2,11 @@
 
 **Shirley technical design · Desktop Interface**
 
+> **2026-10-24 update:** tool approval has been removed from the SDK, application,
+> desktop/server interfaces, and TUI. Tools execute directly. There are no approval
+> buttons, approval events, or approval commands. Historical instructions below to keep
+> the approval path are superseded by this decision.
+
 > **Status: design phase (not yet implemented).** This document is the technical design for migrating
 > the shiwen chat UI to a Shirley desktop interface.
 > **Confirmed decisions**: form 1 (Tauri 2 + React/TS, direct copy) / coexists with the TUI /

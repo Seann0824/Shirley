@@ -13,6 +13,12 @@ The repository is organized in three layers:
 
 ## Running
 
+Tools execute directly without a permission profile, Jev review, or human approval prompt.
+The former `SHIRLEY_CAPABILITY_PROFILE`, `SHIRLEY_APPROVAL_*`, `SHIRLEY_SIDECAR_*`, and
+`JEV_API_KEY` settings are no longer used. Tool-local file access checks, command
+restrictions, and execution timeouts still apply. The current shell backend does not
+isolate filesystem or network access; see [security](docs/security.md).
+
 ```sh
 cp .env.example .env   # create it yourself using the keys documented in .env
 cargo run

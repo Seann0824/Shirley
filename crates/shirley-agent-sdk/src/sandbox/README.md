@@ -36,7 +36,9 @@ UTF-8 is decoded lossily. Small output and the process exit status are preserved
 
 A new backend only needs to implement `SandboxBackend`; the `Sandbox` facade and its callers need no changes.
 
-## Relationship to the permission layer
+## Execution policy
 
-This layer is only responsible for "execution and isolation". **"Whether it should be executed" is decided by the policy layer** (see section 5 of `docs/security.md`).
-Correct order: `policy.check(spec) -> Allow/Deny/Ask` -> if allowed, hand off to `Sandbox::run`.
+The application invokes tools directly; there is no per-call permission or human approval
+gate. Tools retain their own input and path checks before calling `Sandbox::run`.
+The sandbox remains responsible for execution, timeouts, and reporting isolation strength.
+`ProcessBackend` provides no filesystem or network isolation.

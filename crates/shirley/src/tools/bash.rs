@@ -5,9 +5,9 @@ use std::time::Duration;
 use shirley_agent_sdk::sandbox::{Sandbox, SandboxOutput, SandboxSpec, backend::ProcessBackend};
 use shirley_agent_sdk::tool;
 
-// Static deny list: a temporary stopgap before the real permission layer (PermissionPolicy, see docs/security.md section 5) lands.
+// Tool-local command restriction; there is no per-call permission or approval gate.
 // Note: string matching can be bypassed (/bin/rm, r''m, base64 | bash),
-// the real boundary is in the sandbox backend, not this list.
+// and the current ProcessBackend provides no filesystem or network isolation.
 const BLACKLIST: [&str; 3] = ["rm", "shutdown", "reboot"];
 
 /// Workspace root: reads the `SHIRLEY_WORKSPACE` env var first, otherwise falls back to the current directory.
@@ -76,7 +76,7 @@ pub async fn bash(
     #[param(description = "timeout in seconds")] timeout: Option<u64>,
 ) -> Result<String, shirley_agent_sdk::ToolError> {
     // Static stopgap rejection: obviously destructive commands are blocked directly.
-    // This layer is temporary; the real boundary is the sandbox below.
+    // This is a best-effort input check, not an isolation boundary.
     let tokens: Vec<&str> = command.split_whitespace().collect();
     if tokens.is_empty() {
         return Err(shirley_agent_sdk::ToolError::ExecutionError(
@@ -91,7 +91,7 @@ pub async fn bash(
 
     // 1. Put the command into the process sandbox.
     //    Keep `bash -c` (otherwise normal usage like pipes and redirection breaks),
-    //    but the boundary is applied by the sandbox backend at the "what can be touched" layer, rather than pattern-matching the command string.
+    //    ProcessBackend currently provides execution and timeouts without filesystem/network isolation.
     let mut spec = SandboxSpec::new("bash")
         .arg("-c")
         .arg(&command)

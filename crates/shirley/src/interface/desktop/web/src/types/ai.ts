@@ -23,7 +23,6 @@ export type AiToolExecution = {
   content_offset?: number | null;
   tool_name: string;
   status: "pending" | "running" | "complete" | "error";
-  approval_state?: "pending" | "approved" | "rejected" | null;
   summary: string;
   result_json?: string;
   error?: string | null;

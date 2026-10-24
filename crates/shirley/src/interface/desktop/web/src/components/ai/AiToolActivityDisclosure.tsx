@@ -2,7 +2,6 @@ import { useState } from "react";
 import { AlertCircle, BookOpen, Globe, ListChecks, LoaderCircle, Terminal, Wrench } from "lucide-react";
 import type { AiToolExecution } from "@/types/ai";
 import { TextDisclosure } from "./TextDisclosure";
-import { AiToolExecutionCard } from "./AiToolExecutionCard";
 import { aggregateToolExecutions } from "./toolErrorUtils";
 
 const TOOL_LABELS: Record<string, string> = {
@@ -20,16 +19,11 @@ const TOOL_LABELS: Record<string, string> = {
 /** After the tool group is expanded, show concise activity rows; arguments and output expand on demand. */
 export function AiToolActivityDisclosure({
   executions,
-  decidingToolIds,
-  onToolDecision,
 }: {
   executions: AiToolExecution[];
-  decidingToolIds: Set<number>;
-  onToolDecision: (execution: AiToolExecution, decision: "approve" | "reject") => void;
 }) {
   if (executions.length === 0) return null;
   const running = executions.some((execution) => execution.status === "running");
-  const pending = executions.some((execution) => execution.status === "pending" || execution.approval_state === "pending");
   const labels = [...new Set(executions.map((execution) => TOOL_LABELS[execution.tool_name] || execution.tool_name))];
   const summary = `${labels.slice(0, 3).join(", ")}${labels.length > 3 ? " and more" : ""}`;
   const failures = executions.filter((execution) => execution.status === "error").length;
@@ -38,7 +32,7 @@ export function AiToolActivityDisclosure({
     <TextDisclosure
       defaultOpen
       leading={running ? <LoaderCircle className="shrink-0 animate-spin" size={14} aria-hidden="true" /> : <ToolIcon execution={executions[0]} />}
-      label={`${summary} · ${executions.length} items${pending ? " · awaiting confirmation" : ""}`}
+      label={`${summary} · ${executions.length} items`}
       trailing={failures > 0 ? <span className="shrink-0 text-danger-ink">{failures} incomplete</span> : undefined}
       className="min-w-0"
       triggerClassName="max-w-full text-left"
@@ -60,16 +54,6 @@ export function AiToolActivityDisclosure({
           );
         }
         const execution = item.execution;
-        // Executions requiring a user decision keep the existing card and callback; ordinary activity does not get a large card.
-        if (execution.status === "pending" || execution.approval_state === "pending") {
-          return <AiToolExecutionCard
-            key={`${execution.id}:${index}`}
-            execution={execution}
-            deciding={decidingToolIds.has(execution.execution_id ?? (typeof execution.id === "number" ? execution.id : Number.NaN))}
-            onDecision={onToolDecision}
-            className="my-0"
-          />;
-        }
         return <ToolActivityRow key={`${execution.id}:${index}`} execution={execution} />;
       })}
     </TextDisclosure>

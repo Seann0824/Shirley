@@ -193,12 +193,6 @@ export type AgentBridge = {
   /** Request cancellation of the given session's current turn. */
   cancel: (project: string, session: string) => Promise<void>;
   /**
-   * Answer a pending approval prompt (C 档体感): `allow` = run the paused tool call,
-   * otherwise it is denied. The tool call resumes only after this returns. `call_id`
-   * comes from the `approval_requested` event.
-   */
-  approve: (project: string, session: string, callId: string, allow: boolean) => Promise<void>;
-  /**
    * Subscribe to the **content-free** runtime-status stream (`status://event` on desktop,
    * `/api/status` SSE on the cloud). Separate from `openSession`: the status channel ticks
    * even when no `AgentEvent` arrives (that is what makes stall detection possible), and it
@@ -372,9 +366,6 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
     async cancel(project, session) {
       await invoke("agent_cancel", { project, session });
     },
-    async approve(project, session, callId, allow) {
-      await invoke("agent_approve", { project, session, callId, allow });
-    },
     async subscribeStatus(onStatus) {
       if (statusUnlisten) statusListeners.push(onStatus);
       return () => {
@@ -544,9 +535,6 @@ function createMockBridge(): AgentBridge {
     },
     async cancel(project, session) {
       cancelled.add(routeKey(project, session));
-    },
-    async approve() {
-      // mock: no approval flow.
     },
     async subscribeStatus() {
       // mock: no runtime status stream; return a no-op unsubscribe.
@@ -834,9 +822,6 @@ async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
     async cancel(project, session) {
       await httpCall(baseUrl, "agent_cancel", { project, session });
     },
-    async approve(project, session, callId, allow) {
-      await httpCall(baseUrl, "agent_approve", { project, session, callId, allow });
-    },
     async subscribeStatus(onStatus) {
       statusListeners.push(onStatus);
       return () => {
@@ -1039,10 +1024,6 @@ async function createHybridBridge(): Promise<AgentBridge> {
     async cancel(project, session) {
       const { bridge, rawId } = route(project);
       await bridge.cancel(rawId, session);
-    },
-    async approve(project, session, callId, allow) {
-      const { bridge, rawId } = route(project);
-      await bridge.approve(rawId, session, callId, allow);
     },
     async subscribeStatus(onStatus) {
       // Only the local runtime emits a status channel; re-tag its snapshots so the App

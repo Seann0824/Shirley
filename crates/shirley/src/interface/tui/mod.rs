@@ -25,22 +25,15 @@ use self::app::App;
 use self::event::{Event, EventHandler};
 use super::session::SessionManager;
 use crate::models::ModelCatalog;
-use crate::permission::{ApprovalBroker, ApprovalPrompt};
 use std::sync::Arc;
 
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one cohesive per-turn worker task; splitting would only shuffle the same state"
-)]
 async fn run_agent(
     mut agent: Agent,
     prompt: String,
     updates: mpsc::UnboundedSender<Result<AgentEvent, String>>,
-    approvals: mpsc::UnboundedSender<ApprovalPrompt>,
     mut cancel: tokio::sync::oneshot::Receiver<()>,
     memory: Option<Arc<crate::memory::MemoryRuntime>>,
     status: Arc<crate::status::StateKeeper>,
-    approval: Option<Arc<ApprovalBroker>>,
 ) -> Agent {
     // Safety net (`docs/agent-status.md` §5.6): if this task is aborted / dropped mid-turn the guard
     // flips the keeper to `Unreachable` + `stale`; on any normal return we disarm it first.
@@ -60,27 +53,12 @@ async fn run_agent(
         false
     };
     let mut stream = agent.run_stream(&prompt);
-    // Out-of-band approval prompts (C 档体感): the runtime blocks inside a tool awaiting the
-    // decision, so these can never arrive on `stream`; they come from the broker's broadcast.
-    let mut approval_rx = approval.as_ref().map(|broker| broker.subscribe());
     let mut failure = None;
     while !cancelled {
         tokio::select! {
             biased;
             // User interrupt: respond to the cancel signal first, drop the stream so this turn's reply stops immediately.
             _ = &mut cancel => cancelled = true,
-            // A sensitive tool call is parked awaiting the human's decision: forward the prompt to
-            // the main loop (which shows it and reads `y`/`n`). Does not end the turn.
-            prompt = async {
-                match approval_rx.as_mut() {
-                    Some(rx) => rx.recv().await.ok(),
-                    None => std::future::pending().await,
-                }
-            } => {
-                if let Some(prompt) = prompt {
-                    let _ = approvals.send(prompt);
-                }
-            }
             event = stream.next() => {
                 match event {
                     Some(Ok(event)) => {
@@ -231,8 +209,6 @@ impl<'a> Tui<'a> {
         // The model-list load result travels on its own channel: the list may come from a remote source, so loading should move off the main loop
         // and the UI must not be blocked meanwhile (see the async interface of `models::ModelCatalog`).
         let (picker_tx, mut picker_rx) = mpsc::unbounded_channel();
-        // Out-of-band approval prompts from the running turn's broker (C 档体感).
-        let (approvals_tx, mut approvals_rx) = mpsc::unbounded_channel::<ApprovalPrompt>();
         let mut response: Option<JoinHandle<Agent>> = None;
         let mut tick = tokio::time::interval(std::time::Duration::from_secs(1));
         while !self.app.should_exit() {
@@ -254,7 +230,6 @@ impl<'a> Tui<'a> {
                                 // see `run_agent`), so the provider can do relevance retrieval when assembling the request
                                 // and inject it (core.md resident + top-k relevant, V2.5 hybrid retrieval).
                                 let memory = self.app.memory.clone();
-                                let approval = self.app.approval.clone();
                                 let (cancel_tx, cancel_rx) = tokio::sync::oneshot::channel();
                                 self.cancel = Some(cancel_tx);
                                 let status = Arc::clone(&self.app.status);
@@ -262,11 +237,9 @@ impl<'a> Tui<'a> {
                                     agent,
                                     prompt,
                                     updates_tx.clone(),
-                                    approvals_tx.clone(),
                                     cancel_rx,
                                     memory,
                                     status,
-                                    approval,
                                 )));
                             }
                             // User requested interrupt: send a cancel signal to the running task (one-shot).
@@ -302,11 +275,6 @@ impl<'a> Tui<'a> {
                 // Model-list load finished: open the picker.
                 Some(entries) = picker_rx.recv() => {
                     self.app.open_picker(entries);
-                }
-                // A sensitive tool call is parked awaiting the human's decision: surface it and
-                // take over the input hint (`y`/`n` resolve it via the broker).
-                Some(prompt) = approvals_rx.recv(), if response.is_some() => {
-                    self.app.set_pending_approval(prompt);
                 }
                 Some(update) = updates_rx.recv(), if response.is_some() => {
                     let mut next = update;

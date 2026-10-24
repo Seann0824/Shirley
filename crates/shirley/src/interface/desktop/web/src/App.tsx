@@ -553,47 +553,6 @@ export function App() {
     });
   }, []);
 
-  // Answer a pending approval prompt (C 档体感). Optimistically mark the execution's
-  // approval_state so the card updates immediately, then forward to the backend; the tool
-  // only actually resumes after `agent_approve`. Fail-closed: a dropped request or timeout
-  // denies on the backend, so a swallowed error here is safe.
-  const decideTool = useCallback(
-    (project: string, session: string, execution: AiToolExecution, decision: "approve" | "reject") => {
-      const callId = execution.call_id;
-      if (!callId) return;
-      const key = viewKey(project, session);
-      const allow = decision === "approve";
-      setViews((prev) => {
-        const view = prev[key];
-        if (!view) return prev;
-        let assistantId: string | null = null;
-        for (const [id, segs] of Object.entries(view.turnSegments)) {
-          if (segs.some((seg) => seg.kind === "tools" && seg.executions.some((e) => e.call_id === callId))) {
-            assistantId = id;
-            break;
-          }
-        }
-        if (!assistantId) return prev;
-        return {
-          ...prev,
-          [key]: {
-            ...view,
-            turnSegments: setApprovalState(view.turnSegments, assistantId, callId, allow ? "approved" : "rejected"),
-          },
-        };
-      });
-      void (async () => {
-        try {
-          const bridge = await agentBridge();
-          await bridge.approve(project, session, callId, allow);
-        } catch {
-          // Ignore: the backend will fail-closed (deny) if the prompt is gone.
-        }
-      })();
-    },
-    [],
-  );
-
   // Respond to interaction first: immediately switch the foreground session and enter
   // the loading state (render a skeleton), without waiting for the backend round trip.
   // Both opening and switching sessions call this **before** fetching the history
@@ -1599,11 +1558,6 @@ export function App() {
                 durationMs={message.durationMs}
                 failed={message.status === "error"}
                 stopReason={message.stopReason}
-                onToolDecision={
-                  activeProject && sessionName
-                    ? (execution, decision) => decideTool(activeProject, sessionName, execution, decision)
-                    : undefined
-                }
               />
             ) : (
               <InlineReferences content={message.content} references={message.references ?? []} />
@@ -1748,16 +1702,6 @@ function applyWireEvent(
         }),
       };
     }
-    case "approval_requested": {
-      // A sensitive tool call is paused awaiting the human (C 档体感). Mark the matching
-      // execution pending so its card shows the approve/reject buttons; the tool itself
-      // has NOT run yet (ToolStarted already created the running row).
-      if (!assistantId) return view;
-      return {
-        ...view,
-        turnSegments: setApprovalState(view.turnSegments, assistantId, event.call_id, "pending"),
-      };
-    }
     case "tool_finished": {
       if (!assistantId) return view;
       return {
@@ -1857,28 +1801,6 @@ function appendSegment(
     };
   }
   return { ...segments, [assistantId]: [...current, segment] };
-}
-
-/** Set the approval state of the execution matching `callId` (used by approval_requested
- *  and by the local decision handler for immediate feedback). */
-function setApprovalState(
-  segments: Record<string, AiSegment[]>,
-  assistantId: string,
-  callId: string,
-  state: "pending" | "approved" | "rejected",
-): Record<string, AiSegment[]> {
-  const current = segments[assistantId] ?? [];
-  const next = current.map((segment) => {
-    if (segment.kind !== "tools") return segment;
-    if (!segment.executions.some((execution) => execution.call_id === callId)) return segment;
-    return {
-      ...segment,
-      executions: segment.executions.map((execution) =>
-        execution.call_id === callId ? { ...execution, approval_state: state } : execution,
-      ),
-    };
-  });
-  return { ...segments, [assistantId]: next };
 }
 
 function updateTool(

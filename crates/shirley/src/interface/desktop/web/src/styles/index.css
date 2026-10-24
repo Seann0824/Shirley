@@ -189,6 +189,30 @@
   border-color: var(--color-line);
 }
 
+/* The markdown host uses `overflow-wrap: anywhere` so long unbroken prose/URLs wrap
+   instead of overflowing the chat column. That value also makes a table cell's
+   min-content width collapse to a single character, so `table-layout: auto` squeezes
+   the first column to the narrowest possible width and breaks words mid-syllable
+   ("AiMarkdown.tsx" -> "AiMarkdow" / "n.tsx"). Reset cells to `break-word` (does not
+   affect min-content width, still breaks only when a single word truly overflows) and
+   let the browser size columns by their longest word. */
+[data-ai-markdown] [data-streamdown="table"] {
+  table-layout: auto;
+  width: 100%;
+}
+[data-ai-markdown] [data-streamdown="table-header-cell"],
+[data-ai-markdown] [data-streamdown="table-cell"] {
+  overflow-wrap: break-word;
+  word-break: normal;
+  vertical-align: top;
+}
+/* Cell contents (inline code / links / text) inherit the same wrapping rule. */
+[data-ai-markdown] [data-streamdown="table-cell"] *,
+[data-ai-markdown] [data-streamdown="table-header-cell"] * {
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
 /* Code block: the outer container (with language label / copy button) uses a sidebar
    background + border; --color-sidebar is now defined, ensuring both background and
    border show. */

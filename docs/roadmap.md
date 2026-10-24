@@ -19,7 +19,8 @@ Goal: run a migration task once on a real repository without a disaster in the m
   - key rotation + `.env.example`
   - `bash` returns stderr / exit code, fix the blacklist bypass
   - workspace root restriction (cwd allowlist + path canonicalization)
-  - a general permission layer (`PermissionPolicy`) replacing the hard-coded blacklist
+  - per-call permission policy and human approval are deferred by product decision
+    (2026-10-24); the previous implementation has been removed, while tool-local checks remain
 - Runtime hardening (see `runtime-hardening.md`)
   - a `max_steps` cap, so `StopReason::MaxStepsReached` is actually produced
   - wire up `request_timeout` + reuse `reqwest::Client`
@@ -44,9 +45,9 @@ Goal: run a migration task once on a real repository without a disaster in the m
 
 ```mermaid
 graph TD
-    SEC["security.md<br/>permission layer / bash boundary"] --> PERM["permission layer ready"]
-    HARD["runtime-hardening.md"] --> PERM
-    PERM --> LONG["dare to run long tasks"]
+    SEC["security.md<br/>tool boundaries / isolation"] --> BOUND["execution boundaries ready"]
+    HARD["runtime-hardening.md"] --> BOUND
+    BOUND --> LONG["dare to run long tasks"]
     LONG --> PLAN["planning / memory"]
     HARD --> ERR["structured errors"]
     ERR --> RETRY["retry / cancel / step cap"]

@@ -7,10 +7,8 @@
 
 pub mod model_providers;
 pub mod models;
-pub mod permission;
 pub mod project;
 pub mod session;
-pub mod sidecar;
 pub mod status;
 pub mod todo;
 pub mod workspace_search;

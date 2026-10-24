@@ -62,7 +62,7 @@ pub(crate) mod infra;
 
 // ── flat-path compatibility re-exports (crate-internal) ───────────────────
 pub(crate) use domain::{
-    model_providers, models, permission, project, session, sidecar, status, todo, workspace_search,
+    model_providers, models, project, session, status, todo, workspace_search,
 };
 pub(crate) use infra::{prompt_template, remote, settings, storage};
 

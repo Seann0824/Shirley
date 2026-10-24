@@ -1,5 +1,13 @@
 **Shirley technical design · Security and permissions (P0)**
 
+**Current status (2026-10-24):** the per-call permission layer has been removed by product
+decision. Tools execute directly; there is no capability profile, Jev sidecar review,
+approval broker, or approval UI/API. The former permission/approval/sidecar environment
+settings are no longer read. Tool-local workspace/secret-file checks, the shell command
+blacklist, and execution timeouts remain. `bash` still uses `ProcessBackend`, which does
+not isolate filesystem or network access. The permission-layer proposal and its acceptance
+criteria below are historical design notes, not the current execution contract.
+
 **1. Problem statement**
 
 The current `bash` tool is equivalent to "handing the shell to the model". The blacklist is decorative:
