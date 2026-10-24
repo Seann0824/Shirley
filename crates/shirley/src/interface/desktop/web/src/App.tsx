@@ -13,7 +13,9 @@ import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
 import { EditProjectDialog } from "@/components/ai/EditProjectDialog";
-import { WorkspaceTabs, type WorkspaceTabsHandle } from "@/components/ai/WorkspaceTabs";
+import { WorkspaceTabs, type WebTab } from "@/components/ai/WorkspaceTabs";
+import { HeaderTabs, type SessionTab } from "@/components/HeaderTabs";
+import type { BrowserTabMeta } from "@/components/ai/BrowserView";
 import { browserBridge } from "@/lib/browser-bridge";
 import { NewChatControls } from "@/components/ai/NewChatControls";
 import { SubagentSection } from "@/components/ai/SubagentSection";
@@ -331,21 +333,24 @@ export function App() {
       return { entries, index: entries.length - 1 };
     });
   }, [activeProject, sessionName]);
-  // Switching sessions always brings the chat tab to the foreground (open web tabs stay open).
+  // Switching sessions always brings the chat surface to the foreground (open web tabs stay open).
   useEffect(() => {
-    if (activeProject || sessionName) workspaceTabsRef.current?.showChat();
+    if (activeProject || sessionName) setActiveWebTabId(null);
   }, [activeProject, sessionName]);
   // Sidebar collapse: user's manual preference (persisted). Auto-collapsed when the window is too narrow; can still be manually expanded afterward.
   const mobile = useMobileLayout();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     window.matchMedia(MOBILE_LAYOUT_QUERY).matches || readBool(SIDEBAR_STORAGE_KEY, false),
   );
-  // In-app browser as a workspace tab (top-level tab architecture): the chat is one
-  // tab, every web page is its own tab. Desktop-only; the "new tab" button only
-  // renders when the browser is available (Tauri shell). The handle is driven
-  // imperatively (Globe button / session switches call `showChat`).
-  const workspaceTabsRef = useRef<WorkspaceTabsHandle>(null);
+  // Top-bar tabs (rendered inside the header, not a separate row): session tabs (one
+  // per open session) + web tabs (in-app browser pages). `activeWebTabId === null`
+  // means a session (chat) is foreground; otherwise that web tab is.
   const browserAvailable = browserBridge.available;
+  const [webTabs, setWebTabs] = useState<WebTab[]>([]);
+  const [activeWebTabId, setActiveWebTabId] = useState<string | null>(null);
+  const webTabSeqRef = useRef(0);
+  // Open session tabs, in order. The foreground session is always one of them.
+  const [sessionTabs, setSessionTabs] = useState<SessionTab[]>([]);
   // Task ledger panel: **not resident** — the user opens it from the composer toggle.
   // Resets to closed when switching sessions (keyed by `project::session`), so a new
   // session never inherits a stale "open" state.
@@ -561,6 +566,12 @@ export function App() {
   const beginSessionLoad = useCallback((project: string, session: string, silent = false) => {
     const key = viewKey(project, session);
     setSessionName(session);
+    // Register (or refresh) this session as a top-bar tab; order = first opened.
+    setSessionTabs((prev) =>
+      prev.some((tab) => tab.project === project && tab.session === session)
+        ? prev
+        : [...prev, { project, session }],
+    );
     setViews((prev) => {
       const existing = prev[key];
       // Cached content already exists (a background session has run): reuse it without flashing a skeleton; otherwise show a loading placeholder.
@@ -868,6 +879,51 @@ export function App() {
       }
     },
     [openSession, beginSessionLoad],
+  );
+
+  // Web tabs (in-app browser pages) live in the same header strip as session tabs.
+  // Opening one foregrounds it; closing the active one falls back to its neighbor
+  // (or the chat when none remain). Each tab keeps its own native BrowserView.
+  const openWebTab = useCallback((initialUrl?: string) => {
+    const id = `web-${++webTabSeqRef.current}`;
+    setWebTabs((prev) => [...prev, { id, initialUrl }]);
+    setActiveWebTabId(id);
+  }, []);
+
+  const closeWebTab = useCallback(
+    (id: string) => {
+      const index = webTabs.findIndex((tab) => tab.id === id);
+      const next = webTabs.filter((tab) => tab.id !== id);
+      setWebTabs(next);
+      if (activeWebTabId === id) {
+        setActiveWebTabId(next.length ? next[Math.min(index, next.length - 1)].id : null);
+      }
+      void browserBridge.close(id).catch(() => {});
+    },
+    [webTabs, activeWebTabId],
+  );
+
+  const onWebTabMeta = useCallback((meta: BrowserTabMeta) => {
+    setWebTabs((prev) =>
+      prev.map((tab) => (tab.id === meta.tabId ? { ...tab, meta } : tab)),
+    );
+  }, []);
+
+  // Close a session tab. Closing the foreground session moves to the nearest
+  // remaining session tab (or opens a fresh session when none are left).
+  const closeSessionTab = useCallback(
+    (project: string, session: string) => {
+      const remaining = sessionTabs.filter(
+        (tab) => !(tab.project === project && tab.session === session),
+      );
+      setSessionTabs(remaining);
+      if (project === activeProject && session === sessionName) {
+        const next = remaining[remaining.length - 1];
+        if (next) void switchSession(next.project, next.session);
+        else if (project) void newSession(project);
+      }
+    },
+    [sessionTabs, activeProject, sessionName, switchSession, newSession],
   );
 
   // Switching Chat / Work within the new-chat flow: create a lazy empty session in the
@@ -1426,7 +1482,11 @@ export function App() {
         }
         trailingAction={
           <div className="flex items-center gap-1.5">
-            {sourceToggleNode}
+            {/* Local/Cloud send-target toggle: only offered in the new-chat flow (a fresh
+                session is where the runtime is chosen). Once a session has messages the
+                source is already fixed by its project id, so hide it to avoid mid-session
+                surprises. */}
+            {isNewChat ? sourceToggleNode : null}
             <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
           </div>
         }
@@ -1475,7 +1535,30 @@ export function App() {
       }}
       onNewChat={() => { if (mobile) setSidebarCollapsed(true); activeProject ? void newSession(activeProject) : void addProject(); }}
       onAddProject={() => void addProject()}
-      onNewBrowserTab={browserAvailable ? () => workspaceTabsRef.current?.openWebTab() : undefined}
+      onNewBrowserTab={browserAvailable ? () => openWebTab() : undefined}
+      topContent={
+        <HeaderTabs
+          sessionTabs={sessionTabs}
+          activeProject={activeProject}
+          sessionName={sessionName}
+          sessionTitles={sessionTitles}
+          onSelectSession={(project, session) => {
+            setActiveWebTabId(null);
+            void switchSession(project, session);
+          }}
+          onCloseSession={closeSessionTab}
+          onNewSession={() => {
+            if (mobile) setSidebarCollapsed(true);
+            if (activeProject) void newSession(activeProject);
+            else void addProject();
+          }}
+          webTabs={webTabs}
+          activeWebTabId={activeWebTabId}
+          onSelectWebTab={(id) => setActiveWebTabId(id)}
+          onCloseWebTab={closeWebTab}
+          canNewSession={!!activeProject}
+        />
+      }
     >
       {/* Left sidebar: NewChat / pinned / projects (multi-project + session navigation). */}
       {mobile && !sidebarCollapsed && (
@@ -1502,9 +1585,10 @@ export function App() {
       {/* Right main area: fixed-width centered (aligned with shiwen AiConversationSurface's max-w-190 = 760px).
           Neither the chat area nor the input stretches with the window; long text wraps at a comfortable reading width. */}
       <WorkspaceTabs
-        ref={workspaceTabsRef}
-        browserAvailable={browserAvailable}
-        chatTitle={(activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
+        webTabs={webTabs}
+        activeWebTabId={activeWebTabId}
+        onMeta={onWebTabMeta}
+        onCloseWebTab={closeWebTab}
       >
       <main ref={mainRef} aria-label="Conversation" className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Full-width column: the scroll viewport must span the whole right area so the

@@ -404,6 +404,78 @@ The auth check is left as a **middleware mount point in `server.rs`** (an axum l
 router), to be filled in at **P2**. The path allow-list is the same shape: a check inside
 `add_project` / `browse_dirs` before `canonicalize`.
 
+### 7.1 One-command deploy: `scripts/deploy-cloud.sh`
+
+The build → upload → switch → restart → verify loop is captured in **`scripts/deploy-cloud.sh`**.
+Read the header comment first: it explains *why* each step is shaped the way it is (static musl, UTC
+timestamped releases, atomic symlink swap, why `/api/status` must not be used for the health check).
+
+```sh
+# full deploy: npm run build + cargo zigbuild + upload + atomic switch + restart + health check
+scripts/deploy-cloud.sh --host root@your-server
+
+# other commands
+scripts/deploy-cloud.sh build                  # build only (dist + static binary), no server access
+scripts/deploy-cloud.sh releases --host root@your-server   # list releases, mark the active one
+scripts/deploy-cloud.sh rollback --host root@your-server   # flip `current` back one release + restart
+scripts/deploy-cloud.sh rollback --host root@your-server --release 20261020T152821Z
+
+# useful flags
+--host root@your-server --port 22  # a different machine
+--skip-web                         # reuse the existing dist (backend-only change)
+--skip-build                       # reuse target/<triple>/release/Shirley
+--dry-run                          # print every remote action, mutate nothing
+--no-rollback                      # do not auto-revert when the health check fails
+--keep 5                           # after success, keep only the 5 newest releases
+```
+
+`--host` (or `SHIRLEY_DEPLOY_HOST`) is **required** for every command that touches the server
+(`deploy` / `rollback` / `releases`); `build` needs no host. Everything else is overridable by
+environment variable (`_PORT` / `_ROOT` / `_USER` / `_SERVICE` / `_HEALTH` / `_TOKEN`), so the same
+script points at another host without editing it.
+
+**Prerequisites (on the machine you build from):**
+
+- `rustup target add x86_64-unknown-linux-musl`
+- `cargo install cargo-zigbuild` + a `zig` on `PATH` (`brew install zig`)
+- `npm install` once under `crates/shirley/src/interface/desktop/web`
+- SSH key auth to the target host (`BatchMode=yes` is set, so an interactive password prompt will
+  just fail — set up a key)
+
+**What the script assumes on the target host** (all already true for the existing CentOS box):
+
+| Assumption | Default | Override |
+| --- | --- | --- |
+| release root | `/opt/shirley` | `SHIRLEY_DEPLOY_ROOT` |
+| `releases/<UTC ts>/` + `current` symlink | created by the script | — |
+| release tree owner | `shirley:shirley`, binary `755` | `SHIRLEY_DEPLOY_USER` |
+| systemd unit | `shirley.service` | `SHIRLEY_DEPLOY_SERVICE` |
+| served dist | `<root>/current/web` (`SHIRLEY_WEB_DIST` in the unit) | — |
+| health URL (from the server) | `http://127.0.0.1:8787/` (server default) | `SHIRLEY_DEPLOY_HEALTH` |
+| API token | read from `<root>/cloud.env` if present | `SHIRLEY_DEPLOY_TOKEN` |
+
+**Why the artifact must be static.** The target hosts are CentOS 7 (glibc 2.17). A glibc-linked
+build either refuses to start or needs a newer libc than the host ships. `cargo zigbuild --target
+x86_64-unknown-linux-musl` produces a statically linked, stripped ELF; the script runs `file` on the
+result and **aborts if it is not `statically linked`**, so a misconfigured build never reaches the
+server.
+
+**Health check (bounded, no hangs).** After the restart the script verifies, in order: the unit is
+`active`; `GET /` returns 200; every `assets/...` file referenced by `index.html` exists on disk
+(catches a stale `SHIRLEY_WEB_DIST`); an **unauthenticated** `POST /api/cmd/...` returns 401/403
+(auth still enforced — a 200 here means the server is exposed); and, when a token is available, an
+authenticated `POST` returns 200. Every remote `curl`/`ssh` carries a timeout. **Do not add an
+`/api/status` probe** — it is an SSE stream, its body stays empty without pushes, and a plain `curl`
+will hang until it is killed (this happened once).
+
+**Failure handling.** If the unit does not become active or the health check fails after the switch,
+the script re-points `current` at the previous release and restarts (unless `--no-rollback`), so a
+bad build does not leave production down.
+
+**Note on the PWA.** The dist ships a service worker (`sw.js`). After a deploy, a browser may keep
+serving cached old assets; ask the user to hard-reload (Cmd/Ctrl+Shift+R) or unregister the service
+worker in DevTools to confirm the new build.
+
 ---
 
 **8. Landing order**
