@@ -514,30 +514,51 @@ impl Agent {
 
                                         tasks.push(async move {
                                             let started = std::time::Instant::now();
-                                            let (ok, content, error_kind) = match tools.invoke(call, ctx).await {
-                                                Ok(output) => {
-                                                    (true, value_to_content(&output), None)
-                                                }
-                                                // The tool message carries the error text for the
-                                                // model to read; the stable kind travels on the
-                                                // event so the UI classifies structurally instead
-                                                // of sniffing the text.
-                                                Err(error) => {
-                                                    let kind = crate::SdkError::kind(&error);
-                                                    (
-                                                        false,
-                                                        message::MessageContent::text(error.to_string()),
-                                                        Some(kind),
-                                                    )
-                                                }
-                                            };
-                                            (call, ok, content, error_kind, started.elapsed().as_millis() as u64)
+                                            // Two channels: `content` is what the model sees and what is
+                                            // persisted (text-only); `event_output` is what the UI sees (may
+                                            // carry a serialized `ToolOutcome` with resource parts).
+                                            let (ok, content, event_output, error_kind) =
+                                                match tools.invoke(call, ctx).await {
+                                                    Ok(output) => {
+                                                        let (content, event_output) =
+                                                            value_to_channels(&output);
+                                                        (true, content, event_output, None)
+                                                    }
+                                                    // The tool message carries the error text for the
+                                                    // model to read; the stable kind travels on the
+                                                    // event so the UI classifies structurally instead
+                                                    // of sniffing the text.
+                                                    Err(error) => {
+                                                        let kind = crate::SdkError::kind(&error);
+                                                        let text = error.to_string();
+                                                        (
+                                                            false,
+                                                            message::MessageContent::text(text.clone()),
+                                                            text,
+                                                            Some(kind),
+                                                        )
+                                                    }
+                                                };
+                                            (
+                                                call,
+                                                ok,
+                                                content,
+                                                event_output,
+                                                error_kind,
+                                                started.elapsed().as_millis() as u64,
+                                            )
                                         });
                                     }
 
                                     let mut tool_messages = Vec::with_capacity(tool_calls.len());
-                                    while let Some((call, ok, content, error_kind, elapsed_ms)) =
-                                        tasks.next().await
+                                    while let Some((
+                                        call,
+                                        ok,
+                                        content,
+                                        event_output,
+                                        error_kind,
+                                        elapsed_ms,
+                                    )) = tasks.next().await
                                     {
                                         let tool_message = message::Message::Tool {
                                             tool_call_id: call.id.clone(),
@@ -549,7 +570,7 @@ impl Agent {
                                             call_id: call.id.clone(),
                                             name: call.name.clone(),
                                             ok,
-                                            output: content.to_string(),
+                                            output: event_output,
                                             error_kind,
                                             elapsed_ms,
                                         };
@@ -927,20 +948,46 @@ fn trim_compaction_tool_outputs(
 
 /// Convert a tool's JSON output into message content.
 ///
-/// A tool may return **structured content**: a JSON array that deserializes into
-/// [`message::MessageContent`] and carries at least one image (a computer-use screenshot). That is
-/// kept structured so the image reaches the model. Everything else becomes text, using the
-/// compact JSON rendering (`Value::to_string`) — for a plain string result that is the
-/// quoted form the runtime always produced, so the request bytes (and the prefix cache) are
-/// unchanged for every existing tool.
-fn value_to_content(output: &serde_json::Value) -> message::MessageContent {
+/// Split a tool's JSON result into the **two channels**:
+///
+/// - the model-facing [`message::MessageContent`] (text-only in Phase 0/1 — this is what is
+///   persisted and sent back to the model), and
+/// - the UI-facing event `output` string (may carry a serialized [`message::ToolOutcome`] whose
+///   `parts` include [`message::ContentPart::Resource`] handles, so the desktop can render them).
+///
+/// Three cases, chosen so existing tools stay **byte-identical** on the model channel:
+///
+/// 1. A [`message::ToolOutcome`] object (`{parts, text, is_error}`): the model sees `text`; the UI
+///    sees the serialized outcome (so it can resolve resource parts). This is the new structured
+///    seam, opt-in per tool.
+/// 2. A JSON array that deserializes into [`message::MessageContent`] carrying an image (a
+///    computer-use screenshot): kept structured so the image reaches the model; the UI event keeps
+///    the historical `content.to_string()`.
+/// 3. Anything else: text via the compact JSON rendering (`Value::to_string`) — for a plain string
+///    result that is the quoted form the runtime always produced, so the request bytes (and the
+///    prefix cache) are unchanged for every existing tool.
+fn value_to_channels(output: &serde_json::Value) -> (message::MessageContent, String) {
+    // Case 1: structured `ToolOutcome`.
+    if output.is_object()
+        && let Ok(outcome) = serde_json::from_value::<message::ToolOutcome>(output.clone())
+    {
+        let model = message::MessageContent::text(outcome.text.clone());
+        // The UI gets the full outcome (parts + text) so resource renderers can resolve artifacts.
+        let ui = serde_json::to_string(&outcome).unwrap_or_else(|_| outcome.text.clone());
+        return (model, ui);
+    }
+    // Case 2: structured image content.
     if output.is_array()
         && let Ok(content) = serde_json::from_value::<message::MessageContent>(output.clone())
         && content.has_images()
     {
-        return content;
+        let ui = content.to_string();
+        return (content, ui);
     }
-    message::MessageContent::text(output.to_string())
+    // Case 3: plain text (historical behavior, byte-identical).
+    let content = message::MessageContent::text(output.to_string());
+    let ui = content.to_string();
+    (content, ui)
 }
 
 fn text_prefix_for_tokens(text: &str, budget: u64) -> &str {

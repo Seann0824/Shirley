@@ -333,10 +333,14 @@ export function App() {
       return { entries, index: entries.length - 1 };
     });
   }, [activeProject, sessionName]);
-  // Sidebar collapse: user's manual preference (persisted). Auto-collapsed when the window is too narrow; can still be manually expanded afterward.
+  // Sidebar collapse: **collapsed by default** so the first screen is just the
+  // conversation + composer — session/project navigation is a "simple but infrequent"
+  // action and does not deserve permanent screen space; it opens on demand via the
+  // chrome's toggle (and Home). The user's manual choice is still persisted, so an
+  // explicit expand sticks across launches. Also forced collapsed on narrow windows.
   const mobile = useMobileLayout();
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
-    window.matchMedia(MOBILE_LAYOUT_QUERY).matches || readBool(SIDEBAR_STORAGE_KEY, false),
+    window.matchMedia(MOBILE_LAYOUT_QUERY).matches || readBool(SIDEBAR_STORAGE_KEY, true),
   );
   // Top-bar tabs follow the **session** (Codex desktop model): each session owns its own
   // independent tab space — its chat tab plus the web pages it has opened. Switching the

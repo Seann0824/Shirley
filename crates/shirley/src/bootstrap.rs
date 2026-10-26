@@ -312,6 +312,13 @@ impl AgentFactory {
         tool_manager
             .context_mut()
             .insert(tools::read::WorkspaceRoots(workspace_roots));
+        // Artifact store (Phase 1 media channel): shared by the `read` tool (ingest image bytes)
+        // and the interface layer (serve bytes over the artifact endpoint / Tauri command).
+        // Content-addressed under `<state>/artifacts`; the same handle reaches every tool via
+        // `ToolContext`, exactly like `WorkspaceRoots`.
+        tool_manager
+            .context_mut()
+            .insert(crate::artifacts::ArtifactStore::global());
 
         let _ = tool_manager.register(tools::TodoTool::new(Arc::clone(&todo_store)));
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.

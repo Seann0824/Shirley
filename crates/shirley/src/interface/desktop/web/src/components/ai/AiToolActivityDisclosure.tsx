@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { AlertCircle, BookOpen, Globe, ListChecks, LoaderCircle, Terminal, Wrench } from "lucide-react";
 import type { AiToolExecution } from "@/types/ai";
+import { ResourcePreview, parseToolOutcome } from "./ResourcePreview";
 import { TextDisclosure } from "./TextDisclosure";
 import { aggregateToolExecutions } from "./toolErrorUtils";
 
@@ -95,7 +96,11 @@ function displayOutput(raw: string): string {
 
 function ToolActivityRow({ execution }: { execution: AiToolExecution }) {
   const [open, setOpen] = useState(false);
-  const output = execution.error || execution.result_json || execution.summary;
+  // Structured results (e.g. an image `read`) carry `ResourceRef`s alongside the model-facing
+  // text. Render the previews first (they are the point of the media channel), then the raw
+  // output below as the textual fallback.
+  const { resources, text } = parseToolOutcome(execution.result_json);
+  const output = execution.error || text || execution.result_json || execution.summary;
   return (
     <TextDisclosure
       label={activityLabel(execution)}
@@ -108,6 +113,13 @@ function ToolActivityRow({ execution }: { execution: AiToolExecution }) {
       contentClassName="mt-2 ml-5 min-w-0 rounded-control bg-inset p-3 text-caption"
     >
       {open && <>
+      {resources.length > 0 && (
+        <div className="mb-3 flex flex-col gap-2">
+          {resources.map((resource, index) => (
+            <ResourcePreview key={`${resource.artifact}:${index}`} resource={resource} />
+          ))}
+        </div>
+      )}
       {execution.input && (
         <div className="mb-3">
           <p className="mb-1 text-muted">Arguments</p>

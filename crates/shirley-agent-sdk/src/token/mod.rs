@@ -107,7 +107,9 @@ pub fn count_content_parts(content: &message::MessageContent) -> u64 {
         .iter()
         .map(|part| match part {
             message::ContentPart::Text { text } => count_text(text),
-            message::ContentPart::Image(_) => IMAGE_TOKENS,
+            // A resource is degraded to a short text placeholder in the request (Phase 1),
+            // so count it like an image reference rather than a full image.
+            message::ContentPart::Image(_) | message::ContentPart::Resource(_) => IMAGE_TOKENS,
         })
         .sum::<u64>()
 }

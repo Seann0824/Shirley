@@ -15,7 +15,8 @@ pub use error::{ErrorKind, SdkError};
 )]
 pub use message::Content;
 pub use message::{
-    ContentPart, ImageDetail, ImagePart, ImageSource, Message, MessageContent, ToolCall, Usage,
+    ArtifactId, ContentPart, ImageDetail, ImagePart, ImageSource, Message, MessageContent,
+    ModelAccess, ResourceMeta, ResourceRef, ToolCall, ToolOutcome, Usage,
 };
 pub use runtime::{
     Agent, AgentError, AgentEvent, CompactParts, CompactionConfig, ContextProvider, CutPlan,
