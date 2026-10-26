@@ -245,15 +245,6 @@ export type AgentBridge = {
   loadSubagent: (project: string, session: string, id: string) => Promise<HistoryMessage[]>;
   /** Cancel a running subagent (idempotent no-op once terminal / unknown). */
   cancelSubagent: (project: string, session: string, id: string) => Promise<void>;
-
-  /**
-   * Resolve a content-addressed artifact (`sha256:<64 hex>`) to a URL the DOM can load
-   * (an `<img>` / `<video>` / `<audio>` `src`). Desktop returns an inline `data:` URL
-   * (there is no HTTP server in the webview); the cloud build returns the server's
-   * `/api/artifact/{sha256}` URL with the access token as a query param (media elements
-   * cannot attach an `Authorization` header). Rejects on a missing artifact.
-   */
-  artifactUrl: (artifact: string) => Promise<string>;
 };
 
 const isTauri =
@@ -262,11 +253,6 @@ const isTauri =
 /** Route key: unique across projects (session names unique within a project, project ids globally). */
 function routeKey(project: string, session: string): string {
   return `${project}::${session}`;
-}
-
-/** Strip the `sha256:` scheme from a content-addressed artifact id, leaving bare hex. */
-export function stripArtifactScheme(artifact: string): string {
-  return artifact.startsWith("sha256:") ? artifact.slice("sha256:".length) : artifact;
 }
 
 /** Buffer until the snapshot arrives, then discard cloud events already included in its cursor. */
@@ -452,10 +438,6 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
     },
     async cancelSubagent(project, session, id) {
       await invoke("agent_cancel_subagent", { project, session, id });
-    },
-    async artifactUrl(artifact) {
-      const sha256 = stripArtifactScheme(artifact);
-      return invoke<string>("agent_artifact_data", { sha256 });
     },
   };
 }
@@ -670,13 +652,6 @@ function createMockBridge(): AgentBridge {
     },
     async cancelSubagent() {
       // mock: no-op.
-    },
-    async artifactUrl(artifact) {
-      // mock: no real bytes; return a transparent 1x1 PNG so the renderer path is exercisable.
-      const transparentPng =
-        "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
-      void artifact;
-      return transparentPng;
     },
   };
 }
@@ -918,15 +893,6 @@ async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
     async cancelSubagent(project, session, id) {
       await httpCall(baseUrl, "agent_cancel_subagent", { project, session, id });
     },
-    async artifactUrl(artifact) {
-      const sha256 = stripArtifactScheme(artifact);
-      const token = sessionStorage.getItem("shirley.cloudToken");
-      // Media elements (`<img>` / `<video>` / `<audio>`) cannot attach an Authorization
-      // header, so the token rides as a query param — the server's artifact route accepts
-      // it (same reason `/api/events` does). The digest is content-addressed and immutable,
-      // so the URL is safe to cache.
-      return `${baseUrl}/api/artifact/${sha256}${token ? `?token=${encodeURIComponent(token)}` : ""}`;
-    },
   };
 }
 
@@ -1145,17 +1111,6 @@ async function createHybridBridge(): Promise<AgentBridge> {
     async cancelSubagent(project, session, id) {
       const { bridge, rawId } = route(project);
       await bridge.cancelSubagent(rawId, session, id);
-    },
-    async artifactUrl(artifact) {
-      // Artifacts are global (content-addressed under `~/.shirley/artifacts`), shared by the
-      // local and cloud runtimes on this host. Route to local; if it is missing there, fall
-      // back to cloud (whose artifact root may be a different host).
-      try {
-        return await local.artifactUrl(artifact);
-      } catch (error) {
-        if (cloud) return cloud.artifactUrl(artifact);
-        throw error;
-      }
     },
   };
 }

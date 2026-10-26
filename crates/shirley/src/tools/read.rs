@@ -2,10 +2,8 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 
 use shirley_agent_sdk::workspace::{WorkSpace, WorkspaceError};
-use shirley_agent_sdk::{ContentPart, ResourceMeta, ToolContext, ToolError, ToolOutcome, tool};
+use shirley_agent_sdk::{ToolContext, ToolError, tool};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncSeekExt, BufReader};
-
-use crate::artifacts::{ArtifactStore, image_mime_for_extension};
 
 /// Default line count. Used when the model does not specify, to avoid "reading the whole file by the way".
 const DEFAULT_LINE_COUNT: usize = 200;
@@ -111,7 +109,7 @@ pub(crate) fn clip_to_budget(text: &str, budget: usize) -> &str {
 /// Returning plain text rather than structured JSON is deliberate -- directly readable by the model, and the line numbers make it easy to
 /// continue reading with `start_line`.
 #[tool(
-    description = "Read the contents of a text file inside the workspace by line, returning line-numbered text. Reads have line and byte caps; when content is truncated, a hint on how to continue is shown at the end. For large files, first locate content with the grep tool, then use this tool to read the relevant range; do not read the whole file with cat. Reading an image file returns a previewable resource instead of text."
+    description = "Read the contents of a text file inside the workspace by line, returning line-numbered text. Reads have line and byte caps; when content is truncated, a hint on how to continue is shown at the end. For large files, first locate content with the grep tool, then use this tool to read the relevant range; do not read the whole file with cat."
 )]
 pub async fn read(
     ctx: &ToolContext,
@@ -122,131 +120,26 @@ pub async fn read(
     #[param(description = "start line, 1-based; defaults to line 1")] start_line: Option<usize>,
     #[param(description = "maximum number of lines to read, defaults to 200, hard cap 2000")]
     line_count: Option<usize>,
-) -> Result<serde_json::Value, ToolError> {
+) -> Result<String, ToolError> {
     let roots = resolve_workspace_roots(ctx)
         .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
     // Pick the first root that actually contains the requested path. Falling through to the
     // primary root when nothing matches keeps the error message accurate (it will report the
     // missing file relative to the primary root).
-    let chosen = roots
-        .iter()
-        .find(|root| {
-            WorkSpace::new((*root).clone())
-                .ok()
-                .and_then(|workspace| workspace.resolve(&path).ok())
-                .is_some_and(|resolved| resolved.exists())
-        })
-        .or_else(|| roots.first())
+    for root in &roots {
+        if WorkSpace::new(root.clone())
+            .ok()
+            .and_then(|workspace| workspace.resolve(&path).ok())
+            .is_some_and(|resolved| resolved.exists())
+        {
+            return read_text_range(root, &path, &path, start_line, line_count).await;
+        }
+    }
+    let primary = roots
+        .first()
         .cloned()
         .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
-
-    // Image files take the **resource channel** instead of the text channel: ingest the bytes
-    // into the content-addressed `ArtifactStore` and return a previewable `ResourceRef` (the
-    // model still only sees a short text placeholder — see `ToolOutcome::text`). Only when an
-    // `ArtifactStore` was injected (production); otherwise fall through to the text path so the
-    // binary sniff still refuses it.
-    if let Some(mime) = std::path::Path::new(&path)
-        .extension()
-        .and_then(|ext| ext.to_str())
-        .and_then(image_mime_for_extension)
-        && let Some(store) = ctx.get::<ArtifactStore>()
-    {
-        return read_image_resource(&store, &chosen, &path, mime).await;
-    }
-
-    let text = read_text_range(&chosen, &path, &path, start_line, line_count).await?;
-    // Text path returns a JSON string: byte-identical to the historical `String` return.
-    Ok(serde_json::Value::String(text))
-}
-
-/// Ingest an image file into the artifact store and return a structured [`ToolOutcome`] whose
-/// `parts` carry the [`ContentPart::Resource`] and whose `text` is the model-facing placeholder.
-async fn read_image_resource(
-    store: &ArtifactStore,
-    root: &Path,
-    path: &str,
-    mime: &str,
-) -> Result<serde_json::Value, ToolError> {
-    let workspace = WorkSpace::new(root.to_path_buf()).map_err(|error| {
-        ToolError::ExecutionError(format!("workspace initialization failed: {error}"))
-    })?;
-    let resolved = workspace.resolve(path).map_err(|error| match error {
-        WorkspaceError::OutsideRoot(_) | WorkspaceError::InvalidPath(_) => {
-            ToolError::ArgumentsError(error.to_string())
-        }
-        WorkspaceError::Io(_) => ToolError::ExecutionError(error.to_string()),
-    })?;
-    let metadata = tokio::fs::metadata(&resolved).await.map_err(|error| {
-        ToolError::ExecutionError(format!("failed to read metadata of {path}: {error}"))
-    })?;
-    if !metadata.is_file() {
-        return Err(ToolError::ExecutionError(format!(
-            "{path} is not a regular file and cannot be read"
-        )));
-    }
-    let bytes = tokio::fs::read(&resolved).await.map_err(|error| {
-        ToolError::ExecutionError(format!("failed to read image {path}: {error}"))
-    })?;
-    let meta = match image_dimensions(&bytes) {
-        Some((width, height)) => ResourceMeta::Image { width, height },
-        None => ResourceMeta::Other,
-    };
-    let resource = store
-        .ingest(&bytes, mime, Some(format!("image {path}")), meta)
-        .await
-        .map_err(|error| {
-            ToolError::ExecutionError(format!("failed to store image artifact: {error}"))
-        })?;
-    let text = format!(
-        "[image {path}: {} bytes, stored as {}. The UI can preview it; the model cannot read the image bytes.]",
-        resource.bytes, resource.artifact
-    );
-    let outcome = ToolOutcome::with_parts(text, vec![ContentPart::Resource(resource)]);
-    serde_json::to_value(outcome)
-        .map_err(|error| ToolError::ExecutionError(format!("failed to encode outcome: {error}")))
-}
-
-/// Best-effort image dimensions from the header bytes (PNG / GIF / JPEG). Returns `None` when
-/// the format is unknown or the header is malformed — the resource is still valid, just without
-/// typed dimensions.
-fn image_dimensions(bytes: &[u8]) -> Option<(u32, u32)> {
-    // PNG: 8-byte signature, then IHDR length+type, then width/height big-endian u32.
-    if bytes.starts_with(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]) && bytes.len() >= 24 {
-        let width = u32::from_be_bytes(bytes[16..20].try_into().ok()?);
-        let height = u32::from_be_bytes(bytes[20..24].try_into().ok()?);
-        return Some((width, height));
-    }
-    // GIF: "GIF87a"/"GIF89a", then little-endian u16 width/height.
-    if (bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) && bytes.len() >= 10 {
-        let width = u32::from(u16::from_le_bytes(bytes[6..8].try_into().ok()?));
-        let height = u32::from(u16::from_le_bytes(bytes[8..10].try_into().ok()?));
-        return Some((width, height));
-    }
-    // JPEG: scan for a Start-Of-Frame marker (C0..CF except C4/C8/CC).
-    if bytes.starts_with(&[0xFF, 0xD8]) {
-        let mut index = 2;
-        while index + 9 < bytes.len() {
-            if bytes[index] != 0xFF {
-                index += 1;
-                continue;
-            }
-            let marker = bytes[index + 1];
-            if (0xC0..=0xCF).contains(&marker) && marker != 0xC4 && marker != 0xC8 && marker != 0xCC
-            {
-                let height = u32::from(u16::from_be_bytes(
-                    bytes[index + 5..index + 7].try_into().ok()?,
-                ));
-                let width = u32::from(u16::from_be_bytes(
-                    bytes[index + 7..index + 9].try_into().ok()?,
-                ));
-                return Some((width, height));
-            }
-            let segment_len =
-                u16::from_be_bytes(bytes[index + 2..index + 4].try_into().ok()?) as usize;
-            index += 2 + segment_len;
-        }
-    }
-    None
+    read_text_range(&primary, &path, &path, start_line, line_count).await
 }
 
 /// Controlled read kernel: reads the relative path `path` under `root` by line, returning a line-numbered excerpt.
@@ -461,7 +354,6 @@ mod tests {
         let out = read(&ToolContext::new(), "a.txt".into(), None, None)
             .await
             .unwrap();
-        let out = out.as_str().expect("text path returns a JSON string");
 
         assert!(
             out.contains("     1 | first"),
@@ -494,7 +386,6 @@ mod tests {
         let out = read(&ToolContext::new(), "b.txt".into(), Some(3), Some(2))
             .await
             .unwrap();
-        let out = out.as_str().expect("text path returns a JSON string");
 
         assert!(
             out.contains("     3 | line3"),
@@ -620,16 +511,15 @@ mod tests {
         let out = read(&ToolContext::new(), "big.txt".into(), None, None)
             .await
             .unwrap();
-        let text = out.as_str().expect("text path returns a JSON string");
         assert!(
-            text.contains("truncated"),
+            out.contains("truncated"),
             "should hint truncation: length {}",
-            text.len()
+            out.len()
         );
         assert!(
-            text.len() <= MAX_OUTPUT_BYTES + 200,
+            out.len() <= MAX_OUTPUT_BYTES + 200,
             "output should be bounded by the byte cap, actual {}",
-            text.len()
+            out.len()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -707,12 +597,11 @@ mod tests {
         )
         .await
         .unwrap();
-        let text = out.as_str().expect("text path returns a JSON string");
-        let lines = text.lines().filter(|l| l.contains(" | ")).count();
+        let lines = out.lines().filter(|l| l.contains(" | ")).count();
         assert_eq!(lines, MAX_LINE_COUNT, "should read exactly the line cap");
         assert!(
-            text.contains("truncated"),
-            "should hint there is more: {text}"
+            out.contains("truncated"),
+            "should hint there is more: {out}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

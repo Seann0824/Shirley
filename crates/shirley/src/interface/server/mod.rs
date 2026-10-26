@@ -38,7 +38,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::http::StatusCode;
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
@@ -147,7 +147,6 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         .route("/api/cmd/{cmd}", post(dispatch))
         .route("/api/events", get(events_handler))
         .route("/api/status", get(status_handler))
-        .route("/api/artifact/{sha256}", get(artifact_handler))
         .route("/api/memory/sync", post(memory_sync))
         .route("/api/memory/review", post(memory_review))
         .route(
@@ -196,8 +195,7 @@ async fn authorize(
         .map(str::to_owned);
     // Browser EventSource cannot attach headers. Native clients always use Bearer headers.
     let supplied = bearer.or_else(|| {
-        let path = request.uri().path();
-        (path == "/api/events" || path.starts_with("/api/artifact/"))
+        (request.uri().path() == "/api/events")
             .then(|| {
                 url::form_urlencoded::parse(request.uri().query().unwrap_or("").as_bytes())
                     .find(|(key, _)| key == "token")
@@ -256,118 +254,6 @@ async fn memory_confirm_personal(
     .map_err(|e| ApiError::internal(e.to_string()))?
     .map_err(|e| ApiError::bad(e.to_string()))?;
     no_content()
-}
-
-// ---------------------------------------------------------------------------
-// Artifacts (content-addressed media channel)
-// ---------------------------------------------------------------------------
-
-/// Serve a stored artifact by its 64-char sha256 hex digest:
-/// `GET /api/artifact/{sha256}`.
-///
-/// The route parameter is untrusted, so it is validated by [`ArtifactStore::resolve`]
-/// (exactly 64 hex chars -> no `/`, `..`, etc. can appear). Responses carry an
-/// `ETag` (the digest itself) and `Accept-Ranges: bytes`; a single `Range` request is
-/// honoured so `<video>`/`<audio>` can seek. The MIME type comes from the ingest sidecar,
-/// defaulting to `application/octet-stream`.
-async fn artifact_handler(
-    State(_state): State<Arc<ServerState>>,
-    Path(sha256): Path<String>,
-    headers: HeaderMap,
-) -> Result<Response, ApiError> {
-    let store = crate::artifacts::ArtifactStore::global();
-    let Some(path) = store.resolve(&sha256) else {
-        return Err(ApiError::not_found("artifact not found"));
-    };
-    let mime = store
-        .mime_of(&sha256)
-        .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| ApiError::internal(format!("failed to read artifact: {e}")))?;
-    let total = bytes.len();
-
-    let etag = format!("\"{sha256}\"");
-    // Honour a single byte range so media elements can seek.
-    let range = headers
-        .get(header::RANGE)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| parse_byte_range(value, total));
-
-    let (status, body, content_range) = match range {
-        Some((start, end)) => {
-            let slice = bytes[start..=end].to_vec();
-            (
-                StatusCode::PARTIAL_CONTENT,
-                slice,
-                Some(format!("bytes {start}-{end}/{total}")),
-            )
-        }
-        None => (StatusCode::OK, bytes, None),
-    };
-
-    let mut response = Response::new(axum::body::Body::from(body));
-    let response_headers = response.headers_mut();
-    response_headers.insert(
-        header::CONTENT_TYPE,
-        mime.parse()
-            .unwrap_or_else(|_| header::HeaderValue::from_static("application/octet-stream")),
-    );
-    response_headers.insert(
-        header::ETAG,
-        etag.parse()
-            .unwrap_or_else(|_| header::HeaderValue::from_static("\"\"")),
-    );
-    response_headers.insert(
-        header::ACCEPT_RANGES,
-        header::HeaderValue::from_static("bytes"),
-    );
-    response_headers.insert(
-        header::CACHE_CONTROL,
-        header::HeaderValue::from_static("public, max-age=31536000, immutable"),
-    );
-    if let Some(content_range) = content_range
-        && let Ok(value) = content_range.parse()
-    {
-        response_headers.insert(header::CONTENT_RANGE, value);
-    }
-    *response.status_mut() = status;
-    Ok(response)
-}
-
-/// Parse a single `bytes=start-end` range against `total`. Returns an inclusive `(start, end)`.
-/// Open-ended (`bytes=start-`) and suffix (`bytes=-n`) forms are supported; anything malformed or
-/// out of bounds returns `None` (serve the whole body instead of erroring).
-fn parse_byte_range(value: &str, total: usize) -> Option<(usize, usize)> {
-    let spec = value.strip_prefix("bytes=")?;
-    // Only the first range of a multi-range request is honoured.
-    let spec = spec.split(',').next()?.trim();
-    let (start_str, end_str) = spec.split_once('-')?;
-    if total == 0 {
-        return None;
-    }
-    if start_str.is_empty() {
-        // suffix range: last N bytes
-        let n: usize = end_str.parse().ok()?;
-        if n == 0 {
-            return None;
-        }
-        let start = total.saturating_sub(n);
-        return Some((start, total - 1));
-    }
-    let start: usize = start_str.parse().ok()?;
-    if start >= total {
-        return None;
-    }
-    let end = if end_str.is_empty() {
-        total - 1
-    } else {
-        end_str.parse::<usize>().ok()?.min(total - 1)
-    };
-    if end < start {
-        return None;
-    }
-    Some((start, end))
 }
 
 // ---------------------------------------------------------------------------

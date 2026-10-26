@@ -65,49 +65,6 @@ export type AgentEventWire =
   | ({ type: "notice"; text: string } & SessionTag)
   | ({ type: "finished"; stop_reason: StopReason } & SessionTag);
 
-/** Typed resource metadata (aligned with the SDK `ResourceMeta`). */
-export type ResourceMetaWire =
-  | { kind: "other" }
-  | { kind: "image"; width: number; height: number }
-  | { kind: "video"; width: number; height: number; duration_ms: number }
-  | { kind: "audio"; duration_ms: number }
-  | { kind: "document"; pages?: number | null };
-
-/** How the model may access a resource (aligned with the SDK `ModelAccess`). */
-export type ModelAccessWire = "inline" | "on_demand" | "denied";
-
-/**
- * A content-addressed artifact reference (aligned with the SDK `ResourceRef`).
- *
- * `artifact` is `sha256:<64 hex>` — the only way to fetch the bytes. This is the
- * UI-facing channel: the model sees only the tool's `text`, never these bytes
- * (`model` = `denied` by default), so rich previews never inflate the context window.
- */
-export type ResourceRefWire = {
-  type: "resource";
-  artifact: string;
-  mime: string;
-  bytes: number;
-  alt?: string | null;
-  meta?: ResourceMetaWire;
-  model?: ModelAccessWire;
-  render?: string | null;
-};
-
-/** One structured content part (aligned with the SDK `ContentPart`). */
-export type ContentPartWire = { type: "text"; text: string } | ResourceRefWire;
-
-/**
- * The structured tool result (aligned with the SDK `ToolOutcome`), serialized by the
- * runtime into `AgentEventWire.output`. A plain-text tool result arrives as a bare
- * JSON string / non-object and is treated as text by the renderer.
- */
-export type ToolOutcomeWire = {
-  parts: ContentPartWire[];
-  text: string;
-  is_error?: boolean;
-};
-
 /** One UI item in a snapshot (aligned with `ItemWire` in the Rust `desktop/wire.rs`). */
 export type ItemWire =
   | { kind: "message"; role: string; content: string }

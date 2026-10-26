@@ -664,29 +664,6 @@ async fn agent_cancel_subagent(
     state.manager.cancel_subagent(&project, &session, &id).await
 }
 
-/// Fetch a stored artifact as a `data:` URL for the desktop webview.
-///
-/// The desktop webview has no HTTP server, so `<img src>` cannot hit `/api/artifact/{sha256}`.
-/// This command reads the content-addressed blob and returns an inline `data:` URL the frontend
-/// can assign directly. Cloud mode instead uses the server's `/api/artifact/{sha256}` route
-/// (see `bridge.ts`); both resolve through the same [`crate::artifacts::ArtifactStore`].
-#[tauri::command]
-async fn agent_artifact_data(sha256: String) -> Result<String, String> {
-    use base64::Engine as _;
-    let store = crate::artifacts::ArtifactStore::global();
-    let path = store
-        .resolve(&sha256)
-        .ok_or_else(|| format!("artifact not found: {sha256}"))?;
-    let bytes = tokio::fs::read(&path)
-        .await
-        .map_err(|e| format!("failed to read artifact: {e}"))?;
-    let mime = store
-        .mime_of(&sha256)
-        .unwrap_or_else(|| "application/octet-stream".to_owned());
-    let encoded = base64::engine::general_purpose::STANDARD.encode(&bytes);
-    Ok(format!("data:{mime};base64,{encoded}"))
-}
-
 pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
     let working_dir = factory.working_dir.clone();
 
@@ -741,7 +718,6 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
             agent_list_models,
             agent_set_model,
             agent_search_files,
-            agent_artifact_data,
             agent_list_skills,
             agent_activate_skill,
             agent_list_sessions,

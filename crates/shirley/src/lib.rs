@@ -64,7 +64,7 @@ pub(crate) mod infra;
 pub(crate) use domain::{
     model_providers, models, project, session, status, todo, workspace_search,
 };
-pub(crate) use infra::{artifacts, prompt_template, remote, settings, storage};
+pub(crate) use infra::{prompt_template, remote, settings, storage};
 
 use shirley_agent_sdk::AgentError;
 

@@ -14,25 +14,6 @@ use serde_json::{Value, json};
 use super::AdapterError;
 use crate::message::{ContentPart, ImageDetail, ImagePart, ImageSource, MessageContent};
 
-/// Phase 1: a [`ContentPart::Resource`] is never inlined into a request — the runtime strips
-/// tool outcome parts down to text before encoding. If one reaches an adapter anyway (e.g. a
-/// hand-built message), degrade it to a short, stable text placeholder so the request stays
-/// valid and the model still learns *what* the resource was.
-fn resource_placeholder(resource: &crate::message::ResourceRef) -> String {
-    let alt = resource.alt.as_deref().unwrap_or("");
-    if alt.is_empty() {
-        format!(
-            "[resource {} {} {} bytes]",
-            resource.mime, resource.artifact, resource.bytes
-        )
-    } else {
-        format!(
-            "[resource {} {} {} bytes: {alt}]",
-            resource.mime, resource.artifact, resource.bytes
-        )
-    }
-}
-
 fn detail_str(detail: ImageDetail) -> &'static str {
     match detail {
         ImageDetail::Low => "low",
@@ -66,9 +47,6 @@ pub(crate) fn chat_content(content: &MessageContent) -> Result<Value, AdapterErr
                     )));
                 }
             },
-            ContentPart::Resource(resource) => {
-                parts.push(json!({ "type": "text", "text": resource_placeholder(resource) }));
-            }
         }
     }
     Ok(Value::Array(parts))
@@ -95,10 +73,6 @@ pub(crate) fn responses_content(content: &MessageContent) -> Value {
                 }
                 parts.push(block);
             }
-            ContentPart::Resource(resource) => parts.push(json!({
-                "type": "input_text",
-                "text": resource_placeholder(resource),
-            })),
         }
     }
     Value::Array(parts)
@@ -116,9 +90,6 @@ pub(crate) fn anthropic_content(content: &MessageContent) -> Result<Value, Adapt
         match part {
             ContentPart::Text { text } => blocks.push(json!({ "type": "text", "text": text })),
             ContentPart::Image(image) => blocks.push(anthropic_image(image)?),
-            ContentPart::Resource(resource) => {
-                blocks.push(json!({ "type": "text", "text": resource_placeholder(resource) }));
-            }
         }
     }
     Ok(Value::Array(blocks))
