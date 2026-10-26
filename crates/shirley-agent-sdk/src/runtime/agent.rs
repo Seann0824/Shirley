@@ -50,6 +50,14 @@ pub struct Agent {
     /// end of this turn's request — it does not enter `self.messages`, survives compaction, and
     /// leaves the prefix untouched (see [`super::context`]).
     context_provider: Option<Arc<dyn ContextProvider>>,
+    /// Turns an image **reference** into something the provider can fetch, at request-build time.
+    ///
+    /// The application layer keeps the bytes in its own store and puts only an opaque id in the
+    /// message ([`message::ImageSource::FileId`]). Resolving here means the session log stays a
+    /// small reference instead of megabytes of base64, and the bytes have exactly one home. It
+    /// rewrites the *request view* only: `self.messages` keeps the reference, so nothing is baked
+    /// in and a restore / retry simply resolves again.
+    image_resolver: Option<ImageResolver>,
     // L1 estimation + L2 calibration state (see the `token` module)
     token_counter: token::HeuristicCounter,
     /// Upper bound on model execution steps for a single user task (compaction does not reset
@@ -83,6 +91,7 @@ impl Agent {
         #[builder(into)] compaction_instruction: Option<String>,
         #[builder(default)] compaction_config: CompactionConfig,
         context_provider: Option<Arc<dyn ContextProvider>>,
+        image_resolver: Option<ImageResolver>,
         #[builder(default = 64)] max_steps: usize,
     ) -> Result<Self, AgentError> {
         // `max_steps == 0` is allowed and means "no execution cap" (see the field docs).
@@ -114,6 +123,7 @@ impl Agent {
             compaction_pending: false,
             compaction_config,
             context_provider,
+            image_resolver,
             token_counter: token::HeuristicCounter::new(),
             max_steps,
         })
@@ -514,9 +524,14 @@ impl Agent {
 
                                         tasks.push(async move {
                                             let started = std::time::Instant::now();
-                                            let (ok, content, error_kind) = match tools.invoke(call, ctx).await {
+                                            let (ok, content, error_kind, structured) =
+                                                match tools.invoke(call, ctx).await {
                                                 Ok(output) => {
-                                                    (true, value_to_content(&output), None)
+                                                    // Keep the raw value: the flattened
+                                                    // `content` is the model's view, the value is
+                                                    // the UI's (docs/render-parts.md).
+                                                    let content = value_to_content(&output);
+                                                    (true, content, None, Some(output))
                                                 }
                                                 // The tool message carries the error text for the
                                                 // model to read; the stable kind travels on the
@@ -528,16 +543,30 @@ impl Agent {
                                                         false,
                                                         message::MessageContent::text(error.to_string()),
                                                         Some(kind),
+                                                        None,
                                                     )
                                                 }
                                             };
-                                            (call, ok, content, error_kind, started.elapsed().as_millis() as u64)
+                                            (
+                                                call,
+                                                ok,
+                                                content,
+                                                error_kind,
+                                                started.elapsed().as_millis() as u64,
+                                                structured,
+                                            )
                                         });
                                     }
 
                                     let mut tool_messages = Vec::with_capacity(tool_calls.len());
-                                    while let Some((call, ok, content, error_kind, elapsed_ms)) =
-                                        tasks.next().await
+                                    while let Some((
+                                        call,
+                                        ok,
+                                        content,
+                                        error_kind,
+                                        elapsed_ms,
+                                        structured,
+                                    )) = tasks.next().await
                                     {
                                         let tool_message = message::Message::Tool {
                                             tool_call_id: call.id.clone(),
@@ -550,6 +579,7 @@ impl Agent {
                                             name: call.name.clone(),
                                             ok,
                                             output: content.to_string(),
+                                            structured,
                                             error_kind,
                                             elapsed_ms,
                                         };
@@ -694,6 +724,23 @@ impl Agent {
         {
             active.push(message::Message::System { content: text });
         }
+        // A `file_id` must never reach an encoder: `chat_content` rejects it (the provider has no
+        // way to look it up). Without a resolver only the **drop** half is active, which is
+        // exactly the safe half -- a user attachment is never forwarded anyway, and an
+        // unresolvable tool image is dropped rather than sent as a dangling id.
+        let drop_only = |_id: &str| None;
+        let resolver: &dyn Fn(&str) -> Option<String> = match &self.image_resolver {
+            Some(resolver) => resolver.as_ref(),
+            None => &drop_only,
+        };
+        for message in &mut active {
+            resolve_image_refs(message, resolver);
+        }
+        // An assistant turn with neither text nor tool calls is rejected by every provider
+        // ("content or tool_calls must be set"). It can only be the remains of an interrupted
+        // round; drop it here as well, so a log written before the persistence-side guard existed
+        // does not poison every later request.
+        active.retain(|message| !is_unsendable_assistant(message));
         active
     }
 
@@ -775,6 +822,18 @@ impl Agent {
         // `compaction_config`.
         let content = format!("{instruction}\n\n{}", self.compaction_config.template);
         messages.push(message::Message::System { content });
+
+        // The summary request is **text only**. An image reference here is nothing but a way to
+        // fail: the ChatCompletions / Anthropic encoders reject a `file_id` (only the main request
+        // view resolves or drops it), and inlining the bytes as a `data:` URL costs tens of
+        // thousands of tokens for a picture the summary could not actually reproduce. Stripping
+        // keeps the line naming the attachment, so the summary still knows a picture existed.
+        // Only this copy is touched -- `self.messages` keeps the reference, and the rebuilt log
+        // (task included) keeps it too.
+        let mut messages = adapter::content::strip_images_with(
+            &messages,
+            adapter::content::IMAGE_OMITTED_FOR_SUMMARY,
+        );
 
         // The compaction trigger ratio is not the capacity limit of the summary request. Reserve
         // output space from the window; estimation only decides how to shrink the request, not
@@ -933,12 +992,102 @@ fn trim_compaction_tool_outputs(
 /// compact JSON rendering (`Value::to_string`) — for a plain string result that is the
 /// quoted form the runtime always produced, so the request bytes (and the prefix cache) are
 /// unchanged for every existing tool.
+/// Turn a tool's raw return value into what the model reads.
+///
+/// Two envelope shapes are recognized; everything else is stringified as before:
+///
+/// 1. a `MessageContent` array carrying images -- handed to the model as multimodal content;
+/// 2. an object with a string `content` field -- the tool is returning
+///    `{ "content": <text for the model>, "parts": [<structured data for the UI>] }`.
+///    Only `content` reaches the model: the parts are render-layer data (asset ids, links,
+///    tables) and stringifying them would waste context and confuse the model.
+///
+/// The convention matters because the tool result is simultaneously the model's view and the
+/// UI's source (`docs/render-parts.md`): a tool must be able to say "here is a one-line
+/// description for you, and here is an image for the human" without inventing a second channel.
+/// Turns a library id into something the provider can fetch (a `data:` URL).
+///
+/// Injected by the application layer: the SDK must not know where bytes live. Returning `None`
+/// drops the reference instead of forwarding a dangling id.
+pub type ImageResolver = Arc<dyn Fn(&str) -> Option<String> + Send + Sync>;
+
+/// Rewrite image references, **in the request view only**.
+///
+/// The two directions are deliberately different:
+///
+/// - A **tool result** is content the model asked for, so a reference there is resolved into
+///   something the provider can fetch.
+/// - A **user message** is not: the whole point of a resource library is that the model *decides*
+///   what to read, so its reference must reach the provider as nothing at all. The reference still
+///   lives in `self.messages`, where the application layer renders it as a card.
+///
+/// A reference that cannot be resolved is dropped rather than forwarded: a dangling provider-side
+/// id turns "the local file is gone" into a confusing remote error. Text parts are always kept, so
+/// a message never collapses to nothing.
+fn resolve_image_refs(message: &mut message::Message, resolver: &dyn Fn(&str) -> Option<String>) {
+    let (content, asked_for) = match message {
+        message::Message::User { content } => (content, false),
+        message::Message::Tool {
+            content: Some(content),
+            ..
+        } => (content, true),
+        _ => return,
+    };
+    if !content.has_images() {
+        return;
+    }
+    let parts: Vec<message::ContentPart> = content
+        .as_parts()
+        .iter()
+        .filter_map(|part| match part {
+            message::ContentPart::Image(image) => match &image.source {
+                message::ImageSource::FileId { file_id } => {
+                    asked_for.then(|| resolver(file_id)).flatten().map(|url| {
+                        message::ContentPart::Image(message::ImagePart {
+                            source: message::ImageSource::Url { url },
+                            detail: image.detail,
+                        })
+                    })
+                }
+                message::ImageSource::Url { .. } => Some(part.clone()),
+            },
+            _ => Some(part.clone()),
+        })
+        .collect();
+    *content = message::MessageContent::from(parts);
+}
+
+/// True for an assistant message that carries neither text nor tool calls -- it has nothing to say
+/// and no provider accepts it.
+fn is_unsendable_assistant(message: &message::Message) -> bool {
+    let message::Message::Assistant {
+        content,
+        reasoning_content,
+        tool_calls,
+    } = message
+    else {
+        return false;
+    };
+    if !tool_calls.is_empty() {
+        return false;
+    }
+    let blank = |text: &Option<String>| text.as_deref().is_none_or(str::is_empty);
+    blank(content) && blank(reasoning_content)
+}
+
 fn value_to_content(output: &serde_json::Value) -> message::MessageContent {
     if output.is_array()
         && let Ok(content) = serde_json::from_value::<message::MessageContent>(output.clone())
         && content.has_images()
     {
         return content;
+    }
+    if let Some(text) = output
+        .as_object()
+        .and_then(|object| object.get("content"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return message::MessageContent::text(text.to_string());
     }
     message::MessageContent::text(output.to_string())
 }
@@ -1076,5 +1225,107 @@ mod tests {
         assert!(
             matches!(&messages[..], [message::Message::Tool { tool_call_id, content: Some(text) }] if tool_call_id == "a" && text == "modelName returned empty")
         );
+    }
+
+    fn text_of(message: &message::Message) -> String {
+        let content = match message {
+            message::Message::User { content }
+            | message::Message::Tool {
+                content: Some(content),
+                ..
+            } => content,
+            _ => return String::new(),
+        };
+        content
+            .as_parts()
+            .iter()
+            .filter_map(|part| match part {
+                message::ContentPart::Text { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn ref_image() -> message::ContentPart {
+        message::ContentPart::Image(message::ImagePart {
+            source: message::ImageSource::FileId {
+                file_id: "abc123".into(),
+            },
+            detail: None,
+        })
+    }
+
+    fn image_sources(message: &message::Message) -> Vec<message::ImageSource> {
+        let content = match message {
+            message::Message::User { content }
+            | message::Message::Tool {
+                content: Some(content),
+                ..
+            } => content,
+            _ => return Vec::new(),
+        };
+        content
+            .as_parts()
+            .iter()
+            .filter_map(|part| match part {
+                message::ContentPart::Image(image) => Some(image.source.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// The model must not see a picture the *user* merely attached: it only sees the text mention,
+    /// and loads the picture through a tool when it decides to. A tool result is the other way
+    /// round -- the model asked for it, so the reference is resolved.
+    #[test]
+    fn user_references_stay_unresolved_while_tool_references_resolve() {
+        let resolver = |id: &str| Some(format!("data:image/png;base64,{id}"));
+
+        let mut user = message::Message::User {
+            content: message::MessageContent::from(vec![
+                message::ContentPart::Text {
+                    text: "look at this".into(),
+                },
+                ref_image(),
+            ]),
+        };
+        resolve_image_refs(&mut user, &resolver);
+        assert!(
+            image_sources(&user).is_empty(),
+            "a user attachment must not reach the provider"
+        );
+        assert_eq!(text_of(&user), "look at this", "the text survives");
+
+        let mut tool = message::Message::Tool {
+            tool_call_id: "call-1".into(),
+            content: Some(message::MessageContent::from(vec![ref_image()])),
+        };
+        resolve_image_refs(&mut tool, &resolver);
+        let sources = image_sources(&tool);
+        assert_eq!(
+            sources.len(),
+            1,
+            "a tool result the model asked for is resolved"
+        );
+        match &sources[0] {
+            message::ImageSource::Url { url } => assert_eq!(url, "data:image/png;base64,abc123"),
+            other => panic!("expected a resolved url, got {other:?}"),
+        }
+    }
+
+    /// A reference that cannot be resolved is dropped rather than forwarded: a dangling provider
+    /// id turns "the local file is gone" into a confusing remote error.
+    #[test]
+    fn unresolvable_references_are_dropped_not_forwarded() {
+        let mut tool = message::Message::Tool {
+            tool_call_id: "call-1".into(),
+            content: Some(message::MessageContent::from(vec![
+                message::ContentPart::Text { text: "x".into() },
+                ref_image(),
+            ])),
+        };
+        resolve_image_refs(&mut tool, &|_id| None);
+        assert!(image_sources(&tool).is_empty());
+        assert_eq!(text_of(&tool), "x");
     }
 }

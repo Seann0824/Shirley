@@ -13,6 +13,26 @@
 import type { AgentEventWire, SessionSnapshot, StateSnapshotWire } from "@/types/wire";
 import { providerBridge, mockProviderBridge, selectionKey, type ProviderBridge } from "@/lib/model-providers";
 
+/**
+ * An artifact served as **text** rather than as a URL.
+ *
+ * HTML artifacts must be fetched as source and injected with `srcDoc`: loading them as a document
+ * would run generated code on the page's own origin (see `docs/render-parts.md`).
+ */
+export type AssetTextResult = { text: string; mime: string; truncated: boolean };
+
+/**
+ * One entry in the media library (mirrors Rust's `LibraryEntry`).
+ *
+ * The library is the *only* way media reaches the model: the composer uploads bytes into it and
+ * then references `id` in the prompt, so the transcript and the session log carry a short
+ * reference instead of base64. `id` is what `media`/`assetUrl`/`assetText` take.
+ */
+export type LibraryEntry = { id: string; name: string; mime: string; bytes: number; addedMs: number };
+
+/** Result of ingesting local files: per-path failures do not fail the whole batch. */
+export type IngestResult = { entries: LibraryEntry[]; errors: string[] };
+
 /** Subscription handle for one session: snapshot + unsubscribe. */
 export type SessionSubscription = {
   snapshot: SessionSnapshot;
@@ -108,6 +128,30 @@ export type SubagentSummary = {
   summary: string;
   /** Terminal stop reason (empty while running). */
   stop_reason: string;
+};
+
+/**
+ * What the device the app is running on can do for dictation.
+ *
+ * Deliberately not project-scoped: audio is recorded *and* transcribed on the user's own
+ * device, so a cloud project dictates with that device's recogniser and this desktop
+ * computer's `whisper.cpp` is only ever this computer's. (`web` is browser-only, so it can
+ * never appear here.)
+ */
+export type AsrCapabilities = {
+  local_available: boolean;
+  local_binary: string | null;
+  local_model: string | null;
+  /** Whether a model is already on disk; `false` means the first utterance fetches one. */
+  local_model_ready: boolean;
+  /** One short setup hint; empty when everything is ready. */
+  hint: string;
+};
+
+/** Result of one transcription (audio never leaves the device). */
+export type AsrResult = {
+  text: string;
+  elapsed_ms: number;
 };
 
 /** Bridge capability description (lets the UI adapt to native vs. cloud transports). */
@@ -216,6 +260,53 @@ export type AgentBridge = {
   listModels: (project: string) => Promise<ModelEntry[]>;
   /** Hot-swap the model: no Agent rebuild, only `ModelConfig::model`. */
   setModel: (project: string, value: string, session?: string) => Promise<void>;
+  /**
+   * Dictation: what *this device* can do.
+   *
+   * Not project-scoped, unlike `listModels`: the microphone and the transcriber both belong to
+   * the machine the user is sitting at. A cloud deployment has no dictation route at all.
+   */
+  asrCapabilities: () => Promise<AsrCapabilities>;
+  /**
+   * Transcribe one utterance on this device. `audio` is base64 WAV (16 kHz mono, encoded in
+   * the page), so Rust never needs an audio decoder.
+   */
+  transcribe: (audio: string, language?: string | null) => Promise<AsrResult>;
+  /**
+   * Mint a URL for an artifact id (`docs/render-parts.md` P1).
+   *
+   * The id is an opaque, project-scoped artifact reference; what comes back is a URL the webview
+   * can load (`shirley-asset://` on desktop, `/api/asset/` on the cloud). The render layer never
+   * sees a filesystem path, and a handle that no longer resolves simply 404s.
+   */
+  assetUrl: (project: string, id: string) => Promise<string>;
+  /**
+   * Read an artifact as text (interactive HTML artifacts). Rejects when the artifact is not
+   * textual; callers degrade to the file card instead of showing an empty frame.
+   */
+  assetText: (project: string, id: string) => Promise<AssetTextResult>;
+  /**
+   * Put local files into the media library by **path** (desktop only: the frontend can only
+   * learn a path through the native picker or a desktop drop event). Bytes never cross the
+   * bridge, so a 500MB video costs nothing here.
+   */
+  ingestPaths: (project: string, paths: string[]) => Promise<IngestResult>;
+  /**
+   * Put one file's **bytes** into the media library (cloud/browser: no path exists).
+   *
+   * The cloud transport streams the `File` as a raw request body; the Tauri transport has no
+   * path either (a browser drop does not reveal one), so it falls back to a base64 data URL.
+   */
+  ingestBytes: (project: string, name: string, mime: string, file: Blob) => Promise<LibraryEntry>;
+  /**
+   * Everything in a project's media library, newest first.
+   *
+   * The library is the user's own inventory (pasted, dropped, uploaded, or produced by a tool),
+   * not a view of one session -- which is exactly why the Library page can answer "which file did
+   * I send you last week?" without scrolling a transcript. Entries carry an opaque id; thumbnails
+   * come from `assetUrl(project, entry.id)`, the same handle path parts use.
+   */
+  listLibrary: (project: string) => Promise<LibraryEntry[]>;
   /** Search workspace files by keyword (for `@` references, pure application layer). */
   searchFiles: (project: string, query: string) => Promise<FileEntry[]>;
   /** List the skills visible to a project's current session (for `/` candidates). */
@@ -397,6 +488,31 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
     async setModel(project, value, session) {
       await invoke("agent_set_model", { project, model: value, session });
     },
+    async asrCapabilities() {
+      // Always this process: dictation never leaves the device.
+      return invoke<AsrCapabilities>("agent_asr_capabilities", {});
+    },
+    async transcribe(audio, language) {
+      return invoke<AsrResult>("agent_transcribe", { audio, language: language ?? null });
+    },
+    async assetUrl(project, id) {
+      return invoke<string>("agent_asset_url", { project, id });
+    },
+    async assetText(project, id) {
+      return invoke<AssetTextResult>("agent_asset_text", { project, id });
+    },
+    async ingestPaths(project, paths) {
+      return invoke<IngestResult>("agent_ingest_paths", { project, paths });
+    },
+    async ingestBytes(project, name, mime, file) {
+      // Tauri receives a data URL rather than raw bytes: a `#[tauri::command]` argument is
+      // deserialized from JSON, so `Vec<u8>` would arrive as an array of numbers.
+      const dataUrl = await blobToDataUrl(file);
+      return invoke<LibraryEntry>("agent_ingest_bytes", { project, name, mime, text: dataUrl });
+    },
+    async listLibrary(project) {
+      return invoke<LibraryEntry[]>("agent_library_list", { project });
+    },
     async searchFiles(project, query) {
       return invoke<FileEntry[]>("agent_search_files", { project, query });
     },
@@ -567,6 +683,40 @@ function createMockBridge(): AgentBridge {
     async setModel() {
       // mock: no persistence, just gives the selector feedback.
     },
+    async asrCapabilities() {
+      // mock: a plain browser has no whisper.cpp behind it, so only the page's own recogniser
+      // can dictate here -- and that path never touches the bridge.
+      return {
+        local_available: false,
+        local_binary: null,
+        local_model: null,
+        local_model_ready: false,
+        hint: "",
+      };
+    },
+    async transcribe() {
+      throw new Error("Dictation runs on your own device, so there is nothing to upload.");
+    },
+    async assetUrl() {
+      // mock: no artifact channel in a plain browser, so parts degrade to their text fallback.
+      return "";
+    },
+    async assetText() {
+      // mock: same reason -- HTML parts fall back to a file card instead of running.
+      throw new Error("no artifact channel in the mock bridge");
+    },
+    async ingestPaths() {
+      // mock: no library behind a plain browser; return nothing so the composer shows no chip.
+      return { entries: [], errors: [] };
+    },
+    async ingestBytes(_project, name, mime, file) {
+      // mock: a fake entry lets the chip / send path be exercised without a backend.
+      return { id: `mock-${Date.now()}`, name, mime, bytes: file.size, addedMs: Date.now() };
+    },
+    async listLibrary() {
+      // mock: no library behind a plain browser; an empty page still renders (with its hint).
+      return [];
+    },
     async searchFiles(_project, query) {
       // mock: return a few fake entries so the `@` popover is debuggable in a plain browser.
       const all: FileEntry[] = [
@@ -718,6 +868,16 @@ function mockSessions(project: string): SessionEntry[] {
 // ---------------------------------------------------------------------------
 
 /** POST a command to the server; throws with the server's error text on non-2xx. */
+/** Read a `Blob`/`File` as a `data:` URL (the Tauri transport's byte carrier). */
+function blobToDataUrl(file: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error ?? new Error("failed to read file"));
+    reader.readAsDataURL(file);
+  });
+}
+
 async function httpCall<T>(baseUrl: string, name: string, args?: unknown): Promise<T> {
   const token = sessionStorage.getItem("shirley.cloudToken");
   const res = await fetch(`${baseUrl}/api/cmd/${name}`, {
@@ -850,6 +1010,56 @@ async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
     },
     async setModel(project, value, session) {
       await httpCall(baseUrl, "agent_set_model", { project, model: value, session });
+    },
+    async asrCapabilities() {
+      // A cloud runtime has no microphone and never receives audio: dictation happens on the
+      // device that opened the page (the browser recogniser). Say so honestly instead of
+      // advertising a transcriber this server does not have.
+      return {
+        local_available: false,
+        local_binary: null,
+        local_model: null,
+        local_model_ready: false,
+        hint: "",
+      };
+    },
+    async transcribe() {
+      throw new Error("Dictation runs on your own device; this server does not transcribe.");
+    },
+    async assetUrl(project, id) {
+      const path = await httpCall<string>(baseUrl, "agent_asset_url", { project, id });
+      // The command returns a server-absolute path (`/api/asset/<handle>`). The page origin is
+      // not necessarily the server (remote / cloud mode), and an `<img src>` cannot carry a
+      // bearer token, so the URL must be resolved against `baseUrl` here.
+      return path.startsWith("http") ? path : `${baseUrl}${path}`;
+    },
+    async assetText(project, id) {
+      // Deliberately a command, not a fetch of the asset route: this returns source code the page
+      // will execute, so it stays behind the bearer token like every other command.
+      return httpCall<AssetTextResult>(baseUrl, "agent_asset_text", { project, id });
+    },
+    async ingestPaths(project, paths) {
+      return httpCall<IngestResult>(baseUrl, "agent_ingest_paths", { project, paths });
+    },
+    async ingestBytes(project, name, mime, file) {
+      // Raw body, not base64-in-JSON: the server route has its own 64MiB limit while the shared
+      // `/api/cmd` body cap is 16MiB, and base64 would inflate the payload by a third.
+      const token = sessionStorage.getItem("shirley.cloudToken");
+      const query = new URLSearchParams({ project, name, mime });
+      const res = await fetch(`${baseUrl}/api/upload?${query}`, {
+        method: "POST",
+        headers: {
+          "content-type": mime,
+          ...(token ? { authorization: `Bearer ${token}` } : {}),
+        },
+        body: file,
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(text || `upload failed: ${res.status}`);
+      return JSON.parse(text) as LibraryEntry;
+    },
+    async listLibrary(project) {
+      return httpCall<LibraryEntry[]>(baseUrl, "agent_library_list", { project });
     },
     async searchFiles(project, query) {
       return httpCall<FileEntry[]>(baseUrl, "agent_search_files", { project, query });
@@ -1048,9 +1258,38 @@ async function createHybridBridge(): Promise<AgentBridge> {
       const { bridge, rawId } = route(project);
       return bridge.listModels(rawId);
     },
+    // Dictation is a property of the device, not of the project's runtime. However the
+    // project is namespaced, the microphone belongs to this computer and the audio is
+    // transcribed here -- a `cloud::` project does not make the server transcribe.
+    async asrCapabilities() {
+      return local.asrCapabilities();
+    },
+    async transcribe(audio, language) {
+      return local.transcribe(audio, language);
+    },
     async setModel(project, value, session) {
       const { bridge, rawId } = route(project);
       await bridge.setModel(rawId, value, session);
+    },
+    async assetUrl(project, id) {
+      const { bridge, rawId } = route(project);
+      return bridge.assetUrl(rawId, id);
+    },
+    async assetText(project, id) {
+      const { bridge, rawId } = route(project);
+      return bridge.assetText(rawId, id);
+    },
+    async ingestPaths(project, paths) {
+      const { bridge, rawId } = route(project);
+      return bridge.ingestPaths(rawId, paths);
+    },
+    async ingestBytes(project, name, mime, file) {
+      const { bridge, rawId } = route(project);
+      return bridge.ingestBytes(rawId, name, mime, file);
+    },
+    async listLibrary(project) {
+      const { bridge, rawId } = route(project);
+      return bridge.listLibrary(rawId);
     },
     async searchFiles(project, query) {
       const { bridge, rawId } = route(project);

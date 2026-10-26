@@ -3,17 +3,18 @@
 **Current status (2026-10-24):** the per-call permission layer has been removed by product
 decision. Tools execute directly; there is no capability profile, Jev sidecar review,
 approval broker, or approval UI/API. The former permission/approval/sidecar environment
-settings are no longer read. Tool-local workspace/secret-file checks, the shell command
-blacklist, and execution timeouts remain. `bash` still uses `ProcessBackend`, which does
+settings are no longer read. Tool-local workspace/secret-file checks and execution timeouts
+remain; the shell command blacklist has been removed (it never was a boundary). `bash` still uses `ProcessBackend`, which does
 not isolate filesystem or network access. The permission-layer proposal and its acceptance
 criteria below are historical design notes, not the current execution contract.
 
 **1. Problem statement**
 
-The current `bash` tool is equivalent to "handing the shell to the model". The blacklist is decorative:
+The current `bash` tool is equivalent to "handing the shell to the model". A command blacklist built on
+string matching is decorative (and has since been deleted rather than kept as a false comfort):
 
 ```rust
-// crates/shirley/src/tools/bash.rs current
+// the shape the removed blacklist had, for the record
 let args: Vec<&str> = command.split_whitespace().collect();
 let is_blacklisted = args.iter().any(|arg| BLACKLIST.contains(arg));
 // ...

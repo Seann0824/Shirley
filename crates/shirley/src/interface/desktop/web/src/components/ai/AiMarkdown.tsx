@@ -15,6 +15,7 @@ import { cjk } from "@streamdown/cjk";
 import "katex/dist/katex.min.css";
 import { cn } from "@/ui/utils";
 import { FlightMapRenderer } from "@/components/ai/FlightMapRenderer";
+import { ImageBlock } from "@/components/ai/ImageBlock";
 
 const BASE_REMARK_PLUGINS = Object.values(defaultRemarkPlugins);
 const SAFE_REHYPE_PLUGINS = Object.entries(defaultRehypePlugins)
@@ -96,6 +97,10 @@ const BASE_COMPONENTS: Components = {
       {children}
     </h3>
   ),
+  // A picture in the model's answer is a **block**, not a run of text: rounded, height-capped,
+  // and clickable for the full-size view (the same `ImageBlock` the render parts use). It used
+  // to be dropped outright by `disallowedElements`, so an `![shot](...)` simply vanished.
+  img: ({ src, alt }) => (src ? <ImageBlock src={src} alt={alt ?? ""} /> : null),
 };
 
 export function AiMarkdown({
@@ -127,7 +132,6 @@ export function AiMarkdown({
       <Streamdown
         className={cn("min-w-0 max-w-full text-body-sm leading-relaxed text-ink", className)}
         components={mergedComponents}
-        disallowedElements={["img"]}
         isAnimating={streaming}
         linkSafety={DISABLED_LINK_SAFETY}
         mode="streaming"

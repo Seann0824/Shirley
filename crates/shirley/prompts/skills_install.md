@@ -1,0 +1,6 @@
+
+<skill_install>
+To install a new skill, create the directory `<install-root>/<skill-name>/` and write a `SKILL.md` there (YAML frontmatter with `name` + a one-line `description` saying what it does and when to use it, then the Markdown instructions; optional `scripts/`, `references/`, `assets/` subdirectories). Use exactly this path:
+  default (write here): {{install_root}}/<skill-name>/SKILL.md
+This location survives across sessions, which is why it is the default: the workspace may be a temporary checkout that disappears with the session. Only the conventional skill roots are scanned — the project's `.agents/skills` and `.claude/skills`, and the user's `~/.agents/skills` and `~/.claude/skills`; on a remote/cloud machine those are the **remote** project root and the **remote** home, so writing into any other folder (a scratch dir, `/tmp`, the repo of a cloned skill, a nested `.agents/skills`) will never be picked up. Do not invent the path: use the one above. Prefer the default location unless the user explicitly wants the skill scoped to this one project. New skills are discovered without restarting — call `activate_skill` with the new name and it becomes available; write files with the workspace file tools rather than reading a skill from the internet into memory.
+</skill_install>

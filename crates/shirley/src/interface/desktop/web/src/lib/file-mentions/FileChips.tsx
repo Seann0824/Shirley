@@ -1,14 +1,38 @@
-import { File, Folder, Sparkles, X } from "lucide-react";
+import { File, Folder, ImageIcon, Sparkles, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { cn } from "@/ui/utils";
 import { CHIP_TOKEN } from "./editor-dom";
 import type { FileReference, ReferenceKind } from "./types";
 
 /** Chip leading icon: directory / file / skill (`/` entry). Both reference kinds share the same rendering. */
-function iconFor(kind: ReferenceKind) {
-  if (kind === "dir") return Folder;
-  if (kind === "skill") return Sparkles;
+function iconFor(reference: FileReference) {
+  if (reference.kind === "dir") return Folder;
+  if (reference.kind === "skill") return Sparkles;
+  // An uploaded library entry falls back to an icon only when it has no preview to show
+  // (see `previewSrc`); non-image uploads always use the file icon.
+  if (reference.kind === "media" && (reference.mime ?? "").startsWith("image/")) return ImageIcon;
   return File;
+}
+
+/**
+ * The thumbnail `src` for a reference chip, or `""` when the reference has none.
+ *
+ * - `image`: a pasted image, already in hand as a `data:` URL.
+ * - `media`: an uploaded library entry. The bytes live in the library, so the uploader
+ *   stashes a short-lived local preview URL on the reference (`dataUrl`, an object URL or a
+ *   `data:` URL). Without one there is nothing to paint — fall back to the icon.
+ */
+function previewSrc(reference: FileReference): string {
+  if (reference.kind === "image") return reference.dataUrl ?? reference.path;
+  if (reference.kind === "media" && (reference.mime ?? "").startsWith("image/")) {
+    return reference.dataUrl ?? "";
+  }
+  return "";
+}
+
+/** Whether this reference is a picture (rendered as a block, never as an inline chip). */
+function isImageReference(reference: FileReference): boolean {
+  return previewSrc(reference) !== "";
 }
 
 /**
@@ -26,12 +50,12 @@ export function FileChip({
   onRemove?: (path: string) => void;
   className?: string;
 }) {
-  const Icon = iconFor(reference.kind);
+  const Icon = iconFor(reference);
   const tooltip = reference.description
     ? `${reference.name} — ${reference.description}`
     : reference.path;
-  const isImage = reference.kind === "image";
-  const imageSrc = isImage ? (reference.dataUrl ?? reference.path) : "";
+  const imageSrc = previewSrc(reference);
+  const isImage = imageSrc !== "";
   return (
     <span
       className={cn(
@@ -97,7 +121,13 @@ export function InlineReferences({
     if (index < parts.length - 1) {
       const reference = references[refIndex];
       refIndex += 1;
-      if (reference) nodes.push(<FileChip key={`c${index}`} reference={reference} />);
+      // An image is **not** an inline chip: it is rendered as its own block under the text
+      // (the message's `parts`), so drawing a 16px thumbnail here duplicated the picture and
+      // told the eye nothing. The placeholder is still consumed, keeping the 1:1 mapping
+      // between chips and tokens intact.
+      if (reference && !isImageReference(reference)) {
+        nodes.push(<FileChip key={`c${index}`} reference={reference} />);
+      }
     }
   });
   return <span className={cn("whitespace-pre-wrap", className)}>{nodes}</span>;
@@ -150,15 +180,23 @@ export function createChipElement(reference: FileReference): HTMLElement {
   span.dataset.name = reference.name;
   span.dataset.kind = reference.kind;
   if (reference.description) span.dataset.description = reference.description;
+  // Library references carry an artifact id, not bytes: persist it on the element so a
+  // rebuild of the editor content does not silently drop the payload.
+  if (reference.artifactId) span.dataset.artifactId = reference.artifactId;
+  if (reference.mime) span.dataset.mime = reference.mime;
+  if (reference.bytes !== undefined) span.dataset.bytes = String(reference.bytes);
   span.title = reference.description
     ? `${reference.name} — ${reference.description}`
     : reference.path;
   const label = reference.kind === "skill" ? `/${reference.name}` : reference.name;
-  if (reference.kind === "image") {
-    // Pasted image: render a thumbnail instead of an icon; `data-image-preview` marks the
-    // chip for the global hover preview (which reads this <img>.src).
-    const src = reference.dataUrl ?? reference.path;
+  const src = previewSrc(reference);
+  if (src) {
+    // Pasted image / uploaded image: render a thumbnail instead of an icon;
+    // `data-image-preview` marks the chip for the global hover preview (which reads this
+    // <img>.src). Keep the preview URL on the element too, so a rebuild of the editor
+    // content can restore the thumbnail instead of degrading to an icon.
     span.dataset.imagePreview = "true";
+    span.dataset.previewSrc = src;
     span.innerHTML =
       `<img src="${escapeHtml(src)}" alt="${escapeHtml(reference.name)}" class="size-4 shrink-0 rounded-[3px] object-cover" />` +
       `<span class="min-w-0 max-w-40 truncate">${escapeHtml(label)}</span>`;

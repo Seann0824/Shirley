@@ -14,6 +14,15 @@ use serde_json::{Value, json};
 use super::AdapterError;
 use crate::message::{ContentPart, ImageDetail, ImagePart, ImageSource, MessageContent};
 
+/// Placeholder for an image-only message emptied by the capability guard (the model cannot read
+/// images at all).
+pub(crate) const IMAGE_OMITTED_FOR_CAPABILITY: &str =
+    "[image omitted: this model cannot read images]";
+
+/// Placeholder for an image-only message emptied for a **summary** request. The model can read
+/// images; the bytes are simply not worth tens of thousands of tokens when the product is text.
+pub(crate) const IMAGE_OMITTED_FOR_SUMMARY: &str = "[image omitted from this summary request]";
+
 fn detail_str(detail: ImageDetail) -> &'static str {
     match detail {
         ImageDetail::Low => "low",
@@ -24,9 +33,9 @@ fn detail_str(detail: ImageDetail) -> &'static str {
 
 /// `ChatCompletions`: `string` when text-only, otherwise an array of
 /// `{type:text}` / `{type:image_url, image_url:{url, detail}}` parts.
-pub(crate) fn chat_content(content: &MessageContent) -> Result<Value, AdapterError> {
+pub(crate) fn chat_content(content: &MessageContent) -> Value {
     if content.is_text_only() {
-        return Ok(Value::String(content.as_text()));
+        return Value::String(content.as_text());
     }
     let mut parts = Vec::new();
     for part in content.as_parts() {
@@ -40,16 +49,25 @@ pub(crate) fn chat_content(content: &MessageContent) -> Result<Value, AdapterErr
                     }
                     parts.push(json!({ "type": "image_url", "image_url": image_url }));
                 }
+                // A `file_id` is a **provider-side** handle: it only means something to the
+                // endpoint that issued it. ChatCompletions has no such field, so forwarding it
+                // would be an encode error and dropping the image would silently lose the
+                // content. The reference is passed through instead: every ChatCompletions
+                // endpoint fetches `image_url` itself, so a value that is already a URL or a
+                // `data:` URL works without any translation, and a raw id degrades to an
+                // ordinary fetch failure the model can report rather than a hard send-time
+                // abort that poisons the whole turn.
                 ImageSource::FileId { file_id } => {
-                    return Err(AdapterError::Encode(format!(
-                        "ChatCompletions image source does not accept a file_id ({file_id}); \
-                         provide a url (including a data: URL)"
-                    )));
+                    let mut image_url = json!({ "url": file_id });
+                    if let Some(detail) = image.detail {
+                        image_url["detail"] = json!(detail_str(detail));
+                    }
+                    parts.push(json!({ "type": "image_url", "image_url": image_url }));
                 }
             },
         }
     }
-    Ok(Value::Array(parts))
+    Value::Array(parts)
 }
 
 /// Responses: `[{type:input_text}]` when text-only (historical shape), otherwise
@@ -144,26 +162,40 @@ pub(crate) fn messages_have_images(messages: &[crate::message::Message]) -> bool
 /// valid. Messages without images are cloned unchanged, so an all-text request is
 /// byte-for-byte identical (KV prefix cache).
 pub(crate) fn strip_images(messages: &[crate::message::Message]) -> Vec<crate::message::Message> {
+    strip_images_with(messages, IMAGE_OMITTED_FOR_CAPABILITY)
+}
+
+/// Same as [`strip_images`], but with the placeholder that replaces a message left with no text.
+///
+/// The wording matters: the capability path means "the model cannot read images", while the
+/// compaction path means "this is a summary request, the bytes are not worth the tokens". Telling
+/// the summarizer the model is blind would leak into the summary's hard constraints.
+pub(crate) fn strip_images_with(
+    messages: &[crate::message::Message],
+    placeholder: &str,
+) -> Vec<crate::message::Message> {
     use crate::message::Message;
     messages
         .iter()
         .map(|message| match message {
             Message::User { content } => Message::User {
-                content: strip_content_images(content),
+                content: strip_content_images(content, placeholder),
             },
             Message::Tool {
                 tool_call_id,
                 content,
             } => Message::Tool {
                 tool_call_id: tool_call_id.clone(),
-                content: content.as_ref().map(strip_content_images),
+                content: content
+                    .as_ref()
+                    .map(|content| strip_content_images(content, placeholder)),
             },
             other => other.clone(),
         })
         .collect()
 }
 
-fn strip_content_images(content: &MessageContent) -> MessageContent {
+fn strip_content_images(content: &MessageContent, placeholder: &str) -> MessageContent {
     let kept: Vec<ContentPart> = content
         .as_parts()
         .iter()
@@ -171,7 +203,7 @@ fn strip_content_images(content: &MessageContent) -> MessageContent {
         .cloned()
         .collect();
     if kept.is_empty() {
-        MessageContent::text("[image omitted: this model cannot read images]")
+        MessageContent::text(placeholder)
     } else {
         MessageContent::parts(kept)
     }
@@ -207,17 +239,35 @@ mod tests {
 
     #[test]
     fn text_only_stays_plain_string_on_chat() {
-        let value = chat_content(&MessageContent::text("hi")).unwrap();
+        let value = chat_content(&MessageContent::text("hi"));
         assert_eq!(value, Value::String("hi".to_owned()));
     }
 
     #[test]
     fn chat_mixed_uses_image_url_block() {
-        let value = chat_content(&mixed()).unwrap();
+        let value = chat_content(&mixed());
         let parts = value.as_array().unwrap();
         assert_eq!(parts[1]["type"], "image_url");
         assert_eq!(parts[1]["image_url"]["url"], "https://x/y.png");
         assert_eq!(parts[1]["image_url"]["detail"], "high");
+    }
+
+    /// A `file_id` that survived resolution must not abort the whole send: ChatCompletions has no
+    /// file field, so the reference is forwarded as `image_url.url`. A `data:` URL (what the
+    /// application's resolver produces) then works as-is, and a bare provider id degrades to an
+    /// ordinary fetch failure the model can report.
+    #[test]
+    fn chat_file_id_becomes_an_image_url_instead_of_failing() {
+        let content = MessageContent::parts(vec![
+            ContentPart::Image(ImagePart::file_id("file-1").with_detail(ImageDetail::Low)),
+            ContentPart::Image(ImagePart::file_id("data:image/png;base64,cG5n")),
+        ]);
+        let value = chat_content(&content);
+        let parts = value.as_array().unwrap();
+        assert_eq!(parts[0]["type"], "image_url");
+        assert_eq!(parts[0]["image_url"]["url"], "file-1");
+        assert_eq!(parts[0]["image_url"]["detail"], "low");
+        assert_eq!(parts[1]["image_url"]["url"], "data:image/png;base64,cG5n");
     }
 
     #[test]

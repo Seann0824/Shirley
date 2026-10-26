@@ -34,6 +34,10 @@ use crate::project::ProjectRegistry;
 use shirley_agent_sdk::AgentEvent;
 
 /// The single event name the webview listens on.
+/// Custom URL scheme the webview loads artifacts from. The single path segment is an **opaque
+/// handle** minted by [`agent_asset_url`], never a filesystem path (`docs/render-parts.md` P1).
+const ASSET_SCHEME: &str = "shirley-asset";
+
 const EVENT_NAME: &str = "agent://event";
 
 /// Content-free runtime-status channel (separate from `agent://event`, see `docs/agent-status.md`).
@@ -309,6 +313,13 @@ async fn agent_update_project(
 /// Open the native folder picker and return the chosen absolute path **without registering it**.
 /// Used by the "Add folder" button inside the Edit-project dialog, which accumulates folders before
 /// saving them all at once via `agent_update_project`.
+/// What an ingest command hands back: the entries that made it, plus one line per failure.
+#[derive(Debug, Clone, serde::Serialize)]
+struct IngestWire {
+    entries: Vec<crate::artifact::LibraryEntry>,
+    errors: Vec<String>,
+}
+
 #[tauri::command]
 async fn agent_pick_folder(app: AppHandle) -> Result<Option<String>, String> {
     let picked =
@@ -519,6 +530,114 @@ async fn agent_set_model(
         .await
 }
 
+/// Turn an artifact id into a URL the webview can load (`docs/render-parts.md` P1).
+///
+/// The id is validated against the project's artifact jail here; what comes back is an
+/// unguessable handle, so the render layer never learns a filesystem path and a stale/forged
+/// handle simply 404s.
+#[tauri::command]
+async fn agent_asset_url(
+    state: State<'_, DesktopState>,
+    project: String,
+    id: String,
+) -> Result<String, String> {
+    let handle = state.manager.asset_handle(&project, &id).await?;
+    Ok(format!("{ASSET_SCHEME}://localhost/{handle}"))
+}
+
+/// Take **local file paths** into the project's media library: the desktop inbound channel.
+///
+/// The desktop and the workspace are the same machine, so a path is the honest way in -- no
+/// base64 through the IPC bridge, no 33% inflation, and a 400MB clip is copied by the kernel
+/// instead of being carried through the webview. Returns the library entries that landed plus
+/// one message per rejected path (a batch should not fail as a whole because one file was a
+/// `.svg`). See `docs/render-parts.md` inbound channels.
+#[tauri::command]
+async fn agent_ingest_paths(
+    state: State<'_, DesktopState>,
+    project: String,
+    paths: Vec<String>,
+) -> Result<IngestWire, String> {
+    let (entries, errors) = state.manager.ingest_paths(&project, paths).await?;
+    Ok(IngestWire { entries, errors })
+}
+
+/// Take **raw bytes** into the project's media library over IPC.
+///
+/// The desktop normally uses [`agent_ingest_paths`]; this exists for the cases where the page
+/// already holds the bytes (a drag from a browser window, a paste that is not a file) and for
+/// parity with the cloud's `/api/upload`.
+#[tauri::command]
+async fn agent_ingest_bytes(
+    state: State<'_, DesktopState>,
+    project: String,
+    name: String,
+    mime: String,
+    bytes: Vec<u8>,
+) -> Result<crate::artifact::LibraryEntry, String> {
+    state
+        .manager
+        .ingest_bytes(&project, &name, &mime, &bytes)
+        .await
+}
+
+/// List a project's media library, newest first (`docs/render-parts.md` inbound channels).
+///
+/// The library is the user's own inventory of handed-over media, not a view of one session, so
+/// this reads the same `ArtifactStore` the ingest commands write to. Entries carry an opaque id;
+/// the page turns that into a thumbnail URL through `agent_asset_url`, exactly like a part does.
+#[tauri::command]
+async fn agent_library_list(
+    state: State<'_, DesktopState>,
+    project: String,
+) -> Result<Vec<crate::artifact::LibraryEntry>, String> {
+    state.manager.library_list(&project).await
+}
+
+/// Fetch an artifact as **text** so the page can run it (`html` artifacts, `docs/render-parts.md`).
+///
+/// A URL cannot serve this: the frame must receive the source string and inject it with `srcdoc`
+/// on an opaque origin, otherwise generated markup would run with the app's origin.
+#[tauri::command]
+async fn agent_asset_text(
+    state: State<'_, DesktopState>,
+    project: String,
+    id: String,
+) -> Result<crate::interface::runtime::AssetText, String> {
+    state.manager.asset_text(&project, &id).await
+}
+
+/// Serve one artifact to the webview. Deliberately local-only: no network, no redirects, and the
+/// only thing a handle can reach is a file the jail already resolved.
+fn asset_response<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    path: &str,
+) -> tauri::http::Response<Vec<u8>> {
+    use tauri::Manager as _;
+    let handle = path.trim_start_matches('/');
+    let state = app.state::<DesktopState>();
+    let Some((file, mime)) = state.manager.asset_by_handle(handle) else {
+        return asset_error(404, "unknown asset handle");
+    };
+    match std::fs::read(&file) {
+        Ok(bytes) => tauri::http::Response::builder()
+            .status(200)
+            .header("content-type", mime)
+            .header("cache-control", "no-store")
+            .body(bytes)
+            .unwrap_or_else(|_| tauri::http::Response::new(Vec::new())),
+        Err(error) => asset_error(404, &error.to_string()),
+    }
+}
+
+fn asset_error(status: u16, message: &str) -> tauri::http::Response<Vec<u8>> {
+    tauri::http::Response::builder()
+        .status(status)
+        .header("content-type", "text/plain; charset=utf-8")
+        .body(message.as_bytes().to_vec())
+        .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
+}
+
 #[tauri::command]
 async fn agent_search_files(
     state: State<'_, DesktopState>,
@@ -636,6 +755,22 @@ async fn agent_load_history(
 }
 
 #[tauri::command]
+async fn agent_asr_capabilities() -> Result<crate::asr::AsrCapabilities, String> {
+    // Read on every call: installing whisper.cpp takes effect without restarting the app.
+    // Deliberately not project-scoped -- dictation is a property of *this computer*, and the
+    // audio is transcribed here, never on a server.
+    Ok(crate::asr::capabilities(&crate::storage::global_root()))
+}
+
+#[tauri::command]
+async fn agent_transcribe(
+    audio: String,
+    language: Option<String>,
+) -> Result<crate::asr::AsrResult, String> {
+    crate::asr::transcribe(&crate::storage::global_root(), &audio, language.as_deref()).await
+}
+
+#[tauri::command]
 async fn agent_list_subagents(
     state: State<'_, DesktopState>,
     project: String,
@@ -691,6 +826,9 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
+        .register_uri_scheme_protocol(ASSET_SCHEME, |ctx, request| {
+            asset_response(ctx.app_handle(), request.uri().path())
+        })
         .manage(state)
         .manage(BrowserState::default())
         .invoke_handler(tauri::generate_handler![
@@ -702,6 +840,8 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
             agent_remote_start_events,
             agent_memory_review,
             agent_memory_confirm_personal,
+            agent_asr_capabilities,
+            agent_transcribe,
             agent_list_projects,
             agent_add_project,
             agent_rename_project,
@@ -718,6 +858,11 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
             agent_list_models,
             agent_set_model,
             agent_search_files,
+            agent_asset_url,
+            agent_asset_text,
+            agent_ingest_paths,
+            agent_ingest_bytes,
+            agent_library_list,
             agent_list_skills,
             agent_activate_skill,
             agent_list_sessions,

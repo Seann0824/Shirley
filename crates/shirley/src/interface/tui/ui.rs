@@ -14,6 +14,9 @@ use shirley_agent_sdk::Message;
 
 /// Maximum number of lines shown for the input box; beyond that it scrolls vertically inside, to avoid squeezing the message area.
 const INPUT_MAX_LINES: usize = 10;
+/// How many lines of a tool result an expanded call shows (the rest is elided: the TUI is a
+/// fallback view, the full result belongs to the desktop transcript).
+const RESULT_PREVIEW_LINES: usize = 12;
 
 pub(crate) struct MessageCache {
     width: usize,
@@ -869,6 +872,19 @@ fn append_message(lines: &mut Vec<Line>, message: &ChatMessage, width: usize) {
         }
         lines.extend(rendered);
     }
+
+    // Render parts this interface cannot draw (images, files, links, structured data) degrade to
+    // their plain-text fallback instead of vanishing. Text parts are already covered by
+    // `message.content`, so they are skipped (docs/render-parts.md: every part must degrade).
+    for part in &message.parts {
+        if part.is_text() {
+            continue;
+        }
+        lines.push(Line::from(Span::styled(
+            part.fallback_text(),
+            base_style.fg(Color::DarkGray),
+        )));
+    }
     lines.push(Line::default());
 }
 
@@ -891,6 +907,13 @@ fn append_tools(lines: &mut Vec<Line>, group: &ToolGroup, show_args: bool, width
         if show_args {
             for param in format_arguments(&call.arguments) {
                 lines.push(param);
+            }
+            // The tool's result now lives in the view (not only in the live event), so an expanded
+            // call can show it -- as render parts when the tool produced any, else as its text.
+            if let Some(result) = call.result_text() {
+                for raw in result.lines().take(RESULT_PREVIEW_LINES) {
+                    lines.push(Line::from(Span::styled(format!("  {raw}"), dim)));
+                }
             }
         }
     }

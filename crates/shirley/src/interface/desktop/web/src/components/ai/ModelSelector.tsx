@@ -84,11 +84,11 @@ export function ModelSelector({
       <Button
         type="button"
         variant="ghost"
-        size="sm"
+        size="xs"
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="Switch model"
-        className="max-w-[12rem] gap-1 px-2 text-muted"
+        className="max-w-[12rem] gap-1 px-2"
         onClick={() => void toggle()}
       >
         <span className="truncate">{currentLabel || "No model selected"}</span>

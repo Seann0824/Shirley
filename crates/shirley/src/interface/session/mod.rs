@@ -17,12 +17,15 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
-use shirley_agent_sdk::{Agent, AgentEvent, Message, Usage};
+use shirley_agent_sdk::{Agent, AgentEvent, Message, MessageContent, Usage};
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
 use crate::bootstrap::AgentFactory;
-use crate::interface::view::{ChatMessage, Item, Role, ToolCallView, ToolGroup};
+use crate::interface::view::{
+    ChatMessage, Item, RenderPart, Role, ToolCallView, ToolGroup, parts_from_message_content,
+    parts_from_tool_value,
+};
 use crate::memory::MemoryRuntime;
 use crate::session::{SessionCatalog, SessionStore};
 use crate::skills::SkillRuntime;
@@ -33,6 +36,50 @@ use crate::todo::{TaskView, TodoStore};
 /// Event fan-out channel capacity. A running subscriber that falls more than this far behind gets `Lagged`, and the subscriber (desktop
 /// pump) skips and realigns by resending a snapshot (see `docs/multi-session.md`).
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+
+/// Attach a tool result to its call in the view, matched by `call_id`.
+///
+/// Shared by the live path (`AgentEvent::ToolFinished`) and the restore path (`Message::Tool`), so
+/// a rebuilt transcript keeps tool results instead of silently dropping them. Matching is by id,
+/// not by position: tool calls of one round may finish out of order (they run concurrently).
+fn attach_tool_result(
+    items: &mut [Item],
+    call_id: &str,
+    ok: Option<bool>,
+    output: String,
+    parts: Vec<RenderPart>,
+) {
+    for item in items.iter_mut().rev() {
+        let Item::Tools(group) = item else { continue };
+        if let Some(call) = group.calls.iter_mut().find(|call| call.id == call_id) {
+            call.finish(ok, output, parts);
+            return;
+        }
+    }
+}
+
+/// True for a message that no provider will accept and no reader can use: an assistant turn with
+/// neither text nor tool calls.
+///
+/// Such a message is produced when a round is **interrupted** (the user paused while the model was
+/// streaming): the partial text has been discarded, so only the empty shell is left. Writing it to
+/// the log would make the next request invalid, so it is dropped at the persistence boundary.
+/// `Message::Tool` needs the same treatment in spirit, but an empty tool result is legal.
+fn is_unsendable(message: &Message) -> bool {
+    let Message::Assistant {
+        content,
+        reasoning_content,
+        tool_calls,
+    } = message
+    else {
+        return false;
+    };
+    if !tool_calls.is_empty() {
+        return false;
+    }
+    let blank = |text: &Option<String>| text.as_deref().is_none_or(str::is_empty);
+    blank(content) && blank(reasoning_content)
+}
 
 fn proxy_session_id(workspace: &Path, name: Option<&str>) -> Option<String> {
     let name = name?;
@@ -319,7 +366,12 @@ impl Session {
                     manager.push_parent_message(&message);
                 }
                 // Event-driven persistence: the SDK only emits events; persistence is the application layer's job (system does not go into the log).
-                self.persist_message(&message);
+                // An assistant message with neither text nor tool calls is not worth writing: it is
+                // what an interrupted round leaves behind, and providers reject it outright
+                // ("content or tool_calls must be set") -- which then poisons every later turn.
+                if !is_unsendable(&message) {
+                    self.persist_message(&message);
+                }
                 // The user message's view item is recorded by the driver when starting a turn (see `begin_turn`),
                 // so here only the assistant / tool / summary views are added.
                 if !matches!(&message, Message::User { .. }) {
@@ -334,9 +386,22 @@ impl Session {
             Ok(
                 AgentEvent::ReasoningDelta(_)
                 | AgentEvent::Retrying { .. }
-                | AgentEvent::ToolStarted { .. }
-                | AgentEvent::ToolFinished { .. },
+                | AgentEvent::ToolStarted { .. },
             ) => {}
+            // The tool result is recorded **in the view**, not only in the interface's live state:
+            // `output` is what the model read, `parts` is what a human sees (docs/render-parts.md).
+            // Without this arm a tool's result vanished on session switch / restart, because the
+            // view was rebuilt from the message log and `Message::Tool` was skipped.
+            Ok(AgentEvent::ToolFinished {
+                call_id,
+                ok,
+                output,
+                structured,
+                ..
+            }) => {
+                let parts = parts_from_tool_value(structured.as_ref());
+                self.finish_tool_call(&call_id, Some(ok), output, parts);
+            }
             // Neutral notice (e.g. silent image degradation): its own view item, muted, not
             // persisted to the session log (it is a per-turn UI hint, not conversation content).
             Ok(AgentEvent::Notice(text)) => self.push_message(Role::Notice, text),
@@ -396,6 +461,7 @@ impl Session {
                 Message::User { content } => items.push(Item::Message(ChatMessage {
                     role: Role::User,
                     content: content.as_text(),
+                    parts: parts_from_message_content(content),
                 })),
                 Message::Assistant {
                     content,
@@ -407,16 +473,19 @@ impl Session {
                         items.push(Item::Message(ChatMessage {
                             role: Role::Assistant,
                             content: content.clone(),
+                            parts: Vec::new(),
                         }));
                     }
                     if !tool_calls.is_empty() {
                         items.push(Item::Tools(ToolGroup {
                             calls: tool_calls
                                 .iter()
-                                .map(|call| ToolCallView {
-                                    id: call.id.clone(),
-                                    name: call.name.clone(),
-                                    arguments: call.arguments.clone(),
+                                .map(|call| {
+                                    ToolCallView::started(
+                                        call.id.clone(),
+                                        call.name.clone(),
+                                        call.arguments.clone(),
+                                    )
                                 })
                                 .collect(),
                         }));
@@ -426,15 +495,41 @@ impl Session {
                     content: content.clone(),
                     expanded: false,
                 }),
-                Message::Tool { .. } | Message::System { .. } => {}
+                Message::Tool {
+                    tool_call_id,
+                    content,
+                } => attach_tool_result(
+                    &mut items,
+                    tool_call_id,
+                    None,
+                    content
+                        .as_ref()
+                        .map(MessageContent::as_text)
+                        .unwrap_or_default(),
+                    Vec::new(),
+                ),
+                Message::System { .. } => {}
             }
         }
         items
     }
 
     pub(crate) fn push_message(&mut self, role: Role, content: String) {
-        self.items
-            .push(Item::Message(ChatMessage { role, content }));
+        self.push_message_with_parts(role, content, Vec::new());
+    }
+
+    /// Push a message together with its render parts (empty parts = render `content` as-is).
+    pub(crate) fn push_message_with_parts(
+        &mut self,
+        role: Role,
+        content: String,
+        parts: Vec<RenderPart>,
+    ) {
+        self.items.push(Item::Message(ChatMessage {
+            role,
+            content,
+            parts,
+        }));
     }
 
     fn append_streaming_delta(&mut self, delta: String) {
@@ -469,7 +564,11 @@ impl Session {
 
     pub(crate) fn add_message(&mut self, message: Message) {
         match message {
-            Message::User { content } => self.push_message(Role::User, content.as_text()),
+            Message::User { content } => {
+                // Project images too: `as_text()` alone is what silently dropped them on restore.
+                let parts = parts_from_message_content(&content);
+                self.push_message_with_parts(Role::User, content.as_text(), parts);
+            }
             Message::Assistant {
                 content,
                 tool_calls,
@@ -482,11 +581,7 @@ impl Session {
                 if !tool_calls.is_empty() {
                     let calls = tool_calls
                         .into_iter()
-                        .map(|call| ToolCallView {
-                            id: call.id,
-                            name: call.name,
-                            arguments: call.arguments,
-                        })
+                        .map(|call| ToolCallView::started(call.id, call.name, call.arguments))
                         .collect();
                     self.start_tool_calls(calls);
                 }
@@ -495,8 +590,36 @@ impl Session {
                 content,
                 expanded: false,
             }),
-            Message::Tool { .. } | Message::System { .. } => {}
+            // Restore path: the log has the flattened output but not the status / parts. Attach the
+            // text so a rebuilt view is not missing tool results; the live `ToolFinished` arm above
+            // fills the rest (it runs right after this message in the same turn).
+            Message::Tool {
+                tool_call_id,
+                content,
+            } => {
+                self.finish_tool_call(
+                    &tool_call_id,
+                    None,
+                    content
+                        .as_ref()
+                        .map(MessageContent::as_text)
+                        .unwrap_or_default(),
+                    Vec::new(),
+                );
+            }
+            Message::System { .. } => {}
         }
+    }
+
+    /// Record a tool result on its call in the view (matched by `call_id`).
+    fn finish_tool_call(
+        &mut self,
+        call_id: &str,
+        ok: Option<bool>,
+        output: String,
+        parts: Vec<RenderPart>,
+    ) {
+        attach_tool_result(&mut self.items, call_id, ok, output, parts);
     }
 
     fn add_error(&mut self, error: String) {
@@ -578,6 +701,8 @@ pub enum ItemWire {
     Message {
         role: Role,
         content: String,
+        /// Render parts (empty = the transport may skip the field; `content` is the text view).
+        parts: Vec<RenderPart>,
     },
     Compact {
         content: String,
@@ -594,6 +719,12 @@ pub struct ToolCallWire {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    /// The tool's flattened output (`None` while running).
+    pub output: Option<String>,
+    /// Whether the call succeeded (`None` while running, or when restored from a log).
+    pub ok: Option<bool>,
+    /// Rich render parts (empty = render `output` as text).
+    pub parts: Vec<RenderPart>,
 }
 
 impl ItemWire {
@@ -606,6 +737,7 @@ impl ItemWire {
             Item::Message(message) => ItemWire::Message {
                 role: message.role,
                 content: message.content.clone(),
+                parts: message.parts.clone(),
             },
             Item::Tools(group) => ItemWire::Tools {
                 calls: group
@@ -615,6 +747,9 @@ impl ItemWire {
                         id: call.id.clone(),
                         name: call.name.clone(),
                         arguments: call.arguments.clone(),
+                        output: call.output.clone(),
+                        ok: call.ok,
+                        parts: call.parts.clone(),
                     })
                     .collect(),
             },
@@ -1337,7 +1472,7 @@ impl SessionManager {
 mod tests {
     use super::*;
     use crate::session::EmptySessionCatalog;
-    use shirley_agent_sdk::{ModelConfig, ModelProtocol};
+    use shirley_agent_sdk::{ContentPart, ImagePart, ModelConfig, ModelProtocol, ToolCall};
 
     #[test]
     fn proxy_session_identity_is_stable_and_project_scoped() {
@@ -1353,6 +1488,88 @@ mod tests {
         assert_ne!(
             first,
             proxy_session_id(Path::new("/repo/first"), Some("chat-2"))
+        );
+    }
+
+    #[test]
+    fn tool_results_are_restored_into_the_view() {
+        // The bug this pins: a rebuilt view used to skip `Message::Tool` entirely, so switching
+        // sessions or restarting lost every tool result (they only existed in live events).
+        let messages = vec![
+            Message::User {
+                content: MessageContent::text("read it"),
+            },
+            Message::Assistant {
+                content: None,
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: "{\"path\":\"a.txt\"}".into(),
+                }],
+            },
+            Message::Tool {
+                tool_call_id: "c1".into(),
+                content: Some(MessageContent::text("file body")),
+            },
+        ];
+        let items = Session::items_from_messages(&messages);
+        let call = items
+            .iter()
+            .find_map(|item| match item {
+                Item::Tools(group) => group.calls.first(),
+                _ => None,
+            })
+            .expect("the tool call is part of the restored view");
+        assert_eq!(call.output.as_deref(), Some("file body"));
+        assert_eq!(call.result_text().as_deref(), Some("file body"));
+        assert_eq!(
+            call.ok, None,
+            "the log carries no status, so it stays unknown"
+        );
+    }
+
+    #[test]
+    fn tool_results_attach_by_call_id_not_by_order() {
+        // Calls of one round finish concurrently, so results arrive out of order.
+        let mut items = vec![Item::Tools(ToolGroup {
+            calls: vec![
+                ToolCallView::started("c1".into(), "read".into(), "{}".into()),
+                ToolCallView::started("c2".into(), "bash".into(), "{}".into()),
+            ],
+        })];
+        attach_tool_result(&mut items, "c2", Some(true), "second".into(), Vec::new());
+        attach_tool_result(&mut items, "c1", Some(false), "first".into(), Vec::new());
+        // An unknown id must not panic or mismatch.
+        attach_tool_result(&mut items, "nope", Some(true), "?".into(), Vec::new());
+        let Item::Tools(group) = &items[0] else {
+            unreachable!()
+        };
+        assert_eq!(group.calls[0].output.as_deref(), Some("first"));
+        assert_eq!(group.calls[0].ok, Some(false));
+        assert_eq!(group.calls[1].output.as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn user_images_survive_view_restore() {
+        let content = MessageContent::parts(vec![
+            ContentPart::Text {
+                text: "what is this?".into(),
+            },
+            ContentPart::Image(ImagePart::url("data:image/png;base64,AAAA")),
+        ]);
+        let items = Session::items_from_messages(&[Message::User { content }]);
+        let Item::Message(message) = &items[0] else {
+            unreachable!()
+        };
+        assert_eq!(message.content, "what is this?");
+        assert!(
+            message
+                .parts
+                .iter()
+                .any(|part| matches!(part, RenderPart::Image { .. })),
+            "the image must be projected, not dropped: {:?}",
+            message.parts
         );
     }
 

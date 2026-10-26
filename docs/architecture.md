@@ -209,7 +209,7 @@ This table is the core of this document: which point in the architecture each fe
 | reasoning streaming | `adapter` + `message` + application layer | `AgentEvent::ReasoningDelta`, `ReasoningDelta` event | implemented |
 | Multi-protocol (Responses / Anthropic) | `adapter` | the `todo!()` in `codec` | not done, will panic |
 | Tool-argument middle layer | `tool` + macro layer | `ToolDefinition.parameters` | not done |
-| Permission / behavior restriction | `tool` + new `permission` | the `tools/bash.rs` blacklist | hard-coded only |
+| Permission / behavior restriction | `tool` + new `permission` | none (the `tools/bash.rs` blacklist was removed) | not implemented |
 | Step cap | `runtime` | `StopReason::MaxStepsReached` | defined but unused |
 | Cancellation | `runtime` + application layer | `StopReason::Cancelled` | defined but unused |
 | Retry / timeout | `adapter` + `runtime` | `request_timeout` not wired | not done |

@@ -6,7 +6,7 @@
 // Reasoning does **not** enter the segment stream: the user does not care how the AI
 // thinks, only what it does. The thinking process is consumed internally by the program,
 // and the UI keeps only an active indicator that "the AI is still working".
-import type { ToolErrorKindWire } from "./wire";
+import type { RenderPartWire, ToolErrorKindWire } from "./wire";
 
 export type AiSegment =
   | { kind: "content"; text: string }
@@ -25,6 +25,11 @@ export type AiToolExecution = {
   status: "pending" | "running" | "complete" | "error";
   summary: string;
   result_json?: string;
+  /**
+   * Render parts for this execution's result (`docs/render-parts.md`). Empty / absent = render
+   * `result_json` / `error` as text, which is what every existing tool still does.
+   */
+  parts?: RenderPartWire[];
   error?: string | null;
   /// Stable error class from the SDK when this execution failed (see `ToolErrorKindWire`).
   /// Classification reads this instead of matching the error text.

@@ -19,14 +19,14 @@ use crate::{
 // of `message::Message` (whose serde form is protocol-agnostic). Each protocol owns its own
 // encoder (`anthropic_messages::encode_messages`, `responses::encode_input`); see
 // docs/sdk-refactor-0.0.3.md for why this stays in the adapter layer.
-fn encode_messages(messages: &[message::Message]) -> Result<Vec<Value>, AdapterError> {
+fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
     let mut out = Vec::with_capacity(messages.len());
     for msg in messages {
         let value = match msg {
             message::Message::User { content } => {
                 serde_json::json!({
                     "role": "user",
-                    "content": super::content::chat_content(content)?,
+                    "content": super::content::chat_content(content),
                 })
             }
             message::Message::Assistant {
@@ -82,7 +82,7 @@ fn encode_messages(messages: &[message::Message]) -> Result<Vec<Value>, AdapterE
                 if let Some(images) = content.as_ref().and_then(super::content::images_only) {
                     out.push(serde_json::json!({
                         "role": "user",
-                        "content": super::content::chat_content(&images)?,
+                        "content": super::content::chat_content(&images),
                     }));
                 }
                 continue;
@@ -90,7 +90,7 @@ fn encode_messages(messages: &[message::Message]) -> Result<Vec<Value>, AdapterE
         };
         out.push(value);
     }
-    Ok(out)
+    out
 }
 
 // Convert the tools into the format the API requires
@@ -133,7 +133,7 @@ pub fn encode_request(
         "model": &config.model,
         // This should convert, right? But it depends: we currently treat ChatCompletions as the
         // sole protocol, and the others are adapted from it.
-        "messages": encode_messages(input.messages)?,
+        "messages": encode_messages(input.messages),
         "tools": encode_tools(input.tools),
         "stream": &config.stream,
     });

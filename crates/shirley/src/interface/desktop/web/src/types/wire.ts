@@ -53,6 +53,8 @@ export type AgentEventWire =
       name: string;
       ok: boolean;
       output: string;
+      /** Render parts projected from the tool's structured result (empty = render `output`). */
+      parts: RenderPartWire[];
       error_kind: ToolErrorKindWire | null;
       elapsed_ms: number;
     } & SessionTag)
@@ -67,9 +69,45 @@ export type AgentEventWire =
 
 /** One UI item in a snapshot (aligned with `ItemWire` in the Rust `desktop/wire.rs`). */
 export type ItemWire =
-  | { kind: "message"; role: string; content: string }
+  | { kind: "message"; role: string; content: string; parts?: RenderPartWire[] }
   | { kind: "compact"; content: string }
-  | { kind: "tools"; calls: { id: string; name: string; arguments: string }[] };
+  | {
+      kind: "tools";
+      calls: {
+        id: string;
+        name: string;
+        arguments: string;
+        output?: string | null;
+        ok?: boolean | null;
+        parts?: RenderPartWire[];
+      }[];
+    };
+
+/**
+ * One renderable unit of a message or tool result (aligned with the Rust `RenderPart`).
+ *
+ * The contract (`docs/render-parts.md`): parts carry **data only**, never markup or script, and
+ * every part degrades to text. Consumers must **ignore unknown `kind`s** instead of failing, so
+ * an older build can read a newer payload.
+ */
+export type AssetSourceWire =
+  | { kind: "artifact"; id: string }
+  | { kind: "url"; url: string };
+
+export type RenderPartWire =
+  | { kind: "text"; text: string }
+  | { kind: "image"; source: AssetSourceWire; alt: string; mime: string | null }
+  | {
+      kind: "file";
+      /** Absent only when the part merely mentions a path; then only the fallback text shows. */
+      source?: AssetSourceWire;
+      path?: string;
+      name: string;
+      mime: string | null;
+      bytes: number | null;
+    }
+  | { kind: "link"; url: string; title: string }
+  | { kind: "data"; schema: string; value: unknown };
 
 /** Full view snapshot delivered when subscribing to a session (aligned with the Rust `SessionSnapshotWire`). */
 export type SessionSnapshot = {

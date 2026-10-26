@@ -157,6 +157,18 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
             Arc::clone(&state),
             authorize,
         ))
+        // Raw-byte upload (`docs/render-parts.md` inbound channels). It needs its own route
+        // rather than an `/api/cmd` arm for two reasons: the shared JSON body limit is 16MiB
+        // while a library entry may be 64MiB, and base64-in-JSON would inflate the body by a
+        // third and parse it twice. Declared after `route_layer`, so it is authorized.
+        .route(
+            "/api/upload",
+            post(upload_handler).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
+        )
+        // Deliberately *after* `route_layer`: an `<img src>` cannot carry an Authorization
+        // header, so the unguessable handle is the capability. It is only mintable through the
+        // authorized `agent_asset_url` command.
+        .route("/api/asset/{handle}", get(asset_handler))
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
         .fallback_service(static_files)
         .with_state(Arc::clone(&state));
@@ -322,6 +334,10 @@ struct CmdArgs {
     references: Option<Vec<String>>,
     images: Option<Vec<String>>,
     id: Option<String>,
+    /// Local paths for `agent_ingest_paths` (desktop-parity inbound channel).
+    paths: Option<Vec<String>>,
+    /// Content type for `agent_ingest_bytes`.
+    mime: Option<String>,
     archived: Option<bool>,
     #[serde(rename = "targetProject")]
     target_project: Option<String>,
@@ -476,6 +492,55 @@ async fn dispatch(
             let query = args.query.unwrap_or_default();
             ok_json(manager.search_files(&project, query).await?)
         }
+        // Asset channel (`docs/render-parts.md` P1): an artifact id in, an opaque URL out.
+        "agent_asset_url" => {
+            let project = args.project()?;
+            let id = args
+                .id
+                .clone()
+                .ok_or_else(|| ApiError::bad("missing id".to_owned()))?;
+            let handle = manager.asset_handle(&project, &id).await?;
+            ok_json(format!("/api/asset/{handle}"))
+        }
+        "agent_asset_text" => {
+            let project = args.project()?;
+            let id = args
+                .id
+                .clone()
+                .ok_or_else(|| ApiError::bad("missing id".to_owned()))?;
+            // Served through the authorized command channel, not the public asset route: this
+            // returns *source code* that the page then runs in a sandboxed frame.
+            ok_json(manager.asset_text(&project, &id).await?)
+        }
+        // Inbound media (`docs/render-parts.md` inbound channels). Two doors into the same
+        // library: local paths (the server usually runs on the user's machine too) and raw
+        // bytes (the browser cannot hand us a path). Both reuse the jail, allow-list and size
+        // cap of the artifact store -- there is no second storage layer for user uploads.
+        "agent_ingest_paths" => {
+            let project = args.project()?;
+            let paths = args.paths.unwrap_or_default();
+            let (entries, errors) = manager.ingest_paths(&project, paths).await?;
+            ok_json(serde_json::json!({ "entries": entries, "errors": errors }))
+        }
+        "agent_ingest_bytes" => {
+            let project = args.project()?;
+            let mime = args
+                .mime
+                .ok_or_else(|| ApiError::bad("missing mime".to_owned()))?;
+            let name = args.name.unwrap_or_else(|| "upload".to_owned());
+            let data_url = args
+                .text
+                .ok_or_else(|| ApiError::bad("missing data".to_owned()))?;
+            let (_, bytes) = crate::artifact::decode_data_url(&data_url)
+                .map_err(|e| ApiError::bad(e.to_string()))?;
+            ok_json(manager.ingest_bytes(&project, &name, &mime, &bytes).await?)
+        }
+        // The library is an inventory, not a conversation: it outlives any one session, so the
+        // page can answer "which file did I send you last week?" without scrolling a transcript.
+        "agent_library_list" => {
+            let project = args.project()?;
+            ok_json(manager.library_list(&project).await?)
+        }
         "agent_list_skills" => {
             let project = args.project()?;
             ok_json(manager.list_skills(&project).await?)
@@ -540,6 +605,10 @@ async fn dispatch(
             manager.move_session(&project, &name, &target).await?;
             no_content()
         }
+        // No dictation route on purpose: transcription happens on the user's own device
+        // (browser recogniser, or this computer's whisper.cpp in the desktop app). A phone
+        // that opens a cloud project dictates with the phone's own ASR, so no audio ever
+        // reaches this server. See `docs/voice-input.md`.
         "agent_load_history" => {
             let project = args.project()?;
             ok_json(manager.load_history(&project).await?)
@@ -572,6 +641,173 @@ async fn dispatch(
 // ---------------------------------------------------------------------------
 // SSE event stream
 // ---------------------------------------------------------------------------
+
+/// Serve one artifact (`docs/render-parts.md` P1). The jail already resolved the id when the
+/// handle was minted, so this only reads a file it allowed; a forged handle is a plain 404.
+///
+/// Served as a **stream with Range support**, not one `read` into memory: a 64MiB clip would
+/// otherwise be fully buffered per request, and `<video>` cannot seek at all without `206`
+/// responses (browsers open media with a byte-range request and give up on a plain `200`).
+async fn asset_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(handle): Path<String>,
+    headers: axum::http::HeaderMap,
+) -> Response {
+    let Some((path, mime)) = state.manager.asset_by_handle(&handle) else {
+        return (StatusCode::NOT_FOUND, "unknown asset handle").into_response();
+    };
+    let Ok(file) = tokio::fs::File::open(&path).await else {
+        return (StatusCode::NOT_FOUND, "unreadable asset").into_response();
+    };
+    let Ok(meta) = file.metadata().await else {
+        return (StatusCode::NOT_FOUND, "unreadable asset").into_response();
+    };
+    let total = meta.len();
+    let range = headers
+        .get(axum::http::header::RANGE)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| parse_range(value, total));
+    // `no-store` kept: content is user data, and an opaque handle is not a cache key we want
+    // shared between users of the same origin.
+    //
+    // An HTML artifact is never *navigated* to: the chat renders it through `asset_text` into a
+    // `srcdoc` iframe without `allow-same-origin`. Serving it here as `text/html` would instead
+    // hand the browser a same-origin script host keyed by an opaque handle -- the exact injection
+    // surface this channel refuses to open -- so it goes out as inert text.
+    let content_type = if crate::artifact::is_interactive_html(mime) {
+        "text/plain; charset=utf-8"
+    } else {
+        mime
+    };
+    let common = [
+        ("content-type", content_type),
+        ("cache-control", "no-store"),
+        ("accept-ranges", "bytes"),
+        ("x-content-type-options", "nosniff"),
+    ];
+    match range {
+        Some((start, end)) => {
+            let len = end - start + 1;
+            let body = read_range(file, start, len);
+            (
+                StatusCode::PARTIAL_CONTENT,
+                common,
+                [
+                    ("content-range", format!("bytes {start}-{end}/{total}")),
+                    ("content-length", len.to_string()),
+                ],
+                body,
+            )
+                .into_response()
+        }
+        None if headers.get(axum::http::header::RANGE).is_some() => (
+            StatusCode::RANGE_NOT_SATISFIABLE,
+            common,
+            [("content-range", format!("bytes */{total}"))],
+        )
+            .into_response(),
+        None => (
+            StatusCode::OK,
+            common,
+            [("content-length", total.to_string())],
+            read_range(file, 0, total),
+        )
+            .into_response(),
+    }
+}
+
+/// Parse a single-range `Range: bytes=a-b` header into an inclusive `(start, end)`.
+///
+/// Only the forms a media element actually sends are honoured (`a-b`, `a-`, `-n`); multi-range
+/// requests fall back to the whole file, which is legal -- serving `200` with the full body is
+/// always a valid answer to a range request. Returns `None` when the header asks for something
+/// outside the file so the caller can answer `416` instead of silently sending everything.
+fn parse_range(header: &str, total: u64) -> Option<(u64, u64)> {
+    let spec = header.trim().strip_prefix("bytes=")?;
+    let (start, end) = spec.split_once('-')?;
+    if spec.contains(',') || total == 0 {
+        return None;
+    }
+    let (start, end) = match (start.trim(), end.trim()) {
+        ("", suffix) => {
+            let n: u64 = suffix.parse().ok()?;
+            if n == 0 {
+                return None;
+            }
+            (total.saturating_sub(n), total - 1)
+        }
+        (start, "") => (start.parse::<u64>().ok()?, total - 1),
+        (start, end) => (start.parse().ok()?, end.parse::<u64>().ok()?.min(total - 1)),
+    };
+    if start > end || start >= total {
+        return None;
+    }
+    Some((start, end))
+}
+
+/// Stream `len` bytes starting at `offset` in 64KiB chunks, so peak memory stays flat no matter
+/// how large the artifact is.
+fn read_range(file: tokio::fs::File, offset: u64, len: u64) -> axum::body::Body {
+    use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _};
+    let stream = futures::stream::try_unfold(
+        (file, offset, len),
+        |(mut file, remaining_offset, remaining)| async move {
+            if remaining == 0 {
+                return Ok(None);
+            }
+            file.seek(std::io::SeekFrom::Start(remaining_offset))
+                .await?;
+            let want = remaining.min(64 * 1024);
+            let mut buf = vec![0_u8; want as usize];
+            let read = file.read(&mut buf).await?;
+            if read == 0 {
+                return Ok(None);
+            }
+            buf.truncate(read);
+            Ok::<_, std::io::Error>(Some((
+                Bytes::from(buf),
+                (
+                    file,
+                    remaining_offset + read as u64,
+                    remaining - read as u64,
+                ),
+            )))
+        },
+    );
+    axum::body::Body::from_stream(stream)
+}
+
+/// Largest inbound upload the library accepts; mirrors the jail's own cap so a too-large body is
+/// rejected by the HTTP layer before any of it is buffered.
+const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
+
+/// `POST /api/upload?project=<id>&name=<file>&mime=<type>` with the file as the **raw body**.
+///
+/// This is the cloud twin of the desktop's `agent_ingest_paths`: a browser cannot hand us a
+/// path, so it hands us the bytes. The declared `mime` is advisory -- the jail re-derives and
+/// validates it against its own allow-list, and a body that name does not match is refused
+/// there, not trusted here.
+async fn upload_handler(
+    State(state): State<Arc<ServerState>>,
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let project = query
+        .get("project")
+        .ok_or_else(|| ApiError::bad("missing project".to_owned()))?;
+    let mime = query
+        .get("mime")
+        .ok_or_else(|| ApiError::bad("missing mime".to_owned()))?;
+    let name = query.get("name").map_or("upload", String::as_str);
+    if body.is_empty() {
+        return Err(ApiError::bad("empty upload".to_owned()));
+    }
+    let entry = state
+        .manager
+        .ingest_bytes(project, name, mime, &body)
+        .await?;
+    ok_json(entry)
+}
 
 async fn events_handler(
     State(state): State<Arc<ServerState>>,

@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  ArrowLeft, ArrowRight, Folder, FolderPlus, Globe, House,
+  ArrowLeft, ArrowRight, Folder, FolderPlus, Globe, House, LibraryBig,
   MessageSquarePlus, Moon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Settings2, SquarePen, Sun,
 } from "lucide-react";
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from "@/ui/context-menu";
@@ -37,7 +37,7 @@ function IconButton({ label, children, active, className, ...props }: {
 
 export function DesktopChrome({
   title, projectName, sidebarCollapsed, canGoBack, canGoForward,
-  navigationBusy, onBack, onForward, onToggleSidebar, onHome,
+  navigationBusy, onBack, onForward, onToggleSidebar, onHome, onLibrary, libraryActive,
   onNewChat, onAddProject, topContent, onNewBrowserTab, children,
 }: {
   title: string;
@@ -50,6 +50,10 @@ export function DesktopChrome({
   onForward: () => void;
   onToggleSidebar: () => void;
   onHome: () => void;
+  /** Open the media library (an inventory of everything handed over, not a session). */
+  onLibrary: () => void;
+  /** Whether the library page is the current destination (rail highlight). */
+  libraryActive: boolean;
   onNewChat: () => void;
   onAddProject: () => void;
   /** Open a new in-app browser tab; the button is hidden when not provided. */
@@ -136,14 +140,24 @@ export function DesktopChrome({
             sidebar's right border below; the tick is only a short segment, not a
             continuous line running down. When the sidebar is collapsed, the left area is
             no longer fixed-width and the tick is not drawn (there is no sidebar border to
-            align to). */}
+            align to).
+
+            On a phone there is no icon rail and no fixed alignment to keep: the sidebar is
+            an overlay, so the toggle must stay reachable even when a full-surface page
+            (Library) is foreground — otherwise that page is a dead end. Every other header
+            action lives in the sidebar on mobile, which is why the row stays at one button. */}
         <div
           className={cn(
             "app-header-navigation flex h-full shrink-0 items-center gap-1 overflow-hidden transition-[width] duration-200 ease-product",
-            isMacDesktop && !fullscreen ? "pl-[88px]" : "pl-3",
-            sidebarCollapsed
-              ? isMacDesktop && !fullscreen ? "w-[14.25rem]" : "w-[9.5rem]"
-              : "w-[19.5rem]",
+            !mobile && libraryActive && "hidden",
+            mobile
+              ? "w-auto"
+              : [
+                  isMacDesktop && !fullscreen ? "pl-[88px]" : "pl-3",
+                  sidebarCollapsed
+                    ? isMacDesktop && !fullscreen ? "w-[14.25rem]" : "w-[9.5rem]"
+                    : "w-[19.5rem]",
+                ],
           )}
         >
           <IconButton className="hidden md:flex" label="Back" disabled={!canGoBack || navigationBusy} onClick={onBack}>
@@ -156,7 +170,7 @@ export function DesktopChrome({
             {sidebarCollapsed ? <PanelLeftOpen className="size-4" /> : <PanelLeftClose className="size-4" />}
           </IconButton>
           {/* New session: shown here only when the sidebar is collapsed — when expanded, the sidebar already has an entry, avoiding duplication. */}
-          {sidebarCollapsed && (
+          {sidebarCollapsed && !mobile && (
             <IconButton label="New session" onClick={onNewChat}><SquarePen className="size-4" /></IconButton>
           )}
           {/* Divider tick: lines up on the same x as the session sidebar's right border
@@ -180,6 +194,8 @@ export function DesktopChrome({
             </>
           )}
         </div>
+        {!mobile && (
+        <>
         {onNewBrowserTab && (
           <IconButton label="New browser tab" onClick={onNewBrowserTab}><Globe className="size-4" /></IconButton>
         )}
@@ -196,10 +212,13 @@ export function DesktopChrome({
         }>
           {(open) => <IconButton label="More actions" aria-haspopup="menu" onClick={open}><MoreHorizontal className="size-4" /></IconButton>}
         </ContextMenu>
+        </>
+        )}
       </header>
       <div className="flex min-h-0 flex-1">
         <nav aria-label="Main navigation" className="hidden md:flex w-14 shrink-0 flex-col items-center gap-2 bg-frame py-3">
-          <IconButton label="Home" active className="size-10" onClick={onHome}><House className="size-5" /></IconButton>
+          <IconButton label="Home" active={!libraryActive} className="size-10" onClick={onHome}><House className="size-5" /></IconButton>
+          <IconButton label="Library" className="size-10" active={libraryActive} onClick={onLibrary}><LibraryBig className="size-5" /></IconButton>
           <div className="flex-1" />
           <IconButton label="Settings" className="size-10" onClick={() => openSettings("general")}><Settings2 className="size-5" /></IconButton>
           <IconButton label={dark ? "Switch to light appearance" : "Switch to dark appearance"} className="size-10" onClick={toggleTheme}>{dark ? <Sun className="size-5" /> : <Moon className="size-5" />}</IconButton>

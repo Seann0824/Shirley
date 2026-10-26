@@ -109,7 +109,7 @@ pub(crate) fn clip_to_budget(text: &str, budget: usize) -> &str {
 /// Returning plain text rather than structured JSON is deliberate -- directly readable by the model, and the line numbers make it easy to
 /// continue reading with `start_line`.
 #[tool(
-    description = "Read the contents of a text file inside the workspace by line, returning line-numbered text. Reads have line and byte caps; when content is truncated, a hint on how to continue is shown at the end. For large files, first locate content with the grep tool, then use this tool to read the relevant range; do not read the whole file with cat."
+    description = "Read a file inside the workspace. Text is returned as line-numbered text; an image or a document (PDF, office, media) is attached to the chat so the human can see it, and you get a short description back instead of bytes. Reads have line and byte caps; when content is truncated, a hint on how to continue is shown at the end. For large files, first locate content with the grep tool, then use this tool to read the relevant range; do not read the whole file with cat."
 )]
 pub async fn read(
     ctx: &ToolContext,
@@ -120,26 +120,83 @@ pub async fn read(
     #[param(description = "start line, 1-based; defaults to line 1")] start_line: Option<usize>,
     #[param(description = "maximum number of lines to read, defaults to 200, hard cap 2000")]
     line_count: Option<usize>,
-) -> Result<String, ToolError> {
+) -> Result<serde_json::Value, ToolError> {
     let roots = resolve_workspace_roots(ctx)
         .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
     // Pick the first root that actually contains the requested path. Falling through to the
     // primary root when nothing matches keeps the error message accurate (it will report the
     // missing file relative to the primary root).
     for root in &roots {
-        if WorkSpace::new(root.clone())
+        let resolved = WorkSpace::new(root.clone())
             .ok()
             .and_then(|workspace| workspace.resolve(&path).ok())
-            .is_some_and(|resolved| resolved.exists())
-        {
-            return read_text_range(root, &path, &path, start_line, line_count).await;
+            .filter(|resolved| resolved.exists());
+        if let Some(resolved) = resolved {
+            // A picture (or a PDF / deck / clip) is bytes, and bytes have no business in the
+            // transcript: park them in the artifact jail and hand the render channel a part that
+            // points at them. The model gets a one-line description instead of a base64 blob
+            // (`docs/render-parts.md`).
+            if let Some(value) = attach_artifact(ctx, &path, &resolved) {
+                return Ok(value);
+            }
+            return read_text_range(root, &path, &path, start_line, line_count)
+                .await
+                .map(serde_json::Value::String);
         }
     }
     let primary = roots
         .first()
         .cloned()
         .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
-    read_text_range(&primary, &path, &path, start_line, line_count).await
+    read_text_range(&primary, &path, &path, start_line, line_count)
+        .await
+        .map(serde_json::Value::String)
+}
+
+/// Project a product file the **human** should see into the artifact jail.
+///
+/// This covers every type the asset channel accepts *except* plain text: images become `image`
+/// parts, everything else (PDF, office documents, media, archives) becomes a `file` part whose
+/// mime picks the renderer on the other side. Text types return `None` so a text read keeps its
+/// exact previous output -- and with it the request bytes, hence the prefix cache.
+///
+/// The returned object is the producer-side `parts` convention (`docs/render-parts.md`
+/// §生产侧): the model sees `content` only, the chat page sees `parts`.
+fn attach_artifact(ctx: &ToolContext, display: &str, file: &Path) -> Option<serde_json::Value> {
+    let mime = crate::artifact::mime_for_path(file)?;
+    if !crate::artifact::is_attachable(mime) {
+        return None;
+    }
+    let readable = crate::artifact::is_inline_image(mime);
+    let Some(store) = ctx.get::<crate::artifact::ArtifactStore>() else {
+        return Some(serde_json::json!({
+            "content": format!(
+                "[file] {display} ({mime}) - this interface cannot display it, so only the description is available."
+            ),
+        }));
+    };
+    match store.put_file(file) {
+        Ok(artifact) => {
+            let content = if readable {
+                format!(
+                    "[image] {display} ({mime}, {} KB) - shown to the human in the chat. Describe it from the conversation instead of reading its bytes.",
+                    artifact.bytes / 1024
+                )
+            } else {
+                format!(
+                    "[file] {display} ({mime}, {} KB) - not text, so there is nothing to read here; it has been handed to the human in the chat. If you need its contents, extract them with a tool instead.",
+                    artifact.bytes / 1024
+                )
+            };
+            Some(serde_json::json!({
+                "content": content,
+                "parts": [crate::artifact::part_for(&artifact, display, artifact.bytes)],
+            }))
+        }
+        Err(error) => Some(serde_json::json!({
+            "content": format!("[file] {display} - could not be attached to the chat: {error}"),
+        })),
+    }
 }
 
 /// Controlled read kernel: reads the relative path `path` under `root` by line, returning a line-numbered excerpt.
@@ -331,6 +388,22 @@ mod tests {
     // Use tokio's Mutex: the guard may be held across await, std's would be flagged by clippy.
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
+    /// Read a path and project it to the text the model sees (`read` now returns a JSON object
+    /// when the file is an artifact-backed image, a plain string otherwise).
+    async fn read_text(
+        ctx: &ToolContext,
+        path: &str,
+        start_line: Option<usize>,
+        line_count: Option<usize>,
+    ) -> Result<String, ToolError> {
+        read(ctx, path.into(), start_line, line_count)
+            .await
+            .map(|value| match value {
+                serde_json::Value::String(text) => text,
+                other => other["content"].as_str().unwrap_or_default().to_string(),
+            })
+    }
+
     /// Create a unique temporary workspace directory.
     fn temp_workspace(tag: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!(
@@ -351,7 +424,7 @@ mod tests {
         // SAFETY: env var is changed serially within the test, not concurrently with other threads.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read(&ToolContext::new(), "a.txt".into(), None, None)
+        let out = read_text(&ToolContext::new(), "a.txt", None, None)
             .await
             .unwrap();
 
@@ -383,7 +456,7 @@ mod tests {
         // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read(&ToolContext::new(), "b.txt".into(), Some(3), Some(2))
+        let out = read_text(&ToolContext::new(), "b.txt", Some(3), Some(2))
             .await
             .unwrap();
 
@@ -413,7 +486,7 @@ mod tests {
         // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(&ToolContext::new(), "../etc/passwd".into(), None, None)
+        let err = read(&ToolContext::new(), "../etc/passwd".to_string(), None, None)
             .await
             .unwrap_err();
         assert!(
@@ -434,7 +507,7 @@ mod tests {
         // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(&ToolContext::new(), "/etc/hosts".into(), None, None)
+        let err = read(&ToolContext::new(), "/etc/hosts".to_string(), None, None)
             .await
             .unwrap_err();
         assert!(
@@ -452,7 +525,7 @@ mod tests {
         // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(&ToolContext::new(), ".env".into(), None, None)
+        let err = read(&ToolContext::new(), ".env".to_string(), None, None)
             .await
             .unwrap_err();
         assert!(
@@ -470,7 +543,7 @@ mod tests {
         // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(&ToolContext::new(), "bin".into(), None, None)
+        let err = read(&ToolContext::new(), "bin".to_string(), None, None)
             .await
             .unwrap_err();
         assert!(
@@ -488,7 +561,7 @@ mod tests {
         // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(&ToolContext::new(), "sub".into(), None, None)
+        let err = read(&ToolContext::new(), "sub".to_string(), None, None)
             .await
             .unwrap_err();
         assert!(
@@ -508,7 +581,7 @@ mod tests {
         // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let out = read(&ToolContext::new(), "big.txt".into(), None, None)
+        let out = read_text(&ToolContext::new(), "big.txt", None, None)
             .await
             .unwrap();
         assert!(
@@ -589,9 +662,9 @@ mod tests {
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
         // Explicitly request far more lines than the cap; still only read up to the cap.
-        let out = read(
+        let out = read_text(
             &ToolContext::new(),
-            "many.txt".into(),
+            "many.txt",
             None,
             Some(MAX_LINE_COUNT * 2),
         )

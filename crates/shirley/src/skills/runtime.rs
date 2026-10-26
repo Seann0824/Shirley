@@ -104,7 +104,13 @@ impl SkillRuntime {
     ///
     /// Returns the rendered body block -- the tool returns it as the result, so the model sees the instruction this round.
     /// Re-activating the same skill does not append again (keeps the output stable and avoids needlessly breaking the cache).
+    ///
+    /// A skill installed **after** the catalog was scanned (the model wrote the files itself) is
+    /// picked up here: an unknown name triggers one in-place re-scan before giving up.
     pub fn activate(&self, name: &str) -> Result<String, ActivateError> {
+        if self.catalog.get(name).is_none() {
+            self.catalog.refresh();
+        }
         if self.catalog.get(name).is_none() {
             return Err(ActivateError::UnknownSkill(name.to_string()));
         }

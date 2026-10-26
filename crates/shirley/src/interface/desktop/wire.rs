@@ -26,6 +26,7 @@ use shirley_agent_sdk::ErrorKind;
 use shirley_agent_sdk::Usage;
 
 use crate::interface::session::{ItemWire as CoreItemWire, ToolCallWire};
+use crate::interface::view::{RenderPart, parts_from_tool_value};
 use crate::status::{Activity, Health, Liveness, StateSnapshot};
 use crate::todo::TaskView;
 
@@ -89,6 +90,11 @@ pub enum AgentEventWire {
         name: String,
         ok: bool,
         output: String,
+        /// Render parts projected from the tool's structured result (empty = render `output`).
+        ///
+        /// Appended, not replacing `output`: `output` is what the model read, `parts` is what a
+        /// human sees (`docs/render-parts.md`).
+        parts: Vec<RenderPart>,
         /// Stable error class on failure (`None` on success), as a `snake_case` string the
         /// frontend switches on. This replaces sniffing the error text for classification.
         error_kind: Option<String>,
@@ -341,6 +347,7 @@ impl AgentEventWire {
                 name,
                 ok,
                 output,
+                structured,
                 error_kind,
                 elapsed_ms,
             } => Self::ToolFinished {
@@ -349,6 +356,7 @@ impl AgentEventWire {
                 call_id,
                 name,
                 ok,
+                parts: parts_from_tool_value(structured.as_ref()),
                 output,
                 error_kind: error_kind.map(error_kind_str),
                 elapsed_ms,
@@ -465,9 +473,18 @@ fn message_role(message: &shirley_agent_sdk::Message) -> &'static str {
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum ItemWire {
-    Message { role: String, content: String },
-    Compact { content: String },
-    Tools { calls: Vec<ToolCallWireDto> },
+    Message {
+        role: String,
+        content: String,
+        /// Render parts (empty = render `content` as text). Appended field.
+        parts: Vec<RenderPart>,
+    },
+    Compact {
+        content: String,
+    },
+    Tools {
+        calls: Vec<ToolCallWireDto>,
+    },
 }
 
 /// DTO for a single tool call in a snapshot.
@@ -476,15 +493,26 @@ pub struct ToolCallWireDto {
     pub id: String,
     pub name: String,
     pub arguments: String,
+    /// The tool's flattened output (`None` while running).
+    pub output: Option<String>,
+    /// Whether the call succeeded (`None` while running, or restored from a log).
+    pub ok: Option<bool>,
+    /// Rich render parts (empty = render `output` as text).
+    pub parts: Vec<RenderPart>,
 }
 
 impl From<CoreItemWire> for ItemWire {
     fn from(item: CoreItemWire) -> Self {
         match item {
             CoreItemWire::Compact { content } => ItemWire::Compact { content },
-            CoreItemWire::Message { role, content } => ItemWire::Message {
+            CoreItemWire::Message {
+                role,
+                content,
+                parts,
+            } => ItemWire::Message {
                 role: role_wire(role).to_owned(),
                 content,
+                parts,
             },
             CoreItemWire::Tools { calls } => ItemWire::Tools {
                 calls: calls
@@ -494,10 +522,16 @@ impl From<CoreItemWire> for ItemWire {
                              id,
                              name,
                              arguments,
+                             output,
+                             ok,
+                             parts,
                          }| ToolCallWireDto {
                             id,
                             name,
                             arguments,
+                            output,
+                            ok,
+                            parts,
                         },
                     )
                     .collect(),

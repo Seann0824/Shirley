@@ -145,6 +145,12 @@ impl StoragePaths {
     pub fn sessions(&self) -> PathBuf {
         self.state.join("sessions")
     }
+    /// Bytes a chat page is allowed to open: `RenderPart`s point here by id, never by path.
+    /// It is derived state (regenerable from a tool run), deliberately *not* session state.
+    pub fn artifacts(&self) -> PathBuf {
+        self.state.join("artifacts")
+    }
+
     pub fn memory_roots(&self) -> Vec<PathBuf> {
         vec![self.global.join("memory"), self.state.join("memory")]
     }

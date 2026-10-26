@@ -17,7 +17,7 @@ Goal: run a migration task once on a real repository without a disaster in the m
 
 - Security boundary (see `security.md`)
   - key rotation + `.env.example`
-  - `bash` returns stderr / exit code, fix the blacklist bypass
+  - `bash` returns stderr / exit code; the command blacklist is removed (the sandbox is the boundary)
   - workspace root restriction (cwd allowlist + path canonicalization)
   - per-call permission policy and human approval are deferred by product decision
     (2026-10-24); the previous implementation has been removed, while tool-local checks remain

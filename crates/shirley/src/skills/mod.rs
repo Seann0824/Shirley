@@ -37,7 +37,7 @@ pub use runtime::SkillRuntime;
     unused_imports,
     reason = "public re-export used by tests and downstream modules"
 )]
-pub use discovery::{Discovery, discover};
+pub use discovery::Discovery;
 #[allow(
     unused_imports,
     reason = "public re-export used by tests and downstream modules"

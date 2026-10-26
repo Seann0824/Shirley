@@ -21,7 +21,7 @@ use std::path::{Path, PathBuf};
 use super::parse::{SkillMeta, parse_skill};
 
 /// skill directories relative to the project root (in priority order, first scanned wins).
-const PROJECT_SKILL_DIRS: &[&str] = &[".agents/skills", ".claude/skills"];
+pub const PROJECT_SKILL_DIRS: &[&str] = &[".agents/skills", ".claude/skills"];
 /// skill directories relative to the user home (in priority order).
 const USER_SKILL_DIRS: &[&str] = &[".agents/skills", ".claude/skills"];
 /// skill definition file name.
@@ -35,10 +35,11 @@ pub struct Discovery {
     pub conflicts: Vec<(String, PathBuf, PathBuf)>,
 }
 
-/// Discover all skills from "project root + user home".
+/// The discovery roots, in priority order (`[0]` is where a **new** skill should be installed).
 ///
-/// When `home` is `None` (user directory unavailable), only scan project level.
-pub fn discover(project_root: &Path, home: Option<&Path>) -> Discovery {
+/// Project level before user level; the first scanned name wins. Returns an empty-able list --
+/// a project-only catalog when `home` is `None` (user directory unavailable).
+pub fn skill_roots(project_root: &Path, home: Option<&Path>) -> Vec<PathBuf> {
     let mut roots: Vec<PathBuf> = PROJECT_SKILL_DIRS
         .iter()
         .map(|rel| project_root.join(rel))
@@ -46,7 +47,7 @@ pub fn discover(project_root: &Path, home: Option<&Path>) -> Discovery {
     if let Some(home) = home {
         roots.extend(USER_SKILL_DIRS.iter().map(|rel| home.join(rel)));
     }
-    scan_roots(&roots)
+    roots
 }
 
 /// Scan multiple root directories by priority; the first scanned name wins.
@@ -169,7 +170,7 @@ mod tests {
         write_skill(&home_skills, "dup", "user version");
         write_skill(&home_skills, "user-only", "only in user");
 
-        let discovery = discover(&project, Some(&home));
+        let discovery = scan_roots(&skill_roots(&project, Some(&home)));
         let dup = discovery.skills.iter().find(|s| s.name == "dup").unwrap();
         assert_eq!(dup.description, "project version");
         assert!(discovery.skills.iter().any(|s| s.name == "user-only"));
@@ -182,7 +183,7 @@ mod tests {
 
     #[test]
     fn missing_root_is_not_an_error() {
-        let discovery = discover(Path::new("/nonexistent/shirley/skills"), None);
+        let discovery = scan_roots(&skill_roots(Path::new("/nonexistent/shirley/skills"), None));
         assert!(discovery.skills.is_empty());
     }
 

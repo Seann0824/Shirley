@@ -58,7 +58,8 @@ mod tests {
     }
 
     #[test]
-    fn empty_catalog_injects_nothing() {
+    fn catalog_without_roots_injects_nothing() {
+        // Built via `SkillCatalog::new` (no discovery roots): nothing to list and no path to install into.
         assert!(provider(&[]).context().is_none());
     }
 

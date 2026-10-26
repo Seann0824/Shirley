@@ -187,7 +187,7 @@ Right now there is only one tool, `bash`, and one backend, `ProcessBackend`; the
 **10. Not yet done (explicitly bounded)**
 
 - **Real isolation backends**: `sandbox-exec` / `bwrap` / microVM are all unconnected. Currently only `ProcessBackend`.
-- ~~**`Sandbox` is not wired into the `bash` tool**~~: it is wired in. `crates/shirley/src/tools/bash.rs` goes through `Sandbox::run`, keeping `bash -c` (without breaking pipes/redirection), the timeout is handed to the facade, and the result includes stderr/exit_code/a degradation hint. The blacklist is downgraded to a "temporary static fallback".
+- ~~**`Sandbox` is not wired into the `bash` tool**~~: it is wired in. `crates/shirley/src/tools/bash.rs` goes through `Sandbox::run`, keeping `bash -c` (without breaking pipes/redirection), the timeout is handed to the facade, and the result includes stderr/exit_code/a degradation hint. The command blacklist has since been **removed entirely** -- the sandbox is the only boundary.
 - **External verification of `degraded`**: currently only the backend's self-report is trusted, with no self-check probes.
 - **Outbound proxy**: `NetworkPolicy::Proxy` is only a declaration; the proxy itself (domain allowlist + auditing + content inspection) is not implemented. This is the key layer against data exfiltration, and also a high-incident area.
 - **Execution policy ownership not centralized**: currently whether to go through the sandbox is decided by the tool author; see section 9. Solve it together when a second external-execution tool appears.

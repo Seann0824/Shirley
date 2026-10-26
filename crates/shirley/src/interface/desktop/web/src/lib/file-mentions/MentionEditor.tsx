@@ -33,12 +33,11 @@ export type MentionEditorHandle = {
   /** Replace the `/` skill candidate with a skill chip (called by clicking an item in `SkillSlashPopover`). */
   insertSkill: (skill: SkillEntry) => void;
   /** Insert a pasted-image chip at the caret (data URL payload). */
-  insertImage: (reference: FileReference) => void;
   /**
-   * Insert image files picked from the OS file dialog / drag-and-drop (each becomes an
-   * `image` chip with a data: URL payload — the same shape as pasted images).
+   * Insert a **media-library** reference (a file the harness already ingested): the chip
+   * carries an artifact id, not bytes, so size does not matter here.
    */
-  insertImageFiles: (files: File[]) => Promise<void>;
+  insertMedia: (reference: FileReference) => void;
   /** Open the `@` reference picker from the external "+" button (empty query, immediate fetch). */
   openMention: () => void;
 };
@@ -273,31 +272,17 @@ export const MentionEditor = forwardRef<
 
   const selectRef = useRef<(reference: FileReference) => void>(() => {});
   selectRef.current = handleSelect;
-  const imageInsertRef = useRef<(reference: FileReference) => void>(() => {});
-  imageInsertRef.current = insertReferenceAtCaret;
-  const insertImageFiles = useCallback(
-    async (files: File[]) => {
-      for (const file of files) {
-        if (!file.type.startsWith("image/")) continue;
-        const dataUrl = await fileToDataUrl(file);
-        insertReferenceAtCaret({
-          path: `image:${file.name || "image"}`,
-          name: file.name || "image",
-          kind: "image",
-          dataUrl,
-        });
-      }
-    },
-    [insertReferenceAtCaret],
-  );
+  // Uploaded files are ingested by the harness (`bridge.ingestBytes` / `ingestPaths`) and
+  // arrive here as a library reference; the editor only places the chip, it never reads bytes.
+  const mediaInsertRef = useRef<(reference: FileReference) => void>(() => {});
+  mediaInsertRef.current = insertReferenceAtCaret;
   const slashSelectRef = useRef<(skill: SkillEntry) => void>(() => {});
   slashSelectRef.current = handleSkillSelect;
   useImperativeHandle(ref, () => ({
     focus: () => rootRef.current?.focus({ preventScroll: true }),
     insertReference: (reference) => selectRef.current(reference),
     insertSkill: (skill) => slashSelectRef.current(skill),
-    insertImage: (reference) => imageInsertRef.current(reference),
-    insertImageFiles: (files) => insertImageFiles(files),
+    insertMedia: (reference) => mediaInsertRef.current(reference),
     openMention: () => {
       rootRef.current?.focus({ preventScroll: true });
       mentionRef.current = { queryStart: -1 };

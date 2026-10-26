@@ -53,6 +53,39 @@ pub struct FileSettings {
     pub runtime: RuntimeSettings,
     /// Subagent (child Agent) config (the `[subagent]` table in the config file).
     pub subagent: SubagentSettings,
+    /// Voice input (dictation) config (the `[asr]` table in the config file).
+    pub asr: AsrSettings,
+}
+
+/// Voice input ASR config (the `[asr]` table in the config file).
+///
+/// Deliberately **not** part of the merged [`Settings`]: dictation is an input-side
+/// utility read on demand (`asr::capabilities` / `asr::transcribe`), and its environment
+/// overrides use their own `SHIRLEY_ASR_*` names. Keeping it out of `Settings` means the
+/// TUI startup path is untouched by this feature.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AsrSettings {
+    // Kept only so an existing `[asr]` table still parses: transcription moved to the user's
+    // own device, so the deleted cloud engine's keys are accepted and ignored. Removing them
+    // would make `deny_unknown_fields` reject the whole table and silently drop `local_binary`
+    // along with it -- a worse failure than ignoring three dead keys.
+    pub cloud_base_url: Option<String>,
+    pub cloud_api_key: Option<String>,
+    pub cloud_model: Option<String>,
+    /// Local CLI path or name (`whisper-cli`, ...). Auto-detected when absent: `PATH`
+    /// first, then the usual install prefixes, so a Finder-launched app still finds it.
+    pub local_binary: Option<String>,
+    /// Local ggml model file. Defaults to the first `ggml-*.bin` in `<global>/asr/models`,
+    /// then the folders `whisper.cpp` installs keep theirs in.
+    pub local_model: Option<String>,
+    /// Where to fetch the model Shirley manages. Default: the multilingual `base-q5_1`
+    /// weights on Hugging Face. Point this at a mirror when that host is unreachable.
+    pub model_url: Option<String>,
+    /// Spoken language code; `auto` (the default) lets the model detect it.
+    pub local_language: Option<String>,
+    /// Worker threads for the local CLI. Default: available cores, capped at 8.
+    pub local_threads: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
@@ -278,7 +311,7 @@ impl FileSettings {
     }
 
     /// Read the file; return `None` if it does not exist (missing config is not an error, it is "this layer said nothing").
-    fn load_file(path: &Path) -> Result<Option<Self>, SettingsError> {
+    pub(crate) fn load_file(path: &Path) -> Result<Option<Self>, SettingsError> {
         match std::fs::read_to_string(path) {
             Ok(text) => Ok(Some(Self::parse(&text, path)?)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),

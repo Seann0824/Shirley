@@ -22,6 +22,7 @@ use shirley_agent_sdk::{
     ToolCallingMode, ToolManager,
 };
 
+use crate::artifact::ArtifactStore;
 use crate::memory::{
     self, CurateOutcome, CuratorError, Embedder, EmbeddingConfig, MemoryContextProvider,
     MemoryRuntime, MemoryStore,
@@ -85,6 +86,9 @@ pub struct AgentFactory {
     /// **V2.5** embedding client: constructed only when `[memory]` configures both `embedding_base_url` +
     /// `embedding_model` (`None` = pure BM25, honest degradation). Shared by all sessions.
     embedder: Option<Arc<Embedder>>,
+    /// Artifact jail (`docs/render-parts.md`): where bytes a chat page may open live. One store
+    /// per project -- the id a `RenderPart` carries is only resolvable against its own project.
+    pub artifacts: Arc<ArtifactStore>,
     /// Skill catalog (`docs/skills.md` P0): scanned once at assembly, shared by all sessions (read-only, unchanging).
     /// Each `Agent` injects its Tier1 catalog at the end of each round via `SkillContextProvider`.
     skill_catalog: SkillCatalog,
@@ -235,6 +239,7 @@ impl AgentFactory {
             model_catalog,
             session_catalog,
             needs_login,
+            artifacts: Arc::new(ArtifactStore::new(paths.artifacts())),
             memory_roots: paths.memory_roots(),
             curator_settings,
             consolidate_after_entries: settings.memory.consolidate_after_entries.unwrap_or(0),
@@ -302,7 +307,7 @@ impl AgentFactory {
         // `ToolManager` is not `Clone`; each `Agent` build creates a fresh one and re-registers tools:
         // tool definitions are stable (prefix-cache friendly), and `on_register` hooks (e.g. web_search's
         // credential injection) each run once -- state is isolated per tool instance anyway, which is acceptable (decision 5).
-        let mut tool_manager = assemble_tools();
+        let mut tool_manager = assemble_tools(self.artifacts.as_ref());
         // Pin `read` / `grep` to this Agent's real workspace root. Without it they would fall
         // back to the `SHIRLEY_WORKSPACE` env var / process CWD, which is decoupled from the
         // Agent's `working_dir` (e.g. the desktop interface's multi-project mode: one process,
@@ -388,6 +393,13 @@ impl AgentFactory {
             .compaction_config(self.compaction_config.clone())
             .max_steps(max_steps.unwrap_or(self.max_steps))
             .context_provider(Arc::new(provider) as Arc<dyn ContextProvider>)
+            // Image references (`file_id`) become `data:` URLs only in the request view, so a
+            // picture the model asks for never gets baked into the session log.
+            .image_resolver({
+                let store = Arc::clone(&self.artifacts);
+                Arc::new(move |id: &str| store.data_url(id))
+                    as Arc<dyn Fn(&str) -> Option<String> + Send + Sync>
+            })
             .tools(tool_manager)
             .messages(messages)
             .build()?;
@@ -701,11 +713,17 @@ impl ContextProvider for CompositeContextProvider {
 
 /// Build a `ToolManager` with all tools registered (bash / grep / read are always registered;
 /// `web_search` is not registered when unconfigured). Each `Agent` holds one; tool state is isolated per instance.
-fn assemble_tools() -> ToolManager {
+fn assemble_tools(artifacts: &ArtifactStore) -> ToolManager {
     let mut tool_manager = ToolManager::new();
+    // The artifact jail is a `ToolManager` context value, not a tool argument: `read` uses it to
+    // hand bytes to the render channel instead of trying to put them in the transcript.
+    // `ToolContext::get::<T>` hands back `Arc<T>`, so the *value* stored here is `ArtifactStore`.
+    tool_manager.context_mut().insert(artifacts.clone());
     let _ = tool_manager.register(tools::bash_tool::tool());
     let _ = tool_manager.register(tools::grep_tool::tool());
     let _ = tool_manager.register(tools::read_tool::tool());
+    // The media library's model-side door: the bytes stay in the jail, the model asks for them.
+    let _ = tool_manager.register(tools::MediaTool::new(artifacts.clone()));
     if let Err(error) = tool_manager.register(tools::web_search_tool::tool()) {
         eprintln!("[web_search] not enabled: {error}");
     }
@@ -771,6 +789,7 @@ pub(crate) mod test_support {
                 .model("test")
                 .stream(stream)
                 .build(),
+            artifacts: Arc::new(ArtifactStore::new(std::env::temp_dir())),
             system_prompt: SystemPrompt::from("test"),
             compaction_config: CompactionConfig::default(),
             max_steps: 64,
@@ -824,6 +843,7 @@ mod tests {
                 .base_url("http://localhost")
                 .model("test")
                 .build(),
+            artifacts: Arc::new(ArtifactStore::new(std::env::temp_dir())),
             system_prompt: SystemPrompt::from("test"),
             compaction_config: CompactionConfig::default(),
             max_steps: 64,
@@ -895,7 +915,7 @@ mod tests {
 
     #[test]
     fn grep_and_read_are_registered_and_available_to_children() {
-        let manager = assemble_tools();
+        let manager = assemble_tools(&ArtifactStore::new(std::env::temp_dir()));
         let names: Vec<String> = manager
             .definitions()
             .iter()

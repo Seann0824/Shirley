@@ -56,13 +56,24 @@ export function readChips(root: HTMLElement): FileReference[] {
           ? "skill"
           : el.dataset.kind === "image"
             ? "image"
-            : "file";
+            : el.dataset.kind === "media"
+              ? "media"
+              : "file";
     const reference: FileReference = {
       path: el.dataset.path ?? "",
       name: el.dataset.name ?? "",
       kind,
     };
     if (el.dataset.description) reference.description = el.dataset.description;
+    // A library chip carries its artifact id (not bytes): keep it in the DOM so the chip
+    // survives an editor rebuild (Backspace / re-render) without losing the payload.
+    if (el.dataset.artifactId) reference.artifactId = el.dataset.artifactId;
+    if (el.dataset.mime) reference.mime = el.dataset.mime;
+    if (el.dataset.bytes) reference.bytes = Number(el.dataset.bytes);
+    // Keep the chip's thumbnail across a rebuild: the preview URL (an object URL for an
+    // uploaded image, a `data:` URL for a pasted one) is written onto the element by
+    // `createChipElement` and read back here.
+    if (el.dataset.previewSrc) reference.dataUrl = el.dataset.previewSrc;
     return reference;
   });
 }

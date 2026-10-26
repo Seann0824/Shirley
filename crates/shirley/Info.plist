@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<!-- macOS refuses microphone access outright unless the requesting app declares why it
+	     wants it (TCC). Read from the bundle's Info.plist, or -- for the bare binary that
+	     `cargo desktop` runs -- from the `__TEXT,__info_plist` section embedded by build.rs. -->
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Shirley 使用麦克风把你说的话转成输入框里的文字。</string>
+</dict>
+</plist>

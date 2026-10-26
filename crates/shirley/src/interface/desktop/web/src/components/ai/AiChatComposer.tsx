@@ -1,6 +1,7 @@
 import { ArrowUp, Square } from "lucide-react";
 import type { ComponentPropsWithoutRef, ReactNode, Ref } from "react";
 import { Button } from "@/ui/button";
+import { FIELD_SHELL } from "@/ui/field";
 import { Textarea } from "@/ui/textarea";
 import { shouldSendChatOnEnter } from "@/lib/chat-input";
 import { cn } from "@/ui/utils";
@@ -72,7 +73,7 @@ export function AiChatComposer({
   return (
     <form
       className={cn(
-        "relative flex shrink-0 flex-col gap-1 rounded-[1.75rem] border border-line bg-surface p-2.5 shadow-card transition-[border-color,box-shadow] duration-150 ease-product focus-within:border-line-strong focus-within:ring-2 focus-within:ring-ink/8",
+        cn("relative flex shrink-0 flex-col gap-0.5 p-2", FIELD_SHELL),
         className,
       )}
       data-ai-chat-composer
@@ -104,7 +105,7 @@ export function AiChatComposer({
               maxLength={maxLength}
               enterKeyHint="enter"
               className={cn(
-                "max-h-40 min-h-11 resize-none overflow-y-auto rounded-none border-0 bg-transparent p-0 [field-sizing:content] hover:bg-transparent focus:border-transparent focus:bg-transparent focus:ring-0",
+                "max-h-40 min-h-9 resize-none overflow-y-auto rounded-none border-0 bg-transparent p-0 [field-sizing:content] hover:bg-transparent focus:border-transparent focus:bg-transparent focus:ring-0",
                 textareaClassName,
               )}
               placeholder={placeholder}
@@ -123,13 +124,13 @@ export function AiChatComposer({
       </div>
       <div className="order-2 flex items-center justify-between gap-2">
         <div className="flex min-w-0 items-center gap-1">{leadingAction}</div>
-        <div className="flex shrink-0 items-center gap-1.5">
+        <div className="flex shrink-0 items-center gap-1">
           {trailingAction}
           {showStop ? (
             <Button
               type="button"
               variant="primary"
-              size="icon-sm"
+              size="icon-xs"
               aria-label="Stop generating"
               disabled={disabled}
               className="rounded-full"
@@ -144,7 +145,7 @@ export function AiChatComposer({
             <Button
               type="submit"
               variant="primary"
-              size="icon-sm"
+              size="icon-xs"
               aria-label={busy ? "Add to queue, send after the previous turn finishes" : sendLabel}
               disabled={disabled || !hasText}
               className="rounded-full"

@@ -1,6 +1,6 @@
 mod anthropic_messages;
 mod chat_completions;
-mod content;
+pub(crate) mod content;
 mod responses;
 mod sse;
 mod tool_calling;

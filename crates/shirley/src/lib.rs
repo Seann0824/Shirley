@@ -64,7 +64,11 @@ pub(crate) mod infra;
 pub(crate) use domain::{
     model_providers, models, project, session, status, todo, workspace_search,
 };
-pub(crate) use infra::{prompt_template, remote, settings, storage};
+pub(crate) use infra::{artifact, prompt_template, remote, settings, storage};
+// Dictation is reached only from the desktop commands (`crate::asr::…`), so the flat alias is
+// gated with them instead of warning as an unused import in a server-only build.
+#[cfg(feature = "desktop")]
+pub(crate) use infra::asr;
 
 use shirley_agent_sdk::AgentError;
 

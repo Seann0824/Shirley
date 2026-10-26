@@ -53,7 +53,16 @@ pub enum AgentEvent {
         /// Whether the tool succeeded (the `Err` branch is `false`).
         ok: bool,
         /// What the tool returned; on failure it is the error text (matching the stored tool message).
+        ///
+        /// This is **the text the model reads** -- flattened by design, because that is what goes
+        /// into the `Tool` message. It is not the shape the UI should render; see `structured`.
         output: String,
+        /// The tool's raw return value before flattening (`None` on failure).
+        ///
+        /// Appended, not replacing `output`: `output` is the model's view, this is the view for
+        /// humans (the application layer turns it into render parts; the SDK has no opinion on
+        /// what a "part" is -- see `docs/render-parts.md`).
+        structured: Option<serde_json::Value>,
         /// Stable error class on failure (`None` on success). Lets consumers classify a
         /// failure structurally instead of matching the display text — see `error.rs`.
         error_kind: Option<crate::ErrorKind>,

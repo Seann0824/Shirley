@@ -19,6 +19,11 @@ export const buttonVariants = cva(
         lg: "min-h-13 rounded-control px-5 text-base",
         icon: "size-11 rounded-control p-0",
         "icon-sm": "size-10 rounded-control p-0",
+        // Compact row controls (composer action row, tabs): 32px, the size a chat
+        // composer's own buttons should be — big enough to hit, small enough that the
+        // input box is not dominated by its own chrome.
+        xs: "min-h-8 rounded-control px-2.5 text-caption",
+        "icon-xs": "size-8 rounded-control p-0",
       },
     },
     defaultVariants: { variant: "secondary", size: "default" },

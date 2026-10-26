@@ -3,6 +3,7 @@ import { Archive, LoaderCircle } from "lucide-react";
 import { AiMarkdown } from "@/components/ai/AiMarkdown";
 import { AiAssistantMarkdown } from "@/components/ai/AiAssistantMarkdown";
 import { AiToolActivityDisclosure } from "@/components/ai/AiToolActivityDisclosure";
+import { ToolArtifacts } from "@/components/ai/ToolArtifacts";
 import { TextDisclosure } from "@/components/ai/TextDisclosure";
 import type { AiSegment } from "@/types/ai";
 import type { StopReason } from "@/types/wire";
@@ -107,10 +108,12 @@ function SegmentView({
     );
   }
   if (segment.kind === "tools") {
+    // Products first, log after: what the human must look at outranks how the AI got there.
     return (
-      <AiToolActivityDisclosure
-        executions={segment.executions}
-      />
+      <div className="flex min-w-0 flex-col gap-2">
+        <ToolArtifacts executions={segment.executions} />
+        <AiToolActivityDisclosure executions={segment.executions} />
+      </div>
     );
   }
   return <AiAssistantMarkdown content={segment.text} streaming={streaming} />;

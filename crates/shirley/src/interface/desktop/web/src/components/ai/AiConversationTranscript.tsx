@@ -8,9 +8,10 @@ import {
 } from "@/ui/chat";
 import { Pencil } from "lucide-react";
 import { AiAssistantAvatar } from "./AiAssistantAvatar";
+import { MessageCopyButton } from "./MessageCopyButton";
 import { AiMarkdown } from "@/components/ai/AiMarkdown";
 import type { FileReference } from "@/lib/file-mentions/types";
-import type { StopReason } from "@/types/wire";
+import type { RenderPartWire, StopReason } from "@/types/wire";
 
 export type AiTranscriptMessage = {
   id: Key;
@@ -19,6 +20,11 @@ export type AiTranscriptMessage = {
   status?: "streaming" | "complete" | "error";
   /** Workspace files/dirs referenced on the user message (for `@` reference echo). */
   references?: FileReference[];
+  /**
+   * Rich parts of this message (`docs/render-parts.md`). A user message carries its pasted
+   * images here; the transcript renders the non-text parts under the text bubble.
+   */
+  parts?: RenderPartWire[];
   /** Processing time for this turn's assistant reply (ms); used for the "Took Ns" disclosure label. */
   durationMs?: number;
   stopReason?: StopReason;
@@ -114,7 +120,7 @@ export function AiConversationTranscript({
                       aria-label="Edit and resend this message"
                       title="Edit and resend"
                       onClick={() => onEditMessage?.(message)}
-                      className="message-edit-action hidden shrink-0 items-center self-center rounded-md p-1.5 text-muted transition-colors group-hover:flex group-focus-within:flex hover:bg-surface-2 hover:text-ink"
+                      className="message-edit-action flex shrink-0 items-center self-center rounded-md p-1.5 text-muted opacity-0 pointer-events-none transition-opacity hover:bg-surface-2 hover:text-ink group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100"
                     >
                       <Pencil className="size-3.5" />
                     </button>
@@ -142,6 +148,17 @@ export function AiConversationTranscript({
                     ) : null}
                   </Bubble>
                   )}
+                  {/* Copy sits at the message's end and on the assistant's own side: the
+                      reading finishes at the bottom-left of a left-aligned reply. Its box is
+                      always reserved, so fading it in on hover cannot move the text. */}
+                  {isAssistant ? (
+                    <MessageCopyButton
+                      text={message.content}
+                      label="Copy message"
+                      disabled={message.status === "streaming" || editing}
+                      className="self-start"
+                    />
+                  ) : null}
                 </Message>
                 {renderAfterMessage?.(message, index)}
               </div>

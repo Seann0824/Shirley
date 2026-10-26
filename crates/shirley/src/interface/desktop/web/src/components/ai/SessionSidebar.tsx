@@ -6,12 +6,15 @@ import {
   FolderInput,
   FolderOpen,
   FolderPlus,
+  LibraryBig,
   Loader2,
   MoreHorizontal,
   MessageSquarePlus,
   Pencil,
   Pin,
+  Moon,
   Settings2,
+  Sun,
   PinOff,
   Plus,
   Trash2,
@@ -24,7 +27,33 @@ import { ScrollArea } from "@/ui/scroll-area";
 import { HoverScrollLabel } from "@/ui/hover-scroll-label";
 import { cn } from "@/ui/utils";
 import { useMobileLayout } from "@/lib/use-mobile-layout";
+import { openSettings } from "@/components/settings/SettingsDialog";
+import { getThemeMode, resolveTheme, setThemeMode, THEME_CHANGE_EVENT, type ThemeMode } from "@/lib/theme";
 import { projectSource, type ProjectEntry, type SessionEntry } from "@/lib/bridge";
+
+/**
+ * Appearance toggle for the mobile sidebar. Reads the same shared theme module the desktop
+ * header uses, so switching here and switching there can never disagree.
+ */
+function AppearanceButton() {
+  const [mode, setMode] = useState<ThemeMode>(() => getThemeMode());
+  useEffect(() => {
+    const sync = () => setMode(getThemeMode());
+    window.addEventListener(THEME_CHANGE_EVENT, sync);
+    return () => window.removeEventListener(THEME_CHANGE_EVENT, sync);
+  }, []);
+  const dark = resolveTheme(mode) === "dark";
+  return (
+    <button
+      type="button"
+      className="flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm hover:bg-selected"
+      onClick={() => setThemeMode(dark ? "light" : "dark")}
+    >
+      {dark ? <Sun className="size-4 text-muted" /> : <Moon className="size-4 text-muted" />}
+      {dark ? "Light appearance" : "Dark appearance"}
+    </button>
+  );
+}
 
 /**
  * Left sidebar: multi-project + session navigation.
@@ -109,6 +138,24 @@ function CloudBadge() {
   );
 }
 
+/**
+ * Human-readable session title.
+ *
+ * `SessionEntry.label` falls back to the session **name** on the Rust side
+ * (`read_title(name).unwrap_or(name)`), and the name is a file stem / timestamp id. Showing it
+ * verbatim gives a row that reads like `20250612-093015` — i.e. "the pinned session has no
+ * name". The first user message (`preview`) is the only reliably meaningful text, so use it
+ * as the fallback before degrading to a placeholder.
+ */
+function sessionDisplayLabel(entry: Pick<SessionEntry, "label" | "preview" | "name">): string {
+  const label = entry.label.trim();
+  if (label && label !== entry.name) return label;
+  const preview = entry.preview.trim().replace(/\s+/g, " ");
+  if (preview) return preview;
+  if (label) return label; // custom-less but still the identity; better than nothing for a named session
+  return "Untitled session";
+}
+
 /** A project group: project metadata + its sessions (the current project passed from App decides whether to fetch). */
 type ProjectGroup = {
   entry: ProjectEntry;
@@ -132,6 +179,7 @@ export function SessionSidebar({
   onClose,
   chatProjectIds = [],
   onCurrentTitleChange,
+  onOpenLibrary,
   className,
 }: {
   /** Active projects (non-archived), most recently opened first. */
@@ -161,6 +209,8 @@ export function SessionSidebar({
    *  (namespaced: `local::__chat__` / `cloud::__chat__`). */
   chatProjectIds?: string[];
   onCurrentTitleChange: (title: string) => void;
+  /** Open the media library (inventory of everything handed over, independent of any session). */
+  onOpenLibrary: () => void;
   className?: string;
 }) {
   const mobile = useMobileLayout();
@@ -203,11 +253,18 @@ export function SessionSidebar({
     sessions: sessionsByProject[entry.id] ?? [],
   }));
   const currentTitle =
-    (sessionsByProject[activeProject ?? ""] ?? []).find((entry) => entry.name === current)?.label ?? "";
+    (() => {
+      const entry = (sessionsByProject[activeProject ?? ""] ?? []).find((item) => item.name === current);
+      return entry ? sessionDisplayLabel(entry) : "";
+    })();
   useEffect(() => onCurrentTitleChange(currentTitle), [currentTitle, onCurrentTitleChange]);
 
   // Unified list: chat pseudo project + all projects (sessions all go into "Recent"; project groups also need their own lists).
-  const projectIdsKey = [...chatProjectIds, ...projects.map((entry) => entry.id)]
+  // **Pinned projects are included even when they are no longer in the active project list** (archived /
+  // deleted / a cloud source that is currently offline): a pinned row must stay resolvable, otherwise the
+  // session disappears entirely (it is filtered out of the Projects group and never rendered in Pinned).
+  const pinnedProjectIds = pinned.map((key) => (key.includes("::") ? key.slice(0, key.indexOf("::")) : ""));
+  const projectIdsKey = [...new Set([...chatProjectIds, ...projects.map((entry) => entry.id), ...pinnedProjectIds])]
     .filter((id): id is string => Boolean(id))
     .join("\n");
   useEffect(() => {
@@ -219,21 +276,27 @@ export function SessionSidebar({
       };
     }
     const load = async () => {
+      let bridge: Awaited<ReturnType<typeof import("@/lib/bridge").agentBridge>>;
       try {
         const { agentBridge } = await import("@/lib/bridge");
-        const bridge = await agentBridge();
-        const results = await Promise.all(
-          ids.map(async (id) => [id, await bridge.listSessions(id)] as const),
-        );
-        if (!aliveRef.current) return;
-        setSessionsByProject((prev) => {
-          const next = { ...prev };
-          for (const [id, list] of results) next[id] = list;
-          return next;
-        });
+        bridge = await agentBridge();
       } catch {
-        // Keep the previous result when a silent poll fails; don't clear the list.
+        return; // bridge unavailable: keep the previous result.
       }
+      // Per-project tolerance: one unreachable project (cloud offline, archived / deleted
+      // project, source not connected) must not blank out **every** project's session list.
+      // A failed project keeps its previous cached list instead of being dropped.
+      const settled = await Promise.allSettled(
+        ids.map(async (id) => [id, await bridge.listSessions(id)] as const),
+      );
+      if (!aliveRef.current) return;
+      setSessionsByProject((prev) => {
+        const next = { ...prev };
+        for (const outcome of settled) {
+          if (outcome.status === "fulfilled") next[outcome.value[0]] = outcome.value[1];
+        }
+        return next;
+      });
     };
     void load();
     const timer = window.setInterval(() => void load(), 1500);
@@ -302,6 +365,11 @@ export function SessionSidebar({
 
   // Pinned: aggregate across every loaded project (and Chat) — a pinned session may live in
   // any project. Order follows the pin insertion order; keys are `project::name`.
+  //
+  // A pinned row must never silently vanish: when its project's session list has not been
+  // loaded yet (archived project, an offline cloud source, a list that failed to refresh) the
+  // row is rendered with a placeholder entry so unpinning / re-opening stays possible instead
+  // of the session disappearing into nothing (the Projects group already filters it out).
   const pinnedEntries = pinned
     .map((key) => {
       const sep = key.indexOf("::");
@@ -309,9 +377,22 @@ export function SessionSidebar({
       const project = key.slice(0, sep);
       const name = key.slice(sep + 2);
       const entry = (sessionsByProject[project] ?? []).find((item) => item.name === name);
-      return entry ? { project, entry } : null;
+      return { project, name, entry: entry ?? null };
     })
-    .filter((item): item is { project: string; entry: SessionEntry } => item !== null);
+    .filter((item): item is { project: string; name: string; entry: SessionEntry | null } => item !== null)
+    .map(({ project, name, entry }) => ({
+      project,
+      entry: entry ?? {
+        name,
+        // Deliberately empty: `sessionDisplayLabel` then falls through to the placeholder
+        // instead of printing the raw session id as if it were a title.
+        label: "",
+        preview: "",
+        modified_ms: 0,
+        turns: 0,
+        running: false,
+      },
+    }));
   // "Recent": aggregated across projects (including Chat sessions), most recently
   // modified first. Chat and project sessions share one column, with the owning project
   // name noted inline in small text; Chat sessions (pseudo project) have no label.
@@ -415,6 +496,7 @@ export function SessionSidebar({
     const active = project === activeProject && entry.name === current;
     const isEditing = editingSession === `${project}::${entry.name}`;
     const isPinned = group === "pinned" || pinned.includes(`${project}::${entry.name}`);
+    const displayLabel = sessionDisplayLabel(entry);
     // Inline actions: pin (pin/unpin) and more (same menu as right-click, housing
     // rename/delete). Hidden by default, shown on hover or focus; a pinned pin stays
     // visible to indicate the state.
@@ -486,7 +568,7 @@ export function SessionSidebar({
                   }}
                 >
                   <HoverScrollLabel
-                    text={entry.label}
+                    text={displayLabel}
                     className={cn("flex-1 text-body-sm text-ink", active && "font-medium")}
                   />
                   {projectName && (
@@ -539,6 +621,32 @@ export function SessionSidebar({
         >
           <MessageSquarePlus className="size-4 text-muted" />New session
         </button>
+        {/* Mobile only: the desktop entries live on the icon rail. On a phone the header
+            carries a single button (the sidebar toggle), so the rail's remaining actions —
+            Library / Settings / appearance — are reached from here instead. */}
+        <div className="mb-4 flex flex-col gap-0.5 md:hidden">
+          <button
+            type="button"
+            className="flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm hover:bg-selected"
+            onClick={() => {
+              onOpenLibrary();
+              onClose?.();
+            }}
+          >
+            <LibraryBig className="size-4 text-muted" />Library
+          </button>
+          <button
+            type="button"
+            className="flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm hover:bg-selected"
+            onClick={() => {
+              openSettings("general");
+              onClose?.();
+            }}
+          >
+            <Settings2 className="size-4 text-muted" />Settings
+          </button>
+          <AppearanceButton />
+        </div>
         {/* Pinned: manually pinned sessions, aggregated across projects (ChatGPT-Work-style
             "Pinned" block above Projects). Order follows pin insertion order. */}
         {pinnedEntries.length > 0 && (

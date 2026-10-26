@@ -5,6 +5,8 @@
 //! to read/write settings and files, but nothing about sessions, agents, or
 //! tools. (Two cycles with the layers above are known debt — see `lib.rs`.)
 
+pub mod artifact;
+pub mod asr;
 pub mod prompt_template;
 pub mod remote;
 pub mod settings;

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Clock, ImagePlus, ListChecks, LoaderCircle, Plus, X } from "lucide-react";
+import { Clock, LoaderCircle, X } from "lucide-react";
 import { DesktopChrome } from "@/components/DesktopChrome";
 import {
   AiConversationTranscript,
@@ -9,10 +9,14 @@ import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { Button } from "@/ui/button";
 import { AssistantMessage } from "@/components/AssistantMessage";
 import { ImageHoverPreview } from "@/components/ImageHoverPreview";
+import { AssetUrlProvider, RenderParts } from "@/components/ai/RenderParts";
 import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
+import { VoiceInputButton } from "@/components/ai/VoiceInputButton";
+import { ComposerAddMenu } from "@/components/ai/ComposerAddMenu";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
 import { EditProjectDialog } from "@/components/ai/EditProjectDialog";
+import { LibraryPage } from "@/components/ai/LibraryPage";
 import { WorkspaceTabs, type WebTab } from "@/components/ai/WorkspaceTabs";
 import { HeaderTabs } from "@/components/HeaderTabs";
 import type { BrowserTabMeta } from "@/components/ai/BrowserView";
@@ -29,6 +33,7 @@ import {
 } from "@/lib/file-mentions/MentionEditor";
 import { useFileMentionSearch } from "@/lib/file-mentions/useFileMentionSearch";
 import { useSkillSlashSearch } from "@/lib/slash/useSkillSlashSearch";
+import { useVoiceInput } from "@/lib/useVoiceInput";
 import { SkillSlashPopover } from "@/lib/slash/SkillSlashPopover";
 import { CHIP_TOKEN, stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
@@ -171,6 +176,16 @@ function emptyView(): SessionView {
 /** View key: unique across projects. */
 const viewKey = (project: string, session: string) => `${project}::${session}`;
 
+/**
+ * Does this reference contribute media to the turn (rather than a workspace path)?
+ *
+ * Two payload shapes are "attachable": a pasted image (`data:` URL, in hand) and an
+ * uploaded library entry (an artifact id the harness resolves). Everything else — file /
+ * dir / skill — is a path the model reads itself.
+ */
+const isAttachable = (reference: FileReference): boolean =>
+  reference.kind === "image" || reference.kind === "media";
+
 type SessionLocation = { project: string; session: string };
 type NavigationHistory = { entries: SessionLocation[]; index: number };
 
@@ -294,6 +309,8 @@ export function App() {
   const [projects, setProjects] = useState<ProjectEntry[]>([]);
   // Project being edited in the "Edit project" dialog (rename + source folders); null = closed.
   const [editingProjectEntry, setEditingProjectEntry] = useState<ProjectEntry | null>(null);
+  /** The media library is a global inventory, not a session view, so it is its own overlay. */
+  const [libraryOpen, setLibraryOpen] = useState(false);
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState<string | null>(null);
   // Which runtime a NEW send / new chat targets. Existing projects & sessions keep their own
@@ -303,6 +320,14 @@ export function App() {
   // Sources the hybrid bridge can reach (cloud is best-effort; may be local-only).
   const [availableSources, setAvailableSources] = useState<DataSource[]>(["local"]);
   const [input, setInput] = useState("");
+  // Dictation appends to the composer's own text: the editor is a controlled component, so a
+  // plain state update lands the transcript where the user can still edit it. Speech is
+  // free-form prose, so it becomes text -- not a chip / reference.
+  const appendDictation = useCallback((text: string) => {
+    setInput((prev) => (prev.trim() ? `${prev.replace(/\s+$/, "")} ${text}` : text));
+  }, []);
+  // Project-scoped: dictation is answered by the runtime that owns the foreground project.
+  const voice = useVoiceInput(appendDictation);
   const [references, setReferences] = useState<FileReference[]>([]);
   // "Edit the last user message and resend" mode: which session view + which message id
   // is being edited. Only the last user message is ever editable (option A, same as TUI).
@@ -1078,6 +1103,115 @@ export function App() {
 
   /** Send a message to the model as a new turn (echo user + start an assistant streaming placeholder).
    *  `display` is the echo body (chip placeholders preserved), `text` is the plain text sent to the model. */
+  /**
+   * A short-lived local preview for an uploaded image chip.
+   *
+   * The bytes live in the media library, so a chip that only carries an artifact id has
+   * nothing to paint. An `object:` URL of the file we already hold is enough for the
+   * thumbnail and never enters the session log. Revoked when the editor drops the chip,
+   * and on unmount so a long session does not leak blobs.
+   */
+  const previewUrls = useRef<string[]>([]);
+  const previewUrlFor = useCallback((file: File): string | undefined => {
+    if (!file.type.startsWith("image/")) return undefined;
+    const url = URL.createObjectURL(file);
+    previewUrls.current.push(url);
+    return url;
+  }, []);
+  useEffect(
+    () => () => {
+      previewUrls.current.forEach((url) => URL.revokeObjectURL(url));
+      previewUrls.current = [];
+    },
+    [],
+  );
+
+  /**
+   * Upload local files into the media library, then reference them as chips.
+   *
+   * The bytes never enter React state: the harness writes them into the artifact jail and
+   * hands back an id. That is what makes a large file / video attachable at all — the old
+   * pasted-image path inlined base64 straight into the session log.
+   */
+  const uploadFiles = useCallback(
+    async (files: File[]) => {
+      const project = activeProject;
+      if (!project || files.length === 0) return;
+      try {
+        const bridge = await agentBridge();
+        for (const file of files) {
+          const entry = await bridge.ingestBytes(
+            project,
+            file.name || "upload",
+            file.type || "application/octet-stream",
+            file,
+          );
+          editorRef.current?.insertMedia({
+            path: entry.id,
+            name: entry.name,
+            kind: "media",
+            artifactId: entry.id,
+            mime: entry.mime,
+            bytes: entry.bytes,
+            // Thumbnail only: the payload sent to the model is still the artifact id.
+            dataUrl: previewUrlFor(file),
+          });
+        }
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [activeProject, previewUrlFor],
+  );
+
+  /** Same, but for real OS paths (the Tauri drag-and-drop path — no bytes through JS). */
+  const uploadPaths = useCallback(
+    async (paths: string[]) => {
+      const project = activeProject;
+      if (!project || paths.length === 0) return;
+      try {
+        const bridge = await agentBridge();
+        const result = await bridge.ingestPaths(project, paths);
+        for (const entry of result.entries) {
+          editorRef.current?.insertMedia({
+            path: entry.id,
+            name: entry.name,
+            kind: "media",
+            artifactId: entry.id,
+            mime: entry.mime,
+            bytes: entry.bytes,
+          });
+        }
+        if (result.errors.length > 0) setUiError(result.errors.join("; "));
+      } catch (e) {
+        setUiError(e instanceof Error ? e.message : String(e));
+      }
+    },
+    [activeProject],
+  );
+
+  // Desktop: the webview reports dropped **paths**, so the file is copied inside Rust and
+  // never crosses the JS boundary. Browsers have no such API — the `onDrop` handler below
+  // covers them via `File` blobs.
+  useEffect(() => {
+    if (typeof window === "undefined" || !("__TAURI_INTERNALS__" in window)) return;
+    let unlisten: (() => void) | undefined;
+    let cancelled = false;
+    void (async () => {
+      const { getCurrentWebview } = await import("@tauri-apps/api/webview");
+      const off = await getCurrentWebview().onDragDropEvent((event) => {
+        if (event.payload.type !== "drop") return;
+        void uploadPaths(event.payload.paths);
+      });
+      if (cancelled) off();
+      else unlisten = off;
+    })();
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [uploadPaths]);
+
   const dispatchTurn = useCallback(
     async (
       project: string,
@@ -1108,7 +1242,36 @@ export function App() {
             ...view,
             messages: [
               ...base,
-              { id: nextId(), role: "user", content: display, status: "complete", references: refs },
+              {
+                id: nextId(),
+                role: "user",
+                content: display,
+                status: "complete",
+                references: refs,
+                // Echo the attachments immediately. A pasted image is already in hand as a
+                // `data:` URL; an uploaded library entry only has an artifact id, which the
+                // renderer resolves out-of-band (so no bytes sit in view state).
+                parts: refs.filter(isAttachable).map((reference) =>
+                  (reference.mime ?? "").startsWith("image/")
+                    ? {
+                        kind: "image" as const,
+                        source: reference.artifactId
+                          ? { kind: "artifact" as const, id: reference.artifactId }
+                          : { kind: "url" as const, url: reference.dataUrl ?? "" },
+                        alt: reference.name,
+                        mime: reference.mime ?? null,
+                      }
+                    : {
+                        kind: "file" as const,
+                        source: reference.artifactId
+                          ? { kind: "artifact" as const, id: reference.artifactId }
+                          : undefined,
+                        name: reference.name,
+                        mime: reference.mime ?? null,
+                        bytes: reference.bytes ?? null,
+                      },
+                ),
+              },
               { id: assistantId, role: "assistant", content: "", status: "streaming" },
             ],
             turnSegments: { ...view.turnSegments, [assistantId]: [] },
@@ -1239,8 +1402,15 @@ export function App() {
     // placeholders** — `InlineReferences` places chips back into the body by placeholder
     // position, so stripping them renders not a single tag (a past bug).
     const plain = stripTokens(input).trim();
-    // Images are a valid payload on their own (no text needed): allow an image-only turn.
-    const images = refs.filter((reference) => reference.kind === "image").map((reference) => reference.dataUrl ?? "");
+    // Attachments are a valid payload on their own (no text needed): allow an attach-only
+    // turn. A pasted image travels as a `data:` URL, an uploaded library entry as its id —
+    // `runtime::user_content` accepts both and resolves them the same way.
+    const images = refs
+      .filter(isAttachable)
+      .map((reference) =>
+        reference.kind === "media" ? (reference.artifactId ?? "") : (reference.dataUrl ?? ""),
+      )
+      .filter((item) => item.length > 0);
     if (!plain && images.length === 0) return;
     setInput("");
     setReferences([]);
@@ -1252,8 +1422,8 @@ export function App() {
       plain,
       input.trim(),
       refs,
-      // Only file/dir refs travel as workspace paths; images go through the `images` channel.
-      refs.filter((reference) => reference.kind !== "image").map((reference) => reference.path),
+      // Only file/dir refs travel as workspace paths; attachments use the media channel.
+      refs.filter((reference) => !isAttachable(reference)).map((reference) => reference.path),
       images,
       editing ? { resend: true, editMessageId: editing.messageId } : undefined,
     );
@@ -1373,7 +1543,21 @@ export function App() {
   // centered new-chat flow and normal sessions; the popovers use `absolute bottom-full`
   // positioned relative to this container, so both must reuse the same container structure.
   const composerNode = (
-    <div className="chat-composer-shell relative w-full shrink-0 px-3 pb-3">
+    <div
+      className="chat-composer-shell relative w-full shrink-0 px-3 pb-3"
+      onDragOver={(event) => {
+        // Must preventDefault, otherwise the browser refuses the drop.
+        if (event.dataTransfer.types.includes("Files")) event.preventDefault();
+      }}
+      onDrop={(event) => {
+        if (event.dataTransfer.files.length === 0) return;
+        event.preventDefault();
+        // Tauri already delivered this via `onDragDropEvent` (real paths); a webview drop
+        // only carries `File` blobs, so this branch is the browser/cloud path.
+        if ("__TAURI_INTERNALS__" in window) return;
+        void uploadFiles(Array.from(event.dataTransfer.files));
+      }}
+    >
       {slashSearch.open && (
         <div className="absolute inset-x-3 bottom-full z-30 mb-1">
           <SkillSlashPopover
@@ -1402,6 +1586,18 @@ export function App() {
           />
         </div>
       )}
+      {/* Dictation feedback: the browser engine streams a partial transcript, the upload
+          engines only report errors. One line above the composer, never a modal. */}
+      {(voice.interim || voice.error) && (
+        <div
+          className={cn(
+            "mb-1 flex items-center gap-2 px-2 font-utility text-caption",
+            voice.error ? "text-danger-ink" : "text-muted",
+          )}
+        >
+          <span className="truncate">{voice.error || voice.interim}</span>
+        </div>
+      )}
       <AiChatComposer
         id="shirley-composer"
         label="Send message"
@@ -1413,83 +1609,48 @@ export function App() {
         onStop={() => void stop()}
         leadingAction={
           <>
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Add reference (@)"
-              className="rounded-full text-muted hover:text-ink"
-              onClick={() => editorRef.current?.openMention()}
-            >
-              <Plus />
-            </Button>
-            {/* Image upload entry: always present (paste alone is not discoverable). Opens
-                the OS file dialog; picked files become `image` chips, the same payload shape
-                as pasted images. */}
-            <Button
-              type="button"
-              variant="ghost"
-              size="icon-sm"
-              aria-label="Attach image"
-              title="Attach image"
-              className="rounded-full text-muted hover:text-ink"
-              onClick={() => imageInputRef.current?.click()}
-            >
-              <ImagePlus />
-            </Button>
+            {/* One "+" carries every way of adding content: a picture or file, a workspace
+                reference, the task list. The bar stays quiet; the menu explains itself. */}
+            <ComposerAddMenu
+              onAttachFiles={() => imageInputRef.current?.click()}
+              onReference={() => editorRef.current?.openMention()}
+              tasks={
+                view.todo && activeProject && sessionName
+                  ? {
+                      completed: view.todo.completed,
+                      total: view.todo.total,
+                      open: taskPanelKey === viewKey(activeProject, sessionName),
+                      onToggle: () =>
+                        setTaskPanelKey((prev) =>
+                          prev === viewKey(activeProject, sessionName)
+                            ? null
+                            : viewKey(activeProject, sessionName),
+                        ),
+                    }
+                  : undefined
+              }
+            />
             <input
               ref={imageInputRef}
               type="file"
-              accept="image/*"
               multiple
               className="hidden"
               onChange={(event) => {
                 const files = Array.from(event.target.files ?? []);
                 // Reset so picking the same file twice still fires `change`.
                 event.target.value = "";
-                if (files.length > 0) void editorRef.current?.insertImageFiles(files);
+                if (files.length > 0) void uploadFiles(files);
               }}
             />
-            {/* Task ledger toggle: the card is not resident; this is the only entry, and it
-                carries a live progress badge so "is it moving" stays visible at a glance. */}
-            {view.todo && activeProject && sessionName && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                className={cn(
-                  "rounded-full text-muted hover:text-ink",
-                  taskPanelKey === viewKey(activeProject, sessionName) && "bg-quiet text-ink",
-                )}
-                aria-expanded={taskPanelKey === viewKey(activeProject, sessionName)}
-                aria-label="Show task list"
-                title="Task list"
-                onClick={() =>
-                  setTaskPanelKey((prev) =>
-                    prev === viewKey(activeProject, sessionName)
-                      ? null
-                      : viewKey(activeProject, sessionName),
-                  )
-                }
-              >
-                <ListChecks aria-hidden="true" />
-                {view.todo.total > 0 && (
-                  <span className="font-utility text-caption">
-                    {view.todo.completed}/{view.todo.total}
-                  </span>
-                )}
-              </Button>
-            )}
+            {isNewChat ? sourceToggleNode : null}
           </>
         }
         trailingAction={
           <div className="flex items-center gap-1.5">
-            {/* Local/Cloud send-target toggle: only offered in the new-chat flow (a fresh
-                session is where the runtime is chosen). Once a session has messages the
-                source is already fixed by its project id, so hide it to avoid mid-session
-                surprises. */}
-            {isNewChat ? sourceToggleNode : null}
             <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
+            {/* Dictation belongs with the send button, not with the "add content" cluster:
+                the right side is "how this turn goes out", the left is "what goes in it". */}
+            <VoiceInputButton voice={voice} />
           </div>
         }
         inputSlot={
@@ -1518,7 +1679,7 @@ export function App() {
     <>
       <ImageHoverPreview />
       <DesktopChrome
-      title={(activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
+      title={libraryOpen ? "Library" : (activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
       projectName={
         mode === "chat"
           ? `Chat · ${activeSource === "cloud" ? "Cloud" : "Local"}`
@@ -1531,7 +1692,10 @@ export function App() {
       onBack={() => void navigateHistory(-1)}
       onForward={() => void navigateHistory(1)}
       onToggleSidebar={toggleSidebar}
+      onLibrary={() => setLibraryOpen((open) => !open)}
+      libraryActive={libraryOpen}
       onHome={() => {
+        setLibraryOpen(false);
         setSidebarCollapsed(false);
         writeBool(SIDEBAR_STORAGE_KEY, false);
       }}
@@ -1539,6 +1703,10 @@ export function App() {
       onAddProject={() => void addProject()}
       onNewBrowserTab={browserAvailable ? () => openWebTab() : undefined}
       topContent={
+        // The tab strip is a desktop affordance: it exists to hold the session's chat surface
+        // plus its in-app browser pages. Phones have no browser tabs and already list sessions
+        // in the sidebar, so the strip there was a permanent row conveying nothing.
+        mobile ? undefined : (
         <HeaderTabs
           sessionTitle={
             (currentKey && sessionTitles[currentKey]) || (sessionName ? "New session" : "")
@@ -1560,17 +1728,20 @@ export function App() {
           }}
           canNewSession={!!activeProject}
         />
+        )
       }
     >
       {/* Left sidebar: NewChat / pinned / projects (multi-project + session navigation). */}
       {mobile && !sidebarCollapsed && (
         <button type="button" className="mobile-sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebarCollapsed(true)} />
       )}
+      {(!libraryOpen || mobile) && (
       <SessionSidebar
         onClose={closeSidebar}
         collapsed={sidebarCollapsed}
         chatProjectIds={availableSources.map((source) => tagProject(source, CHAT_PROJECT_ID))}
         onCurrentTitleChange={updateCurrentTitle}
+        onOpenLibrary={() => setLibraryOpen(true)}
         projects={projects}
         activeProject={activeProject}
         current={sessionName}
@@ -1578,12 +1749,21 @@ export function App() {
         onEditProject={(entry) => setEditingProjectEntry(entry)}
         onRenameProject={(id, name) => void renameProject(id, name)}
         onArchiveProject={(id) => void archiveProject(id)}
-        onSelect={(project, name) => { if (mobile) setSidebarCollapsed(true); void switchSession(project, name); }}
-        onNew={(project) => { if (mobile) setSidebarCollapsed(true); void newSession(project); }}
+        onSelect={(project, name) => {
+          if (mobile) setSidebarCollapsed(true);
+          setLibraryOpen(false);
+          void switchSession(project, name);
+        }}
+        onNew={(project) => {
+          if (mobile) setSidebarCollapsed(true);
+          setLibraryOpen(false);
+          void newSession(project);
+        }}
         onRename={(project, name, title) => void renameSession(project, name, title)}
         onDelete={(project, name) => void deleteSession(project, name)}
         onMove={(project, name, targetProject) => void moveSession(project, name, targetProject)}
       />
+      )}
       {/* Right main area: fixed-width centered (aligned with shiwen AiConversationSurface's max-w-190 = 760px).
           Neither the chat area nor the input stretches with the window; long text wraps at a comfortable reading width. */}
       <WorkspaceTabs
@@ -1592,6 +1772,26 @@ export function App() {
         onMeta={onWebTabMeta}
         onCloseWebTab={closeWebTab}
       >
+      {libraryOpen && activeProject ? (
+        <LibraryPage
+          project={activeProject}
+          onClose={() => setLibraryOpen(false)}
+          onReference={(entry) => {
+            // A reference carries the artifact id, not bytes: re-sending an old file costs nothing
+            // and goes through the exact same chip path as a fresh drop.
+            editorRef.current?.insertMedia({
+              path: entry.id,
+              name: entry.name,
+              kind: "media",
+              artifactId: entry.id,
+              mime: entry.mime,
+              bytes: entry.bytes,
+            });
+            setLibraryOpen(false);
+            requestAnimationFrame(() => editorRef.current?.focus());
+          }}
+        />
+      ) : (
       <main ref={mainRef} aria-label="Conversation" className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Full-width column: the scroll viewport must span the whole right area so the
             wheel works over the side gutters too. The reading column itself stays 760px
@@ -1621,6 +1821,7 @@ export function App() {
             </div>
           </div>
         ) : (
+        <AssetUrlProvider project={activeProject}>
         <AiConversationTranscript
           messages={view.messages}
           conversationKey={activeProject && sessionName ? viewKey(activeProject, sessionName) : "main"}
@@ -1646,11 +1847,19 @@ export function App() {
                 stopReason={message.stopReason}
               />
             ) : (
-              <InlineReferences content={message.content} references={message.references ?? []} />
+              <>
+                <InlineReferences content={message.content} references={message.references ?? []} />
+                {/* Text parts are already in `content`; only media parts add anything here. */}
+                <RenderParts
+                  parts={message.parts?.filter((part) => part.kind !== "text")}
+                  className="mt-2 space-y-1"
+                />
+              </>
             )
           }
           contentClassName="mx-auto w-full max-w-190"
         />
+        </AssetUrlProvider>
         )}
         {/* Bottom stack (subagents / status / task / pending / composer): stays pinned
             under the scroll viewport, centered at the same 760px reading width. */}
@@ -1711,6 +1920,7 @@ export function App() {
           />
         )}
       </main>
+      )}
       </WorkspaceTabs>
       </DesktopChrome>
       {editingProjectEntry && (
@@ -1922,6 +2132,8 @@ function updateTool(
       status: event.ok ? "complete" : "error",
       summary: event.output.slice(0, 200),
       result_json: event.output,
+      // Rich render parts (docs/render-parts.md). Empty = the card renders `result_json` as text.
+      parts: event.parts ?? [],
       error: event.ok ? null : event.output,
       error_kind: event.error_kind,
     };
@@ -1985,7 +2197,13 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
     }
     if (item.kind === "message") {
       if (item.role === "user") {
-        messages.push({ id: nextId(), role: "user", content: item.content, status: "complete" });
+        messages.push({
+          id: nextId(),
+          role: "user",
+          content: item.content,
+          status: "complete",
+          parts: item.parts ?? [],
+        });
         currentAssistantId = null;
         continue;
       }
@@ -2004,8 +2222,12 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
             id: call.id,
             call_id: call.id,
             tool_name: call.name,
-            status: "complete",
-            summary: "",
+            // Restored from the snapshot: the result now lives in the view (it used to be lost on
+            // session switch / restart because tool results only existed in live events).
+            status: call.ok === false ? "error" : "complete",
+            summary: (call.output ?? "").slice(0, 200),
+            result_json: call.output ?? undefined,
+            parts: call.parts ?? [],
             input: safeParseArgs(call.arguments),
           }),
         ),

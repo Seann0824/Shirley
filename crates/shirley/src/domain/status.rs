@@ -450,6 +450,7 @@ mod tests {
             name: "bash".into(),
             ok: true,
             output: String::new(),
+            structured: None,
             error_kind: None,
             elapsed_ms: 5,
         });
@@ -525,6 +526,7 @@ mod tests {
             name: "bash".into(),
             ok: true,
             output: String::new(),
+            structured: None,
             error_kind: None,
             elapsed_ms: 20,
         });

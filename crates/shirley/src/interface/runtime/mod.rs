@@ -37,8 +37,11 @@ use std::sync::Arc;
 use futures::{FutureExt, StreamExt};
 use serde::Serialize;
 use shirley_agent_sdk::{
-    Agent, AgentEvent, Content, ContentPart, ImagePart, Message, RunResult, StopReason, Usage,
+    Agent, AgentEvent, Content, ContentPart, ImagePart, ImageSource, Message, RunResult,
+    StopReason, Usage,
 };
+
+use crate::artifact::{ArtifactStore, LibraryEntry, human_bytes};
 use tokio::sync::{Mutex, broadcast, oneshot};
 
 use super::desktop::wire::{AgentEventWire, SessionSnapshotWire, StateSnapshotWire, TaskViewWire};
@@ -81,7 +84,44 @@ pub struct ProjectRuntimeManager {
     /// If `Some`, the `__chat__` pseudo project resolves to this root.
     /// If `None`, `__chat__` is rejected.
     chat_root: Option<PathBuf>,
+    /// Asset handles (`docs/render-parts.md` P1): `<handle>` -> (absolute file, mime).
+    ///
+    /// The render channel never accepts a path. A `RenderPart` carries an opaque artifact id and
+    /// nothing else; [`Self::asset_handle`] validates that id against the *project's* artifact jail
+    /// and mints a handle; the transport (`shirley-asset://` on desktop, `/api/asset/` on the
+    /// cloud) turns the handle back into bytes. A handle is unguessable and revocable (drop the
+    /// entry), and it is only mintable through an authenticated/app-local command -- which is also
+    /// how the cloud solves "an `<img>` tag cannot carry an Authorization header".
+    ///
+    /// A `std::sync::Mutex` on purpose: the Tauri scheme handler is a synchronous function.
+    assets: Arc<std::sync::Mutex<HashMap<String, AssetEntry>>>,
 }
+
+/// One minted asset handle. Deliberately holds the *resolved* jail file, not an id to re-resolve:
+/// resolution already happened once, under the project's own jail.
+#[derive(Debug, Clone)]
+struct AssetEntry {
+    path: PathBuf,
+    mime: &'static str,
+}
+
+/// Cap on an artifact served as **text** (HTML documents are executed, not streamed).
+const MAX_ASSET_TEXT_BYTES: usize = 2 * 1024 * 1024;
+
+/// An artifact handed over as text: what an interactive renderer needs to run it.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct AssetText {
+    /// The document source, possibly cut at [`MAX_ASSET_TEXT_BYTES`].
+    pub text: String,
+    /// The allow-listed mime the jail resolved (never the producer's claim).
+    pub mime: &'static str,
+    /// Whether the source was cut, so the renderer can say so instead of silently running half a page.
+    pub truncated: bool,
+}
+
+/// Above this, the handle table is reset. Handles are a cache of "the page asked for this while
+/// it was on screen", not durable state: `agent_asset_url` re-mints on demand.
+const MAX_ASSET_HANDLES: usize = 512;
 
 /// Event pump / cancel key: unique across projects.
 pub fn route_key(project: &str, session: &str) -> String {
@@ -101,6 +141,7 @@ impl ProjectRuntimeManager {
             sink,
             status_sink: Arc::new(|_| {}),
             chat_root,
+            assets: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 
@@ -394,8 +435,13 @@ impl ProjectRuntimeManager {
         references: Vec<String>,
         images: Vec<String>,
     ) -> Result<(), String> {
+        let store = {
+            let runtime = self.ensure_runtime(project).await?;
+            let guard = runtime.lock().await;
+            Arc::clone(&guard.factory.artifacts)
+        };
         let prompt = compose_prompt(&text, &references);
-        let user_content = user_content(&prompt, &images);
+        let user_content = user_content(&store, &prompt, &images);
         self.spawn_turn(project, session, text, user_content).await
     }
 
@@ -409,7 +455,7 @@ impl ProjectRuntimeManager {
         images: Vec<String>,
     ) -> Result<(), String> {
         let runtime = self.ensure_runtime(project).await?;
-        {
+        let store = {
             let mut guard = runtime.lock().await;
             let session_name = match session.clone() {
                 Some(name) => name,
@@ -422,9 +468,10 @@ impl ProjectRuntimeManager {
             if guard.sessions.rewind_last_turn(&session_name).is_none() {
                 return Err("no message to edit".to_owned());
             }
-        }
+            Arc::clone(&guard.factory.artifacts)
+        };
         let prompt = compose_prompt(&text, &references);
-        let user_content = user_content(&prompt, &images);
+        let user_content = user_content(&store, &prompt, &images);
         self.spawn_turn(project, session, text, user_content).await
     }
 
@@ -717,6 +764,163 @@ impl ProjectRuntimeManager {
     // -----------------------------------------------------------------------
     // Workspace files / skills
     // -----------------------------------------------------------------------
+
+    /// Mint an asset handle for an artifact id inside `project`'s jail.
+    ///
+    /// This is the only way a handle comes into existence: it requires a project, so the jail is
+    /// the project's own, and it re-validates the id instead of trusting the render layer.
+    ///
+    /// # Errors
+    /// Unknown project, or an id the jail rejects (malformed, escaping, not allow-listed, too
+    /// large). The message is safe to hand straight back to the caller.
+    pub async fn asset_handle(&self, project: &str, id: &str) -> Result<String, String> {
+        let runtime = self.ensure_runtime(project).await?;
+        let store = {
+            let guard = runtime.lock().await;
+            Arc::clone(&guard.factory.artifacts)
+        };
+        let resolved = store.resolve(id).map_err(|error| error.to_string())?;
+        let handle = uuid::Uuid::new_v4().simple().to_string();
+        {
+            let mut assets = self
+                .assets
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if assets.len() >= MAX_ASSET_HANDLES {
+                assets.clear();
+            }
+            assets.insert(
+                handle.clone(),
+                AssetEntry {
+                    path: resolved.path,
+                    mime: resolved.mime,
+                },
+            );
+        }
+        Ok(handle)
+    }
+
+    /// Read an artifact as text, for renderers that must **execute** it rather than load it.
+    ///
+    /// Pictures and clips go through a URL; an HTML artifact cannot, because loading it as a
+    /// document would give generated code the page's origin. So it comes back as a string and the
+    /// renderer injects it into a sandboxed frame -- and even this path is gated on the jail saying
+    /// the file is textual, so a forged id cannot pull a binary through it.
+    ///
+    /// # Errors
+    /// Unknown project, an id the jail rejects, or an artifact whose mime is not textual.
+    pub async fn asset_text(&self, project: &str, id: &str) -> Result<AssetText, String> {
+        let runtime = self.ensure_runtime(project).await?;
+        let store = {
+            let guard = runtime.lock().await;
+            Arc::clone(&guard.factory.artifacts)
+        };
+        let resolved = store.resolve(id).map_err(|error| error.to_string())?;
+        if !crate::artifact::is_textual(resolved.mime) {
+            return Err(format!("not a text artifact: {}", resolved.mime));
+        }
+        let bytes = tokio::fs::read(&resolved.path)
+            .await
+            .map_err(|error| format!("failed to read artifact: {error}"))?;
+        let truncated = bytes.len() > MAX_ASSET_TEXT_BYTES;
+        let slice = &bytes[..bytes.len().min(MAX_ASSET_TEXT_BYTES)];
+        let text = String::from_utf8_lossy(slice).into_owned();
+        Ok(AssetText {
+            text,
+            mime: resolved.mime,
+            truncated,
+        })
+    }
+
+    /// Take **local file paths** into the library: the desktop door into the jail.
+    ///
+    /// The desktop runs on the same machine as the workspace, so the honest way to hand us a
+    /// 400MB video is a path, not base64 through the webview or the IPC bridge. This copies
+    /// file-by-file (`put_file_named`), so nothing large is ever held in memory, and it keeps
+    /// the original file name as the library entry's display name.
+    ///
+    /// Per-path failures do not abort the batch: the caller gets the entries that made it plus
+    /// one message per rejected path, because "I dragged five files and one was a `.svg`" should
+    /// not throw the other four away.
+    ///
+    /// # Errors
+    /// Unknown project. Every other failure is reported per path in the returned tuple.
+    pub async fn ingest_paths(
+        &self,
+        project: &str,
+        paths: Vec<String>,
+    ) -> Result<(Vec<LibraryEntry>, Vec<String>), String> {
+        let runtime = self.ensure_runtime(project).await?;
+        let store = {
+            let guard = runtime.lock().await;
+            Arc::clone(&guard.factory.artifacts)
+        };
+        let mut entries = Vec::new();
+        let mut errors = Vec::new();
+        for raw in paths {
+            let path = PathBuf::from(&raw);
+            match store.put_file_named(&path) {
+                Ok(entry) => entries.push(entry),
+                Err(error) => errors.push(format!("{raw}: {error}")),
+            }
+        }
+        Ok((entries, errors))
+    }
+
+    /// Take **raw bytes** into the library: the cloud door into the jail.
+    ///
+    /// A browser cannot hand us a path, and a `data:` URL means the whole file is base64 in a
+    /// JSON body (33% bigger, parsed twice). So the cloud takes the upload as an opaque byte
+    /// stream and names it from the request (`docs/render-parts.md` inbound channels).
+    ///
+    /// # Errors
+    /// Unknown project, or a type/size the jail rejects.
+    pub async fn ingest_bytes(
+        &self,
+        project: &str,
+        name: &str,
+        mime: &str,
+        bytes: &[u8],
+    ) -> Result<LibraryEntry, String> {
+        let runtime = self.ensure_runtime(project).await?;
+        let store = {
+            let guard = runtime.lock().await;
+            Arc::clone(&guard.factory.artifacts)
+        };
+        store
+            .put_named(mime, name, bytes)
+            .map_err(|error| error.to_string())
+    }
+
+    /// What is in this project's media library, newest first.
+    ///
+    /// The library is an inventory, not a conversation: it survives session switches and shows
+    /// everything the user has ever handed us (pasted, dropped, uploaded, or produced), so the
+    /// "which file was that again?" question has an answer that is not "scroll the transcript".
+    /// The store owns the ordering (`added_ms` descending); this only adds the project jail.
+    ///
+    /// # Errors
+    /// Unknown project.
+    pub async fn library_list(&self, project: &str) -> Result<Vec<LibraryEntry>, String> {
+        let runtime = self.ensure_runtime(project).await?;
+        let store = {
+            let guard = runtime.lock().await;
+            Arc::clone(&guard.factory.artifacts)
+        };
+        Ok(store.list())
+    }
+
+    /// Resolve a minted handle back to a jail file and its mime.
+    ///
+    /// Synchronous on purpose: Tauri's scheme handler is a synchronous function, and the lookup
+    /// is a map hit -- no project lock, no runtime assembly.
+    #[must_use]
+    pub fn asset_by_handle(&self, handle: &str) -> Option<(PathBuf, &'static str)> {
+        let assets = self.assets.lock().ok()?;
+        assets
+            .get(handle)
+            .map(|entry| (entry.path.clone(), entry.mime))
+    }
 
     pub async fn search_files(
         &self,
@@ -1156,15 +1360,128 @@ pub fn compose_prompt(text: &str, references: &[String]) -> String {
     prompt
 }
 
-pub fn user_content(prompt: &str, images: &[String]) -> Content {
+/// Build the user turn: the prompt, plus any attached media as **library references**.
+///
+/// The bytes never ride along. A `data:` URL (what a browser paste gives us) is stored first and
+/// replaced by its id; an id is looked up as-is. What reaches the model is a line naming each
+/// entry plus, for pictures, an image part carrying `file_id` -- and the SDK deliberately drops
+/// those on the way out of a *user* message, so the picture is only loaded when the model asks
+/// for it with the `media` tool. The application's own render path still sees the part and draws
+/// the card, which is how the human gets a preview without the log carrying base64.
+pub fn user_content(store: &ArtifactStore, prompt: &str, media: &[String]) -> Content {
     let mut parts: Vec<ContentPart> = Vec::new();
-    if !prompt.is_empty() {
-        parts.push(ContentPart::Text {
-            text: prompt.to_owned(),
-        });
+    let mut entries = Vec::new();
+    for (index, item) in media.iter().enumerate() {
+        let entry = if item.starts_with("data:") {
+            store.ingest_data_url(item, &format!("pasted-{}", index + 1))
+        } else {
+            store.entry(item)
+        };
+        let Some(entry) = entry else { continue };
+        if crate::artifact::is_inline_image(entry.mime) {
+            parts.push(ContentPart::Image(ImagePart {
+                source: ImageSource::FileId {
+                    file_id: entry.id.clone(),
+                },
+                detail: None,
+            }));
+        }
+        entries.push(entry);
     }
-    for url in images {
-        parts.push(ContentPart::Image(ImagePart::url(url.clone())));
+
+    let mut text = prompt.trim_end().to_owned();
+    if !entries.is_empty() {
+        // One line, not a block and not a bulleted listing: this text is the *body of the user's
+        // message*, and the UI draws it directly above the image card. A multi-line inventory
+        // turns a one-sentence message into a wall of English that reads like the message body.
+        // `id` is still on every line -- that is the only handle the `media` tool takes.
+        text.push('\n');
+        for entry in &entries {
+            text.push_str(&format!(
+                "\n[{} · {} · {} · id={}]",
+                entry.name,
+                entry.mime,
+                human_bytes(entry.bytes),
+                entry.id
+            ));
+        }
+    }
+    if !text.is_empty() {
+        parts.insert(0, ContentPart::Text { text });
     }
     Content::from(parts)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fixture(tag: &str) -> (std::path::PathBuf, ArtifactStore) {
+        let dir = std::env::temp_dir().join(format!(
+            "shirley_user_content_{tag}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("mkdir");
+        (dir.clone(), ArtifactStore::new(dir))
+    }
+
+    /// The inbound contract: the bytes are stored, and what goes into the message is a **reference**
+    /// -- an id in the text (for the model) plus an image part carrying `file_id` (for the human's
+    /// card). No base64 may reach the log.
+    #[test]
+    fn attached_media_becomes_a_library_reference() {
+        let (_dir, store) = fixture("ref");
+        let content = user_content(
+            &store,
+            "what is wrong here?",
+            &[
+                "data:image/png;base64,cG5nLWJ5dGVz".to_string(),
+                "not-an-id".to_string(),
+            ],
+        );
+
+        let text = match &content.as_parts()[0] {
+            ContentPart::Text { text } => text.clone(),
+            other => panic!("expected leading text, got {other:?}"),
+        };
+        assert!(text.starts_with("what is wrong here?"));
+        // One bracketed line per entry: `[pasted-1 · image/png · 9 B · id=…]`. The id is the
+        // only handle the `media` tool takes, so the line has to carry it.
+        assert!(text.contains("[pasted-1 · image/png"), "got {text}");
+        assert!(
+            text.contains("id="),
+            "the model needs an id to ask for: {text}"
+        );
+        assert!(!text.contains("base64"), "no payload in the text: {text}");
+
+        let images: Vec<&shirley_agent_sdk::ImageSource> = content
+            .as_parts()
+            .iter()
+            .filter_map(|part| match part {
+                ContentPart::Image(image) => Some(&image.source),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 1, "the picture is referenced once");
+        match images[0] {
+            shirley_agent_sdk::ImageSource::FileId { file_id } => {
+                assert!(
+                    text.contains(file_id),
+                    "the id line and the part must agree"
+                );
+                assert!(store.entry(file_id).is_some(), "the id must resolve");
+            }
+            other => panic!("expected a file_id reference, got {other:?}"),
+        }
+    }
+
+    /// A bogus reference is dropped rather than half-attached: the turn still carries its text.
+    #[test]
+    fn unusable_references_do_not_break_the_turn() {
+        let (_dir, store) = fixture("junk");
+        let content = user_content(&store, "hi", &["../../etc/passwd".to_string()]);
+        assert_eq!(content.as_parts().len(), 1, "text only");
+    }
 }
