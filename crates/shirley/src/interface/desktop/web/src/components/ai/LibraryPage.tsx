@@ -258,34 +258,57 @@ export function LibraryPage({
             )
           ) : (
             <>
-              <h2 className="pb-3 text-body-sm text-muted">Items</h2>
               {layout === "grid" ? (
-                // Masonry, not a fixed grid: pictures keep their own aspect, so the wall packs
-                // tight the way the reference does and nothing is letterboxed.
-                <div className="columns-2 gap-3 sm:columns-3 lg:columns-4 xl:columns-5 2xl:columns-6">
-                  {shown.map((entry) => (
-                    <div key={entry.id} className="mb-3 break-inside-avoid">
-                      <LibraryTile
+                <>
+                  {/* The wall keeps the reference's "Items" caption: a grid of pictures explains
+                      itself, and the caption is the only labelling it gets. */}
+                  <h2 className="pb-3 text-body-sm text-muted">Items</h2>
+                  {/* Masonry, not a fixed grid: pictures keep their own aspect, so the wall packs
+                      tight the way the reference does and nothing is letterboxed. */}
+                  <div className="columns-2 gap-3 sm:columns-3 lg:columns-4 xl:columns-5 2xl:columns-6">
+                    {shown.map((entry) => (
+                      <div key={entry.id} className="mb-3 break-inside-avoid">
+                        <LibraryTile
+                          project={project}
+                          entry={entry}
+                          onPreview={() => setPreview(entry)}
+                          onReference={() => pick(entry)}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                </>
+              ) : (
+                // Same table as the reference: Name · Modified · Size, no outer frame. The caption
+                // is not repeated here — the column header already says what each column is.
+                <div role="table" aria-label="Library items" className="flex flex-col">
+                  <div role="rowgroup">
+                    <div role="row" className={cn(ROW_GRID, "sticky top-0 z-10 bg-canvas pb-2 text-caption text-muted")}>
+                      <span role="columnheader" className="sr-only">
+                        Preview
+                      </span>
+                      <span role="columnheader">Name</span>
+                      <span role="columnheader">Modified</span>
+                      <span role="columnheader" className="text-right">
+                        Size
+                      </span>
+                      <span role="columnheader" className="sr-only">
+                        Actions
+                      </span>
+                    </div>
+                  </div>
+                  <div role="rowgroup" className="flex flex-col">
+                    {shown.map((entry) => (
+                      <LibraryRow
+                        key={entry.id}
                         project={project}
                         entry={entry}
                         onPreview={() => setPreview(entry)}
                         onReference={() => pick(entry)}
                       />
-                    </div>
-                  ))}
+                    ))}
+                  </div>
                 </div>
-              ) : (
-                <ul className="flex flex-col divide-y divide-line overflow-hidden rounded-card border border-line bg-surface">
-                  {shown.map((entry) => (
-                    <LibraryRow
-                      key={entry.id}
-                      project={project}
-                      entry={entry}
-                      onPreview={() => setPreview(entry)}
-                      onReference={() => pick(entry)}
-                    />
-                  ))}
-                </ul>
               )}
 
               {visible.length > shown.length && (
@@ -346,6 +369,15 @@ export function LibraryPage({
  * every thumbnail at once. Paging keeps the working set small and the cost bounded.
  */
 const PAGE_SIZE = 60;
+
+/**
+ * The list view's column template — preview · name · modified · size · actions.
+ *
+ * One definition for the sticky header and every row: the whole point of the reference's table is
+ * that the header sits exactly over the columns, and two copies of a `grid-cols-[...]` string is
+ * exactly how that alignment rots.
+ */
+const ROW_GRID = "grid grid-cols-[2.25rem_minmax(0,1fr)_7.5rem_5rem_1.75rem] items-center gap-3";
 
 /** One small square control; the page has several and they must not drift apart. */
 const ICON_BUTTON =
@@ -435,6 +467,7 @@ function LibraryTile({
   );
 }
 
+/** One table row: the same five columns as the sticky header, in the same order. */
 function LibraryRow({
   project,
   entry,
@@ -447,27 +480,53 @@ function LibraryRow({
   onReference: () => void;
 }) {
   return (
-    <li className="flex items-center gap-3 px-4 py-3 transition-colors hover:bg-quiet">
-      <button
-        type="button"
-        onClick={onPreview}
-        className="flex size-10 shrink-0 items-center justify-center overflow-hidden rounded-control border border-line bg-inset"
-      >
-        <LibraryAsset project={project} id={entry.id} mime={entry.mime} name={entry.name} mode="thumb" />
-      </button>
-      <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="min-w-0 truncate text-body-sm text-ink" title={entry.name}>
-          {entry.name}
-        </span>
-        <span className="min-w-0 truncate font-utility text-meta text-muted">
-          {[entry.mime, formatBytes(entry.bytes), formatDate(entry.addedMs)].join(" · ")}
-        </span>
+    // A full-bleed row with a divider, not a card: the reference's table has no outer frame, and
+    // a long inventory reads as one continuous list. Modified and Size get their own columns
+    // instead of a "mime · bytes · date" caption, so they line up down the page and can be
+    // scanned. The Reference action only surfaces on hover/focus — the same gesture the grid
+    // tiles use — because every row carrying a button is what makes a table look busy.
+    <div
+      role="row"
+      className={cn(ROW_GRID, "group h-14 border-b border-line/70 transition-colors hover:bg-quiet")}
+    >
+      <div role="cell">
+        <button
+          type="button"
+          onClick={onPreview}
+          aria-label={`Preview ${entry.name}`}
+          className="flex size-9 items-center justify-center overflow-hidden rounded-control border border-line bg-inset"
+        >
+          <LibraryAsset project={project} id={entry.id} mime={entry.mime} name={entry.name} mode="thumb" />
+        </button>
       </div>
-      <Button variant="ghost" size="sm" onClick={onReference} className="shrink-0 gap-1 text-muted">
-        <Plus className="size-3.5" />
-        Reference
-      </Button>
-    </li>
+      <div role="cell" className="min-w-0">
+        <button
+          type="button"
+          onClick={onPreview}
+          title={`${entry.name} · ${entry.mime}`}
+          className="block w-full truncate text-left text-body-sm text-ink"
+        >
+          {entry.name}
+        </button>
+      </div>
+      <div role="cell" className="truncate text-body-sm text-muted">
+        {formatModified(entry.addedMs)}
+      </div>
+      <div role="cell" className="truncate text-right font-utility text-body-sm text-muted">
+        {formatBytes(entry.bytes)}
+      </div>
+      <div role="cell" className="flex justify-end">
+        <button
+          type="button"
+          onClick={onReference}
+          title="Reference in chat"
+          aria-label={`Reference ${entry.name} in chat`}
+          className="flex size-7 items-center justify-center rounded-control text-muted opacity-0 transition-opacity group-hover:opacity-100 hover:bg-selected hover:text-ink focus-visible:opacity-100"
+        >
+          <Plus className="size-3.5" />
+        </button>
+      </div>
+    </div>
   );
 }
 
@@ -573,8 +632,22 @@ function formatBytes(bytes: number): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/** Library entries are timestamps, so a date (not a clock) is what the user is looking for. */
-function formatDate(ms: number): string {
+/**
+ * Modified, in the reference's own voice: `Today` / `Yesterday` for the recent past, then a short
+ * local date. The year only appears when it is not the current one — a library is mostly this
+ * year's files, and repeating the year on every row is noise. A date, not a clock: "when did I add
+ * this" is a day-granularity question.
+ */
+function formatModified(ms: number): string {
   const date = new Date(ms);
-  return Number.isNaN(date.getTime()) ? "" : date.toLocaleDateString();
+  if (Number.isNaN(date.getTime())) return "—";
+  const now = new Date();
+  const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate()).getTime();
+  if (ms >= startOfToday) return "Today";
+  if (ms >= startOfToday - 86_400_000) return "Yesterday";
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() === now.getFullYear() ? {} : { year: "numeric" }),
+  });
 }

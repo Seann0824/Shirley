@@ -11,6 +11,7 @@ import { AiAssistantAvatar } from "./AiAssistantAvatar";
 import { MessageCopyButton } from "./MessageCopyButton";
 import { AiMarkdown } from "@/components/ai/AiMarkdown";
 import type { FileReference } from "@/lib/file-mentions/types";
+import { stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { RenderPartWire, StopReason } from "@/types/wire";
 
 export type AiTranscriptMessage = {
@@ -22,7 +23,7 @@ export type AiTranscriptMessage = {
   references?: FileReference[];
   /**
    * Rich parts of this message (`docs/render-parts.md`). A user message carries its pasted
-   * images here; the transcript renders the non-text parts under the text bubble.
+   * images here; the transcript renders attachments separately above the text bubble.
    */
   parts?: RenderPartWire[];
   /** Processing time for this turn's assistant reply (ms); used for the "Took Ns" disclosure label. */
@@ -38,6 +39,7 @@ export function AiConversationTranscript({
   viewportRef: externalViewportRef,
   emptyContent,
   renderMessageContent,
+  renderMessageAttachments,
   renderAfterMessage,
   editableMessageId,
   onEditMessage,
@@ -53,6 +55,7 @@ export function AiConversationTranscript({
   viewportRef?: RefObject<HTMLDivElement>;
   emptyContent?: ReactNode;
   renderMessageContent?: (message: AiTranscriptMessage, index: number) => ReactNode;
+  renderMessageAttachments?: (message: AiTranscriptMessage) => ReactNode;
   renderAfterMessage?: (message: AiTranscriptMessage, index: number) => ReactNode;
   /** Id of the one message that can be edited (the last user message); others show no button. */
   editableMessageId?: Key | null;
@@ -109,44 +112,36 @@ export function AiConversationTranscript({
               >
                 <Message
                   align={isAssistant ? "start" : "end"}
-                  className={isAssistant ? "flex-col items-start gap-2" : undefined}
+                  className={isAssistant ? "flex-col items-start gap-2" : "flex-col items-end gap-2"}
                 >
                   {isAssistant && <AiAssistantAvatar responding={message.status === "streaming"} />}
-                  {!isAssistant && canEdit && !editing ? (
-                    // The edit affordance sits next to the bubble, appears only on hover /
-                    // focus-within, and reserves no layout space (hidden -> flex).
-                    <button
-                      type="button"
-                      aria-label="Edit and resend this message"
-                      title="Edit and resend"
-                      onClick={() => onEditMessage?.(message)}
-                      className="message-edit-action flex shrink-0 items-center self-center rounded-md p-1.5 text-muted opacity-0 pointer-events-none transition-opacity hover:bg-surface-2 hover:text-ink group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100"
-                    >
-                      <Pencil className="size-3.5" />
-                    </button>
-                  ) : null}
+                  {!isAssistant && !editing && renderMessageAttachments?.(message)}
                   {editing && renderEditContent ? (
                     renderEditContent(message, index)
                   ) : (
-                  <Bubble
-                    variant={isAssistant ? "ghost" : "default"}
-                    className={isAssistant ? undefined : "whitespace-pre-wrap"}
-                  >
-                    {renderMessageContent ? (
-                      renderMessageContent(message, index)
-                    ) : message.content ? (
-                      isAssistant ? (
-                        <AiMarkdown
-                          content={message.content}
-                          streaming={message.status === "streaming"}
-                        />
-                      ) : (
-                        message.content
-                      )
-                    ) : message.status === "streaming" ? (
-                      <span className="shimmer">Working...</span>
-                    ) : null}
-                  </Bubble>
+                    <div className={isAssistant ? "w-full min-w-0" : "flex max-w-full items-center justify-end gap-1"}>
+                      {!isAssistant && canEdit ? (
+                        <button
+                          type="button"
+                          aria-label="Edit and resend this message"
+                          title="Edit and resend"
+                          onClick={() => onEditMessage?.(message)}
+                          className="message-edit-action flex shrink-0 items-center rounded-md p-1.5 text-muted opacity-0 pointer-events-none transition-opacity hover:bg-surface-2 hover:text-ink group-hover:pointer-events-auto group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:opacity-100 focus-visible:opacity-100 [@media(hover:none)]:pointer-events-auto [@media(hover:none)]:opacity-100"
+                        >
+                          <Pencil className="size-3.5" />
+                        </button>
+                      ) : null}
+                      {isAssistant || stripTokens(message.content).trim() || message.references?.some((reference) => reference.kind === "file" || reference.kind === "dir" || reference.kind === "skill") ? (
+                        <Bubble
+                          variant={isAssistant ? "ghost" : "secondary"}
+                          className={isAssistant ? undefined : "whitespace-pre-wrap [overflow-wrap:anywhere]"}
+                        >
+                          {renderMessageContent ? renderMessageContent(message, index) : message.content ? (
+                            isAssistant ? <AiMarkdown content={message.content} streaming={message.status === "streaming"} /> : message.content
+                          ) : message.status === "streaming" ? <span className="shimmer">Working...</span> : null}
+                        </Bubble>
+                      ) : null}
+                    </div>
                   )}
                   {/* Copy sits at the message's end and on the assistant's own side: the
                       reading finishes at the bottom-left of a left-aligned reply. Its box is

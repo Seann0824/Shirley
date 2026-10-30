@@ -39,7 +39,8 @@ use crate::{
 ///
 /// Order preservation is the structural guarantee for **KV prefix caching**: appending a message
 /// = adding an item at the end, without touching a single byte before it, so the prefix hits
-/// naturally. **Do not introduce any sort / grouping / position adjustment here.**
+/// naturally. Preserve original message order; image user items derived from tool results are
+/// deferred to the end of their consecutive result group so they cannot split parallel results.
 ///
 /// `System` / `ContextSummary` stay in place as normal `{role:"system"}` items (the schema's
 /// `EasyInputMessage.role` includes `system`, and any position in `input` is legal); **no
@@ -50,8 +51,12 @@ use crate::{
 /// `function_call` items".
 fn encode_input(messages: &[message::Message]) -> Vec<Value> {
     let mut input: Vec<Value> = Vec::new();
+    let mut pending_images = Vec::new();
 
     for message in messages {
+        if !matches!(message, message::Message::Tool { .. }) {
+            input.append(&mut pending_images);
+        }
         match message {
             // system-level content stays in place as a system item, not hoisted or merged.
             message::Message::System { content } | message::Message::ContextSummary { content } => {
@@ -108,8 +113,8 @@ fn encode_input(messages: &[message::Message]) -> Vec<Value> {
                 content,
             } => {
                 // `function_call_output` is text-only; an image result (a computer-use
-                // screenshot) is split into the text output plus a trailing user item
-                // that carries the image.
+                // screenshot) is split into the text output plus a user image item deferred
+                // until all parallel function_call_output items have been emitted.
                 input.push(serde_json::json!({
                     "type": "function_call_output",
                     "call_id": tool_call_id,
@@ -120,7 +125,7 @@ fn encode_input(messages: &[message::Message]) -> Vec<Value> {
                         .unwrap_or_default(),
                 }));
                 if let Some(images) = content.as_ref().and_then(super::content::images_only) {
-                    input.push(serde_json::json!({
+                    pending_images.push(serde_json::json!({
                         "type": "message",
                         "role": "user",
                         "content": super::content::responses_content(&images),
@@ -130,6 +135,7 @@ fn encode_input(messages: &[message::Message]) -> Vec<Value> {
         }
     }
 
+    input.append(&mut pending_images);
     input
 }
 

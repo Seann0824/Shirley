@@ -21,7 +21,13 @@ use crate::{
 // docs/sdk-refactor-0.0.3.md for why this stays in the adapter layer.
 fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
     let mut out = Vec::with_capacity(messages.len());
+    let mut pending_images = Vec::new();
     for msg in messages {
+        // A parallel call group must be followed by all its tool results before any user
+        // message. Defer image-only user messages until the consecutive result group ends.
+        if !matches!(msg, message::Message::Tool { .. }) {
+            out.append(&mut pending_images);
+        }
         let value = match msg {
             message::Message::User { content } => {
                 serde_json::json!({
@@ -72,15 +78,15 @@ fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
                 content,
             } => {
                 // The tool role accepts text only; an image result (a computer-use
-                // screenshot) is split into a text tool message followed by a trailing
-                // user message that carries the image part.
+                // screenshot) is split into a text tool message and an image user message
+                // deferred until all parallel tool results have been emitted.
                 out.push(serde_json::json!({
                     "role": "tool",
                     "tool_call_id": tool_call_id,
                     "content": content.as_ref().map(super::super::message::MessageContent::as_text),
                 }));
                 if let Some(images) = content.as_ref().and_then(super::content::images_only) {
-                    out.push(serde_json::json!({
+                    pending_images.push(serde_json::json!({
                         "role": "user",
                         "content": super::content::chat_content(&images),
                     }));
@@ -90,6 +96,7 @@ fn encode_messages(messages: &[message::Message]) -> Vec<Value> {
         };
         out.push(value);
     }
+    out.append(&mut pending_images);
     out
 }
 

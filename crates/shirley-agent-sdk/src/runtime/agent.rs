@@ -1075,18 +1075,30 @@ fn is_unsendable_assistant(message: &message::Message) -> bool {
     blank(content) && blank(reasoning_content)
 }
 
+/// Parse a JSON value as multimodal content when it is **structured content**, i.e. it carries at
+/// least one image. Text-only JSON stays text so the request bytes (and the prefix cache) do not
+/// change for the tools that already existed.
+fn structured_content(value: &serde_json::Value) -> Option<message::MessageContent> {
+    if !value.is_array() {
+        return None;
+    }
+    let content = serde_json::from_value::<message::MessageContent>(value.clone()).ok()?;
+    content.has_images().then_some(content)
+}
+
 fn value_to_content(output: &serde_json::Value) -> message::MessageContent {
-    if output.is_array()
-        && let Ok(content) = serde_json::from_value::<message::MessageContent>(output.clone())
-        && content.has_images()
-    {
+    if let Some(content) = structured_content(output) {
         return content;
     }
-    if let Some(text) = output
-        .as_object()
-        .and_then(|object| object.get("content"))
-        .and_then(serde_json::Value::as_str)
-    {
+    let envelope = output.as_object().and_then(|object| object.get("content"));
+    // `{ "content": [...], "parts": [...] }` -- the media envelope. `content` is the model's view
+    // and may carry images (a library screenshot the model asked to read); reading only
+    // `content.as_str()` here is what used to stringify the whole envelope, leaving the model with
+    // a bare `file_id` and no picture at all.
+    if let Some(content) = envelope.and_then(structured_content) {
+        return content;
+    }
+    if let Some(text) = envelope.and_then(serde_json::Value::as_str) {
         return message::MessageContent::text(text.to_string());
     }
     message::MessageContent::text(output.to_string())
@@ -1311,6 +1323,58 @@ mod tests {
             message::ImageSource::Url { url } => assert_eq!(url, "data:image/png;base64,abc123"),
             other => panic!("expected a resolved url, got {other:?}"),
         }
+    }
+
+    /// The media envelope `{ "content": [...], "parts": [...] }` must keep its image: `content`
+    /// is the model's view, and it is an *array* whenever a picture is involved (a library
+    /// screenshot the model asked to read). Reading it as a plain string used to collapse the
+    /// whole envelope into JSON text, so the model got a bare `file_id` and no picture at all.
+    #[test]
+    fn a_media_envelope_keeps_its_image_instead_of_becoming_text() {
+        let output = serde_json::json!({
+            "content": [
+                { "type": "text", "text": "shot.png (image/png)" },
+                ref_image(),
+            ],
+            "parts": [{ "kind": "image", "source": { "kind": "artifact", "id": "abc123" } }],
+        });
+        let mut message = message::Message::Tool {
+            tool_call_id: "call-1".into(),
+            content: Some(value_to_content(&output)),
+        };
+        assert_eq!(image_sources(&message).len(), 1, "the image survives");
+
+        resolve_image_refs(&mut message, &|_id| {
+            Some("data:image/png;base64,abc123".into())
+        });
+        match &image_sources(&message)[0] {
+            message::ImageSource::Url { url } => assert_eq!(url, "data:image/png;base64,abc123"),
+            other => panic!("expected a resolved url, got {other:?}"),
+        }
+        assert_eq!(text_of(&message), "shot.png (image/png)");
+        assert!(
+            !text_of(&message).contains("parts"),
+            "UI-only parts stay out of the model's view"
+        );
+    }
+
+    /// A text-only envelope is unchanged: the model sees the `content` string, never the JSON.
+    #[test]
+    fn a_text_only_envelope_still_becomes_plain_text() {
+        let output = serde_json::json!({
+            "content": "rows.html: <table/>",
+            "parts": [{ "kind": "file", "source": { "kind": "artifact", "id": "x" } }],
+        });
+        let content = value_to_content(&output);
+        assert!(content.is_text_only());
+        assert_eq!(content.as_text(), "rows.html: <table/>");
+    }
+
+    /// A tool returning a bare JSON value is still stringified (request bytes unchanged).
+    #[test]
+    fn an_ordinary_tool_value_is_still_stringified() {
+        let content = value_to_content(&serde_json::json!({ "ok": true }));
+        assert_eq!(content.as_text(), "{\"ok\":true}");
     }
 
     /// A reference that cannot be resolved is dropped rather than forwarded: a dangling provider

@@ -93,6 +93,12 @@ const COLLAPSED_STORAGE_KEY = "shirley.desktop.collapsed-projects";
 /** Collapse state of group headers (the "Recent" / "Projects" groups, local only). */
 const COLLAPSED_RECENT_KEY = "shirley.desktop.collapsed-recent";
 const COLLAPSED_PROJECTS_KEY = "shirley.desktop.collapsed-projects-group";
+/**
+ * Project session paging: show at most this many rows first, then load another page per
+ * "Show more" click. Long-history projects otherwise push every other project out of view.
+ */
+const PROJECT_SESSION_INITIAL = 5;
+const PROJECT_SESSION_PAGE = 10;
 
 function readStringArray(key: string): string[] {
   try {
@@ -246,6 +252,8 @@ export function SessionSidebar({
   const [movingSession, setMovingSession] = useState<string | null>(null);
   // Project id awaiting archive confirmation (in-menu confirmation).
   const [confirmingArchive, setConfirmingArchive] = useState<string | null>(null);
+  // Per-project visible session count (by project id; absent = PROJECT_SESSION_INITIAL).
+  const [sessionLimits, setSessionLimits] = useState<Record<string, number>>({});
 
   // Each project shows its own sessions (session names are unique only within a project).
   const groups: ProjectGroup[] = projects.map((entry) => ({
@@ -706,9 +714,17 @@ export function SessionSidebar({
                 {groups.length === 0 && (
                   <p className="px-2 py-1.5 text-caption text-muted">No projects yet. Right-click "Projects" to create one.</p>
                 )}
-                {groups.map(({ entry, sessions: projectSessions }) => {
+                {groups.map(({ entry }) => {
                   const isCollapsed = collapsedProjects.includes(entry.id);
                   const isEditing = editingProject === entry.id;
+                  // Unpinned sessions first paginated to `PROJECT_SESSION_INITIAL`, growing by
+                  // `PROJECT_SESSION_PAGE` per "Show more"; the pinned ones are hidden here anyway.
+                  const projectSessions = (groups.find((group) => group.entry.id === entry.id)?.sessions ?? [])
+                    .filter((session) => !pinned.includes(`${entry.id}::${session.name}`));
+                  const visibleProjectSessions = projectSessions.slice(
+                    0,
+                    sessionLimits[entry.id] ?? PROJECT_SESSION_INITIAL,
+                  );
                   const isConfirming = confirmingArchive === entry.id;
                   const projectMenu = (
                     <>
@@ -816,12 +832,29 @@ export function SessionSidebar({
                           aria-label={`Sessions of ${entry.name}`}
                           className="mt-0.5 flex flex-col gap-0.5"
                         >
-                          {projectSessions.length === 0 ? (
+                          {visibleProjectSessions.length === 0 ? (
                             <p className="px-2 py-1.5 text-caption text-muted">No sessions yet.</p>
                           ) : (
-                            projectSessions
-                              .filter((session) => !pinned.includes(`${entry.id}::${session.name}`))
-                              .map((session) => renderRow(session, "project", entry.id))
+                            <>
+                              {visibleProjectSessions.map((session) => renderRow(session, "project", entry.id))}
+                              {visibleProjectSessions.length < projectSessions.length && (
+                                <button
+                                  type="button"
+                                  className="flex h-8 items-center rounded-control pr-2 pl-[26px] text-left text-body-sm text-muted transition-colors hover:bg-quiet hover:text-ink"
+                                  onClick={() =>
+                                    setSessionLimits((prev) => ({
+                                      ...prev,
+                                      [entry.id]: (prev[entry.id] ?? PROJECT_SESSION_INITIAL) + PROJECT_SESSION_PAGE,
+                                    }))
+                                  }
+                                >
+                                  Show more
+                                  <span className="ml-1 text-caption">
+                                    ({projectSessions.length - visibleProjectSessions.length})
+                                  </span>
+                                </button>
+                              )}
+                            </>
                           )}
                         </div>
                       </CollapsibleContent>

@@ -30,9 +30,9 @@ function previewSrc(reference: FileReference): string {
   return "";
 }
 
-/** Whether this reference is a picture (rendered as a block, never as an inline chip). */
-function isImageReference(reference: FileReference): boolean {
-  return previewSrc(reference) !== "";
+/** Media is shown in the attachment row, independently of inline workspace references. */
+function isAttachmentReference(reference: FileReference): boolean {
+  return reference.kind === "image" || reference.kind === "media";
 }
 
 /**
@@ -65,9 +65,6 @@ export function FileChip({
       title={tooltip}
       data-reference-chip
       data-kind={reference.kind}
-      // Marker only: `ImageHoverPreview` reads the nested <img>.src, so the (potentially
-      // large) data URL is not duplicated into an attribute.
-      data-image-preview={isImage ? "true" : undefined}
     >
       {isImage ? (
         <img
@@ -121,11 +118,8 @@ export function InlineReferences({
     if (index < parts.length - 1) {
       const reference = references[refIndex];
       refIndex += 1;
-      // An image is **not** an inline chip: it is rendered as its own block under the text
-      // (the message's `parts`), so drawing a 16px thumbnail here duplicated the picture and
-      // told the eye nothing. The placeholder is still consumed, keeping the 1:1 mapping
-      // between chips and tokens intact.
-      if (reference && !isImageReference(reference)) {
+      // Consume legacy attachment tokens without duplicating the media gallery.
+      if (reference && !isAttachmentReference(reference)) {
         nodes.push(<FileChip key={`c${index}`} reference={reference} />);
       }
     }
@@ -191,11 +185,7 @@ export function createChipElement(reference: FileReference): HTMLElement {
   const label = reference.kind === "skill" ? `/${reference.name}` : reference.name;
   const src = previewSrc(reference);
   if (src) {
-    // Pasted image / uploaded image: render a thumbnail instead of an icon;
-    // `data-image-preview` marks the chip for the global hover preview (which reads this
-    // <img>.src). Keep the preview URL on the element too, so a rebuild of the editor
-    // content can restore the thumbnail instead of degrading to an icon.
-    span.dataset.imagePreview = "true";
+    // Preserve compatibility with legacy image chips when rebuilding older drafts.
     span.dataset.previewSrc = src;
     span.innerHTML =
       `<img src="${escapeHtml(src)}" alt="${escapeHtml(reference.name)}" class="size-4 shrink-0 rounded-[3px] object-cover" />` +

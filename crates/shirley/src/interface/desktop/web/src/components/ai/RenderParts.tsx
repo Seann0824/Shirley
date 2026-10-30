@@ -168,11 +168,11 @@ function useAssetText(source: AssetSourceWire | null | undefined): string | null
 }
 
 /** Direct `url` sources render as-is; `artifact` ids go through the out-of-band channel. */
-function useAssetUrl(source: AssetSourceWire): string | null {
+export function useAssetUrl(source: AssetSourceWire): string | null {
   const resolve = useContext(AssetContext);
   const direct = source.kind === "url" ? source.url : null;
   const id = source.kind === "artifact" ? source.id : null;
-  const [resolved, setResolved] = useState<string | null>(null);
+  const [resolved, setResolved] = useState<{ id: string; resolver: AssetResolver; url: string | null } | null>(null);
 
   useEffect(() => {
     if (!id || !resolve) {
@@ -181,14 +181,14 @@ function useAssetUrl(source: AssetSourceWire): string | null {
     }
     let cancelled = false;
     void resolve(id).then((url) => {
-      if (!cancelled) setResolved(url);
+      if (!cancelled) setResolved({ id, resolver: resolve, url });
     });
     return () => {
       cancelled = true;
     };
   }, [id, resolve]);
 
-  return direct ?? resolved;
+  return direct ?? (resolved?.id === id && resolved?.resolver === resolve ? resolved?.url ?? null : null);
 }
 
 function FallbackText({ text }: { text: string }) {

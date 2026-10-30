@@ -8,8 +8,8 @@ import {
 import { AiChatComposer } from "@/components/ai/AiChatComposer";
 import { Button } from "@/ui/button";
 import { AssistantMessage } from "@/components/AssistantMessage";
-import { ImageHoverPreview } from "@/components/ImageHoverPreview";
-import { AssetUrlProvider, RenderParts } from "@/components/ai/RenderParts";
+import { ComposerAttachments, UserMessageAttachments, attachmentsFromMessage, restoreUserMessage, splitMessageReferences } from "@/components/ai/ChatAttachments";
+import { AssetUrlProvider } from "@/components/ai/RenderParts";
 import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { VoiceInputButton } from "@/components/ai/VoiceInputButton";
@@ -329,6 +329,21 @@ export function App() {
   // Project-scoped: dictation is answered by the runtime that owns the foreground project.
   const voice = useVoiceInput(appendDictation);
   const [references, setReferences] = useState<FileReference[]>([]);
+  const [attachments, setAttachments] = useState<FileReference[]>([]);
+  const [uploadCount, setUploadCount] = useState(0);
+  // Async uploads belong to the draft that started them. Never append them to another chat.
+  const draftEpoch = useRef(0);
+  const uploadCountRef = useRef(0);
+  const draftTarget = useRef({ project: activeProject, session: sessionName });
+  if (draftTarget.current.project !== activeProject || draftTarget.current.session !== sessionName) {
+    draftTarget.current = { project: activeProject, session: sessionName };
+    draftEpoch.current += 1;
+    uploadCountRef.current = 0;
+  }
+  useEffect(() => {
+    setAttachments([]);
+    setUploadCount(0);
+  }, [activeProject, sessionName]);
   // "Edit the last user message and resend" mode: which session view + which message id
   // is being edited. Only the last user message is ever editable (option A, same as TUI).
   const [editingTurn, setEditingTurn] = useState<{ key: string; messageId: string } | null>(null);
@@ -1101,93 +1116,76 @@ export function App() {
     });
   }, []);
 
-  /** Send a message to the model as a new turn (echo user + start an assistant streaming placeholder).
-   *  `display` is the echo body (chip placeholders preserved), `text` is the plain text sent to the model. */
-  /**
-   * A short-lived local preview for an uploaded image chip.
-   *
-   * The bytes live in the media library, so a chip that only carries an artifact id has
-   * nothing to paint. An `object:` URL of the file we already hold is enough for the
-   * thumbnail and never enters the session log. Revoked when the editor drops the chip,
-   * and on unmount so a long session does not leak blobs.
-   */
-  const previewUrls = useRef<string[]>([]);
-  const previewUrlFor = useCallback((file: File): string | undefined => {
-    if (!file.type.startsWith("image/")) return undefined;
-    const url = URL.createObjectURL(file);
-    previewUrls.current.push(url);
-    return url;
-  }, []);
-  useEffect(
-    () => () => {
-      previewUrls.current.forEach((url) => URL.revokeObjectURL(url));
-      previewUrls.current = [];
-    },
-    [],
-  );
-
-  /**
-   * Upload local files into the media library, then reference them as chips.
-   *
-   * The bytes never enter React state: the harness writes them into the artifact jail and
-   * hands back an id. That is what makes a large file / video attachable at all — the old
-   * pasted-image path inlined base64 straight into the session log.
-   */
+  /** Paste, file picker and native drops all ingest into the same media library. */
   const uploadFiles = useCallback(
     async (files: File[]) => {
       const project = activeProject;
-      if (!project || files.length === 0) return;
+      if (!project || !sessionName || files.length === 0) return;
+      setUiError("");
+      const epoch = draftEpoch.current;
+      uploadCountRef.current += files.length;
+      setUploadCount(uploadCountRef.current);
       try {
         const bridge = await agentBridge();
         for (const file of files) {
-          const entry = await bridge.ingestBytes(
-            project,
-            file.name || "upload",
-            file.type || "application/octet-stream",
-            file,
-          );
-          editorRef.current?.insertMedia({
-            path: entry.id,
-            name: entry.name,
-            kind: "media",
-            artifactId: entry.id,
-            mime: entry.mime,
-            bytes: entry.bytes,
-            // Thumbnail only: the payload sent to the model is still the artifact id.
-            dataUrl: previewUrlFor(file),
-          });
+          try {
+            const entry = await bridge.ingestBytes(
+              project, file.name || "upload", file.type || "application/octet-stream", file,
+            );
+            if (epoch !== draftEpoch.current) return;
+            setAttachments((prev) => [...prev, {
+              path: entry.id, name: entry.name, kind: "media", artifactId: entry.id,
+              mime: entry.mime, bytes: entry.bytes,
+            }]);
+          } catch (error) {
+            if (epoch === draftEpoch.current) {
+              setUiError(`${file.name}: ${error instanceof Error ? error.message : String(error)}`);
+            }
+          } finally {
+            if (epoch === draftEpoch.current) {
+              uploadCountRef.current -= 1;
+              setUploadCount(uploadCountRef.current);
+            }
+          }
         }
-      } catch (e) {
-        setUiError(e instanceof Error ? e.message : String(e));
+      } catch (error) {
+        if (epoch === draftEpoch.current) {
+          uploadCountRef.current -= files.length;
+          setUploadCount(uploadCountRef.current);
+          setUiError(error instanceof Error ? error.message : String(error));
+        }
       }
     },
-    [activeProject, previewUrlFor],
+    [activeProject, sessionName],
   );
 
-  /** Same, but for real OS paths (the Tauri drag-and-drop path — no bytes through JS). */
+  /** Native drops carry paths; Rust copies the files without passing bytes through JS. */
   const uploadPaths = useCallback(
     async (paths: string[]) => {
       const project = activeProject;
-      if (!project || paths.length === 0) return;
+      if (!project || !sessionName || paths.length === 0) return;
+      setUiError("");
+      const epoch = draftEpoch.current;
+      uploadCountRef.current += paths.length;
+      setUploadCount(uploadCountRef.current);
       try {
-        const bridge = await agentBridge();
-        const result = await bridge.ingestPaths(project, paths);
-        for (const entry of result.entries) {
-          editorRef.current?.insertMedia({
-            path: entry.id,
-            name: entry.name,
-            kind: "media",
-            artifactId: entry.id,
-            mime: entry.mime,
-            bytes: entry.bytes,
-          });
-        }
+        const result = await (await agentBridge()).ingestPaths(project, paths);
+        if (epoch !== draftEpoch.current) return;
+        setAttachments((prev) => [...prev, ...result.entries.map((entry): FileReference => ({
+          path: entry.id, name: entry.name, kind: "media", artifactId: entry.id,
+          mime: entry.mime, bytes: entry.bytes,
+        }))]);
         if (result.errors.length > 0) setUiError(result.errors.join("; "));
-      } catch (e) {
-        setUiError(e instanceof Error ? e.message : String(e));
+      } catch (error) {
+        if (epoch === draftEpoch.current) setUiError(error instanceof Error ? error.message : String(error));
+      } finally {
+        if (epoch === draftEpoch.current) {
+          uploadCountRef.current -= paths.length;
+          setUploadCount(uploadCountRef.current);
+        }
       }
     },
-    [activeProject],
+    [activeProject, sessionName],
   );
 
   // Desktop: the webview reports dropped **paths**, so the file is copied inside Rust and
@@ -1252,7 +1250,7 @@ export function App() {
                 // `data:` URL; an uploaded library entry only has an artifact id, which the
                 // renderer resolves out-of-band (so no bytes sit in view state).
                 parts: refs.filter(isAttachable).map((reference) =>
-                  (reference.mime ?? "").startsWith("image/")
+                  (reference.kind === "image" || (reference.mime ?? "").startsWith("image/"))
                     ? {
                         kind: "image" as const,
                         source: reference.artifactId
@@ -1343,13 +1341,14 @@ export function App() {
   const send = useCallback(async () => {
     const project = activeProject;
     const session = sessionName;
-    if (!project || !session) return;
+    if (!project || !session || uploadCountRef.current > 0) return;
     const key = viewKey(project, session);
     // Edit mode for the last user message: submit rewinds that turn and resends the edited
     // text (the old reply is discarded), instead of appending a new turn.
     const editing = editingTurn && editingTurn.key === key ? editingTurn : null;
 
-    const refs = references;
+    const refs = [...references, ...attachments];
+    const display = `${input}${CHIP_TOKEN.repeat(attachments.length)}`;
     // `/` skill entry (same semantics as the TUI): the skill appears as a chip in the
     // input; the text after the chip is args. No args = activate only + a local system
     // notice (not sent to the model); with args = activate + use args as this turn's
@@ -1365,9 +1364,10 @@ export function App() {
       slashSearch.close();
       setInput("");
       setReferences([]);
+      setAttachments([]);
       setUiError("");
       const args = stripTokens(input).trim();
-      if (!args) {
+      if (!args && attachments.length === 0) {
         // No args: activate only, don't bother the model, show a local system notice (chip echo preserved).
         setViews((prev) => {
           const view = prev[key] ?? emptyView();
@@ -1393,7 +1393,9 @@ export function App() {
       // With args: after activating, treat args as this turn's prompt and continue
       // through the normal send flow; display keeps the chip, but **the skill name is not
       // sent to the backend as a reference path** (sendPaths empty). Enqueue if running.
-      await submit(project, session, args, `${CHIP_TOKEN}${args}`, [skill], [], []);
+      await submit(project, session, args, display, refs,
+        references.filter((reference) => reference.kind === "file" || reference.kind === "dir").map((reference) => reference.path),
+        attachments.map((reference) => reference.artifactId ?? reference.dataUrl ?? "").filter(Boolean));
       return;
     }
 
@@ -1408,26 +1410,27 @@ export function App() {
     const images = refs
       .filter(isAttachable)
       .map((reference) =>
-        reference.kind === "media" ? (reference.artifactId ?? "") : (reference.dataUrl ?? ""),
+        reference.artifactId ?? reference.dataUrl ?? "",
       )
       .filter((item) => item.length > 0);
     if (!plain && images.length === 0) return;
     setInput("");
     setReferences([]);
+    setAttachments([]);
     setUiError("");
     setEditingTurn(null);
     await submit(
       project,
       session,
       plain,
-      input.trim(),
+      display.trim(),
       refs,
       // Only file/dir refs travel as workspace paths; attachments use the media channel.
-      refs.filter((reference) => !isAttachable(reference)).map((reference) => reference.path),
+      refs.filter((reference) => reference.kind === "file" || reference.kind === "dir").map((reference) => reference.path),
       images,
       editing ? { resend: true, editMessageId: editing.messageId } : undefined,
     );
-  }, [activeProject, input, references, sessionName, slashSearch, submit, editingTurn]);
+  }, [activeProject, input, references, attachments, sessionName, slashSearch, submit, editingTurn]);
 
   /** Enter edit mode for a user message: pre-fill the composer; submit will resend. */
   const beginEdit = useCallback(
@@ -1435,9 +1438,14 @@ export function App() {
       if (!activeProject || !sessionName) return;
       const key = viewKey(activeProject, sessionName);
       if (views[key]?.busy) return;
+      draftEpoch.current += 1;
+      uploadCountRef.current = 0;
+      setUploadCount(0);
       setEditingTurn({ key, messageId: String(message.id) });
-      setInput(message.content);
-      setReferences(message.references ?? []);
+      const draft = splitMessageReferences(message.content, message.references ?? []);
+      setInput(draft.content);
+      setReferences(draft.references);
+      setAttachments(attachmentsFromMessage(message));
       setUiError("");
       requestAnimationFrame(() => editorRef.current?.focus());
     },
@@ -1446,9 +1454,13 @@ export function App() {
 
   /** Leave edit mode without resending (Esc / session switch). */
   const cancelEdit = useCallback(() => {
+    draftEpoch.current += 1;
+    uploadCountRef.current = 0;
+    setUploadCount(0);
     setEditingTurn(null);
     setInput("");
     setReferences([]);
+    setAttachments([]);
   }, []);
 
   // Esc cancels edit mode with no side effects (mirrors the TUI's `/rewind` Esc).
@@ -1586,6 +1598,9 @@ export function App() {
           />
         </div>
       )}
+      {isNewChat && error && (
+        <p className="mb-2 px-2 text-body-sm text-danger-ink" role="alert">{error}</p>
+      )}
       {/* Dictation feedback: the browser engine streams a partial transcript, the upload
           engines only report errors. One line above the composer, never a modal. */}
       {(voice.interim || voice.error) && (
@@ -1604,6 +1619,8 @@ export function App() {
         value={stripTokens(input)}
         placeholder="Message Shirley… (@ to reference files, / to invoke a skill)"
         busy={busy}
+        hasAttachments={attachments.length > 0}
+        uploading={uploadCount > 0}
         onValueChange={() => {}}
         onSend={() => void send()}
         onStop={() => void stop()}
@@ -1668,16 +1685,24 @@ export function App() {
               setInput(text);
               setReferences(refs);
             }}
+            onAttachFiles={(files) => void uploadFiles(files)}
             onSubmit={() => void send()}
           />
         }
-      />
+      >
+        <AssetUrlProvider project={activeProject}>
+          <ComposerAttachments
+            attachments={attachments}
+            uploading={uploadCount}
+            onRemove={(index) => setAttachments((prev) => prev.filter((_, itemIndex) => itemIndex !== index))}
+          />
+        </AssetUrlProvider>
+      </AiChatComposer>
     </div>
   );
 
   return (
     <>
-      <ImageHoverPreview />
       <DesktopChrome
       title={libraryOpen ? "Library" : (activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
       projectName={
@@ -1778,15 +1803,15 @@ export function App() {
           onClose={() => setLibraryOpen(false)}
           onReference={(entry) => {
             // A reference carries the artifact id, not bytes: re-sending an old file costs nothing
-            // and goes through the exact same chip path as a fresh drop.
-            editorRef.current?.insertMedia({
+            // and goes through the same attachment path as a fresh drop.
+            setAttachments((prev) => [...prev, {
               path: entry.id,
               name: entry.name,
               kind: "media",
               artifactId: entry.id,
               mime: entry.mime,
               bytes: entry.bytes,
-            });
+            }]);
             setLibraryOpen(false);
             requestAnimationFrame(() => editorRef.current?.focus());
           }}
@@ -1836,6 +1861,7 @@ export function App() {
           onEditMessage={beginEdit}
           editingMessageId={editing?.messageId ?? null}
           renderEditContent={() => composerNode}
+          renderMessageAttachments={(message) => <UserMessageAttachments parts={message.parts} />}
           renderMessageContent={(message) =>
             message.role === "assistant" ? (
               <AssistantMessage
@@ -1847,14 +1873,7 @@ export function App() {
                 stopReason={message.stopReason}
               />
             ) : (
-              <>
-                <InlineReferences content={message.content} references={message.references ?? []} />
-                {/* Text parts are already in `content`; only media parts add anything here. */}
-                <RenderParts
-                  parts={message.parts?.filter((part) => part.kind !== "text")}
-                  className="mt-2 space-y-1"
-                />
-              </>
+              <InlineReferences content={message.content} references={message.references ?? []} />
             )
           }
           contentClassName="mx-auto w-full max-w-190"
@@ -2200,9 +2219,8 @@ function viewFromSnapshot(snapshot: SessionSnapshot): {
         messages.push({
           id: nextId(),
           role: "user",
-          content: item.content,
           status: "complete",
-          parts: item.parts ?? [],
+          ...restoreUserMessage(item.content, item.parts),
         });
         currentAssistantId = null;
         continue;

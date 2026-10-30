@@ -505,10 +505,15 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
       return invoke<IngestResult>("agent_ingest_paths", { project, paths });
     },
     async ingestBytes(project, name, mime, file) {
-      // Tauri receives a data URL rather than raw bytes: a `#[tauri::command]` argument is
-      // deserialized from JSON, so `Vec<u8>` would arrive as an array of numbers.
-      const dataUrl = await blobToDataUrl(file);
-      return invoke<LibraryEntry>("agent_ingest_bytes", { project, name, mime, text: dataUrl });
+      if (remote) {
+        // The server's JSON command accepts a data URL in `text`.
+        const dataUrl = await blobToDataUrl(file);
+        return invoke<LibraryEntry>("agent_ingest_bytes", { project, name, mime, text: dataUrl });
+      }
+      // The native Tauri command takes `bytes: Vec<u8>`; a data URL in `text`
+      // does not satisfy that contract.
+      const bytes = Array.from(new Uint8Array(await file.arrayBuffer()));
+      return invoke<LibraryEntry>("agent_ingest_bytes", { project, name, mime, bytes });
     },
     async listLibrary(project) {
       return invoke<LibraryEntry[]>("agent_library_list", { project });
@@ -561,6 +566,7 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
 function createMockBridge(): AgentBridge {
   const handlers = new Map<string, (event: AgentEventWire) => void>();
   const cancelled = new Set<string>();
+  const assets = new Map<string, string>();
   const providers = mockProviderBridge();
   return {
     providers,
@@ -697,9 +703,8 @@ function createMockBridge(): AgentBridge {
     async transcribe() {
       throw new Error("Dictation runs on your own device, so there is nothing to upload.");
     },
-    async assetUrl() {
-      // mock: no artifact channel in a plain browser, so parts degrade to their text fallback.
-      return "";
+    async assetUrl(_project, id) {
+      return assets.get(id) ?? "";
     },
     async assetText() {
       // mock: same reason -- HTML parts fall back to a file card instead of running.
@@ -710,8 +715,10 @@ function createMockBridge(): AgentBridge {
       return { entries: [], errors: [] };
     },
     async ingestBytes(_project, name, mime, file) {
-      // mock: a fake entry lets the chip / send path be exercised without a backend.
-      return { id: `mock-${Date.now()}`, name, mime, bytes: file.size, addedMs: Date.now() };
+      const id = `mock-${crypto.randomUUID()}`;
+      // Keep dev previews usable through the same asset resolver as the real app.
+      if (mime.startsWith("image/")) assets.set(id, await blobToDataUrl(file));
+      return { id, name, mime, bytes: file.size, addedMs: Date.now() };
     },
     async listLibrary() {
       // mock: no library behind a plain browser; an empty page still renders (with its hint).

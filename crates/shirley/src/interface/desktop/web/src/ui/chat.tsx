@@ -133,6 +133,26 @@ export function useMessageAutoScroll({
     return () => window.cancelAnimationFrame(frame);
   }, [contentKey, scrollToLatest]);
 
+  // Images resolve after the text arrives. Follow their layout changes only while the
+  // reader is already at the bottom; scrolling up must keep their position intact.
+  useEffect(() => {
+    const content = viewportRef.current?.firstElementChild;
+    if (!content) return;
+    let frame = 0;
+    const observer = new ResizeObserver(() => {
+      if (!followingRef.current) return;
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (followingRef.current) scrollToLatest("auto");
+      });
+    });
+    observer.observe(content);
+    return () => {
+      observer.disconnect();
+      window.cancelAnimationFrame(frame);
+    };
+  }, [scrollToLatest]);
+
   return { viewportRef, followingLatest, scrollToLatest };
 }
 

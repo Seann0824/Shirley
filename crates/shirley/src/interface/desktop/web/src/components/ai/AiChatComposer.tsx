@@ -14,6 +14,8 @@ type AiChatComposerProps = Omit<ComponentPropsWithoutRef<"form">, "children" | "
   placeholder: string;
   busy: boolean;
   disabled?: boolean;
+  hasAttachments?: boolean;
+  uploading?: boolean;
   rows?: number;
   maxLength?: number;
   textareaRef?: Ref<HTMLTextAreaElement>;
@@ -50,6 +52,8 @@ export function AiChatComposer({
   placeholder,
   busy,
   disabled,
+  hasAttachments = false,
+  uploading = false,
   rows = 2,
   maxLength,
   textareaRef,
@@ -68,8 +72,8 @@ export function AiChatComposer({
   ...props
 }: AiChatComposerProps) {
   // A single adaptive button: non-empty input = send (queued if running); empty input while generating = pause/stop.
-  const hasText = value.trim().length > 0;
-  const showStop = !hasText && busy && Boolean(onStop);
+  const hasContent = value.trim().length > 0 || hasAttachments;
+  const showStop = !hasContent && busy && Boolean(onStop);
   return (
     <form
       className={cn(
@@ -81,7 +85,7 @@ export function AiChatComposer({
       onSubmit={(event) => {
         event.preventDefault();
         // Allow submit even while busy: the caller queues it as pending and auto-sends after the previous turn ends.
-        if (disabled || !value.trim()) return;
+        if (disabled || uploading || !hasContent) return;
         onSend();
         // Return focus to the input control after sending (built-in textarea or the rich input in inputSlot).
         event.currentTarget
@@ -113,7 +117,7 @@ export function AiChatComposer({
               onChange={(event) => onValueChange(event.target.value)}
               onKeyDown={(event) => {
                 if (textareaOnKeyDown?.(event)) return;
-                if (shouldSendChatOnEnter(event) && value.trim() && !disabled) {
+                if (shouldSendChatOnEnter(event) && hasContent && !disabled && !uploading) {
                   event.preventDefault();
                   onSend();
                 }
@@ -147,7 +151,7 @@ export function AiChatComposer({
               variant="primary"
               size="icon-xs"
               aria-label={busy ? "Add to queue, send after the previous turn finishes" : sendLabel}
-              disabled={disabled || !hasText}
+              disabled={disabled || uploading || !hasContent}
               className="rounded-full"
             >
               <ArrowUp data-icon="inline-start" />

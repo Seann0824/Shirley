@@ -32,12 +32,6 @@ export type MentionEditorHandle = {
   insertReference: (reference: FileReference) => void;
   /** Replace the `/` skill candidate with a skill chip (called by clicking an item in `SkillSlashPopover`). */
   insertSkill: (skill: SkillEntry) => void;
-  /** Insert a pasted-image chip at the caret (data URL payload). */
-  /**
-   * Insert a **media-library** reference (a file the harness already ingested): the chip
-   * carries an artifact id, not bytes, so size does not matter here.
-   */
-  insertMedia: (reference: FileReference) => void;
   /** Open the `@` reference picker from the external "+" button (empty query, immediate fetch). */
   openMention: () => void;
 };
@@ -57,17 +51,6 @@ function deriveReferences(text: string, references: FileReference[]): FileRefere
   const count = countTokens(text);
   if (references.length === count) return references;
   return references.slice(0, count);
-}
-
-/**
-/** Read a pasted image file into a base64 `data:` URL (the chip / send payload shape). */
-function fileToDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(typeof reader.result === "string" ? reader.result : "");
-    reader.onerror = () => reject(reader.error ?? new Error("failed to read pasted image"));
-    reader.readAsDataURL(file);
-  });
 }
 
 /**
@@ -97,9 +80,10 @@ export const MentionEditor = forwardRef<
     slash: SkillSlashState;
     onChange: (value: string, references: FileReference[]) => void;
     onSubmit: () => void;
+    onAttachFiles: (files: File[]) => void;
   }
 >(function MentionEditor(
-  { id, label, value, references, placeholder, disabled, autoFocus, className, search, slash, onChange, onSubmit },
+  { id, label, value, references, placeholder, disabled, autoFocus, className, search, slash, onChange, onSubmit, onAttachFiles },
   ref,
 ) {
   const rootRef = useRef<HTMLDivElement>(null);
@@ -198,25 +182,6 @@ export const MentionEditor = forwardRef<
     slash.sync(text);
   }, [emit, syncMention, slash]);
 
-  /** Insert a reference chip at the caret without touching the `@` mention state (used for pasted images). */
-  const insertReferenceAtCaret = useCallback(
-    (reference: FileReference) => {
-      const root = rootRef.current;
-      if (!root) return;
-      const text = serializeEditor(root);
-      const caret = caretOffset(root);
-      const before = text.slice(0, caret);
-      const after = text.slice(caret);
-      const tokenIndex = countTokens(before);
-      const refs = refsRef.current.slice();
-      refs.splice(tokenIndex, 0, reference);
-      const next = `${before}${CHIP_TOKEN}${after}`;
-      rebuild(next, refs, (before + CHIP_TOKEN).length);
-      emit(next, refs);
-    },
-    [rebuild, emit],
-  );
-
   const handleSelect = useCallback(
     (result: FileReference) => {
       const root = rootRef.current;
@@ -272,17 +237,12 @@ export const MentionEditor = forwardRef<
 
   const selectRef = useRef<(reference: FileReference) => void>(() => {});
   selectRef.current = handleSelect;
-  // Uploaded files are ingested by the harness (`bridge.ingestBytes` / `ingestPaths`) and
-  // arrive here as a library reference; the editor only places the chip, it never reads bytes.
-  const mediaInsertRef = useRef<(reference: FileReference) => void>(() => {});
-  mediaInsertRef.current = insertReferenceAtCaret;
   const slashSelectRef = useRef<(skill: SkillEntry) => void>(() => {});
   slashSelectRef.current = handleSkillSelect;
   useImperativeHandle(ref, () => ({
     focus: () => rootRef.current?.focus({ preventScroll: true }),
     insertReference: (reference) => selectRef.current(reference),
     insertSkill: (skill) => slashSelectRef.current(skill),
-    insertMedia: (reference) => mediaInsertRef.current(reference),
     openMention: () => {
       rootRef.current?.focus({ preventScroll: true });
       mentionRef.current = { queryStart: -1 };
@@ -482,58 +442,22 @@ export const MentionEditor = forwardRef<
   }, []);
 
   const handlePaste = useCallback(
-    async (event: React.ClipboardEvent<HTMLDivElement>) => {
-      // Pasted image(s): intercept before the text branch. A clipboard screenshot has no
-      // useful `text/plain`; each image file becomes an `image` chip (data URL payload),
-      // inserted at the caret in order. Multiple images paste as multiple chips.
-      const files = Array.from(event.clipboardData?.items ?? [])
-        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
-        .map((item) => item.getAsFile())
-        .filter((file): file is File => file != null);
+    (event: React.ClipboardEvent<HTMLDivElement>) => {
+      const files = Array.from(event.clipboardData.files);
       if (files.length > 0) {
         event.preventDefault();
-        for (const file of files) {
-          const dataUrl = await fileToDataUrl(file);
-          insertReferenceAtCaret({
-            path: `image:${file.name || "pasted-image"}`,
-            name: file.name || "image",
-            kind: "image",
-            dataUrl,
-          });
-        }
-        return;
+        onAttachFiles(files);
       }
-
-      const data = event.clipboardData?.getData("text/plain");
-      if (data == null) return;
+      // Keep accompanying text when the clipboard contains both text and files.
+      const data = event.clipboardData.getData("text/plain");
+      if (!data) return;
       event.preventDefault();
       const root = rootRef.current;
       if (!root) return;
       insertTextAtCaret(root, data);
       handleInput();
     },
-    [handleInput, insertReferenceAtCaret],
-  );
-
-  // Drag-and-drop image files onto the editor: same payload shape as paste / file dialog.
-  const handleDrop = useCallback(
-    async (event: React.DragEvent<HTMLDivElement>) => {
-      const files = Array.from(event.dataTransfer?.files ?? []).filter((file) =>
-        file.type.startsWith("image/"),
-      );
-      if (files.length === 0) return;
-      event.preventDefault();
-      for (const file of files) {
-        const dataUrl = await fileToDataUrl(file);
-        insertReferenceAtCaret({
-          path: `image:${file.name || "image"}`,
-          name: file.name || "image",
-          kind: "image",
-          dataUrl,
-        });
-      }
-    },
-    [insertReferenceAtCaret],
+    [handleInput, onAttachFiles],
   );
 
   // Keep the native listener registered at mount always calling the latest implementation.
@@ -560,11 +484,10 @@ export const MentionEditor = forwardRef<
       onInput={handleInput}
       onKeyDown={handleKeyDown}
       onMouseDown={handleMouseDown}
-      onPaste={(event) => void handlePaste(event)}
+      onPaste={handlePaste}
       onDragOver={(event) => {
         if (event.dataTransfer?.types.includes("Files")) event.preventDefault();
       }}
-      onDrop={(event) => void handleDrop(event)}
     />
   );
 });
