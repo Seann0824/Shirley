@@ -496,6 +496,168 @@ fn interrupted_tools_get_paired_results_without_overwriting_finished_tools() {
     assert!(agent.finish_interrupted_turn().is_empty());
 }
 
+/// Pausing the AI leaves an assistant turn whose tool calls never returned. The interrupt path
+/// closes that group off itself, but a log written before that guard existed (or a turn whose
+/// driver died) still holds the orphan, and every provider rejects such a request. The outbound
+/// view repairs it: the stored history is left as the log wrote it.
+#[tokio::test]
+async fn orphan_tool_call_is_paired_in_the_outbound_request() {
+    let server = Server::new(vec![Response::new(
+        200,
+        sse(json!({"content": "ok"}), true),
+    )]);
+    let mut agent = Agent::builder()
+        .model_config(config(&server.url, true))
+        .messages(vec![
+            Message::User {
+                content: "first".into(),
+            },
+            Message::Assistant {
+                content: None,
+                reasoning_content: None,
+                tool_calls: vec![ToolCall {
+                    id: "ghost".into(),
+                    name: "fixture".into(),
+                    arguments: "{}".into(),
+                }],
+            },
+        ])
+        .build()
+        .unwrap();
+    agent.run("second").await.unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    let messages = requests[0]["messages"].as_array().unwrap();
+    assert_eq!(messages[0]["content"], "first");
+    assert_eq!(messages[1]["role"], "assistant");
+    // The placeholder result follows its call, before the next user turn.
+    assert_eq!(messages[2]["role"], "tool");
+    assert_eq!(messages[2]["tool_call_id"], "ghost");
+    assert!(
+        messages[2]["content"]
+            .as_str()
+            .unwrap()
+            .contains("interrupted")
+    );
+    assert_eq!(messages[3]["content"], "second");
+    // Repair is confined to the request: the stored log keeps exactly what was recorded (the
+    // placeholder is inserted into the outbound view, never appended to the history).
+    assert!(
+        matches!(
+            agent.messages(),
+            [
+                Message::User { .. },
+                Message::Assistant { .. },
+                Message::User { .. },
+                Message::Assistant { .. }
+            ]
+        ),
+        "unexpected stored history: {:?}",
+        agent.messages()
+    );
+}
+
+/// The opposite orphan -- a result whose call is gone (e.g. compacted away) -- is dropped from the
+/// request instead of being forwarded.
+#[tokio::test]
+async fn orphan_tool_result_is_dropped_from_the_outbound_request() {
+    let server = Server::new(vec![Response::new(
+        200,
+        sse(json!({"content": "ok"}), true),
+    )]);
+    let mut agent = Agent::builder()
+        .model_config(config(&server.url, true))
+        .messages(vec![
+            Message::User {
+                content: "first".into(),
+            },
+            Message::Tool {
+                tool_call_id: "ghost".into(),
+                content: Some("stale result".into()),
+            },
+        ])
+        .build()
+        .unwrap();
+    agent.run("second").await.unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    let messages = requests[0]["messages"].as_array().unwrap();
+    assert!(
+        messages.iter().all(|message| message["role"] != "tool"),
+        "an orphan tool result must not reach the endpoint: {messages:?}"
+    );
+    assert_eq!(messages.last().unwrap()["content"], "second");
+}
+
+/// The reported bug, end to end: pause (Esc) while a tool is still running, then send the next
+/// message. The unfinished call must be closed off with a placeholder result **left in place**,
+/// otherwise the next request carries an orphan `tool_call` and the endpoint rejects it.
+#[tokio::test]
+async fn interrupting_a_running_tool_leaves_a_paired_request_for_the_next_turn() {
+    struct HangingTool(ToolDefinition);
+
+    impl Tool for HangingTool {
+        fn definition(&self) -> &ToolDefinition {
+            &self.0
+        }
+        fn invoke(&self, _: Value, _: ToolContext) -> ToolFuture<'_> {
+            Box::pin(std::future::pending())
+        }
+    }
+
+    let mut tools = ToolManager::new();
+    tools
+        .register(HangingTool(ToolDefinition {
+            name: "fixture".into(),
+            description: "never finishes".into(),
+            parameters: json!({"type": "object"}),
+        }))
+        .unwrap();
+    let server = Server::new(vec![
+        Response::new(
+            200,
+            sse(
+                json!({"tool_calls": [{"index": 0, "id": "running", "type": "function", "function": {"name": "fixture", "arguments": "{}"}}]}),
+                true,
+            ),
+        ),
+        Response::new(200, sse(json!({"content": "continued"}), true)),
+    ]);
+    let mut agent = Agent::builder()
+        .model_config(config(&server.url, true))
+        .tools(tools)
+        .build()
+        .unwrap();
+
+    let mut stream = agent.run_stream("first");
+    while !matches!(
+        stream.next().await.unwrap().unwrap(),
+        AgentEvent::ToolStarted { .. }
+    ) {}
+    drop(stream);
+    // The pause closes the unfinished call off; the placeholder is handed to the session log.
+    assert!(
+        matches!(&agent.finish_interrupted_turn()[..], [Message::Tool { tool_call_id, .. }] if tool_call_id == "running")
+    );
+
+    agent.run("second").await.unwrap();
+    let requests = server.requests.lock().unwrap();
+    let messages = requests[1]["messages"].as_array().unwrap();
+    let call_index = messages
+        .iter()
+        .position(|message| message["role"] == "assistant" && message.get("tool_calls").is_some())
+        .expect("the interrupted assistant turn is still in the request");
+    let result = &messages[call_index + 1];
+    assert_eq!(result["role"], "tool", "{messages:?}");
+    assert_eq!(result["tool_call_id"], "running");
+    assert!(
+        messages[call_index + 2..]
+            .iter()
+            .all(|message| message["role"] != "tool"),
+        "every result must stay adjacent to its call: {messages:?}"
+    );
+}
+
 struct EvidenceTool(ToolDefinition);
 
 impl Tool for EvidenceTool {

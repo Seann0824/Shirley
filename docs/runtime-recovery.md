@@ -30,6 +30,13 @@ TUI Esc and desktop stop both preserve this round's user input, already-complete
 After the driver drops the stream it calls `Agent::finish_interrupted_turn()`, which appends the returned new messages to the session log.
 Tool calls that have not returned a result are filled in with an interruption result, so the next request does not carry an orphaned tool_call;
 that result only indicates that the wait was interrupted, and it must not be used to assert that the tool had no side effects.
+The placeholder is emitted **before** any pending text of the interrupted round, so the results stay adjacent to the call that produced them.
+The same invariant is enforced a second time where the request is built: `active_messages()`
+repairs the outgoing view (`repair_tool_pairing`) by filling in any call that still has no result
+and dropping any result whose call is gone (e.g. compacted away). This covers what the interrupt
+path cannot: a log written by an older build, a turn whose driver died, or a future path that
+forgets to close the group. The repair is deterministic and a no-op on a healthy log, so the
+prefix stays stable, and it never writes to the stored history.
 The TUI also waits for the cancellation to settle when it exits while running. A new draft in the input box is preserved; the original input is not restored.
 Only an explicit `/rewind` still rolls back messages and truncates the log.
 

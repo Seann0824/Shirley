@@ -223,6 +223,11 @@ impl Agent {
     /// endpoint.
     pub fn finish_interrupted_turn(&mut self) -> Vec<message::Message> {
         let mut added = Vec::new();
+        // Order matters: the interrupted tool results pair the tool group that is already at the
+        // tail, so they must be emitted **first**, directly after it. Emitting the pending text
+        // first would leave `[assistant(tool_calls), assistant(text), tool(result)]`, where the
+        // result no longer follows its call -- rejected by the endpoint just like a missing one.
+        added.extend(self.interrupted_tool_results());
         if let Some(content) = self.pending_user.take() {
             added.push(message::Message::User { content });
         }
@@ -235,29 +240,35 @@ impl Agent {
                 tool_calls: Vec::new(),
             });
         }
-        // Only the tool group at the tail of the current message may be unfinished.
-        if let Some(index) = self
+        self.messages.extend(added.iter().cloned());
+        added
+    }
+
+    /// Placeholder results for the tool calls that never returned, so the stored log is closed
+    /// off. Only the tool group at the tail of the current message may be unfinished; a stale
+    /// log that still holds an orphan call is repaired in the outbound view
+    /// (`repair_tool_pairing`), not here.
+    fn interrupted_tool_results(&self) -> Vec<message::Message> {
+        let Some(index) = self
             .messages
             .iter()
             .rposition(|message| !matches!(message, message::Message::Tool { .. }))
-            && let message::Message::Assistant { tool_calls, .. } = &self.messages[index]
-        {
-            for call in tool_calls {
-                let completed = self.messages[index + 1..].iter().any(|message| {
+        else {
+            return Vec::new();
+        };
+        let message::Message::Assistant { tool_calls, .. } = &self.messages[index] else {
+            return Vec::new();
+        };
+        let tail = &self.messages[index + 1..];
+        tool_calls
+            .iter()
+            .filter(|call| {
+                !tail.iter().any(|message| {
                     matches!(message, message::Message::Tool { tool_call_id, .. } if tool_call_id == &call.id)
-                });
-                if !completed {
-                    added.push(message::Message::Tool {
-                        tool_call_id: call.id.clone(),
-                        content: Some(
-                            "Tool call was interrupted while waiting; execution may have produced side effects — check the actual state first.".into(),
-                        ),
-                    });
-                }
-            }
-        }
-        self.messages.extend(added.iter().cloned());
-        added
+                })
+            })
+            .map(interrupted_tool_result)
+            .collect()
     }
 
     /// Truncate the conversation history to the first `len` messages, returning the truncated
@@ -741,6 +752,13 @@ impl Agent {
         // round; drop it here as well, so a log written before the persistence-side guard existed
         // does not poison every later request.
         active.retain(|message| !is_unsendable_assistant(message));
+        // Last defence for the "one result per tool call, one call per result" invariant: the
+        // interrupt path closes its own group off (`finish_interrupted_turn`), but a log written
+        // by an older build, a panic/abort that never reached that call, or a future path can
+        // still hand us an orphan. Every provider rejects such a request outright, so repair the
+        // **outbound view** (the stored history is untouched -- the same seam as the appended
+        // context). Deterministic, so the request prefix stays stable across turns.
+        repair_tool_pairing(&mut active);
         active
     }
 
@@ -1059,6 +1077,82 @@ fn resolve_image_refs(message: &mut message::Message, resolver: &dyn Fn(&str) ->
 
 /// True for an assistant message that carries neither text nor tool calls -- it has nothing to say
 /// and no provider accepts it.
+/// Filler result for a tool call whose execution never reported back.
+const INTERRUPTED_TOOL_RESULT: &str = "Tool call was interrupted while waiting; execution may have \
+produced side effects — check the actual state first.";
+
+fn interrupted_tool_result(call: &message::ToolCall) -> message::Message {
+    message::Message::Tool {
+        tool_call_id: call.id.clone(),
+        content: Some(message::MessageContent::text(INTERRUPTED_TOOL_RESULT)),
+    }
+}
+
+/// Enforce the pairing invariant of a tool group in an outgoing request.
+///
+/// Two repairs, both no-ops on a healthy log (byte-for-byte unchanged, so the prefix cache is
+/// unaffected):
+///
+/// - a `Tool` whose id no assistant turn ever declared is **dropped** (its declaration was
+///   compacted away, or it is a leftover of an interrupted round);
+/// - a declared call with no result gets a placeholder result inserted right after the group's
+///   existing results, so `tool_calls` is still immediately followed by its results.
+fn repair_tool_pairing(messages: &mut Vec<message::Message>) {
+    use std::collections::HashSet;
+
+    let declared: HashSet<String> = messages
+        .iter()
+        .filter_map(|message| match message {
+            message::Message::Assistant { tool_calls, .. } => Some(tool_calls.iter()),
+            _ => None,
+        })
+        .flatten()
+        .map(|call| call.id.clone())
+        .collect();
+
+    // Orphan results (and duplicated results for the same id: keep the first, it is the one the
+    // model actually saw).
+    let mut answered: HashSet<String> = HashSet::new();
+    messages.retain(|message| match message {
+        message::Message::Tool { tool_call_id, .. } => {
+            declared.contains(tool_call_id) && answered.insert(tool_call_id.clone())
+        }
+        _ => true,
+    });
+
+    let mut index = 0;
+    while index < messages.len() {
+        let mut group_end = index + 1;
+        while matches!(messages.get(group_end), Some(message::Message::Tool { .. })) {
+            group_end += 1;
+        }
+        let missing: Vec<message::ToolCall> = match &messages[index] {
+            message::Message::Assistant { tool_calls, .. } => tool_calls
+                .iter()
+                .filter(|call| {
+                    !matches!(
+                        messages.get(index + 1..group_end),
+                        Some(results) if results.iter().any(|message| {
+                            matches!(message, message::Message::Tool { tool_call_id, .. } if tool_call_id == &call.id)
+                        })
+                    )
+                })
+                .cloned()
+                .collect(),
+            _ => Vec::new(),
+        };
+        if missing.is_empty() {
+            index = group_end;
+            continue;
+        }
+        let inserted = missing.len();
+        for (offset, call) in missing.iter().enumerate() {
+            messages.insert(group_end + offset, interrupted_tool_result(call));
+        }
+        index = group_end + inserted;
+    }
+}
+
 fn is_unsendable_assistant(message: &message::Message) -> bool {
     let message::Message::Assistant {
         content,
