@@ -1,7 +1,6 @@
 import {
   Archive,
   ChevronDown,
-  ChevronRight,
   Folder,
   FolderInput,
   FolderOpen,
@@ -46,7 +45,7 @@ function AppearanceButton() {
   return (
     <button
       type="button"
-      className="flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm hover:bg-selected"
+      className="flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm transition-interactive hover:bg-selected"
       onClick={() => setThemeMode(dark ? "light" : "dark")}
     >
       {dark ? <Sun className="size-4 text-muted" /> : <Moon className="size-4 text-muted" />}
@@ -509,12 +508,19 @@ export function SessionSidebar({
     // rename/delete). Hidden by default, shown on hover or focus; a pinned pin stays
     // visible to indicate the state.
     const actions = (open: (event: React.MouseEvent) => void) => (
-      <div className="hidden shrink-0 items-center gap-0.5 group-hover:flex group-focus-within:flex">
+      // Absolutely positioned + faded in: while the actions were `hidden`, revealing them
+      // on hover shrank the label and re-wrapped the title. The overlay keeps the row
+      // geometry fixed; `data-session-actions` lets the touch media query put it back into
+      // normal flow, where there is no hover to reveal it on demand.
+      <div
+        data-session-actions
+        className="pointer-events-none absolute inset-y-0 right-1.5 flex translate-x-1 items-center gap-0.5 opacity-0 transition-interactive group-hover:pointer-events-auto group-hover:translate-x-0 group-hover:opacity-100 group-focus-within:pointer-events-auto group-focus-within:translate-x-0 group-focus-within:opacity-100"
+      >
         <button
           type="button"
           aria-label="More actions"
           title="More actions"
-          className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
+          className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-interactive hover:bg-selected hover:text-ink"
           onClick={(event) => {
             event.stopPropagation();
             open(event);
@@ -526,7 +532,7 @@ export function SessionSidebar({
           type="button"
           aria-label={isPinned ? "Unpin" : "Pin"}
           title={isPinned ? "Unpin" : "Pin"}
-          className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors hover:bg-selected hover:text-ink"
+          className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted transition-interactive hover:bg-selected hover:text-ink"
           onClick={(event) => {
             event.stopPropagation();
             togglePin(`${project}::${entry.name}`);
@@ -542,17 +548,26 @@ export function SessionSidebar({
         key={`${project}::${entry.name}`}
         menu={sessionMenu(entry, group, project)}
         className={cn(
-          "group flex h-8 items-center gap-1.5 rounded-control pr-2 pl-[26px] transition-colors",
-          active ? "bg-selected" : "hover:bg-quiet",
+          "group relative flex h-8 animate-row-in items-center gap-1.5 rounded-control pr-2 pl-[26px] transition-interactive",
+          active ? "bg-selected" : "hover:bg-quiet active:bg-selected",
         )}
       >
         {(open) => (
           <>
+            {/* Active marker: grows out of the row's vertical centre instead of appearing at
+                full height, so moving between sessions reads as motion rather than a repaint. */}
+            <span
+              aria-hidden
+              className={cn(
+                "pointer-events-none absolute top-1/2 left-1.5 h-4 w-0.5 -translate-y-1/2 rounded-full bg-ink/40 transition-[opacity,scale] duration-quick ease-product",
+                active ? "scale-y-100 opacity-100" : "scale-y-50 opacity-0",
+              )}
+            />
             {isEditing ? (
               <input
                 autoFocus
                 value={editValue}
-                className="min-w-0 flex-1 rounded-control bg-inset px-2 py-1 text-body-sm text-ink outline-none"
+                className="min-w-0 flex-1 animate-field-in rounded-control bg-inset px-2 py-1 text-body-sm text-ink outline-none"
                 onChange={(event) => setEditValue(event.target.value)}
                 onKeyDown={(event) => {
                   if (event.key === "Enter") submitSessionRename(project, entry.name);
@@ -577,7 +592,7 @@ export function SessionSidebar({
                 >
                   <HoverScrollLabel
                     text={displayLabel}
-                    className={cn("flex-1 text-body-sm text-ink", active && "font-medium")}
+                    className={cn("session-row-label flex-1 text-body-sm text-ink", active && "font-medium")}
                   />
                   {projectName && (
                     <span className="max-w-[72px] shrink-0 truncate text-caption text-muted">
@@ -605,14 +620,16 @@ export function SessionSidebar({
       data-session-sidebar
       aria-hidden={collapsed || undefined}
       className={cn(
-        "session-sidebar flex h-full shrink-0 flex-col overflow-hidden transition-[width] duration-200 ease-product",
-        collapsed ? "invisible w-0" : "w-64 border-r border-line",
+        // `visibility` is transitioned on purpose: it flips discretely, so the panel stays
+        // painted until the width collapse finishes, and turns visible immediately on expand.
+        "session-sidebar flex h-full shrink-0 flex-col overflow-hidden transition-[width,opacity,visibility] duration-slow ease-product",
+        collapsed ? "pointer-events-none invisible w-0 opacity-0" : "w-64 border-r border-line opacity-100",
         className,
       )}
     >
       <div className="flex h-12 shrink-0 items-center justify-between px-4 text-body-sm font-semibold">
         Shirley
-        <button ref={closeRef} type="button" aria-label="Close sidebar" className="flex size-11 items-center justify-center rounded-control text-muted hover:bg-selected md:hidden" onClick={onClose}>
+        <button ref={closeRef} type="button" aria-label="Close sidebar" className="flex size-11 items-center justify-center rounded-control text-muted transition-interactive hover:bg-selected md:hidden" onClick={onClose}>
           <X className="size-5" />
         </button>
       </div>
@@ -635,7 +652,7 @@ export function SessionSidebar({
         <div className="mb-4 flex flex-col gap-0.5 md:hidden">
           <button
             type="button"
-            className="flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm hover:bg-selected"
+            className="flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm transition-interactive hover:bg-selected"
             onClick={() => {
               onOpenLibrary();
               onClose?.();
@@ -645,7 +662,7 @@ export function SessionSidebar({
           </button>
           <button
             type="button"
-            className="flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm hover:bg-selected"
+            className="flex h-9 w-full items-center gap-2 rounded-control px-2 text-body-sm transition-interactive hover:bg-selected"
             onClick={() => {
               openSettings("general");
               onClose?.();
@@ -689,27 +706,31 @@ export function SessionSidebar({
             >
               <div className="group flex h-8 items-center gap-1 px-2">
                 <CollapsibleTrigger className="flex min-w-0 flex-1 items-center gap-1 text-left">
-                  <span className="min-w-0 truncate text-[0.875rem] font-medium text-muted">
+                  <span className="min-w-0 truncate text-[0.875rem] font-medium text-muted transition-interactive group-hover:text-ink">
                     Projects
                   </span>
-                  {projectsCollapsed ? (
-                    <ChevronRight className="size-3.5 shrink-0 text-muted" />
-                  ) : (
-                    <ChevronDown className="size-3.5 shrink-0 text-muted" />
-                  )}
+                  {/* One chevron rotated by state: swapping two icons pops, a rotation reads
+                      as "the group opened". */}
+                  <ChevronDown
+                    className={cn(
+                      "size-3.5 shrink-0 text-muted transition-transform duration-base ease-product",
+                      projectsCollapsed && "-rotate-90",
+                    )}
+                  />
                 </CollapsibleTrigger>
                 <button
                   type="button"
                   aria-label="New project"
                   title="New project"
-                  className="hidden size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors group-hover:flex group-focus-within:flex hover:bg-selected hover:text-ink"
+                  data-session-reveal
+                  className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted opacity-0 transition-interactive group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-selected hover:text-ink"
                   onClick={onAddProject}
                 >
                   <Plus className="size-3.5" />
                 </button>
               </div>
             </ContextMenu>
-            <CollapsibleContent>
+            <CollapsibleContent className="overflow-hidden data-[state=closed]:animate-disclosure-close data-[state=open]:animate-disclosure-open">
               <div className="flex flex-col gap-1">
                 {groups.length === 0 && (
                   <p className="px-2 py-1.5 text-caption text-muted">No projects yet. Right-click "Projects" to create one.</p>
@@ -774,12 +795,12 @@ export function SessionSidebar({
                       onOpenChange={() => toggleCollapsed(entry.id)}
                     >
                       <ContextMenu menu={projectMenu}>
-                        <div className="group flex h-8 items-center gap-1 rounded-control px-2 transition-colors hover:bg-quiet">
+                        <div className="group flex h-8 items-center gap-1 rounded-control px-2 transition-interactive hover:bg-quiet">
                           {isEditing ? (
                             <input
                               autoFocus
                               value={editValue}
-                              className="min-w-0 flex-1 rounded-control bg-inset px-2 py-1 text-body-sm text-ink outline-none"
+                              className="min-w-0 flex-1 animate-field-in rounded-control bg-inset px-2 py-1 text-body-sm text-ink outline-none"
                               onChange={(event) => setEditValue(event.target.value)}
                               onKeyDown={(event) => {
                                 if (event.key === "Enter") submitProjectRename(entry.id);
@@ -796,11 +817,20 @@ export function SessionSidebar({
                               title={entry.path}
                             >
                               {/* Expand/collapse share the same folder icon position, switching with state (no arrow). */}
-                              {isCollapsed ? (
-                                <Folder className="size-3.5 shrink-0 text-muted" />
-                              ) : (
-                                <FolderOpen className="size-3.5 shrink-0 text-muted" />
-                              )}
+                              <span className="relative flex size-3.5 shrink-0 items-center justify-center text-muted">
+                                <Folder
+                                  className={cn(
+                                    "absolute size-3.5 transition-interactive",
+                                    isCollapsed ? "scale-100 opacity-100" : "scale-75 opacity-0",
+                                  )}
+                                />
+                                <FolderOpen
+                                  className={cn(
+                                    "absolute size-3.5 transition-interactive",
+                                    isCollapsed ? "scale-75 opacity-0" : "scale-100 opacity-100",
+                                  )}
+                                />
+                              </span>
                               <span className="min-w-0 flex-1 truncate text-body-sm text-ink">
                                 {entry.name}
                               </span>
@@ -815,7 +845,8 @@ export function SessionSidebar({
                               type="button"
                               aria-label={`New session in "${entry.name}"`}
                               title="New session"
-                              className="hidden size-6 shrink-0 items-center justify-center rounded-control text-muted transition-colors group-hover:flex hover:bg-selected hover:text-ink"
+                              data-session-reveal
+                              className="flex size-6 shrink-0 items-center justify-center rounded-control text-muted opacity-0 transition-interactive group-hover:opacity-100 group-focus-within:opacity-100 hover:bg-selected hover:text-ink"
                               onClick={(event) => {
                                 event.stopPropagation();
                                 onNew(entry.id);
@@ -826,7 +857,7 @@ export function SessionSidebar({
                           )}
                         </div>
                       </ContextMenu>
-                      <CollapsibleContent>
+                      <CollapsibleContent className="overflow-hidden data-[state=closed]:animate-disclosure-close data-[state=open]:animate-disclosure-open">
                         <div
                           role="listbox"
                           aria-label={`Sessions of ${entry.name}`}
@@ -840,7 +871,7 @@ export function SessionSidebar({
                               {visibleProjectSessions.length < projectSessions.length && (
                                 <button
                                   type="button"
-                                  className="flex h-8 items-center rounded-control pr-2 pl-[26px] text-left text-body-sm text-muted transition-colors hover:bg-quiet hover:text-ink"
+                                  className="flex h-8 animate-row-in items-center rounded-control pr-2 pl-[26px] text-left text-body-sm text-muted transition-interactive hover:bg-quiet hover:text-ink"
                                   onClick={() =>
                                     setSessionLimits((prev) => ({
                                       ...prev,
@@ -871,17 +902,18 @@ export function SessionSidebar({
         {recent.length > 0 && (
           <section className="mb-3">
             <Collapsible open={!recentCollapsed} onOpenChange={toggleRecentCollapsed}>
-              <CollapsibleTrigger className="flex h-8 w-full items-center gap-1 px-2 text-left">
-                <span className="min-w-0 truncate text-[0.875rem] font-medium text-muted">
+              <CollapsibleTrigger className="group flex h-8 w-full items-center gap-1 px-2 text-left">
+                <span className="min-w-0 truncate text-[0.875rem] font-medium text-muted transition-interactive group-hover:text-ink">
                   Recent
                 </span>
-                {recentCollapsed ? (
-                  <ChevronRight className="size-3.5 shrink-0 text-muted" />
-                ) : (
-                  <ChevronDown className="size-3.5 shrink-0 text-muted" />
-                )}
+                <ChevronDown
+                  className={cn(
+                    "size-3.5 shrink-0 text-muted transition-transform duration-base ease-product",
+                    recentCollapsed && "-rotate-90",
+                  )}
+                />
               </CollapsibleTrigger>
-              <CollapsibleContent>
+              <CollapsibleContent className="overflow-hidden data-[state=closed]:animate-disclosure-close data-[state=open]:animate-disclosure-open">
                 <div role="listbox" aria-label="Recent sessions" className="flex flex-col gap-0.5">
                   {recent.map(({ project, entry }) =>
                     renderRow(entry, "recent", project, chatProjectIds.includes(project) ? undefined : projectNameById[project]),

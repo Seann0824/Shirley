@@ -90,18 +90,49 @@
   --shadow-detail: 0 4px 36px rgb(0 0 0 / 24%);
   --shadow-snapshot: 0 6px 24px rgb(0 0 0 / 7%);
 
+  /* ------------------------------------------------------------------ */
+  /* Motion scale. Component code picks a **role**, never a millisecond value, so
+     timing stays consistent across the app and can be retuned in one place.
+     Durations are plain properties (Tailwind 4 has no `--duration-*` namespace --
+     `duration-<number>` takes a raw number), so `duration-<role>` utilities are
+     registered in index.css. Easings use the `--ease-*` namespace and therefore
+     work as classes out of the box (`ease-product` / `ease-standard` / `ease-exit`).
+     Reduced motion is handled once, globally, in index.css. */
+  --duration-instant: 90ms; /* press / caret: must read as immediate */
+  --duration-quick: 140ms; /* hover, focus, color + opacity on small surfaces */
+  --duration-base: 180ms; /* default: row state, disclosure, icon reveal */
+  --duration-slow: 240ms; /* container resizes: panel width, sheet */
+  --duration-slower: 320ms; /* deliberate entrances that must register as motion */
+
+  /* Enter / expand: decelerate into place (the house curve). */
   --ease-product: cubic-bezier(0.22, 1, 0.36, 1);
+  /* Symmetric: hover and color shifts, where an eased-out curve feels laggy. */
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  /* Leave / collapse: accelerate out, so dismissal reads faster than entry. */
+  --ease-exit: cubic-bezier(0.4, 0, 1, 1);
+
   --animate-pulse-soft: pulse-soft 1s infinite;
   --animate-spin-soft: spin 1.5s linear infinite;
   --animate-shimmer: shimmer 1.5s infinite linear;
   --animate-thinking-sheen: thinking-sheen 1.6s infinite linear;
   --background-size-thinking: 200% 100%;
-  --animate-overlay-in: overlay-in 180ms var(--ease-product);
-  --animate-overlay-out: overlay-out 140ms ease-in;
-  --animate-dialog-in: dialog-in 260ms var(--ease-product);
-  --animate-dialog-out: dialog-out 160ms ease-in;
-  --animate-scrollbar-in: scrollbar-in 140ms var(--ease-product);
-  --animate-scrollbar-out: scrollbar-out 100ms ease-in;
+  --animate-overlay-in: overlay-in var(--duration-base) var(--ease-product);
+  --animate-overlay-out: overlay-out var(--duration-quick) var(--ease-exit);
+  --animate-dialog-in: dialog-in var(--duration-slow) var(--ease-product);
+  --animate-dialog-out: dialog-out var(--duration-base) var(--ease-exit);
+  --animate-scrollbar-in: scrollbar-in var(--duration-quick) var(--ease-product);
+  --animate-scrollbar-out: scrollbar-out var(--duration-instant) var(--ease-exit);
+  /* Disclosure (a collapsible group opening / closing). The height comes from
+     Radix's --radix-collapsible-content-height, so the timing matches the content
+     instead of guessing a distance. Pair with `overflow-hidden` on the content. */
+  --animate-disclosure-open: disclosure-open var(--duration-base) var(--ease-product);
+  --animate-disclosure-close: disclosure-close var(--duration-quick) var(--ease-exit);
+  /* A row arriving: a fresh page of sessions, a newly pinned session. */
+  --animate-row-in: row-in var(--duration-base) var(--ease-product);
+  /* An inline editor replacing static text (rename). */
+  --animate-field-in: field-in var(--duration-quick) var(--ease-product);
+  /* A panel sliding in from the left edge (mobile drawer). */
+  --animate-sheet-in: sheet-in var(--duration-slow) var(--ease-product);
 
   @keyframes pulse-soft {
     50% {
@@ -174,6 +205,56 @@
     }
     to {
       opacity: 0;
+    }
+  }
+  @keyframes disclosure-open {
+    from {
+      height: 0;
+      opacity: 0;
+    }
+    to {
+      height: var(--radix-collapsible-content-height);
+      opacity: 1;
+    }
+  }
+  @keyframes disclosure-close {
+    from {
+      height: var(--radix-collapsible-content-height);
+      opacity: 1;
+    }
+    to {
+      height: 0;
+      opacity: 0;
+    }
+  }
+  @keyframes row-in {
+    from {
+      opacity: 0;
+      translate: 0 -3px;
+    }
+    to {
+      opacity: 1;
+      translate: 0 0;
+    }
+  }
+  @keyframes field-in {
+    from {
+      opacity: 0;
+      scale: 0.97;
+    }
+    to {
+      opacity: 1;
+      scale: 1;
+    }
+  }
+  @keyframes sheet-in {
+    from {
+      opacity: 0.4;
+      translate: -16px 0;
+    }
+    to {
+      opacity: 1;
+      translate: 0 0;
     }
   }
 }

@@ -1726,12 +1726,18 @@ export function App() {
       }}
       onNewChat={() => { if (mobile) setSidebarCollapsed(true); activeProject ? void newSession(activeProject) : void addProject(); }}
       onAddProject={() => void addProject()}
-      onNewBrowserTab={browserAvailable ? () => openWebTab() : undefined}
+      // A browser tab belongs to a session: opening one while the Library is foreground
+      // would create a tab nobody can see (the strip that would show it is hidden there).
+      onNewBrowserTab={browserAvailable && !(libraryOpen && activeProject) ? () => openWebTab() : undefined}
       topContent={
         // The tab strip is a desktop affordance: it exists to hold the session's chat surface
         // plus its in-app browser pages. Phones have no browser tabs and already list sessions
         // in the sidebar, so the strip there was a permanent row conveying nothing.
-        mobile ? undefined : (
+        // The Library is a full-surface inventory page, not a session surface: it owns its own
+        // title row, and every tab in the strip belongs to some session (its chat surface plus
+        // that session's web pages). Rendering it here showed a stray session tab with nothing
+        // to switch to, so the strip is scoped to session destinations only.
+        mobile || (libraryOpen && activeProject) ? undefined : (
         <HeaderTabs
           sessionTitle={
             (currentKey && sessionTitles[currentKey]) || (sessionName ? "New session" : "")

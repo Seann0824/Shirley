@@ -148,8 +148,9 @@ export function useVoiceInput(onText: (text: string) => void): VoiceInput {
         const target = engineRef.current;
         if (target !== "local") return;
         const bridge = await agentBridge();
-        // No project and no engine: the audio is transcribed by this computer's whisper.
-        const result = await bridge.transcribe(audio.base64, preferredLanguage());
+        // No project, no engine, no language: the audio is transcribed by this computer's
+        // whisper, which detects the spoken language itself (`[asr] local_language` can pin it).
+        const result = await bridge.transcribe(audio.base64);
         const text = result.text.trim();
         if (text) {
           onTextRef.current(text);
@@ -324,11 +325,16 @@ const WEB_SILENCE_MS = 8000;
 
 
 /**
- * Dictation language.
+ * Dictation language for the **browser recogniser** only.
  *
- * BCP-47 (`en-US`) is what the browser recogniser wants; the local model strips the region
- * itself (`whisper_language` in `infra/asr.rs`), because whisper.cpp only knows base codes and
- * an unknown one makes it print its usage and exit 0.
+ * `SpeechRecognition.lang` needs a concrete BCP-47 tag, and its value is the browser's own
+ * locale, which is the right signal there.
+ *
+ * It must not be handed to the local model: in the desktop webview `navigator.language` is the
+ * **app bundle's** language (`en-US` -- the bundle declares no localisations), not the language
+ * the user is speaking, so passing it pinned whisper to `-l en` and Chinese dictation came back
+ * as English noise. The local model detects the language on its own instead; `[asr]
+ * local_language` pins it when detection is not wanted.
  */
 function preferredLanguage(): string {
   return navigator.language || "en-US";

@@ -167,10 +167,19 @@ pub async fn transcribe(
     let started = Instant::now();
     let bytes = decode_audio(audio_base64)?;
     let config = AsrConfig::load(&|key| std::env::var(key).ok());
-    let language = language
+    // The caller's tag is a guess, a configured language is the user's explicit pin: the pin
+    // wins. Neither -> `auto`, i.e. whisper detects the spoken language itself.
+    //
+    // The guess is not trustworthy on its own: `navigator.language` inside the desktop webview
+    // reports the *app bundle's* language (`en-US`, the bundle ships English only), not the
+    // language being spoken. Honouring it unconditionally pinned whisper to `-l en`, and every
+    // Chinese utterance came back as English-looking noise.
+    let language = config
+        .local_language
+        .as_deref()
         .map(str::trim)
         .filter(|value| !value.is_empty())
-        .or(config.local_language.as_deref());
+        .or_else(|| language.map(str::trim).filter(|value| !value.is_empty()));
     let text = transcribe_local(&config, global, &bytes, language).await?;
     Ok(AsrResult {
         text,
@@ -502,7 +511,10 @@ fn resolve_local_model(global: &Path, configured: Option<&str>) -> Option<PathBu
             .map(|entry| entry.path())
             .filter(|path| is_ggml_model(path))
             .collect();
-        models.sort();
+        // A multilingual model transcribes any language; an English-only one (`ggml-*.en.bin`)
+        // only ever produces English, whatever `-l` says. Prefer the multilingual one, keep the
+        // English-only one as a last resort instead of dropping it.
+        models.sort_by(|a, b| is_english_only(a).cmp(&is_english_only(b)).then_with(|| a.cmp(b)));
         if let Some(model) = models.into_iter().next() {
             return Some(model);
         }
@@ -517,6 +529,14 @@ fn is_ggml_model(path: &Path) -> bool {
         .and_then(|name| name.to_str())
         .is_some_and(|name| name.starts_with("ggml-") && name.ends_with(".bin"));
     named && path.metadata().is_ok_and(|meta| meta.len() > 1024 * 1024)
+}
+
+/// `ggml-base.en.bin` and friends cannot speak anything but English: whisper ignores `-l` for
+/// them, so they must never outrank a multilingual model for a Chinese utterance.
+fn is_english_only(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains(".en."))
 }
 
 /// Return a usable model, downloading Shirley's own copy the first time.
@@ -671,6 +691,21 @@ mod tests {
             resolve_local_model(&root, Some(tiny.to_str().unwrap())),
             Some(tiny)
         );
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn model_lookup_prefers_multilingual_over_english_only() {
+        let root = std::env::temp_dir().join(format!("shirley-asr-{}", uuid::Uuid::new_v4()));
+        let managed = root.join("asr").join("models");
+        std::fs::create_dir_all(&managed).unwrap();
+        // `ggml-base.en.bin` sorts *before* `ggml-base-q5_1.bin`, so alphabetical order alone
+        // would pick the one model that can only transcribe English.
+        let english = managed.join("ggml-base.en.bin");
+        std::fs::write(&english, vec![0_u8; 2 * 1024 * 1024]).unwrap();
+        let multilingual = managed.join("ggml-base-q5_1.bin");
+        std::fs::write(&multilingual, vec![0_u8; 2 * 1024 * 1024]).unwrap();
+        assert_eq!(resolve_local_model(&root, None), Some(multilingual));
         std::fs::remove_dir_all(&root).unwrap();
     }
 
