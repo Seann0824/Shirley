@@ -514,7 +514,11 @@ fn resolve_local_model(global: &Path, configured: Option<&str>) -> Option<PathBu
         // A multilingual model transcribes any language; an English-only one (`ggml-*.en.bin`)
         // only ever produces English, whatever `-l` says. Prefer the multilingual one, keep the
         // English-only one as a last resort instead of dropping it.
-        models.sort_by(|a, b| is_english_only(a).cmp(&is_english_only(b)).then_with(|| a.cmp(b)));
+        models.sort_by(|a, b| {
+            is_english_only(a)
+                .cmp(&is_english_only(b))
+                .then_with(|| a.cmp(b))
+        });
         if let Some(model) = models.into_iter().next() {
             return Some(model);
         }

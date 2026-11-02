@@ -4,7 +4,7 @@ A business-agnostic Agent SDK for Rust. It packages the building blocks needed t
 
 The [Shirley](https://github.com/Seann0824/Shirley) TUI coding agent is built on top of it.
 
-> **Status: `0.0.1`** — an early release; the API is still changing.
+> **Status: `0.0.4`** — an early release; the API is still changing.
 
 ## Features
 
@@ -12,7 +12,7 @@ The [Shirley](https://github.com/Seann0824/Shirley) TUI coding agent is built on
 - **Tool system** — a `#[tool]` attribute macro turns a plain async function into a model-callable tool (JSON Schema generated automatically)
 - **Protocol adapters** — a unified `invoke` interface with three wire protocols: ChatCompletions, Responses, and Anthropic Messages (all with streaming)
 - **Context compaction** — history is compacted automatically as the context window fills up; the summary is never shown to the user
-- **Task ledger** — a `todo` tool lets the model maintain its own progress state, injected every turn so it survives compaction
+- **Per-turn context injection** — a `ContextProvider` seam appends application context as a system message at the end of every request, so it survives compaction; the Shirley app uses it for its task ledger and skill catalog
 - **Sandbox & workspace** — a unified process-execution abstraction (with timeouts and degradation reporting) and workspace path confinement
 - **Unified error contract** — `ErrorKind` / `SdkError`; retry decisions are based on the kind, never on message text
 
