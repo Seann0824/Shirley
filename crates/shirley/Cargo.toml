@@ -47,6 +47,12 @@ tauri-plugin-dialog = { version = "2.7.1", optional = true }
 axum = { version = "0.8", optional = true, features = ["ws"] }
 tower-http = { version = "0.6", optional = true, features = ["fs", "trace"] }
 
+# Computer use (macOS accessibility API + CGEvent keystrokes). Gated by target so the other
+# platforms never link the framework bindings; `src/computer/stub.rs` covers them.
+[target.'cfg(target_os = "macos")'.dependencies]
+accessibility-sys = "0.2.0"
+core-foundation-sys = "0.8.7"
+
 [features]
 default = []
 # Desktop interface (Tauri 2 shell). Off by default, to avoid forcing a TUI-only build to pull in webview deps.

@@ -6,6 +6,7 @@ import {
   useLayoutEffect,
   useRef,
   useState,
+  type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from "react";
 import { createPortal } from "react-dom";
@@ -84,11 +85,14 @@ export function ContextMenu({
   children,
   menu,
   className,
+  onPointerDown,
 }: {
   /** A plain node = right-click only; a function = `(open) => node`, letting a custom button call `open(event)` to open the menu. */
   children: ReactNode | ((open: (event: React.MouseEvent) => void) => ReactNode);
   menu: ReactNode | ((close: () => void) => ReactNode);
   className?: string;
+  /** Forwarded to the wrapper element: a row that is a drag handle needs the gesture to start anywhere on it. */
+  onPointerDown?: (event: ReactPointerEvent<HTMLDivElement>) => void;
 }) {
   const [pos, setPos] = useState<MenuState>(null);
   const menuRef = useRef<HTMLDivElement>(null);
@@ -134,7 +138,7 @@ export function ContextMenu({
 
   return (
     <>
-      <div className={className} onContextMenu={open}>
+      <div className={className} onContextMenu={open} onPointerDown={onPointerDown}>
         {typeof children === "function" ? children(open) : children}
       </div>
       {pos &&

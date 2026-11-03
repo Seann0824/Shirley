@@ -50,7 +50,14 @@ pub(crate) mod prompt;
 pub(crate) mod interface;
 
 // ── capabilities ──────────────────────────────────────────────────────────
+// Computer use: drives other apps' windows through the macOS accessibility API. Application-layer
+// on purpose -- "how to poke another app's UI" is a product decision, not an SDK fundamental.
+pub(crate) mod computer;
 pub(crate) mod memory;
+// Desktop-only surface: the pool drives background sessions, which the server transport
+// does not expose. `test` is included so the model's unit tests still run under `--features server`.
+#[cfg(any(feature = "desktop", test))]
+pub(crate) mod pool;
 pub(crate) mod skills;
 pub(crate) mod subagent;
 pub(crate) mod tools;

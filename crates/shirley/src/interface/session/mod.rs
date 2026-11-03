@@ -336,6 +336,26 @@ impl Session {
         Ok(())
     }
 
+    /// Hot-swap the model config **without** touching the model selection.
+    ///
+    /// Used by the composer's inline reasoning-effort control: effort is an attribute of the
+    /// model already selected, so the model name -- and therefore the selection key its
+    /// sidecar holds -- must stay exactly as it is. `select_model` would rewrite that sidecar
+    /// (and clear it when the key is `None`), which is a different operation.
+    pub fn hot_swap_model_config(
+        &mut self,
+        config: shirley_agent_sdk::ModelConfig,
+    ) -> Result<(), String> {
+        let agent = self
+            .agent
+            .as_mut()
+            .ok_or_else(|| "对话正在执行，请结束后再调整".to_owned())?;
+        agent.set_model_config(config);
+        self.model_binding_error = None;
+        self.remember_model();
+        Ok(())
+    }
+
     /// Subscribe to this session's event stream (multi-session: the UI subscribes when switching to this session, and drops the handle to unsubscribe when switching away).
     pub fn subscribe(&self) -> broadcast::Receiver<Result<AgentEvent, String>> {
         self.events.subscribe()
@@ -1076,6 +1096,56 @@ impl SessionManager {
         if let Some(previous) = previous.filter(|p| p != entry.name.as_str()) {
             self.spawn_curation(&previous);
         }
+        Ok(entry.name)
+    }
+
+    /// Create a background session **without touching the foreground pointer**.
+    ///
+    /// A task-pool job (`crate::pool`) runs in its own session, but it is not a conversation the
+    /// user is looking at: creating it must not yank the sidebar selection out from under them, and
+    /// it must not trigger the memory curation that a real switch implies. Everything else matches
+    /// [`Self::create_new`] -- lazy on disk, same model as the current session.
+    #[cfg_attr(
+        not(feature = "desktop"),
+        allow(
+            dead_code,
+            reason = "only used when the relevant interface feature is enabled"
+        )
+    )]
+    pub fn create_pool_session(&mut self, title: Option<&str>) -> Result<String, String> {
+        let use_profile_default = self.factory.as_ref().is_some_and(|f| {
+            crate::model_providers::default_config(f.model_providers_root())
+                .ok()
+                .flatten()
+                .is_some()
+        });
+        let selected_model = (!use_profile_default)
+            .then(|| self.active().model_name().map(str::to_owned))
+            .flatten();
+        let factory = self
+            .factory
+            .clone()
+            .ok_or_else(|| "the current session catalog does not support creating".to_owned())?;
+        let (entry, store) = self
+            .catalog
+            .create_lazy(title)
+            .map_err(|error| error.to_string())?;
+        let log = store.load().map_err(|error| error.to_string())?;
+        let mut built = factory
+            .build_agent(log)
+            .map_err(|error| error.to_string())?;
+        if let Some(model) = selected_model {
+            built.agent.set_model(model);
+        }
+        self.insert(
+            built.agent,
+            Some(entry.name.clone()),
+            Some(store),
+            Some(built.memory),
+            Some(built.skills),
+            Some(built.todo),
+            built.subagents,
+        );
         Ok(entry.name)
     }
 

@@ -3,5 +3,5 @@
   "identifier": "default",
   "description": "Shirley desktop window capabilities: AgentEvent event listening, title-bar drag and double-click zoom.",
   "windows": ["main"],
-  "permissions": ["core:default", "core:window:allow-start-dragging", "dialog:default"]
+  "permissions": ["core:default", "core:window:allow-start-dragging", "core:window:allow-internal-toggle-maximize", "dialog:default"]
 }

@@ -30,6 +30,57 @@ export type AssetTextResult = { text: string; mime: string; truncated: boolean }
  */
 export type LibraryEntry = { id: string; name: string; mime: string; bytes: number; addedMs: number };
 
+/**
+ * Where a task sits in the workflow (mirrors Rust's `TaskStatus`).
+ *
+ * The vocabulary is Jira's on purpose -- no new words to learn. Two members carry the product:
+ * `in_review` is why the feature exists (a deliverable exists and nothing moves until the user
+ * judges it), and `blocked` is where a broken run lands: not "failed", because a human still has
+ * to decide what to do.
+ */
+export type PoolTaskStatus =
+  | "backlog"
+  | "to_do"
+  | "in_progress"
+  | "in_review"
+  | "blocked"
+  | "done"
+  | "cancelled";
+
+/** One file produced during an attempt (mirrors Rust's `DeliveryFile`). */
+export type DeliveryFile = { id: string; name: string; mime: string; bytes: number };
+
+/**
+ * What the user is asked to judge (mirrors Rust's `Delivery`).
+ *
+ * `summary` is the model's final message (what was delivered + how to check it); `files` are the
+ * artifacts that appeared while the attempt ran. `error` is set only when the attempt produced no
+ * deliverable -- a failure is a delivery too, because it is what the user gets to react to.
+ */
+export type Delivery = { summary: string; files: DeliveryFile[]; error?: string | null };
+
+/** One task in the pool (mirrors Rust's `PoolTask`). */
+export type PoolTask = {
+  id: string;
+  /** Project the task belongs to; one project's pool never lists another's. */
+  project: string;
+  /** Short label derived from the instruction's first line. */
+  title: string;
+  /** The instruction, verbatim -- also the definition of done. */
+  brief: string;
+  status: PoolTaskStatus;
+  /** 1 on the first run, incremented by every rework. */
+  attempt: number;
+  createdMs: number;
+  startedMs: number | null;
+  finishedMs: number | null;
+  /** Background session backing this task (reused across reworks). */
+  session: string | null;
+  delivery: Delivery | null;
+  /** The user's rejection note -- the requirement for the next attempt. */
+  note: string | null;
+};
+
 /** Result of ingesting local files: per-path failures do not fail the whole batch. */
 export type IngestResult = { entries: LibraryEntry[]; errors: string[] };
 
@@ -44,6 +95,16 @@ export type ModelEntry = {
   label: string;
   value: string;
   provider: string;
+  /**
+   * Reasoning-effort levels this model accepts (from Rust's `ModelEntryWire`).
+   *
+   * Empty = no effort affordance (not host-configured, or a protocol where the SDK drops
+   * `reasoning_effort`). The effort is a **request parameter**, not something a provider
+   * reports per model in `GET /models`.
+   */
+  efforts?: string[];
+  /** Effort currently written into the model definition; `null` = provider default. */
+  effort?: string | null;
 };
 
 /** Entry selectable for `@` references (aligned with Rust's `FileEntryWire`). */
@@ -261,6 +322,13 @@ export type AgentBridge = {
   /** Hot-swap the model: no Agent rebuild, only `ModelConfig::model`. */
   setModel: (project: string, value: string, session?: string) => Promise<void>;
   /**
+   * Change the reasoning effort of the session's current model (`null` = provider default).
+   *
+   * The effort shown next to the model name in the composer: same model, hot-swapped config
+   * plus the per-model definition updated, so it survives switching away and back.
+   */
+  setReasoningEffort: (project: string, effort: string | null, session?: string) => Promise<void>;
+  /**
    * Dictation: what *this device* can do.
    *
    * Not project-scoped, unlike `listModels`: the microphone and the transcriber both belong to
@@ -307,6 +375,33 @@ export type AgentBridge = {
    * come from `assetUrl(project, entry.id)`, the same handle path parts use.
    */
   listLibrary: (project: string) => Promise<LibraryEntry[]>;
+  /**
+   * A project's task pool, ordered for review: what needs a verdict first, then what is in flight,
+   * then what waits.
+   *
+   * Polled by the pool surface rather than pushed: the list is small and low-frequency, and the
+   * event channel already carries `AgentEvent` for the transcripts -- adding a second stream for
+   * five rows would be a new contract to keep in sync for no gain.
+   */
+  listPoolTasks: (project: string) => Promise<PoolTask[]>;
+  /** Drop an instruction into the pool; it starts as soon as an execution slot is free. */
+  enqueuePoolTask: (project: string, brief: string) => Promise<PoolTask[]>;
+  /** Accept a delivery: the task is finished for good. */
+  acceptPoolTask: (project: string, id: string) => Promise<PoolTask[]>;
+  /** Send a delivery back with a note; the task re-enters the queue and runs again. */
+  rejectPoolTask: (project: string, id: string, note: string) => Promise<PoolTask[]>;
+  /** Run a failed or cancelled task again without changing its instruction. */
+  retryPoolTask: (project: string, id: string) => Promise<PoolTask[]>;
+  /** Withdraw a task (a running one also has its turn cancelled). */
+  cancelPoolTask: (project: string, id: string) => Promise<PoolTask[]>;
+  /** Move a task along the workflow: park it, start it, reopen it (Jira's "transition"). */
+  transitionPoolTask: (
+    project: string,
+    id: string,
+    status: PoolTaskStatus,
+  ) => Promise<PoolTask[]>;
+  /** Forget a task; the session it used is left alone. */
+  removePoolTask: (project: string, id: string) => Promise<PoolTask[]>;
   /** Search workspace files by keyword (for `@` references, pure application layer). */
   searchFiles: (project: string, query: string) => Promise<FileEntry[]>;
   /** List the skills visible to a project's current session (for `/` candidates). */
@@ -488,6 +583,9 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
     async setModel(project, value, session) {
       await invoke("agent_set_model", { project, model: value, session });
     },
+    async setReasoningEffort(project, effort, session) {
+      await invoke("agent_set_reasoning_effort", { project, effort, session });
+    },
     async asrCapabilities() {
       // Always this process: dictation never leaves the device.
       return invoke<AsrCapabilities>("agent_asr_capabilities", {});
@@ -517,6 +615,30 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
     },
     async listLibrary(project) {
       return invoke<LibraryEntry[]>("agent_library_list", { project });
+    },
+    async listPoolTasks(project) {
+      return invoke<PoolTask[]>("agent_pool_list", { project });
+    },
+    async enqueuePoolTask(project, brief) {
+      return invoke<PoolTask[]>("agent_pool_enqueue", { project, brief });
+    },
+    async acceptPoolTask(project, id) {
+      return invoke<PoolTask[]>("agent_pool_accept", { project, id });
+    },
+    async rejectPoolTask(project, id, note) {
+      return invoke<PoolTask[]>("agent_pool_reject", { project, id, note });
+    },
+    async retryPoolTask(project, id) {
+      return invoke<PoolTask[]>("agent_pool_retry", { project, id });
+    },
+    async cancelPoolTask(project, id) {
+      return invoke<PoolTask[]>("agent_pool_cancel", { project, id });
+    },
+    async transitionPoolTask(project, id, status) {
+      return invoke<PoolTask[]>("agent_pool_transition", { project, id, status });
+    },
+    async removePoolTask(project, id) {
+      return invoke<PoolTask[]>("agent_pool_remove", { project, id });
     },
     async searchFiles(project, query) {
       return invoke<FileEntry[]>("agent_search_files", { project, query });
@@ -561,6 +683,31 @@ async function createTauriBridge(remote = false): Promise<AgentBridge> {
       await invoke("agent_cancel_subagent", { project, session, id });
     },
   };
+}
+
+/** In-memory task pool for the browser-only mock bridge (same ordering as the Rust side). */
+const mockPoolTasks: PoolTask[] = [];
+
+const POOL_RANK: Record<PoolTaskStatus, number> = {
+  in_review: 0,
+  blocked: 1,
+  in_progress: 2,
+  to_do: 3,
+  backlog: 4,
+  done: 5,
+  cancelled: 6,
+};
+
+function mockPool(project: string): PoolTask[] {
+  return mockPoolTasks
+    .filter((task) => task.project === project)
+    .slice()
+    .sort((a, b) => POOL_RANK[a.status] - POOL_RANK[b.status] || b.createdMs - a.createdMs);
+}
+
+/** The pool drives background sessions on the user's machine; a connected server has no such thing. */
+function poolUnsupported(): never {
+  throw new Error("The task pool runs in the desktop app, not on a connected server.");
 }
 
 function createMockBridge(): AgentBridge {
@@ -689,6 +836,9 @@ function createMockBridge(): AgentBridge {
     async setModel() {
       // mock: no persistence, just gives the selector feedback.
     },
+    async setReasoningEffort() {
+      // mock: same -- the composer's effort row is driven by what `listModels` declares.
+    },
     async asrCapabilities() {
       // mock: a plain browser has no whisper.cpp behind it, so only the page's own recogniser
       // can dictate here -- and that path never touches the bridge.
@@ -723,6 +873,70 @@ function createMockBridge(): AgentBridge {
     async listLibrary() {
       // mock: no library behind a plain browser; an empty page still renders (with its hint).
       return [];
+    },
+    async listPoolTasks(project) {
+      return mockPool(project);
+    },
+    async enqueuePoolTask(project, brief) {
+      // mock: there is no agent behind a plain browser, so the instruction lands straight in
+      // `review` with a placeholder deliverable -- enough to design and click through the surface.
+      const now = Date.now();
+      mockPoolTasks.push({
+        id: `mock-${crypto.randomUUID()}`,
+        project,
+        title: brief.trim().split("\n")[0].slice(0, 64) || "Untitled task",
+        brief,
+        status: "in_review",
+        attempt: 1,
+        createdMs: now,
+        startedMs: now,
+        finishedMs: now,
+        session: null,
+        delivery: {
+          summary:
+            "Mock delivery. The desktop app runs this instruction in a background session and reports what it built.",
+          files: [],
+        },
+        note: null,
+      });
+      return mockPool(project);
+    },
+    async acceptPoolTask(project, id) {
+      const task = mockPoolTasks.find((item) => item.project === project && item.id === id);
+      if (task) task.status = "done";
+      return mockPool(project);
+    },
+    async rejectPoolTask(project, id, note) {
+      const task = mockPoolTasks.find((item) => item.project === project && item.id === id);
+      if (task) {
+        task.status = "to_do";
+        task.attempt += 1;
+        task.note = note;
+      }
+      return mockPool(project);
+    },
+    async retryPoolTask(project, id) {
+      const task = mockPoolTasks.find((item) => item.project === project && item.id === id);
+      if (task) {
+        task.status = "to_do";
+        task.attempt += 1;
+      }
+      return mockPool(project);
+    },
+    async cancelPoolTask(project, id) {
+      const task = mockPoolTasks.find((item) => item.project === project && item.id === id);
+      if (task) task.status = "cancelled";
+      return mockPool(project);
+    },
+    async transitionPoolTask(project, id, status) {
+      const task = mockPoolTasks.find((item) => item.project === project && item.id === id);
+      if (task) task.status = status;
+      return mockPool(project);
+    },
+    async removePoolTask(project, id) {
+      const index = mockPoolTasks.findIndex((item) => item.project === project && item.id === id);
+      if (index >= 0) mockPoolTasks.splice(index, 1);
+      return mockPool(project);
     },
     async searchFiles(_project, query) {
       // mock: return a few fake entries so the `@` popover is debuggable in a plain browser.
@@ -1018,6 +1232,9 @@ async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
     async setModel(project, value, session) {
       await httpCall(baseUrl, "agent_set_model", { project, model: value, session });
     },
+    async setReasoningEffort(project, effort, session) {
+      await httpCall(baseUrl, "agent_set_reasoning_effort", { project, effort, session });
+    },
     async asrCapabilities() {
       // A cloud runtime has no microphone and never receives audio: dictation happens on the
       // device that opened the page (the browser recogniser). Say so honestly instead of
@@ -1067,6 +1284,30 @@ async function createHttpBridge(baseUrl: string = ""): Promise<AgentBridge> {
     },
     async listLibrary(project) {
       return httpCall<LibraryEntry[]>(baseUrl, "agent_library_list", { project });
+    },
+    async listPoolTasks() {
+      return poolUnsupported();
+    },
+    async enqueuePoolTask() {
+      return poolUnsupported();
+    },
+    async acceptPoolTask() {
+      return poolUnsupported();
+    },
+    async rejectPoolTask() {
+      return poolUnsupported();
+    },
+    async retryPoolTask() {
+      return poolUnsupported();
+    },
+    async cancelPoolTask() {
+      return poolUnsupported();
+    },
+    async transitionPoolTask() {
+      return poolUnsupported();
+    },
+    async removePoolTask() {
+      return poolUnsupported();
     },
     async searchFiles(project, query) {
       return httpCall<FileEntry[]>(baseUrl, "agent_search_files", { project, query });
@@ -1278,6 +1519,10 @@ async function createHybridBridge(): Promise<AgentBridge> {
       const { bridge, rawId } = route(project);
       await bridge.setModel(rawId, value, session);
     },
+    async setReasoningEffort(project, effort, session) {
+      const { bridge, rawId } = route(project);
+      await bridge.setReasoningEffort(rawId, effort, session);
+    },
     async assetUrl(project, id) {
       const { bridge, rawId } = route(project);
       return bridge.assetUrl(rawId, id);
@@ -1297,6 +1542,38 @@ async function createHybridBridge(): Promise<AgentBridge> {
     async listLibrary(project) {
       const { bridge, rawId } = route(project);
       return bridge.listLibrary(rawId);
+    },
+    async listPoolTasks(project) {
+      const { bridge, rawId } = route(project);
+      return bridge.listPoolTasks(rawId);
+    },
+    async enqueuePoolTask(project, brief) {
+      const { bridge, rawId } = route(project);
+      return bridge.enqueuePoolTask(rawId, brief);
+    },
+    async acceptPoolTask(project, id) {
+      const { bridge, rawId } = route(project);
+      return bridge.acceptPoolTask(rawId, id);
+    },
+    async rejectPoolTask(project, id, note) {
+      const { bridge, rawId } = route(project);
+      return bridge.rejectPoolTask(rawId, id, note);
+    },
+    async retryPoolTask(project, id) {
+      const { bridge, rawId } = route(project);
+      return bridge.retryPoolTask(rawId, id);
+    },
+    async cancelPoolTask(project, id) {
+      const { bridge, rawId } = route(project);
+      return bridge.cancelPoolTask(rawId, id);
+    },
+    async transitionPoolTask(project, id, status) {
+      const { bridge, rawId } = route(project);
+      return bridge.transitionPoolTask(rawId, id, status);
+    },
+    async removePoolTask(project, id) {
+      const { bridge, rawId } = route(project);
+      return bridge.removePoolTask(rawId, id);
     },
     async searchFiles(project, query) {
       const { bridge, rawId } = route(project);

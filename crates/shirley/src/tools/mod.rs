@@ -1,4 +1,5 @@
 mod bash;
+mod computer;
 mod grep;
 mod media;
 pub(crate) mod read;
@@ -8,6 +9,7 @@ mod todo;
 mod web_search;
 
 pub use bash::bash as bash_tool;
+pub use computer::{computer_act, computer_apps, computer_key, computer_snapshot};
 pub use grep::grep as grep_tool;
 pub use read::read as read_tool;
 pub use web_search::web_search as web_search_tool;

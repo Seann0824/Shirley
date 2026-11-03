@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Clock, LoaderCircle, X } from "lucide-react";
+import { Clock, LoaderCircle, Send, X } from "lucide-react";
 import { DesktopChrome } from "@/components/DesktopChrome";
 import {
   AiConversationTranscript,
@@ -17,6 +17,7 @@ import { ComposerAddMenu } from "@/components/ai/ComposerAddMenu";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
 import { EditProjectDialog } from "@/components/ai/EditProjectDialog";
 import { LibraryPage } from "@/components/ai/LibraryPage";
+import { TaskPoolPage } from "@/components/ai/TaskPoolPage";
 import { WorkspaceTabs, type WebTab } from "@/components/ai/WorkspaceTabs";
 import { HeaderTabs } from "@/components/HeaderTabs";
 import type { BrowserTabMeta } from "@/components/ai/BrowserView";
@@ -272,31 +273,122 @@ function StatusPill({
  * send automatically once the previous turn ends.
  *
  * Only appears when the foreground session has queued items; shows each body (with chip
- * placeholders stripped) and allows removal. Send order = enqueue order (first
- * submitted, first sent).
+ * placeholders stripped). A row can be **edited in place** before it goes out (Enter saves,
+ * Esc cancels), sent **now** — which interrupts the running turn, the only way to change
+ * course mid-reply — or removed. Send order = enqueue order (first submitted, first sent).
  */
-function PendingQueue({ turns, onRemove }: { turns: PendingTurn[]; onRemove: (id: string) => void }) {
+function PendingQueue({
+  turns,
+  onSaveEdit,
+  onSendNow,
+  onRemove,
+}: {
+  turns: PendingTurn[];
+  onSaveEdit: (turn: PendingTurn, text: string) => void;
+  onSendNow: (turn: PendingTurn) => void;
+  onRemove: (id: string) => void;
+}) {
+  // One row at a time, edited in place: the queue is transient, so a modal (or a second
+  // composer) would weigh more than the thing it edits.
+  const [editing, setEditing] = useState<{ id: string; draft: string } | null>(null);
   if (turns.length === 0) return null;
+  // The edited row can leave the queue (sent / removed) while the editor is open; fall back
+  // to the read-only list rather than editing a row that no longer exists.
+  const draft = editing && turns.some((turn) => turn.id === editing.id) ? editing : null;
+
+  const save = (turn: PendingTurn) => {
+    if (!draft) return;
+    const next = draft.draft.trim();
+    // An empty body is only meaningful when the turn already carries attachment chips.
+    if (!next && !turn.display.includes(CHIP_TOKEN)) return;
+    if (next !== stripTokens(turn.display).trim()) onSaveEdit(turn, next);
+    setEditing(null);
+  };
+
   return (
     <div className="mx-3 mb-1 rounded-card border border-line bg-surface px-3 py-2 shadow-card">
       <div className="mb-1 flex items-center gap-1.5 text-caption text-muted">
         <Clock className="size-3.5" aria-hidden="true" />
         Pending · {turns.length}
+        {/* Stated once, here: the row action is destructive to the current reply. */}
+        <span className="ml-auto">立即发送会打断当前回合</span>
       </div>
       <ul className="flex flex-col gap-1">
-        {turns.map((turn) => (
-          <li key={turn.id} className="flex items-start gap-2 text-body-sm text-ink">
-            <span className="min-w-0 flex-1 truncate">{stripTokens(turn.display)}</span>
-            <button
-              type="button"
-              aria-label="Remove this pending message"
-              className="mt-0.5 shrink-0 rounded-control p-0.5 text-muted transition-colors hover:bg-selected hover:text-ink"
-              onClick={() => onRemove(turn.id)}
-            >
-              <X className="size-3.5" />
-            </button>
-          </li>
-        ))}
+        {turns.map((turn) => {
+          const body = stripTokens(turn.display);
+          if (draft && draft.id === turn.id) {
+            return (
+              <li key={turn.id} className="flex flex-col gap-1">
+                <textarea
+                  autoFocus
+                  rows={2}
+                  value={draft.draft}
+                  aria-label="Edit this pending message"
+                  className="w-full resize-none rounded-control border border-line bg-inset px-2 py-1 text-body-sm text-ink outline-none focus:border-line-strong"
+                  onChange={(event) => setEditing({ id: turn.id, draft: event.target.value })}
+                  onKeyDown={(event) => {
+                    // Enter saves, Shift+Enter breaks the line, Esc walks away unchanged.
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      save(turn);
+                    } else if (event.key === "Escape") {
+                      event.preventDefault();
+                      event.stopPropagation();
+                      setEditing(null);
+                    }
+                  }}
+                />
+                <div className="flex items-center gap-2 text-caption text-muted">
+                  <span className="mr-auto">Enter 保存 · Esc 取消</span>
+                  <button
+                    type="button"
+                    className="rounded-control px-1.5 py-0.5 transition-colors hover:bg-selected hover:text-ink"
+                    onClick={() => save(turn)}
+                  >
+                    保存
+                  </button>
+                  <button
+                    type="button"
+                    className="rounded-control px-1.5 py-0.5 transition-colors hover:bg-selected hover:text-ink"
+                    onClick={() => setEditing(null)}
+                  >
+                    取消
+                  </button>
+                </div>
+              </li>
+            );
+          }
+          return (
+            <li key={turn.id} className="flex items-start gap-2 text-body-sm text-ink">
+              {/* Click the body to edit it: no extra icon for the occasional case. */}
+              <button
+                type="button"
+                title="改这条（发出前）"
+                className="min-w-0 flex-1 truncate text-left transition-colors hover:text-primary"
+                onClick={() => setEditing({ id: turn.id, draft: body.trim() })}
+              >
+                {body}
+              </button>
+              <button
+                type="button"
+                aria-label="Send this pending message now"
+                title="立即发送：打断当前回合，改用这条"
+                className="mt-0.5 shrink-0 rounded-control p-0.5 text-muted transition-colors hover:bg-selected hover:text-primary"
+                onClick={() => onSendNow(turn)}
+              >
+                <Send className="size-3.5" />
+              </button>
+              <button
+                type="button"
+                aria-label="Remove this pending message"
+                className="mt-0.5 shrink-0 rounded-control p-0.5 text-muted transition-colors hover:bg-selected hover:text-ink"
+                onClick={() => onRemove(turn.id)}
+              >
+                <X className="size-3.5" />
+              </button>
+            </li>
+          );
+        })}
       </ul>
     </div>
   );
@@ -311,6 +403,13 @@ export function App() {
   const [editingProjectEntry, setEditingProjectEntry] = useState<ProjectEntry | null>(null);
   /** The media library is a global inventory, not a session view, so it is its own overlay. */
   const [libraryOpen, setLibraryOpen] = useState(false);
+  /**
+   * The task pool is the other global surface: instructions in, deliverables out. Opening it must
+   * not depend on which session is foreground, because a task runs in a session of its own.
+   */
+  const [poolOpen, setPoolOpen] = useState(false);
+  /** Both surfaces replace the chat area, so everything that keys off "a page is open" uses this. */
+  const pageOpen = libraryOpen || poolOpen;
   const [activeProject, setActiveProject] = useState<string | null>(null);
   const [sessionName, setSessionName] = useState<string | null>(null);
   // Which runtime a NEW send / new chat targets. Existing projects & sessions keep their own
@@ -1116,6 +1215,24 @@ export function App() {
     });
   }, []);
 
+  /**
+   * Rewrite a queued message before it goes out. Only the body in front of the attachment
+   * chips is replaced: chips map to `refs` **by position**, so the trailing run must keep
+   * its exact length or every reference after the edit would point at the wrong file.
+   */
+  const updatePending = useCallback((key: string, id: string, text: string) => {
+    setViews((prev) => {
+      const view = prev[key];
+      if (!view) return prev;
+      const pending = view.pending.map((turn) => {
+        if (turn.id !== id) return turn;
+        const chips = turn.display.split(CHIP_TOKEN).length - 1;
+        return { ...turn, text, display: `${text}${CHIP_TOKEN.repeat(chips)}` };
+      });
+      return { ...prev, [key]: { ...view, pending } };
+    });
+  }, []);
+
   /** Paste, file picker and native drops all ingest into the same media library. */
   const uploadFiles = useCallback(
     async (files: File[]) => {
@@ -1492,6 +1609,30 @@ export function App() {
     await (await agentBridge()).cancel(project, session).catch(() => {});
   }, [activeProject, sessionName]);
 
+  /**
+   * Send a queued message right now — the only way to change course while a reply is being
+   * written: float it to the head of the queue and, if a turn is running, send the cancel
+   * signal. The wrap-up stays in one place: the backend's `finished(cancelled)` sets `busy`
+   * false, and the auto-flush effect above then sends the (now first) queued turn. So this
+   * adds no second send path, and the items behind it keep their order.
+   */
+  const sendPendingNow = useCallback(
+    async (turn: PendingTurn) => {
+      const key = viewKey(turn.project, turn.session);
+      const busy = views[key]?.busy ?? false;
+      setViews((prev) => {
+        const view = prev[key];
+        if (!view) return prev;
+        const index = view.pending.findIndex((item) => item.id === turn.id);
+        if (index <= 0) return prev; // already sent, or already at the head
+        const pending = [view.pending[index], ...view.pending.slice(0, index), ...view.pending.slice(index + 1)];
+        return { ...prev, [key]: { ...view, pending } };
+      });
+      if (busy) await (await agentBridge()).cancel(turn.project, turn.session).catch(() => {});
+    },
+    [views],
+  );
+
   const switchModel = useCallback(
     async (value: string) => {
       if (!activeProject) return;
@@ -1664,7 +1805,12 @@ export function App() {
         }
         trailingAction={
           <div className="flex items-center gap-1.5">
-            <ModelSelector project={activeProject ?? ""} current={model} onSelect={(value) => void switchModel(value)} />
+            <ModelSelector
+              project={activeProject ?? ""}
+              current={model}
+              session={sessionName ?? undefined}
+              onSelect={(value) => void switchModel(value)}
+            />
             {/* Dictation belongs with the send button, not with the "add content" cluster:
                 the right side is "how this turn goes out", the left is "what goes in it". */}
             <VoiceInputButton voice={voice} />
@@ -1704,7 +1850,7 @@ export function App() {
   return (
     <>
       <DesktopChrome
-      title={libraryOpen ? "Library" : (activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
+      title={libraryOpen ? "Library" : poolOpen ? "任务池" : (activeProject && sessionName && sessionTitles[viewKey(activeProject, sessionName)]) || (sessionName ? "New session" : "Shirley")}
       projectName={
         mode === "chat"
           ? `Chat · ${activeSource === "cloud" ? "Cloud" : "Local"}`
@@ -1717,10 +1863,19 @@ export function App() {
       onBack={() => void navigateHistory(-1)}
       onForward={() => void navigateHistory(1)}
       onToggleSidebar={toggleSidebar}
-      onLibrary={() => setLibraryOpen((open) => !open)}
+      onLibrary={() => {
+        setPoolOpen(false);
+        setLibraryOpen((open) => !open);
+      }}
       libraryActive={libraryOpen}
+      onPool={() => {
+        setLibraryOpen(false);
+        setPoolOpen((open) => !open);
+      }}
+      poolActive={poolOpen}
       onHome={() => {
         setLibraryOpen(false);
+        setPoolOpen(false);
         setSidebarCollapsed(false);
         writeBool(SIDEBAR_STORAGE_KEY, false);
       }}
@@ -1728,7 +1883,7 @@ export function App() {
       onAddProject={() => void addProject()}
       // A browser tab belongs to a session: opening one while the Library is foreground
       // would create a tab nobody can see (the strip that would show it is hidden there).
-      onNewBrowserTab={browserAvailable && !(libraryOpen && activeProject) ? () => openWebTab() : undefined}
+      onNewBrowserTab={browserAvailable && !(pageOpen && activeProject) ? () => openWebTab() : undefined}
       topContent={
         // The tab strip is a desktop affordance: it exists to hold the session's chat surface
         // plus its in-app browser pages. Phones have no browser tabs and already list sessions
@@ -1737,7 +1892,7 @@ export function App() {
         // title row, and every tab in the strip belongs to some session (its chat surface plus
         // that session's web pages). Rendering it here showed a stray session tab with nothing
         // to switch to, so the strip is scoped to session destinations only.
-        mobile || (libraryOpen && activeProject) ? undefined : (
+        mobile || (pageOpen && activeProject) ? undefined : (
         <HeaderTabs
           sessionTitle={
             (currentKey && sessionTitles[currentKey]) || (sessionName ? "New session" : "")
@@ -1766,7 +1921,7 @@ export function App() {
       {mobile && !sidebarCollapsed && (
         <button type="button" className="mobile-sidebar-backdrop" aria-label="Close sidebar" onClick={() => setSidebarCollapsed(true)} />
       )}
-      {(!libraryOpen || mobile) && (
+      {(!pageOpen || mobile) && (
       <SessionSidebar
         onClose={closeSidebar}
         collapsed={sidebarCollapsed}
@@ -1822,6 +1977,8 @@ export function App() {
             requestAnimationFrame(() => editorRef.current?.focus());
           }}
         />
+      ) : poolOpen && activeProject ? (
+        <TaskPoolPage project={activeProject} />
       ) : (
       <main ref={mainRef} aria-label="Conversation" className="relative flex min-h-0 min-w-0 flex-1 flex-col">
         {/* Full-width column: the scroll viewport must span the whole right area so the
@@ -1925,6 +2082,8 @@ export function App() {
             {/* Pending queue: messages submitted early while running, sent automatically once the previous turn ends. */}
             <PendingQueue
               turns={view.pending}
+              onSaveEdit={(turn, text) => updatePending(viewKey(turn.project, turn.session), turn.id, text)}
+              onSendNow={(turn) => void sendPendingNow(turn)}
               onRemove={(id) => activeProject && sessionName && removePending(viewKey(activeProject, sessionName), id)}
             />
             {/* While editing the last user message, the composer is rendered inline at that

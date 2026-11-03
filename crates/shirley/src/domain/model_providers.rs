@@ -377,6 +377,46 @@ pub fn delete(global: &Path, input: &DeleteProvider) -> Result<RegistryView, Str
     persist(global, &registry)
 }
 
+/// Set one model's reasoning effort in place.
+///
+/// This is the write path behind the composer's inline effort control. The model definition
+/// stays the single source of truth: [`ConfiguredModel::config`] projects `reasoning_effort`
+/// into the request, so a later model switch picks the choice back up without a sidecar.
+/// `None` clears it (the provider default).
+pub fn set_model_effort(
+    global: &Path,
+    provider_id: &str,
+    model_id: &str,
+    effort: Option<&str>,
+) -> Result<RegistryView, String> {
+    if effort.is_some_and(|effort| !matches!(effort, "low" | "medium" | "high")) {
+        return Err("推理强度无效".into());
+    }
+    let registry = load(global)?;
+    let revision = revision(&registry);
+    let mut provider = registry
+        .providers
+        .iter()
+        .find(|provider| provider.id == provider_id)
+        .cloned()
+        .ok_or("服务商已被移除，请刷新列表")?;
+    provider
+        .models
+        .iter_mut()
+        .find(|model| model.id == model_id)
+        .ok_or("模型已被移除，请刷新列表")?
+        .reasoning_effort = effort.map(str::to_string);
+    save(
+        global,
+        SaveProvider {
+            revision,
+            provider,
+            clear_api_key: false,
+            set_default: false,
+        },
+    )
+}
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct ConfiguredModel {
     pub provider: Provider,

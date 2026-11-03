@@ -19,7 +19,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/ui/collapsible";
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from "@/ui/context-menu";
 import { ScrollArea } from "@/ui/scroll-area";
@@ -98,6 +98,20 @@ const COLLAPSED_PROJECTS_KEY = "shirley.desktop.collapsed-projects-group";
  */
 const PROJECT_SESSION_INITIAL = 5;
 const PROJECT_SESSION_PAGE = 10;
+/**
+ * Sidebar width: user-draggable (right edge), clamped to these bounds. The lower bound keeps
+ * a session row readable (label + hover actions) and the upper bound keeps the 760px reading
+ * column usable on a 1024px window.
+ */
+const WIDTH_STORAGE_KEY = "shirley.desktop.sidebar-width";
+const SIDEBAR_MIN_WIDTH = 208;
+/** Pointer travel before a press on a session row becomes a drag: below this it is still a click. */
+const SESSION_DRAG_THRESHOLD = 4;
+const SIDEBAR_MAX_WIDTH = 420;
+/** `w-64` = 256px, the historical fixed width: the value a double-click on the handle restores. */
+const SIDEBAR_DEFAULT_WIDTH = 256;
+/** Keyboard resize step (the handle is focusable, so it is not a mouse-only affordance). */
+const SIDEBAR_KEYBOARD_STEP = 16;
 
 function readStringArray(key: string): string[] {
   try {
@@ -132,6 +146,29 @@ function writeBool(key: string, value: boolean) {
   } catch {
     // Silently degrade when localStorage is unavailable (private mode, etc.): state is valid for this session only.
   }
+}
+
+function readNumber(key: string, fallback: number): number {
+  try {
+    const raw = window.localStorage.getItem(key);
+    const parsed = raw === null ? Number.NaN : Number.parseFloat(raw);
+    return Number.isFinite(parsed) ? parsed : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeNumber(key: string, value: number) {
+  try {
+    window.localStorage.setItem(key, String(value));
+  } catch {
+    // Silently degrade when localStorage is unavailable (private mode, etc.): state is valid for this session only.
+  }
+}
+
+/** Clamp a dragged / restored width into the supported range. */
+function clampSidebarWidth(value: number): number {
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(value)));
 }
 
 /** Small inline marker so cloud-hosted projects / sessions are distinguishable in the merged view. */
@@ -253,6 +290,137 @@ export function SessionSidebar({
   const [confirmingArchive, setConfirmingArchive] = useState<string | null>(null);
   // Per-project visible session count (by project id; absent = PROJECT_SESSION_INITIAL).
   const [sessionLimits, setSessionLimits] = useState<Record<string, number>>({});
+  // Whether the first session scan has resolved. Before that every group is still empty, and
+  // painting empty groups reads as "you have no sessions" and then flips — so the whole list
+  // region shows one loading state instead (see the overlay at the end of the aside).
+  const [sessionsLoaded, setSessionsLoaded] = useState(false);
+  // Draggable width, persisted like every other layout preference in this file.
+  const [width, setWidth] = useState(() =>
+    clampSidebarWidth(readNumber(WIDTH_STORAGE_KEY, SIDEBAR_DEFAULT_WIDTH)),
+  );
+  const [resizing, setResizing] = useState(false);
+  // Session drag-to-project: the row being dragged, the project group currently under the
+  // pointer (the drop target, `null` = none) and the pointer position for the floating label.
+  const [dragSession, setDragSession] = useState<{
+    project: string;
+    name: string;
+    label: string;
+  } | null>(null);
+  const [dropProject, setDropProject] = useState<string | null>(null);
+  const [dragPoint, setDragPoint] = useState<{ x: number; y: number } | null>(null);
+  useEffect(() => {
+    // Persist on settle, not on every pointer move: a drag is dozens of writes otherwise.
+    if (!resizing) writeNumber(WIDTH_STORAGE_KEY, width);
+  }, [width, resizing]);
+
+  /**
+   * Drag the right edge. The pointer is tracked on `window` (not on the 6px handle) so a fast
+   * drag that outruns the cursor keeps resizing, and the width transition is switched off while
+   * dragging — otherwise the panel animates behind the pointer.
+   */
+  const startResize = (event: ReactPointerEvent<HTMLDivElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = width;
+    const previousCursor = document.body.style.cursor;
+    const previousSelect = document.body.style.userSelect;
+    setResizing(true);
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    const move = (moveEvent: PointerEvent) => setWidth(clampSidebarWidth(startWidth + moveEvent.clientX - startX));
+    const stop = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", stop);
+      window.removeEventListener("pointercancel", stop);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousSelect;
+      setResizing(false);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", stop);
+    window.addEventListener("pointercancel", stop);
+  };
+
+  /**
+   * Drag a session row onto another project group to move it there — the pointer counterpart of
+   * the context menu's "Move to project…", through the same `onMove` seam (no new backend call).
+   *
+   * Pointer events rather than HTML5 drag-and-drop: `draggable` + `dataTransfer` is unreliable in
+   * the WKWebView the desktop shell embeds, and doing it by hand lets us draw the drop indicator
+   * ourselves. Nothing happens until the pointer travels `SESSION_DRAG_THRESHOLD`, so a press that
+   * does not move is still a plain click on the row.
+   */
+  const beginSessionDrag = (
+    event: ReactPointerEvent<HTMLDivElement>,
+    project: string,
+    name: string,
+    label: string,
+  ) => {
+    if (event.button !== 0 || mobile) return;
+    // Pin / more are their own affordances: grabbing one must not start a row drag.
+    const hitElement = event.target instanceof Element ? event.target : null;
+    if (hitElement?.closest("[data-session-actions], input")) return;
+    const startX = event.clientX;
+    const startY = event.clientY;
+    const previousCursor = document.body.style.cursor;
+    const previousSelect = document.body.style.userSelect;
+    let dragging = false;
+    let target: string | null = null;
+
+    const finish = (commit: boolean) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", cancel);
+      window.removeEventListener("keydown", onKey, true);
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousSelect;
+      if (dragging) {
+        // A drag can still end in a click on the same row; swallow it so releasing over another
+        // project cannot also switch the session. `once` fires with that click; the timed release
+        // covers the case where none follows (released outside the window), so the guard cannot
+        // eat a later, unrelated click.
+        const swallow = (clickEvent: MouseEvent) => {
+          clickEvent.preventDefault();
+          clickEvent.stopPropagation();
+        };
+        window.addEventListener("click", swallow, { capture: true, once: true });
+        window.setTimeout(() => window.removeEventListener("click", swallow, true), 300);
+        if (commit && target) onMove(project, name, target);
+      }
+      setDragSession(null);
+      setDropProject(null);
+      setDragPoint(null);
+    };
+    const move = (moveEvent: PointerEvent) => {
+      if (!dragging) {
+        const travelled = Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY);
+        if (travelled < SESSION_DRAG_THRESHOLD) return;
+        dragging = true;
+        setDragSession({ project, name, label });
+        document.body.style.cursor = "grabbing";
+        document.body.style.userSelect = "none";
+      }
+      setDragPoint({ x: moveEvent.clientX, y: moveEvent.clientY });
+      // Hit-test the element under the pointer, not event.target: the drag does not have pointer
+      // capture, so target stays on the row the gesture started from.
+      const under = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY);
+      const zone = under instanceof Element ? under.closest<HTMLElement>("[data-drop-project]") : null;
+      const hit = zone?.dataset.dropProject ?? null;
+      // Dropping a session back into its own project is a no-op, so it never counts as a target.
+      target = hit && hit !== project ? hit : null;
+      setDropProject(target);
+    };
+    const up = () => finish(true);
+    const cancel = () => finish(false);
+    const onKey = (keyEvent: KeyboardEvent) => {
+      if (keyEvent.key === "Escape") finish(false);
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", cancel);
+    window.addEventListener("keydown", onKey, true);
+  };
 
   // Each project shows its own sessions (session names are unique only within a project).
   const groups: ProjectGroup[] = projects.map((entry) => ({
@@ -278,6 +446,7 @@ export function SessionSidebar({
     aliveRef.current = true;
     const ids = projectIdsKey ? projectIdsKey.split("\n") : [];
     if (ids.length === 0) {
+      setSessionsLoaded(true);
       return () => {
         aliveRef.current = false;
       };
@@ -288,7 +457,10 @@ export function SessionSidebar({
         const { agentBridge } = await import("@/lib/bridge");
         bridge = await agentBridge();
       } catch {
-        return; // bridge unavailable: keep the previous result.
+        // Bridge unavailable: keep the previous result, but leave the loading state — a failure
+        // the user cannot act on must not spin forever.
+        if (aliveRef.current) setSessionsLoaded(true);
+        return;
       }
       // Per-project tolerance: one unreachable project (cloud offline, archived / deleted
       // project, source not connected) must not blank out **every** project's session list.
@@ -304,6 +476,7 @@ export function SessionSidebar({
         }
         return next;
       });
+      setSessionsLoaded(true);
     };
     void load();
     const timer = window.setInterval(() => void load(), 1500);
@@ -502,6 +675,7 @@ export function SessionSidebar({
     // The active state requires the same project and session name — session names are unique only within a project.
     const active = project === activeProject && entry.name === current;
     const isEditing = editingSession === `${project}::${entry.name}`;
+    const isDragged = dragSession?.project === project && dragSession?.name === entry.name;
     const isPinned = group === "pinned" || pinned.includes(`${project}::${entry.name}`);
     const displayLabel = sessionDisplayLabel(entry);
     // Inline actions: pin (pin/unpin) and more (same menu as right-click, housing
@@ -547,9 +721,13 @@ export function SessionSidebar({
       <ContextMenu
         key={`${project}::${entry.name}`}
         menu={sessionMenu(entry, group, project)}
+        onPointerDown={(event) => beginSessionDrag(event, project, entry.name, displayLabel)}
         className={cn(
           "group relative flex h-8 animate-row-in items-center gap-1.5 rounded-control pr-2 pl-[26px] transition-interactive",
           active ? "bg-selected" : "hover:bg-quiet active:bg-selected",
+          // The dragged row stays in place, dimmed: removing it would reflow the list under the
+          // pointer and move every drop target mid-gesture.
+          isDragged && "opacity-40",
         )}
       >
         {(open) => (
@@ -622,10 +800,15 @@ export function SessionSidebar({
       className={cn(
         // `visibility` is transitioned on purpose: it flips discretely, so the panel stays
         // painted until the width collapse finishes, and turns visible immediately on expand.
-        "session-sidebar flex h-full shrink-0 flex-col overflow-hidden transition-[width,opacity,visibility] duration-slow ease-product",
-        collapsed ? "pointer-events-none invisible w-0 opacity-0" : "w-64 border-r border-line opacity-100",
+        "session-sidebar relative flex h-full shrink-0 flex-col overflow-hidden transition-[width,opacity,visibility] duration-slow ease-product",
+        collapsed ? "pointer-events-none invisible opacity-0" : "border-r border-line opacity-100",
+        // A drag must not animate: the width would trail the cursor.
+        resizing && "transition-none",
         className,
       )}
+      // Width is an inline style, not a `w-*` class: it is user-draggable, clamped into
+      // [SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH] and collapsed to 0.
+      style={{ width: collapsed ? 0 : width }}
     >
       <div className="flex h-12 shrink-0 items-center justify-between px-4 text-body-sm font-semibold">
         Shirley
@@ -738,6 +921,9 @@ export function SessionSidebar({
                 {groups.map(({ entry }) => {
                   const isCollapsed = collapsedProjects.includes(entry.id);
                   const isEditing = editingProject === entry.id;
+                  // The whole group is a drop zone, but the indicator always sits right under the
+                  // header — that is where a moved session lands (top of the list, newest first).
+                  const isDropTarget = dragSession !== null && dropProject === entry.id;
                   // Unpinned sessions first paginated to `PROJECT_SESSION_INITIAL`, growing by
                   // `PROJECT_SESSION_PAGE` per "Show more"; the pinned ones are hidden here anyway.
                   const projectSessions = (groups.find((group) => group.entry.id === entry.id)?.sessions ?? [])
@@ -795,7 +981,15 @@ export function SessionSidebar({
                       onOpenChange={() => toggleCollapsed(entry.id)}
                     >
                       <ContextMenu menu={projectMenu}>
-                        <div className="group flex h-8 items-center gap-1 rounded-control px-2 transition-interactive hover:bg-quiet">
+                        <div
+                          data-drop-project={entry.id}
+                          className={cn(
+                            "group relative flex h-8 items-center gap-1 rounded-control px-2 transition-interactive hover:bg-quiet",
+                            // Lighting the header keeps the destination legible while the pointer
+                            // is down in the session list.
+                            isDropTarget && "bg-selected",
+                          )}
+                        >
                           {isEditing ? (
                             <input
                               autoFocus
@@ -835,9 +1029,6 @@ export function SessionSidebar({
                                 {entry.name}
                               </span>
                               {projectSource(entry.id) === "cloud" && <CloudBadge />}
-                              <span className="shrink-0 text-caption text-muted">
-                                {projectSessions.length}
-                              </span>
                             </CollapsibleTrigger>
                           )}
                           {!isEditing && (
@@ -855,12 +1046,21 @@ export function SessionSidebar({
                               <Plus className="size-3.5" />
                             </button>
                           )}
+                          {isDropTarget && (
+                            // The indicator line: marks exactly where the dragged session is about
+                            // to be inserted (top of this project's list).
+                            <span
+                              aria-hidden
+                              className="pointer-events-none absolute inset-x-1 -bottom-0.5 z-10 h-0.5 rounded-full bg-ink/60"
+                            />
+                          )}
                         </div>
                       </ContextMenu>
                       <CollapsibleContent className="overflow-hidden data-[state=closed]:animate-disclosure-close data-[state=open]:animate-disclosure-open">
                         <div
                           role="listbox"
                           aria-label={`Sessions of ${entry.name}`}
+                          data-drop-project={entry.id}
                           className="mt-0.5 flex flex-col gap-0.5"
                         >
                           {visibleProjectSessions.length === 0 ? (
@@ -880,9 +1080,6 @@ export function SessionSidebar({
                                   }
                                 >
                                   Show more
-                                  <span className="ml-1 text-caption">
-                                    ({projectSessions.length - visibleProjectSessions.length})
-                                  </span>
                                 </button>
                               )}
                             </>
@@ -925,6 +1122,63 @@ export function SessionSidebar({
         )}
 
       </ScrollArea>
+      {/* Resize handle: a transparent 6px strip on the right edge (at rest the panel border
+          already draws that edge), widening the hit area beyond the visible hairline. */}
+      {!collapsed && !mobile && (
+        <div
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          aria-valuemin={SIDEBAR_MIN_WIDTH}
+          aria-valuemax={SIDEBAR_MAX_WIDTH}
+          aria-valuenow={width}
+          tabIndex={0}
+          title="Drag to resize"
+          onPointerDown={startResize}
+          onDoubleClick={() => setWidth(SIDEBAR_DEFAULT_WIDTH)}
+          onKeyDown={(event) => {
+            if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+            event.preventDefault();
+            const delta =
+              event.key === "ArrowLeft" ? -SIDEBAR_KEYBOARD_STEP : SIDEBAR_KEYBOARD_STEP;
+            setWidth((prev) => clampSidebarWidth(prev + delta));
+          }}
+          className="group/resize absolute inset-y-0 right-0 z-20 w-1.5 cursor-col-resize touch-none outline-none"
+        >
+          <span
+            className={cn(
+              "absolute inset-y-0 right-0 w-px transition-interactive",
+              resizing
+                ? "bg-ink/40"
+                : "bg-transparent group-hover/resize:bg-ink/20 group-focus-visible/resize:bg-ink/40",
+            )}
+          />
+        </div>
+      )}
+      {/* Dragged session, following the pointer: without it a drag over a long list of rows
+          gives no feedback about what is being carried. It is pinned to the cursor rather than
+          animating, and must not intercept hit-testing (`pointer-events-none`). */}
+      {dragSession && dragPoint && (
+        <div
+          aria-hidden
+          style={{ left: dragPoint.x + 12, top: dragPoint.y + 12 }}
+          className="pointer-events-none fixed z-40 max-w-[220px] truncate rounded-control border border-line bg-surface px-2 py-1 text-caption text-ink shadow-card"
+        >
+          {dragSession.label}
+        </div>
+      )}
+      {/* Global loading for the whole session region: until the first scan resolves every group
+          is empty, and painting empty groups reads as "no sessions" and then flips. */}
+      {!sessionsLoaded && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="absolute inset-0 z-30 flex flex-col items-center justify-center gap-2 bg-canvas"
+        >
+          <Loader2 className="size-4 animate-spin text-muted" aria-hidden />
+          <span className="text-caption text-muted">Loading sessions…</span>
+        </div>
+      )}
     </aside>
   );
 }

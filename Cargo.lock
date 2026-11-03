@@ -6,10 +6,12 @@ version = 4
 name = "Shirley"
 version = "0.0.4"
 dependencies = [
+ "accessibility-sys",
  "arboard",
  "axum",
  "base64 0.22.1",
  "chrono",
+ "core-foundation-sys",
  "crossterm",
  "dirs 6.0.0",
  "dotenvy",
@@ -38,6 +40,15 @@ dependencies = [
  "unicode-width",
  "url",
  "uuid",
+]
+
+[[package]]
+name = "accessibility-sys"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46a6a8e90a1d8b96a48249e7c8f5b4058447bea8847280db7bfccb6dcab6b8e1"
+dependencies = [
+ "core-foundation-sys",
 ]
 
 [[package]]

@@ -11,15 +11,26 @@ import type { ModelEntry } from "@/lib/bridge";
  * Just a thin UI over "model catalog + hot switch" — both the catalog and the switch are
  * provided by the Rust side (`ModelCatalog` / `Agent::set_model`); the frontend holds no
  * model state.
+ *
+ * The **reasoning effort** rides in the same entry: it is shown after the model name and
+ * adjusted inline in this popover, because it is an attribute of the chosen model, not a
+ * second thing to choose. Nothing appears when the model declares no levels (a provider does
+ * not report effort in `GET /models`; only host-configured models on a protocol that accepts
+ * `reasoning_effort` do).
  */
+const EFFORT_LABELS: Record<string, string> = { low: "Low", medium: "Medium", high: "High" };
+
 export function ModelSelector({
   project,
   current,
+  session,
   onSelect,
   className,
 }: {
   project: string;
   current: string;
+  /** Foreground session name: the effort belongs to that session's live model config. */
+  session?: string;
   onSelect: (value: string) => void;
   className?: string;
 }) {
@@ -27,6 +38,7 @@ export function ModelSelector({
   const [entries, setEntries] = useState<ModelEntry[]>([]);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
+  const [effort, setEffort] = useState<string | null>(null);
   const rootRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -44,6 +56,26 @@ export function ModelSelector({
   }, [project, current]);
   const selected = entries.find((entry) => entry.value === current);
   const currentLabel = selected ? `${selected.provider} / ${selected.label}` : current.startsWith("provider:") ? "Select provider model" : current;
+  const efforts = selected?.efforts ?? [];
+
+  // Mirror the model definition's effort locally so the label follows a click immediately;
+  // re-sync whenever the catalog says something different (model switched elsewhere, reload).
+  useEffect(() => {
+    setEffort(selected?.effort ?? null);
+  }, [selected?.value, selected?.effort]);
+
+  const changeEffort = async (next: string) => {
+    const previous = effort;
+    setEffort(next);
+    try {
+      const { agentBridge } = await import("@/lib/bridge");
+      await (await agentBridge()).setReasoningEffort(project, next, session);
+      setEntries((old) => old.map((entry) => (entry.value === current ? { ...entry, effort: next } : entry)));
+    } catch (cause) {
+      setEffort(previous);
+      setError(cause instanceof Error ? cause.message : String(cause));
+    }
+  };
 
   // Close on click outside the component / Esc.
   useEffect(() => {
@@ -92,6 +124,9 @@ export function ModelSelector({
         onClick={() => void toggle()}
       >
         <span className="truncate">{currentLabel || "No model selected"}</span>
+        {effort && (
+          <span className="shrink-0 text-muted">{EFFORT_LABELS[effort] ?? effort}</span>
+        )}
         <ChevronDown className="size-3.5 shrink-0" />
       </Button>
       {open && (
@@ -149,6 +184,27 @@ export function ModelSelector({
                   </div>
                 );
               })}
+            {efforts.length > 0 && (
+              <div className="mt-1 border-t border-line px-2 pt-2 pb-1">
+                <p className="pb-1 text-caption font-medium text-muted">Reasoning effort</p>
+                <div className="flex gap-1">
+                  {efforts.map((level) => (
+                    <button
+                      key={level}
+                      type="button"
+                      aria-pressed={effort === level}
+                      className={cn(
+                        "flex-1 rounded-control px-2 py-1 text-caption transition-colors",
+                        effort === level ? "bg-selected text-ink" : "text-muted hover:bg-quiet hover:text-ink",
+                      )}
+                      onClick={() => void changeEffort(level)}
+                    >
+                      {EFFORT_LABELS[level] ?? level}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <button type="button" className="mt-1 flex w-full items-center gap-2 border-t border-line px-3 py-2 text-body-sm text-muted hover:bg-selected hover:text-ink" onClick={() => { setOpen(false); window.dispatchEvent(new Event("open-model-providers")); }}><Settings2 className="size-4" />Manage model providers</button>
           </div>
         </ScrollArea>

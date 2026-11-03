@@ -1,6 +1,6 @@
 import { useEffect, useState, type ReactNode } from "react";
 import {
-  ArrowLeft, ArrowRight, Folder, FolderPlus, Globe, House, LibraryBig,
+  ArrowLeft, ArrowRight, Folder, FolderPlus, Globe, House, LibraryBig, ListTodo,
   MessageSquarePlus, Moon, MoreHorizontal, PanelLeftClose, PanelLeftOpen, Settings2, SquarePen, Sun,
 } from "lucide-react";
 import { ContextMenu, ContextMenuItem, ContextMenuSeparator } from "@/ui/context-menu";
@@ -37,7 +37,7 @@ function IconButton({ label, children, active, className, ...props }: {
 
 export function DesktopChrome({
   title, projectName, sidebarCollapsed, canGoBack, canGoForward,
-  navigationBusy, onBack, onForward, onToggleSidebar, onHome, onLibrary, libraryActive,
+  navigationBusy, onBack, onForward, onToggleSidebar, onHome, onLibrary, libraryActive, onPool, poolActive,
   onNewChat, onAddProject, topContent, onNewBrowserTab, children,
 }: {
   title: string;
@@ -52,6 +52,9 @@ export function DesktopChrome({
   onHome: () => void;
   /** Open the media library (an inventory of everything handed over, not a session). */
   onLibrary: () => void;
+  /** Open the task pool: instructions in, deliverables out (no transcript in between). */
+  onPool: () => void;
+  poolActive: boolean;
   /** Whether the library page is the current destination (rail highlight). */
   libraryActive: boolean;
   onNewChat: () => void;
@@ -126,14 +129,27 @@ export function DesktopChrome({
     };
   }, []);
 
+  // A full-surface page (Library / task pool) owns its own title row and is not a session
+  // surface, so the header's navigation cluster has nothing to act on and is dropped.
+  // Only the *buttons* go away — the macOS traffic-light gutter is part of the window
+  // frame and has to survive every page.
+  const navigationHidden = !mobile && (libraryActive || poolActive);
+
   return (
     <div className="app-shell flex h-dvh min-h-0 w-full flex-col overflow-hidden bg-frame">
       {/* The 48px title bar pairs with trafficLightPosition.y=26 in tauri.conf.json;
           the native y is the container inset, not the button center, so 20 would make
           the traffic lights about 6px too high. */}
+      {/* `deep`, not the bare attribute: bare only drags when the press lands exactly on
+          this element, and every child here (the nav cluster, the tab strip a page renders
+          through `topContent`, the right area) would swallow it — the title bar ended up
+          draggable only through the hairline gaps between children. `deep` lets any
+          descendant start the drag, while real controls still opt out on their own: Tauri
+          stops the walk at buttons, links, inputs and role="tab" elements that do not
+          carry the attribute themselves. Double-click on empty space zooms the window. */}
       <header
         className="app-header flex h-12 shrink-0 items-center bg-frame pr-3 select-none"
-        data-tauri-drag-region
+        data-tauri-drag-region="deep"
       >
         {/* The left area width aligns with "icon rail w-14 + session sidebar w-64" =
             19.5rem, so the divider tick at its right end lines up on the same x as the
@@ -149,17 +165,24 @@ export function DesktopChrome({
         <div
           className={cn(
             "app-header-navigation flex h-full shrink-0 items-center gap-1 overflow-hidden transition-[width] duration-200 ease-product",
-            !mobile && libraryActive && "hidden",
             mobile
               ? "w-auto"
               : [
+                  // The traffic-light gutter belongs to the frame, never to the buttons:
+                  // with the cluster emptied (w-auto) the padding alone still reserves
+                  // those 88px, so the title that follows cannot slide under the window
+                  // controls the way it did when the whole element was `display: none`.
                   isMacDesktop && !fullscreen ? "pl-[88px]" : "pl-3",
-                  sidebarCollapsed
-                    ? isMacDesktop && !fullscreen ? "w-[14.25rem]" : "w-[9.5rem]"
-                    : "w-[19.5rem]",
+                  navigationHidden
+                    ? "w-auto"
+                    : sidebarCollapsed
+                      ? isMacDesktop && !fullscreen ? "w-[14.25rem]" : "w-[9.5rem]"
+                      : "w-[19.5rem]",
                 ],
           )}
         >
+          {!navigationHidden && (
+          <>
           <IconButton className="hidden md:flex" label="Back" disabled={!canGoBack || navigationBusy} onClick={onBack}>
             <ArrowLeft className="size-4" />
           </IconButton>
@@ -183,9 +206,11 @@ export function DesktopChrome({
               sidebarCollapsed ? "w-0 opacity-0" : "w-px",
             )}
           />
+          </>
+          )}
         </div>
         {/* Content-area top bar (right area): customized per page, default renders folder icon + title + project name. */}
-        <div className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-3" data-tauri-drag-region>
+        <div className="flex min-w-0 flex-1 items-center gap-2 self-stretch px-3">
           {topContent ?? (
             <>
               <Folder className="size-4 shrink-0 text-muted pointer-events-none" />
@@ -219,6 +244,7 @@ export function DesktopChrome({
         <nav aria-label="Main navigation" className="hidden md:flex w-14 shrink-0 flex-col items-center gap-2 bg-frame py-3">
           <IconButton label="Home" active={!libraryActive} className="size-10" onClick={onHome}><House className="size-5" /></IconButton>
           <IconButton label="Library" className="size-10" active={libraryActive} onClick={onLibrary}><LibraryBig className="size-5" /></IconButton>
+          <IconButton label="Task pool" className="size-10" active={poolActive} onClick={onPool}><ListTodo className="size-5" /></IconButton>
           <div className="flex-1" />
           <IconButton label="Settings" className="size-10" onClick={() => openSettings("general")}><Settings2 className="size-5" /></IconButton>
           <IconButton label={dark ? "Switch to light appearance" : "Switch to dark appearance"} className="size-10" onClick={toggleTheme}>{dark ? <Sun className="size-5" /> : <Moon className="size-5" />}</IconButton>

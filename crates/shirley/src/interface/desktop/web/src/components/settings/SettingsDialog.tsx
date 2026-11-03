@@ -120,11 +120,13 @@ export function SettingsDialog() {
       aria-labelledby={titleId}
       onClose={() => setQuery("")}
       onClick={(event) => { if (event.target === dialog.current) close(); }}
-      className="m-auto h-[min(56rem,92dvh)] w-[min(72rem,calc(100vw-1.5rem))] overflow-hidden rounded-sheet border border-line bg-canvas p-0 text-ink shadow-sheet backdrop:bg-black/40"
+      // Desktop: a centered sheet. Phone: the sheet fills the screen -- at 92dvh with 0.75rem
+      // gutters the rail ate the width and the form was squeezed to a single cramped column.
+      className="m-auto h-[min(56rem,92dvh)] w-[min(72rem,calc(100vw-1.5rem))] overflow-hidden rounded-sheet border border-line bg-canvas p-0 text-ink shadow-sheet backdrop:bg-black/40 max-md:h-dvh max-md:max-h-none max-md:w-screen max-md:max-w-none max-md:rounded-none max-md:border-0"
     >
-      <div className="flex h-full min-h-0">
+      <div className="flex h-full min-h-0 flex-col md:flex-row">
         {/* Left rail: search + grouped navigation. */}
-        <aside className="flex w-60 shrink-0 flex-col border-r border-line bg-surface">
+        <aside className="flex shrink-0 flex-col border-b border-line bg-surface md:w-60 md:border-r md:border-b-0">
           <div className="flex items-center justify-between px-4 pt-4 pb-2">
             <h2 id={titleId} className="text-body font-medium">Settings</h2>
             <button type="button" aria-label="Close settings" onClick={close} className="rounded-control p-1.5 text-muted hover:bg-selected hover:text-ink md:hidden"><X className="size-4" /></button>
@@ -141,11 +143,15 @@ export function SettingsDialog() {
               />
             </div>
           </div>
-          <nav aria-label="Settings navigation" className="min-h-0 flex-1 overflow-auto px-2 pb-4">
+          <nav
+            aria-label="Settings navigation"
+            className="flex min-h-0 flex-1 items-center gap-1 overflow-x-auto px-2 pb-2 md:block md:overflow-x-visible md:overflow-y-auto md:pb-4"
+          >
             {groups.length === 0 && <p className="px-3 py-4 text-caption text-muted">No matching settings.</p>}
             {groups.map(([group, items]) => (
-              <div key={group} className="mt-3">
-                <p className="px-3 pb-1 text-caption font-medium text-muted">{group}</p>
+              <div key={group} className="contents md:mt-3 md:block">
+                {/* Group headings are rail furniture: on a phone the items are one flat row. */}
+                <p className="hidden px-3 pb-1 text-caption font-medium text-muted md:block">{group}</p>
                 {items.map((item) => (
                   <button
                     key={item.id}
@@ -153,7 +159,7 @@ export function SettingsDialog() {
                     aria-current={item.id === page ? "page" : undefined}
                     onClick={() => { setPage(item.id); setQuery(""); }}
                     className={cn(
-                      "flex w-full items-center gap-2.5 rounded-control px-3 py-2 text-left text-body-sm transition-colors",
+                      "flex w-full shrink-0 items-center gap-2.5 rounded-control px-3 py-2 text-left text-body-sm transition-colors",
                       item.id === page ? "bg-selected text-ink" : "text-muted hover:bg-quiet hover:text-ink",
                     )}
                   >
@@ -168,10 +174,10 @@ export function SettingsDialog() {
 
         {/* Right content: fixed reading width, page title + sections. */}
         <div className="flex min-w-0 flex-1 flex-col">
-          <div className="flex h-12 shrink-0 items-center justify-end px-4">
+          <div className="hidden h-12 shrink-0 items-center justify-end px-4 md:flex">
             <Button size="icon-sm" variant="ghost" aria-label="Close settings" onClick={close}><X className="size-4" /></Button>
           </div>
-          <div className="min-h-0 flex-1 overflow-auto px-6 pb-12 md:px-12">
+          <div className="min-h-0 flex-1 overflow-auto px-4 pt-4 pb-10 md:px-12 md:pt-0 md:pb-12">
             <div className="mx-auto w-full max-w-2xl">
               <h1 className="text-title-sm font-medium text-ink">{active.label}</h1>
               <div className="mt-2">

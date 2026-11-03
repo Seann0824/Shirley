@@ -323,6 +323,14 @@ impl AgentFactory {
         // Memory writes go **through no** tool; they are done only by the background curator (`docs/memory.md` decision 3).
         let _ = tool_manager.register(tools::RecallTool::new(Arc::clone(&memory)));
 
+        // Computer use: drive other apps' windows through the accessibility API. Registered on
+        // every platform -- the non-macOS build answers "unsupported" honestly instead of hiding
+        // the tools, so the tool table (and therefore the prompt prefix) is identical everywhere.
+        let _ = tool_manager.register(tools::computer_apps::tool());
+        let _ = tool_manager.register(tools::computer_snapshot::tool());
+        let _ = tool_manager.register(tools::computer_act::tool());
+        let _ = tool_manager.register(tools::computer_key::tool());
+
         // Skill runtime (application-layer capability): the catalog is read-only and shared across sessions; the activated set is **created fresh per session**
         // (activation state is isolated per session). `activate_skill` writes, `SkillContextProvider` reads,
         // sharing the same `Arc`, exactly like the runtime dispatch of todo / memory.

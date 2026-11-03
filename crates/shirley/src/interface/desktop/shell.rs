@@ -530,6 +530,22 @@ async fn agent_set_model(
         .await
 }
 
+/// Change the reasoning effort shown next to the model name in the composer.
+///
+/// `None` clears it back to the provider default. Same model, so no selection write.
+#[tauri::command]
+async fn agent_set_reasoning_effort(
+    state: State<'_, DesktopState>,
+    project: String,
+    effort: Option<String>,
+    session: Option<String>,
+) -> Result<(), String> {
+    state
+        .manager
+        .set_reasoning_effort(&project, effort.as_deref(), session.as_deref())
+        .await
+}
+
 /// Turn an artifact id into a URL the webview can load (`docs/render-parts.md` P1).
 ///
 /// The id is validated against the project's artifact jail here; what comes back is an
@@ -586,6 +602,86 @@ async fn agent_ingest_bytes(
 /// The library is the user's own inventory of handed-over media, not a view of one session, so
 /// this reads the same `ArtifactStore` the ingest commands write to. Entries carry an opaque id;
 /// the page turns that into a thumbnail URL through `agent_asset_url`, exactly like a part does.
+// ---------------------------------------------------------------------------
+// Task pool (`crates/shirley/src/pool/mod.rs`)
+//
+// Every mutation returns the whole list: the pool surface re-renders from one snapshot, so it never
+// has to reconcile a partial update against concurrent background progress.
+// ---------------------------------------------------------------------------
+
+#[tauri::command]
+async fn agent_pool_list(
+    state: State<'_, DesktopState>,
+    project: String,
+) -> Result<Vec<crate::pool::PoolTask>, String> {
+    state.manager.pool_list(&project).await
+}
+
+#[tauri::command]
+async fn agent_pool_enqueue(
+    state: State<'_, DesktopState>,
+    project: String,
+    brief: String,
+) -> Result<Vec<crate::pool::PoolTask>, String> {
+    state.manager.pool_enqueue(&project, &brief).await
+}
+
+#[tauri::command]
+async fn agent_pool_accept(
+    state: State<'_, DesktopState>,
+    project: String,
+    id: String,
+) -> Result<Vec<crate::pool::PoolTask>, String> {
+    state.manager.pool_accept(&project, &id).await
+}
+
+#[tauri::command]
+async fn agent_pool_reject(
+    state: State<'_, DesktopState>,
+    project: String,
+    id: String,
+    note: String,
+) -> Result<Vec<crate::pool::PoolTask>, String> {
+    state.manager.pool_reject(&project, &id, &note).await
+}
+
+#[tauri::command]
+async fn agent_pool_retry(
+    state: State<'_, DesktopState>,
+    project: String,
+    id: String,
+) -> Result<Vec<crate::pool::PoolTask>, String> {
+    state.manager.pool_retry(&project, &id).await
+}
+
+#[tauri::command]
+async fn agent_pool_transition(
+    state: State<'_, DesktopState>,
+    project: String,
+    id: String,
+    status: crate::pool::TaskStatus,
+) -> Result<Vec<crate::pool::PoolTask>, String> {
+    state.manager.pool_transition(&project, &id, status).await
+}
+
+#[tauri::command]
+async fn agent_pool_cancel(
+    state: State<'_, DesktopState>,
+    project: String,
+    id: String,
+) -> Result<Vec<crate::pool::PoolTask>, String> {
+    state.manager.pool_cancel(&project, &id).await
+}
+
+#[tauri::command]
+async fn agent_pool_remove(
+    state: State<'_, DesktopState>,
+    project: String,
+    id: String,
+) -> Result<Vec<crate::pool::PoolTask>, String> {
+    state.manager.pool_remove(&project, &id).await
+}
+
 #[tauri::command]
 async fn agent_library_list(
     state: State<'_, DesktopState>,
@@ -857,12 +953,21 @@ pub fn run(factory: crate::bootstrap::AgentFactory) -> std::io::Result<()> {
             agent_model_name,
             agent_list_models,
             agent_set_model,
+            agent_set_reasoning_effort,
             agent_search_files,
             agent_asset_url,
             agent_asset_text,
             agent_ingest_paths,
             agent_ingest_bytes,
             agent_library_list,
+            agent_pool_list,
+            agent_pool_enqueue,
+            agent_pool_accept,
+            agent_pool_reject,
+            agent_pool_retry,
+            agent_pool_transition,
+            agent_pool_cancel,
+            agent_pool_remove,
             agent_list_skills,
             agent_activate_skill,
             agent_list_sessions,

@@ -95,6 +95,9 @@ pub struct ProjectRuntimeManager {
     ///
     /// A `std::sync::Mutex` on purpose: the Tauri scheme handler is a synchronous function.
     assets: Arc<std::sync::Mutex<HashMap<String, AssetEntry>>>,
+    /// Task pools, one per project, opened lazily like the runtimes (`../pool/mod.rs`).
+    #[cfg(feature = "desktop")]
+    pools: Arc<Mutex<HashMap<String, Arc<Mutex<crate::pool::TaskPool>>>>>,
 }
 
 /// One minted asset handle. Deliberately holds the *resolved* jail file, not an id to re-resolve:
@@ -142,6 +145,8 @@ impl ProjectRuntimeManager {
             status_sink: Arc::new(|_| {}),
             chat_root,
             assets: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            #[cfg(feature = "desktop")]
+            pools: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -702,10 +707,15 @@ impl ProjectRuntimeManager {
         let entries = catalog.list().await;
         Ok(entries
             .into_iter()
-            .map(|entry| ModelEntryWire {
-                label: entry.label,
-                value: entry.value,
-                provider: entry.provider,
+            .map(|entry| {
+                let (efforts, effort) = reasoning_efforts(&entry);
+                ModelEntryWire {
+                    label: entry.label,
+                    value: entry.value,
+                    provider: entry.provider,
+                    efforts,
+                    effort,
+                }
             })
             .collect())
     }
@@ -759,6 +769,59 @@ impl ProjectRuntimeManager {
             .filter(|e| e.configured.is_some())
             .map(|e| e.value.clone());
         session.select_model(config, key)
+    }
+
+    /// Change the reasoning effort of the session's current model.
+    ///
+    /// The effort is shown next to the model name in the composer and adjusted right there --
+    /// one model entry, no second selector, and nothing on the provider-configuration side.
+    ///
+    /// Two writes with one meaning: the choice is persisted **onto the model definition** (so
+    /// switching back to the model later keeps it, and `model_config_for` re-derives it) and the
+    /// live `Agent` is hot-swapped through `set_model_config` -- no rebuild, no new chat. Models
+    /// that are not host-configured (static / remote catalog entries) have no definition to
+    /// persist to; only the live config changes then.
+    pub async fn set_reasoning_effort(
+        &self,
+        project: &str,
+        effort: Option<&str>,
+        target_session: Option<&str>,
+    ) -> Result<(), String> {
+        let runtime = self.ensure_runtime(project).await?;
+        let (factory, session_name) = {
+            let guard = runtime.lock().await;
+            (
+                Arc::clone(&guard.factory),
+                target_session
+                    .map(str::to_string)
+                    .or_else(|| guard.sessions.active_name().map(str::to_string))
+                    .ok_or("no active session")?,
+            )
+        };
+        let mut guard = runtime.lock().await;
+        let root = factory.model_providers_root().to_path_buf();
+        let session = guard
+            .sessions
+            .session_mut(&session_name)
+            .ok_or("session no longer exists")?;
+        let mut config = session
+            .agent
+            .as_ref()
+            .ok_or_else(|| "对话正在执行，请结束后再调整".to_owned())?
+            .model_config()
+            .clone();
+        // Persist first: if the definition write is rejected (registry edited elsewhere), the
+        // live config must not be left disagreeing with what the model definition says.
+        if let Some((provider_id, model_id)) = session
+            .model_selection
+            .as_deref()
+            .and_then(|key| key.strip_prefix("provider:"))
+            .and_then(|rest| rest.split_once(':'))
+        {
+            crate::model_providers::set_model_effort(&root, provider_id, model_id, effort)?;
+        }
+        config.reasoning_effort = effort.map(str::to_string);
+        session.hot_swap_model_config(config)
     }
 
     // -----------------------------------------------------------------------
@@ -1267,6 +1330,38 @@ pub struct ModelEntryWire {
     pub label: String,
     pub value: String,
     pub provider: String,
+    /// Reasoning-effort levels this model accepts (`docs/desktop-interface.md`).
+    ///
+    /// Empty means "no effort affordance": either the model is not host-configured, or it is on
+    /// a protocol where the SDK deliberately ignores `reasoning_effort` (Anthropic Messages).
+    pub efforts: Vec<String>,
+    /// The effort currently written into the model definition (`None` = provider default).
+    pub effort: Option<String>,
+}
+
+/// Reasoning-effort capability of one catalog entry, as the composer sees it.
+///
+/// `GET /models` does not report "which efforts do you accept", so the fact is derived from what
+/// we do know: a host-local configured model that is **not** on the Anthropic Messages protocol
+/// (where the SDK deliberately drops `reasoning_effort`) accepts the standard three levels.
+/// Unconfigured entries (static fallback / remote catalog) declare nothing, so the composer shows
+/// no effort affordance for them rather than offering a knob that would silently do nothing.
+fn reasoning_efforts(entry: &crate::models::ModelEntry) -> (Vec<String>, Option<String>) {
+    match &entry.configured {
+        Some(configured)
+            if configured.provider.protocol
+                != crate::model_providers::Protocol::AnthropicMessages =>
+        {
+            (
+                ["low", "medium", "high"]
+                    .into_iter()
+                    .map(str::to_string)
+                    .collect(),
+                configured.model.reasoning_effort.clone(),
+            )
+        }
+        _ => (Vec::new(), None),
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -1411,6 +1506,9 @@ pub fn user_content(store: &ArtifactStore, prompt: &str, media: &[String]) -> Co
     }
     Content::from(parts)
 }
+
+#[cfg(feature = "desktop")]
+mod pool;
 
 #[cfg(test)]
 mod tests {

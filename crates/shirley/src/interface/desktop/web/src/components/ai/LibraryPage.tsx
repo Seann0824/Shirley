@@ -1,5 +1,4 @@
 import {
-  ArrowLeft,
   ArrowUpDown,
   ChevronDown,
   FileText,
@@ -123,15 +122,6 @@ export function LibraryPage({
             {/* Leaving the library is the one thing this page must always offer: on a phone it is
                 a full-surface page with no rail behind it, so without this the only exits were
                 "pick a file" or reload. */}
-            <button
-              type="button"
-              aria-label="Back to chat"
-              title="Back to chat"
-              onClick={onClose}
-              className={ICON_BUTTON}
-            >
-              <ArrowLeft className="size-4" />
-            </button>
             <h1 className="truncate font-display text-title-sm text-ink">Library</h1>
           </div>
           <div className="flex flex-wrap items-center gap-2">

@@ -329,6 +329,8 @@ struct CmdArgs {
     path: Option<String>,
     title: Option<String>,
     model: Option<String>,
+    /// Reasoning effort for `agent_set_reasoning_effort` (`None` = provider default).
+    effort: Option<String>,
     query: Option<String>,
     text: Option<String>,
     references: Option<Vec<String>>,
@@ -482,6 +484,13 @@ async fn dispatch(
             let model = args.model.ok_or_else(|| ApiError::bad("missing model"))?;
             manager
                 .set_model(&project, &model, args.session.as_deref())
+                .await?;
+            no_content()
+        }
+        "agent_set_reasoning_effort" => {
+            let project = args.project()?;
+            manager
+                .set_reasoning_effort(&project, args.effort.as_deref(), args.session.as_deref())
                 .await?;
             no_content()
         }

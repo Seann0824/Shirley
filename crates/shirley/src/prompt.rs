@@ -35,6 +35,8 @@ const SUBAGENT_GUIDE_TEMPLATE: &str = include_str!("../prompts/subagent_guide.md
 /// its primary root. `plan.md` records that an AI without the workspace root wanders from the
 /// filesystem root; the same applies to every attached folder, so they must be told explicitly.
 const EXTRA_ROOTS_TEMPLATE: &str = include_str!("../prompts/extra_roots.md");
+/// Computer-use guidance. Only injected where the `computer_*` tools can actually work.
+const COMPUTER_TEMPLATE: &str = include_str!("../prompts/computer.md");
 
 /// Resolve the coding agent's workspace root.
 ///
@@ -138,6 +140,15 @@ fn render_with_roots(root: &Path, extra_roots: &[PathBuf], subagents: bool) -> S
         render_template(EXTRA_ROOTS_TEMPLATE, &[("extra_roots", list.trim_end())])
     };
 
+    // Computer use exists only on macOS: the tools are registered everywhere (a stable tool table
+    // keeps the prompt prefix identical), but describing them on a platform where they can only
+    // answer "unsupported" would send the model chasing a capability it does not have.
+    let computer_block = if cfg!(target_os = "macos") {
+        COMPUTER_TEMPLATE.to_owned()
+    } else {
+        String::new()
+    };
+
     let working_dir = root.display().to_string();
     render_template(
         SYSTEM_TEMPLATE,
@@ -146,6 +157,7 @@ fn render_with_roots(root: &Path, extra_roots: &[PathBuf], subagents: bool) -> S
             ("project_guide", &guide_block),
             ("subagent_guide", &subagent_block),
             ("extra_roots", &extra_block),
+            ("computer", &computer_block),
         ],
     )
 }
@@ -166,6 +178,29 @@ mod tests {
             text.contains(&dir.display().to_string()),
             "should contain the working directory: {text}"
         );
+    }
+
+    #[test]
+    fn render_teaches_the_computer_tools_only_where_they_work() {
+        // The computer tools are registered on every platform, but the guidance must only promise
+        // them on macOS (elsewhere they can only answer "unsupported").
+        let dir = tempfile_dir("render_computer");
+        let text = render(&dir);
+        if cfg!(target_os = "macos") {
+            assert!(
+                text.contains("computer_snapshot"),
+                "macOS prompt should teach the computer tools: {text}"
+            );
+            assert!(
+                text.contains("@e7") || text.contains("ref"),
+                "macOS prompt should explain refs: {text}"
+            );
+        } else {
+            assert!(
+                !text.contains("computer_snapshot"),
+                "non-macOS prompt should not advertise the computer tools: {text}"
+            );
+        }
     }
 
     #[test]
