@@ -1,4 +1,5 @@
 pub mod desktop;
+pub(crate) mod exec;
 #[cfg(any(feature = "desktop", feature = "server"))]
 pub(crate) mod runtime;
 #[cfg(feature = "server")]

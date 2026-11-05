@@ -18,6 +18,12 @@ type AiChatComposerProps = Omit<ComponentPropsWithoutRef<"form">, "children" | "
   uploading?: boolean;
   rows?: number;
   maxLength?: number;
+  /**
+   * `stack` (default) is the desktop shape: text on top, `attach … model · send` underneath.
+   * `row` is the phone shape and the one a chat app uses: `attach [input] model send` on a
+   * single line, so the field the user touches and the button they press are next to each other.
+   */
+  layout?: "stack" | "row";
   textareaRef?: Ref<HTMLTextAreaElement>;
   textareaClassName?: string;
   textareaOnKeyDown?: (event: React.KeyboardEvent<HTMLTextAreaElement>) => boolean | void;
@@ -56,6 +62,7 @@ export function AiChatComposer({
   uploading = false,
   rows = 2,
   maxLength,
+  layout = "stack",
   textareaRef,
   autoFocus,
   className,
@@ -74,6 +81,33 @@ export function AiChatComposer({
   // A single adaptive button: non-empty input = send (queued if running); empty input while generating = pause/stop.
   const hasContent = value.trim().length > 0 || hasAttachments;
   const showStop = !hasContent && busy && Boolean(onStop);
+  const sendControls = showStop ? (
+    <Button
+      type="button"
+      variant="primary"
+      size="icon-xs"
+      aria-label="Stop generating"
+      disabled={disabled}
+      className="rounded-full"
+      onClick={(event) => {
+        event.preventDefault();
+        onStop?.();
+      }}
+    >
+      <Square data-icon="inline-start" fill="currentColor" />
+    </Button>
+  ) : hasContent || layout !== "row" ? (
+    <Button
+      type="submit"
+      variant="primary"
+      size="icon-xs"
+      aria-label={busy ? "Add to queue, send after the previous turn finishes" : sendLabel}
+      disabled={disabled || uploading || !hasContent}
+      className="rounded-full"
+    >
+      <ArrowUp data-icon="inline-start" />
+    </Button>
+  ) : null;
   return (
     <form
       className={cn(
@@ -94,6 +128,33 @@ export function AiChatComposer({
       }}
     >
       {children}
+      {layout === "row" ? (
+        <div className="order-1 flex min-w-0 items-center gap-1.5">
+          <div className="flex shrink-0 items-center gap-1">{leadingAction}</div>
+          <div className="min-w-0 flex-1">
+            {inputSlot ?? (
+              <input
+                ref={textareaRef as unknown as Ref<HTMLInputElement>}
+                id={id}
+                autoFocus={autoFocus}
+                value={value}
+                maxLength={maxLength}
+                enterKeyHint="enter"
+                aria-label={label}
+                className="h-9 w-full rounded-full border-0 bg-canvas px-3 text-body-sm outline-none placeholder:text-muted"
+                placeholder={placeholder}
+                disabled={disabled}
+                onChange={(event) => onValueChange(event.target.value)}
+              />
+            )}
+          </div>
+          <div className="flex shrink-0 items-center gap-1">
+            {trailingAction}
+            {sendControls}
+          </div>
+        </div>
+      ) : (
+        <>
       <div className="order-1 min-w-0 px-0.5 pt-0.5">
         {inputSlot ?? (
           <>
@@ -130,35 +191,11 @@ export function AiChatComposer({
         <div className="flex min-w-0 items-center gap-1">{leadingAction}</div>
         <div className="flex shrink-0 items-center gap-1">
           {trailingAction}
-          {showStop ? (
-            <Button
-              type="button"
-              variant="primary"
-              size="icon-xs"
-              aria-label="Stop generating"
-              disabled={disabled}
-              className="rounded-full"
-              onClick={(event) => {
-                event.preventDefault();
-                onStop?.();
-              }}
-            >
-              <Square data-icon="inline-start" fill="currentColor" />
-            </Button>
-          ) : (
-            <Button
-              type="submit"
-              variant="primary"
-              size="icon-xs"
-              aria-label={busy ? "Add to queue, send after the previous turn finishes" : sendLabel}
-              disabled={disabled || uploading || !hasContent}
-              className="rounded-full"
-            >
-              <ArrowUp data-icon="inline-start" />
-            </Button>
-          )}
+          {sendControls}
         </div>
       </div>
+        </>
+      )}
     </form>
   );
 }

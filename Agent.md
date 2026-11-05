@@ -8,13 +8,34 @@ This document is written for the next Agent (or human) who takes over this repos
 
 **1. What this is**
 
-Shirley is a Coding Agent written in Rust. The name comes from Shirley in *Code Geass*; the character setup in `prompts/system.md` (the system prompt) is written around her -- it is both a personality test case and the real default persona.
+Shirley is a **personal agent** written in Rust: an agent you deploy on your own machine (a cloud host, a home server) that you hand work to from your phone, and that operates the software itself to finish the job. The name comes from Shirley in *Code Geass*; the character setup in `prompts/system.md` (the system prompt) is written around her -- it is both a personality test case and the real default persona.
+
+**The main line -- read this before you add anything.** One loop, end to end:
+
+> from the phone, hand a task to the machine on the cloud -> it operates the software and finishes it -> a delivery comes back to you.
+
+Everything else is either a means to that loop or frozen. A coding agent is a *subset* of this (writing code is one of the things the machine does), not the product. This is not a rebrand on paper: the code already moved. `crates/shirley/src/pool/` is the queue, `interface/runtime/pool.rs` is the executor, `tools/computer.rs` is the hands, `interface/server/` is the always-on transport, `docs/cloud-server.md` and `docs/mobile-web.md` are its entry points. What was missing was the bridge between the queue and the always-on host; `interface/server` now sweeps it on a resident timer (`ProjectRuntimeManager::pool_tick_all`), so **the queue advances with no browser open**.
+
+**The acceptance test is exactly one line**: *are you still using it every day, two weeks from now?* Not "are the features complete". A capability that does not make that answer yes is not a priority -- it is a distraction, however good it is.
+
+**Frozen -- stop investing, do not delete.** These earned their place in the coding-agent era and still work; they are simply not the main line any more. Touching them needs a reason that names the loop above:
+
+| Frozen | Why it is not the main line |
+| --- | --- |
+| `rewind` (history rewind / in-place edit box) | An ergonomic for a long keyboard session. The phone client has no such session. |
+| Fine-grained markdown rendering (tables, nested lists, task lists in `interface/tui/markdown.rs`) | Terminal polish. The main surfaces are a chat box and a task list. |
+| Multi-project sidebar / project management UI | A developer's filesystem view. One deployment serves one person; projects are an implementation detail of storage. |
+| `grep` / `read` / `bash` beyond correctness | They are the *local* hands. The main line needs the machine's hands (`computer_*`) and service connectors, not better text-file tools. |
+
+Frozen means **frozen, not removed**: bugs in a frozen feature still get fixed, because a broken feature still costs the one user you have. What stops is *investment* -- new capabilities, refactors, polish.
+
+One gap is **not** frozen and must be treated as a blocker rather than as debt: the sandbox is `isolation: none` (a bare process -- no filesystem isolation, no resource limits, no network isolation, the workspace is only a `cwd`). In a coding agent that was technical debt. In a personal agent -- one that can read `~/.ssh` and `.env` and send messages on your behalf -- it fails on day one. A real backend (`bwrap` / `sandbox-exec`), approval on writes and hard refusal of sensitive paths is the next structural change, not a nice-to-have; see `docs/security.md`.
 
 The whole repository is split into three layers:
 
 | Layer | Location | Responsibility |
 | --- | --- | --- |
-| Application layer | `crates/shirley/src/` | A runnable TUI chat Agent that registers tools and drives the interface |
+| Application layer | `crates/shirley/src/` | A runnable agent application -- TUI / desktop / cloud server interfaces over one shared runtime |
 | SDK layer | `crates/shirley-agent-sdk/` | Business-agnostic Agent fundamentals: messages, tools, protocol adapters, the ReAct runtime, sandbox, workspace |
 | Macro layer | `crates/shirley-agent-sdk-macros/` | The `#[tool]` attribute macro that turns an ordinary async function into a model-callable tool |
 
@@ -37,7 +58,7 @@ memory/ skills/ subagent/ tools/   capabilities
 
 The flat historical paths (`crate::settings`, `crate::session`, …) still work: `lib.rs` re-exports `pub(crate) use domain::{...}` / `pub(crate) use infra::{...}`. Four production **module cycles** remain as known debt (breaking them needs type relocation, not directory moves): `settings ↔ storage`, `remote ↔ memory`, `models ↔ model_providers`, `bootstrap ↔ subagent`.
 
-The core design goal is written in the root `plan.md`: the SDK should only accumulate "capabilities you would still need the next time you build an Agent", with no business logic mixed in. The current focus is the "Coding Agent" scenario, i.e. using it for long tasks such as migrating a TS backend to Rust.
+The core design goal is written in the root `plan.md`: the SDK should only accumulate "capabilities you would still need the next time you build an Agent", with no business logic mixed in. The current focus is the personal-agent loop above -- `plan.md:392` already puts it in one line: *"A coding agent is essentially just the first step; the core is a personal agent."*
 
 **Prompts always go through md (a convention)**: the **body text** of every system prompt / injected copy / compression template is maintained in `prompts/*.md` (application layer) and `crates/shirley-agent-sdk/prompts/*.md` (SDK). Rust code only `include_str!`s the template and fills dynamic values via `{{placeholder}}` (`crates/shirley/src/infra/prompt_template.rs::render`, a single pass, unknown placeholders kept verbatim). Changing copy does not require changing code; to add dynamic content, add a placeholder. Current templates: `system.md` / `project_guide.md` / `project_guide_missing.md` / `compression_instruction.md` / `todo_header.md` / `todo_nag.md` / `skills_header.md` / `curator_*.md` (application layer), `compaction_template.md` (SDK).
 

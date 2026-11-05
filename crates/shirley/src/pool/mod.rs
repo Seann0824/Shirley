@@ -21,13 +21,6 @@
 //! atomically on every transition: a pool that survives a crash is worth more than one that is
 //! clever about batching writes.
 
-// Driving the queue lives in `interface::runtime::pool` (desktop only), so in a `--features server`
-// build the only consumer of this module is its own unit tests.
-#![cfg_attr(
-    not(feature = "desktop"),
-    expect(dead_code, reason = "consumed by the desktop task-pool scheduler")
-)]
-
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};

@@ -12,7 +12,7 @@ mod cf;
 mod input;
 
 use accessibility_sys as ax;
-use cf::{CfOwned, CfStr};
+use core_foundation::base::{CFType, TCFType};
 use core_foundation_sys::{
     base::{CFRelease, CFTypeRef},
     dictionary::{
@@ -48,7 +48,7 @@ const WINDOW_LIST_ON_SCREEN_ONLY: u32 = 1 << 0;
 const WINDOW_LIST_EXCLUDE_DESKTOP: u32 = 1 << 4;
 
 /// An owned `AXUIElement` (or any CF value used as one). Released on drop.
-struct Element(CfOwned);
+struct Element(CFType);
 
 impl Element {
     fn from_owned(raw: CFTypeRef) -> Option<Self> {
@@ -56,16 +56,13 @@ impl Element {
     }
 
     fn as_ref(&self) -> ax::AXUIElementRef {
-        self.0.as_ref().cast_mut().cast()
+        self.0.as_CFTypeRef().cast_mut().cast()
     }
 }
 
-fn owned(raw: CFTypeRef) -> Option<CfOwned> {
-    if raw.is_null() {
-        return None;
-    }
-    // SAFETY: callers pass the `+1` reference returned by a CoreFoundation copy / create call.
-    Some(unsafe { CfOwned::from_owned(raw) })
+/// Adopt the `+1` reference returned by a CoreFoundation copy / create call.
+fn owned(raw: CFTypeRef) -> Option<CFType> {
+    cf::owned(raw)
 }
 
 pub(super) fn is_trusted(prompt: bool) -> bool {
@@ -122,13 +119,14 @@ fn ensure_trusted() -> Result<(), ComputerError> {
 // attribute plumbing
 // ---------------------------------------------------------------------------------------------
 
-fn copy_attr(element: ax::AXUIElementRef, attribute: &str) -> Option<CfOwned> {
-    let name = CfStr::new(attribute)?;
+fn copy_attr(element: ax::AXUIElementRef, attribute: &str) -> Option<CFType> {
+    let name = cf::string(attribute);
     let mut value: CFTypeRef = std::ptr::null();
     // SAFETY: `element` is a live AXUIElement and `name` a live CFString; the API writes a `+1`
     // value into `value` on success, whose ownership we take.
-    let status =
-        unsafe { ax::AXUIElementCopyAttributeValue(element, name.as_ref(), &raw mut value) };
+    let status = unsafe {
+        ax::AXUIElementCopyAttributeValue(element, name.as_concrete_TypeRef(), &raw mut value)
+    };
     if status != ax::kAXErrorSuccess {
         return None;
     }
@@ -137,12 +135,12 @@ fn copy_attr(element: ax::AXUIElementRef, attribute: &str) -> Option<CfOwned> {
 
 fn string_attr(element: ax::AXUIElementRef, attribute: &str) -> Option<String> {
     let value = copy_attr(element, attribute)?;
-    cf::to_string(value.as_ref())
+    cf::to_string(&value)
 }
 
 fn bool_attr(element: ax::AXUIElementRef, attribute: &str) -> Option<bool> {
     let value = copy_attr(element, attribute)?;
-    cf::to_bool(value.as_ref())
+    cf::to_bool(&value)
 }
 
 fn set_bool_attr(
@@ -150,8 +148,7 @@ fn set_bool_attr(
     attribute: &str,
     value: bool,
 ) -> Result<(), ComputerError> {
-    let name = CfStr::new(attribute)
-        .ok_or_else(|| ComputerError::failed(format!("bad attribute name '{attribute}'")))?;
+    let name = cf::string(attribute);
     let flag = if value {
         // SAFETY: framework-owned CF boolean constant, only borrowed for the call.
         unsafe { kCFBooleanTrue.cast::<std::ffi::c_void>() }
@@ -160,7 +157,8 @@ fn set_bool_attr(
         unsafe { core_foundation_sys::number::kCFBooleanFalse.cast::<std::ffi::c_void>() }
     };
     // SAFETY: `element` is live, `name` a live CFString, and `flag` a valid CF boolean value.
-    let status = unsafe { ax::AXUIElementSetAttributeValue(element, name.as_ref(), flag) };
+    let status =
+        unsafe { ax::AXUIElementSetAttributeValue(element, name.as_concrete_TypeRef(), flag) };
     if status == ax::kAXErrorSuccess {
         Ok(())
     } else {
@@ -172,29 +170,28 @@ fn set_bool_attr(
 }
 
 fn is_settable(element: ax::AXUIElementRef, attribute: &str) -> bool {
-    let Some(name) = CfStr::new(attribute) else {
-        return false;
-    };
+    let name = cf::string(attribute);
     let mut settable: u8 = 0;
     // SAFETY: `element` / `name` are live; `settable` is a valid out-parameter.
-    let status =
-        unsafe { ax::AXUIElementIsAttributeSettable(element, name.as_ref(), &raw mut settable) };
+    let status = unsafe {
+        ax::AXUIElementIsAttributeSettable(element, name.as_concrete_TypeRef(), &raw mut settable)
+    };
     status == ax::kAXErrorSuccess && settable != 0
 }
 
+/// The children of `element` for `attribute`, each with a reference of its own.
+///
+/// The child must outlive the array it came from, so it has to be retained exactly once. That used
+/// to be a hand-written `retain` plus a second owner over the same pointer, which released the
+/// reference `Element` still held: the count fell back to the array's, the array's death freed the
+/// child, and the next `AXUIElementCopyAttributeValue` on it trapped inside `CFGetTypeID` (SIGTRAP)
+/// -- how `computer_snapshot` used to crash. `cf::array_items` owns the retained reference and
+/// `Element` takes that same owner over; there is no second wrapper to get wrong.
 fn element_list(element: ax::AXUIElementRef, attribute: &str) -> Vec<Element> {
     let Some(value) = copy_attr(element, attribute) else {
         return Vec::new();
     };
-    cf::array_items(value.as_ref())
-        .into_iter()
-        .filter_map(|item| {
-            // SAFETY: `item` is a valid element inside `value`, which outlives this iteration; we
-            // retain it so it survives `value` being dropped.
-            let child = unsafe { cf::retain(item) };
-            Element::from_owned(child.as_ref())
-        })
-        .collect()
+    cf::array_items(&value).into_iter().map(Element).collect()
 }
 
 fn action_names(element: ax::AXUIElementRef) -> Vec<String> {
@@ -207,9 +204,9 @@ fn action_names(element: ax::AXUIElementRef) -> Vec<String> {
     let Some(array) = owned(names.cast()) else {
         return Vec::new();
     };
-    cf::array_items(array.as_ref())
+    cf::array_items(&array)
         .into_iter()
-        .filter_map(cf::to_string)
+        .filter_map(|value| cf::to_string(&value))
         .collect()
 }
 
@@ -217,7 +214,7 @@ fn action_names(element: ax::AXUIElementRef) -> Vec<String> {
 /// numbers into something readable.
 fn value_of(element: ax::AXUIElementRef, role: &str) -> Option<String> {
     let value = copy_attr(element, ax::kAXValueAttribute)?;
-    let raw = value.as_ref();
+    let raw = &value;
     if let Some(text) = cf::to_string(raw) {
         return (!text.trim().is_empty()).then_some(text);
     }
@@ -253,10 +250,11 @@ fn describe(status: ax::AXError) -> String {
 // apps
 // ---------------------------------------------------------------------------------------------
 
-fn dict_value(dict: CFDictionaryRef, key: CFStringRef) -> CFTypeRef {
-    // SAFETY: `dict` / `key` are live CoreFoundation values; the returned borrow is only read
-    // while `dict` is alive.
-    unsafe { CFDictionaryGetValue(dict, key.cast()) }
+fn dict_value(dict: CFDictionaryRef, key: CFStringRef) -> Option<CFType> {
+    // SAFETY: `dict` / `key` are live CoreFoundation values; the borrow is retained into an owner
+    // of its own before `dict` can go away.
+    let raw = unsafe { CFDictionaryGetValue(dict, key.cast()) };
+    cf::retained(raw)
 }
 
 pub(super) fn apps() -> Result<Vec<AppInfo>, ComputerError> {
@@ -271,13 +269,16 @@ pub(super) fn apps() -> Result<Vec<AppInfo>, ComputerError> {
     };
     let frontmost = focused_pid();
     let mut found: Vec<AppInfo> = Vec::new();
-    for item in cf::array_items(list.as_ref()) {
-        let dict: CFDictionaryRef = item.cast();
+    for item in cf::array_items(&list) {
+        let dict: CFDictionaryRef = item.as_CFTypeRef().cast();
         // SAFETY: the statics are framework-owned CFString constants.
-        let pid = cf::to_i64(dict_value(dict, unsafe { kCGWindowOwnerPID }));
+        let pid =
+            dict_value(dict, unsafe { kCGWindowOwnerPID }).and_then(|value| cf::to_i64(&value));
         // SAFETY: framework-owned CFString constant.
         let layer_key = unsafe { kCGWindowLayer };
-        let layer = cf::to_i64(dict_value(dict, layer_key)).unwrap_or(0);
+        let layer = dict_value(dict, layer_key)
+            .and_then(|value| cf::to_i64(&value))
+            .unwrap_or(0);
         // Layer 0 is "normal window"; everything else is the menu bar, dock, tooltips, wallpaper.
         let (Some(pid), 0) = (pid, layer) else {
             continue;
@@ -287,7 +288,8 @@ pub(super) fn apps() -> Result<Vec<AppInfo>, ComputerError> {
             continue;
         }
         // SAFETY: framework-owned CFString constant.
-        let name = cf::to_string(dict_value(dict, unsafe { kCGWindowOwnerName }))
+        let name = dict_value(dict, unsafe { kCGWindowOwnerName })
+            .and_then(|value| cf::to_string(&value))
             .unwrap_or_else(|| format!("pid {pid}"));
         match found.iter_mut().find(|app| app.pid == pid) {
             Some(app) => app.windows += 1,
@@ -315,7 +317,8 @@ fn focused_pid() -> Option<i32> {
     let focused = copy_attr(system.as_ref(), ax::kAXFocusedApplicationAttribute)?;
     let mut pid: ax::pid_t = 0;
     // SAFETY: `focused` is a live application element; `pid` is a valid out-parameter.
-    let status = unsafe { ax::AXUIElementGetPid(focused.as_ref().cast_mut().cast(), &raw mut pid) };
+    let status =
+        unsafe { ax::AXUIElementGetPid(focused.as_CFTypeRef().cast_mut().cast(), &raw mut pid) };
     (status == ax::kAXErrorSuccess && pid > 0).then_some(pid)
 }
 
@@ -599,10 +602,9 @@ fn press(element: ax::AXUIElementRef) -> Result<String, ComputerError> {
 }
 
 fn perform_action(element: ax::AXUIElementRef, action: &str) -> Result<String, ComputerError> {
-    let name = CfStr::new(action)
-        .ok_or_else(|| ComputerError::failed(format!("bad action name '{action}'")))?;
+    let name = cf::string(action);
     // SAFETY: `element` and `name` are live for the duration of the call.
-    let status = unsafe { ax::AXUIElementPerformAction(element, name.as_ref()) };
+    let status = unsafe { ax::AXUIElementPerformAction(element, name.as_concrete_TypeRef()) };
     if status != ax::kAXErrorSuccess {
         return Err(ComputerError::failed(format!(
             "the element does not support {action}: {}",
@@ -619,14 +621,16 @@ fn set_value(element: ax::AXUIElementRef, value: &str) -> Result<String, Compute
 element and sends keystrokes)",
         ));
     }
-    let name = CfStr::new(ax::kAXValueAttribute)
-        .ok_or_else(|| ComputerError::failed("bad attribute name"))?;
-    let text = CfStr::new(value).ok_or_else(|| {
-        ComputerError::failed("the value contains a NUL byte and cannot be written")
-    })?;
+    let name = cf::string(ax::kAXValueAttribute);
+    let text = cf::string(value);
     // SAFETY: element / attribute / value are all live CF values.
-    let status =
-        unsafe { ax::AXUIElementSetAttributeValue(element, name.as_ref(), text.as_ref().cast()) };
+    let status = unsafe {
+        ax::AXUIElementSetAttributeValue(
+            element,
+            name.as_concrete_TypeRef(),
+            text.as_concrete_TypeRef().cast(),
+        )
+    };
     if status != ax::kAXErrorSuccess {
         return Err(ComputerError::failed(format!(
             "writing the value failed: {}",
@@ -744,6 +748,48 @@ mod tests {
         assert!(
             !apps.is_empty(),
             "a logged-in session has at least one window"
+        );
+    }
+
+    /// Regression: taking a child out of an array must add exactly one reference, not zero.
+    ///
+    /// The crash it guards against -- `computer_snapshot` -> `string_attr` -> `copy_attr` trapping
+    /// in `CFGetTypeID` -- was a reference-count underflow: the child was owned twice but released
+    /// once too often, so the element died together with its parent array and the next attribute
+    /// read went through a freed pointer. Retain counts are type-agnostic, so an ordinary CF value
+    /// exercises the same ownership protocol as an `AXUIElement`. A *mutable* value is used because
+    /// a short `CFString` can be a tagged pointer whose count reads as `isize::MAX`.
+    #[test]
+    fn a_retained_child_holds_exactly_one_reference() {
+        use core_foundation_sys::{
+            array::{CFArrayCreateMutable, kCFTypeArrayCallBacks},
+            base::CFGetRetainCount,
+        };
+
+        // SAFETY: documented creation call; the callbacks are the framework's own.
+        let array =
+            unsafe { CFArrayCreateMutable(std::ptr::null(), 0, &raw const kCFTypeArrayCallBacks) };
+        let holder = owned(array.cast()).expect("a mutable array is created");
+        let raw = holder.as_CFTypeRef();
+        // SAFETY: `raw` is a live CF array that `holder` keeps alive; only read here.
+        let before = unsafe { CFGetRetainCount(raw) };
+        assert!(before > 0, "a fresh object has a real retain count");
+
+        let taken = cf::retained(raw).expect("a non-null value is retained");
+        // SAFETY: `holder` still owns the object, so `raw` is live; this only reads a count.
+        let while_taken = unsafe { CFGetRetainCount(raw) };
+        assert_eq!(
+            while_taken,
+            before + 1,
+            "taking the value out of an array must add exactly one reference"
+        );
+
+        drop(taken);
+        // SAFETY: the original reference in `holder` keeps `raw` alive; only a count is read.
+        let after_drop = unsafe { CFGetRetainCount(raw) };
+        assert_eq!(
+            after_drop, before,
+            "dropping the taken value must hand that one reference back"
         );
     }
 

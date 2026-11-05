@@ -1020,3 +1020,94 @@ async fn over_budget_scratchpad_is_removed_before_tool_evidence() {
             .contains("confirmed conclusion")
     );
 }
+
+/// A turn stopped **during thinking** streams reasoning but no text. Recording that as an
+/// assistant message produces the wire form `{"role": "assistant", "content": null}` (reasoning is
+/// metadata, not content), which every provider rejects with "Invalid assistant message: content
+/// or tool_calls must be set" -- so the following turn died with a 400.
+#[tokio::test]
+async fn a_turn_stopped_while_thinking_leaves_no_unsendable_assistant() {
+    let thinking = sse(json!({"reasoning_content": "deliberating"}), false);
+    let server = Server::new(vec![
+        Response::truncated(&thinking),
+        Response::truncated(&thinking),
+        Response::truncated(&thinking),
+        Response::new(200, sse(json!({"content": "done"}), true)),
+    ]);
+    let mut agent = server.agent(true);
+    let error = agent.run("first").await.unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Transport);
+    assert_eq!(server.count(), 3);
+    // Nothing was said, so nothing is recorded: no empty assistant bubble in the transcript and
+    // no `content: null` turn for the next request.
+    assert!(agent.finish_interrupted_turn().is_empty());
+    assert!(
+        !agent
+            .messages()
+            .iter()
+            .any(|message| matches!(message, Message::Assistant { .. }))
+    );
+
+    agent.run("second").await.unwrap();
+    let requests = server.requests.lock().unwrap();
+    let messages = requests[3]["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .filter(|m| m["role"] == "assistant")
+            .all(|m| {
+                m["content"]
+                    .as_str()
+                    .is_some_and(|text| !text.trim().is_empty())
+                    || m["tool_calls"]
+                        .as_array()
+                        .is_some_and(|calls| !calls.is_empty())
+            }),
+        "an assistant turn with neither text nor tool calls cannot be encoded: {messages:?}"
+    );
+}
+
+/// The same shape can already be sitting in a log written by an older build (or by a driver that
+/// died mid-thinking). The outbound view repairs it; the stored history stays as the log wrote it.
+#[tokio::test]
+async fn a_reasoning_only_assistant_from_an_old_log_is_dropped_from_the_request() {
+    let server = Server::new(vec![Response::new(
+        200,
+        sse(json!({"content": "done"}), true),
+    )]);
+    let mut agent = Agent::builder()
+        .model_config(config(&server.url, true))
+        .messages(vec![
+            Message::User {
+                content: "first".into(),
+            },
+            Message::Assistant {
+                content: None,
+                reasoning_content: Some("half a thought".into()),
+                tool_calls: Vec::new(),
+            },
+            Message::User {
+                content: "second".into(),
+            },
+        ])
+        .build()
+        .unwrap();
+    agent.run("third").await.unwrap();
+
+    let requests = server.requests.lock().unwrap();
+    let messages = requests[0]["messages"].as_array().unwrap();
+    assert!(
+        messages
+            .iter()
+            .all(|m| m["role"] != "assistant" || m["content"].is_string()),
+        "the reasoning-only turn must not reach the wire: {messages:?}"
+    );
+    assert!(messages.iter().any(|m| m["content"] == "second"));
+    // Read-only repair: the log still holds the record, so nothing is silently deleted on disk.
+    assert!(
+        agent
+            .messages()
+            .iter()
+            .any(|message| matches!(message, Message::Assistant { .. }))
+    );
+}

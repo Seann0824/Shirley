@@ -17,7 +17,16 @@ export function VoiceInputButton({ voice, className }: { voice: VoiceInput; clas
 
   const listening = voice.state === "listening";
   const transcribing = voice.state === "transcribing";
-  const label = listening ? "Stop dictation" : transcribing ? "Transcribing" : "Dictate";
+  // `starting` is the permission / capture spin-up. It is not "off" and not "on", so the button
+  // shows the same spinner as transcription instead of a mic that ignores the next click.
+  const starting = voice.state === "starting";
+  const label = starting
+    ? "Opening the microphone"
+    : listening
+      ? "Stop dictation"
+      : transcribing
+        ? "Transcribing"
+        : "Dictate";
 
   return (
     <Button
@@ -40,7 +49,7 @@ export function VoiceInputButton({ voice, className }: { voice: VoiceInput; clas
       )}
       onClick={() => voice.toggle()}
     >
-      {transcribing ? (
+      {transcribing || starting ? (
         <Loader2 className="size-3.5 animate-spin" aria-hidden="true" />
       ) : listening ? (
         // A square is the universal "stop" mark; the mic glyph would leave the second click

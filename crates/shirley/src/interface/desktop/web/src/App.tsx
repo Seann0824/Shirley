@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Clock, LoaderCircle, Send, X } from "lucide-react";
+import { Clock, Keyboard, LoaderCircle, Mic, Send, X } from "lucide-react";
 import { DesktopChrome } from "@/components/DesktopChrome";
 import {
   AiConversationTranscript,
@@ -13,6 +13,8 @@ import { AssetUrlProvider } from "@/components/ai/RenderParts";
 import { TaskCard } from "@/components/ai/TaskCard";
 import { ModelSelector } from "@/components/ai/ModelSelector";
 import { VoiceInputButton } from "@/components/ai/VoiceInputButton";
+import { VoiceHoldBar } from "@/components/ai/VoiceHoldBar";
+import { VoiceHoldOverlay, type VoiceHoldZone } from "@/components/ai/VoiceHoldOverlay";
 import { ComposerAddMenu } from "@/components/ai/ComposerAddMenu";
 import { SessionSidebar } from "@/components/ai/SessionSidebar";
 import { EditProjectDialog } from "@/components/ai/EditProjectDialog";
@@ -34,7 +36,7 @@ import {
 } from "@/lib/file-mentions/MentionEditor";
 import { useFileMentionSearch } from "@/lib/file-mentions/useFileMentionSearch";
 import { useSkillSlashSearch } from "@/lib/slash/useSkillSlashSearch";
-import { useVoiceInput } from "@/lib/useVoiceInput";
+import { useVoiceInput, type VoiceDelivery } from "@/lib/useVoiceInput";
 import { SkillSlashPopover } from "@/lib/slash/SkillSlashPopover";
 import { CHIP_TOKEN, stripTokens } from "@/lib/file-mentions/editor-dom";
 import type { FileReference } from "@/lib/file-mentions/types";
@@ -419,14 +421,30 @@ export function App() {
   // Sources the hybrid bridge can reach (cloud is best-effort; may be local-only).
   const [availableSources, setAvailableSources] = useState<DataSource[]>(["local"]);
   const [input, setInput] = useState("");
-  // Dictation appends to the composer's own text: the editor is a controlled component, so a
-  // plain state update lands the transcript where the user can still edit it. Speech is
-  // free-form prose, so it becomes text -- not a chip / reference.
-  const appendDictation = useCallback((text: string) => {
-    setInput((prev) => (prev.trim() ? `${prev.replace(/\s+$/, "")} ${text}` : text));
+  // Where a finished transcript lands depends on how it was started: dictation and the hold
+  // overlay's 编辑 zone drop it into the composer's own text (the editor is a controlled
+  // component, so a state update lands it where the user can still fix a word), while the
+  // overlay's release means the utterance *is* the turn and goes straight out. The router is a
+  // ref because `send` is declared further down and both halves belong to the same decision.
+  const dictationHandler = useRef<(text: string, mode: VoiceDelivery) => void>(() => {});
+  const appendDictation = useCallback((text: string, mode: VoiceDelivery) => {
+    dictationHandler.current(text, mode);
   }, []);
   // Project-scoped: dictation is answered by the runtime that owns the foreground project.
   const voice = useVoiceInput(appendDictation);
+  // Which half of the phone's single input line is showing: `false` = the resting pill (press it
+  // and it listens), `true` = the editor with the keyboard up. It is not a "mode" the user picks
+  // from a menu -- the pill decides from the touch itself (tap = type, hold = talk), and losing
+  // focus with the keyboard down drops back to the pill. The desktop never sees this: it has a
+  // real composer and a mic button.
+  const [typing, setTyping] = useState(
+    () => !window.matchMedia(MOBILE_LAYOUT_QUERY).matches,
+  );
+  /** Whether the fullscreen dictation overlay is up (the finger is still down). */
+  const [holding, setHolding] = useState(false);
+  /** Where the hold started: the overlay measures the slide from here, not from a fixed band. */
+  const holdOrigin = useRef({ x: 0, y: 0 });
+  /** When it started: a stray thumb must not produce a turn, or an error message. */
   const [references, setReferences] = useState<FileReference[]>([]);
   const [attachments, setAttachments] = useState<FileReference[]>([]);
   const [uploadCount, setUploadCount] = useState(0);
@@ -474,6 +492,10 @@ export function App() {
   }, [activeProject, sessionName]);
   // Sidebar collapse: user's manual preference (persisted). Auto-collapsed when the window is too narrow; can still be manually expanded afterward.
   const mobile = useMobileLayout();
+  // Hold-to-talk takes over the phone's input line: on a phone the first thing you want to do is
+  // talk, and a bar that says so beats a caret waiting for a keyboard. Desktop keeps the mic
+  // button and its text composer; without a transcriber neither shows either.
+  const holdToTalk = mobile && voice.available && !typing;
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() =>
     window.matchMedia(MOBILE_LAYOUT_QUERY).matches || readBool(SIDEBAR_STORAGE_KEY, false),
   );
@@ -1455,17 +1477,21 @@ export function App() {
     }
   }, [views, dispatchTurn]);
 
-  const send = useCallback(async () => {
+  const send = useCallback(async (options?: { text?: string }) => {
     const project = activeProject;
     const session = sessionName;
     if (!project || !session || uploadCountRef.current > 0) return;
+    // A dictation turn arrives with its words in hand: the composer state has not caught up
+    // (there is nothing to catch up to -- the words were never typed). Everything below reads
+    // `draft` so both origins share one send path.
+    const draft = options?.text ?? input;
     const key = viewKey(project, session);
     // Edit mode for the last user message: submit rewinds that turn and resends the edited
     // text (the old reply is discarded), instead of appending a new turn.
     const editing = editingTurn && editingTurn.key === key ? editingTurn : null;
 
     const refs = [...references, ...attachments];
-    const display = `${input}${CHIP_TOKEN.repeat(attachments.length)}`;
+    const display = `${draft}${CHIP_TOKEN.repeat(attachments.length)}`;
     // `/` skill entry (same semantics as the TUI): the skill appears as a chip in the
     // input; the text after the chip is args. No args = activate only + a local system
     // notice (not sent to the model); with args = activate + use args as this turn's
@@ -1483,7 +1509,7 @@ export function App() {
       setReferences([]);
       setAttachments([]);
       setUiError("");
-      const args = stripTokens(input).trim();
+      const args = stripTokens(draft).trim();
       if (!args && attachments.length === 0) {
         // No args: activate only, don't bother the model, show a local system notice (chip echo preserved).
         setViews((prev) => {
@@ -1520,7 +1546,7 @@ export function App() {
     // (placeholders are not user text); but **the echo content must keep the
     // placeholders** — `InlineReferences` places chips back into the body by placeholder
     // position, so stripping them renders not a single tag (a past bug).
-    const plain = stripTokens(input).trim();
+    const plain = stripTokens(draft).trim();
     // Attachments are a valid payload on their own (no text needed): allow an attach-only
     // turn. A pasted image travels as a `data:` URL, an uploaded library entry as its id —
     // `runtime::user_content` accepts both and resolves them the same way.
@@ -1608,6 +1634,83 @@ export function App() {
     // backend's "agent is currently running" check if the user resends immediately.
     await (await agentBridge()).cancel(project, session).catch(() => {});
   }, [activeProject, sessionName]);
+
+  // Route a finished transcript. Dictation and the 编辑 zone extend what the user has typed;
+  // a plain release sends the utterance on its own -- that is the point of hold-to-talk, and
+  // the reason the two are different gestures rather than one with a mode flag.
+  dictationHandler.current = (text, mode) => {
+    if (mode === "send") {
+      void send({ text });
+      return;
+    }
+    // Both remaining modes keep the words and stay in voice: dictation is the composer on a
+    // phone, and handing the keyboard back in the middle of it is the switch the user asked us
+    // to stop making. Nothing here focuses an input or flips `voiceComposer` -- the mode switch
+    // in the action row is the only way across, and it is the user's move to make.
+    setInput((prev) => (prev.trim() ? `${prev.replace(/\s+$/, "")} ${text}` : text));
+  };
+
+  /**
+   * Down on the pill, in the gesture.
+   *
+   * The microphone opens *here*, not on the hold timer. Safari only lets a page start speech
+   * recognition from inside a user gesture: a `start()` reached from a timer (or any task later
+   * than the touch) opens the audio session -- the OS draws its recording indicator -- and then
+   * never delivers a word, which is exactly the second utterance that "recorded" and transcribed
+   * nothing. The 220 ms therefore decides what this press *was*, not whether to open the
+   * microphone at all; a tap drops the utterance again a moment later.
+   */
+  const openHoldToTalk = useCallback(
+    (origin: { x: number; y: number }) => {
+      holdOrigin.current = origin;
+      // Dismiss the keyboard first. On a phone the hold bar and the editor are the same row,
+      // and the system keyboard carries its own dictation key: leaving it up while the
+      // fullscreen overlay covers the screen both reflows the layout under the finger that is
+      // still down and puts a second microphone in the user's field of view.
+      (document.activeElement as HTMLElement | null)?.blur();
+      voice.begin("send");
+    },
+    [voice],
+  );
+
+  /** Still down after the tap threshold: it is a hold, so raise the fullscreen layer. */
+  const confirmHoldToTalk = useCallback(() => setHolding(true), []);
+
+  /** The press turned out to be something else: drop the utterance it had already opened. */
+  const dropHoldToTalk = useCallback(() => {
+    setHolding(false);
+    voice.cancel();
+  }, [voice]);
+
+  /** A short touch is the keyboard, not a failed hold. */
+  const tapHoldToTalk = useCallback(() => {
+    setHolding(false);
+    voice.cancel();
+    setTyping(true);
+  }, [voice]);
+
+  /**
+   * Up again, in one of the three zones.
+   *
+   * Nothing has been delivered yet at this point (`send` / `edit` hold the transcript back), so
+   * this only says where it should go; the hook calls back once it has the words.
+   *
+   * There is deliberately no minimum hold time. A `now - start < 400ms` guard used to drop the
+   * turn here, which read as "releasing the finger does nothing" -- the whole gesture is a press
+   * and a release, and a quick one is a person deciding they have said enough. Presses that heard
+   * nothing deliver no text, so they cannot turn into empty turns; the guard only cost real ones.
+   */
+  const finishHoldToTalk = useCallback(
+    (zone: VoiceHoldZone) => {
+      setHolding(false);
+      if (zone === "cancel") {
+        voice.cancel();
+        return;
+      }
+      voice.commit(zone);
+    },
+    [voice],
+  );
 
   /**
    * Send a queued message right now — the only way to change course while a reply is being
@@ -1744,7 +1847,7 @@ export function App() {
       )}
       {/* Dictation feedback: the browser engine streams a partial transcript, the upload
           engines only report errors. One line above the composer, never a modal. */}
-      {(voice.interim || voice.error) && (
+      {((voice.interim && !holding) || voice.error) && (
         <div
           className={cn(
             "mb-1 flex items-center gap-2 px-2 font-utility text-caption",
@@ -1762,6 +1865,7 @@ export function App() {
         busy={busy}
         hasAttachments={attachments.length > 0}
         uploading={uploadCount > 0}
+        layout={mobile ? "row" : "stack"}
         onValueChange={() => {}}
         onSend={() => void send()}
         onStop={() => void stop()}
@@ -1809,31 +1913,63 @@ export function App() {
               project={activeProject ?? ""}
               current={model}
               session={sessionName ?? undefined}
+              compact={mobile}
               onSelect={(value) => void switchModel(value)}
             />
             {/* Dictation belongs with the send button, not with the "add content" cluster:
-                the right side is "how this turn goes out", the left is "what goes in it". */}
-            <VoiceInputButton voice={voice} />
+                the right side is "how this turn goes out", the left is "what goes in it".
+                In hold mode the input line itself is the microphone, so a second one here would
+                only be a thing to press by accident. On a phone it is *always* the wrong one to
+                draw: the mode switch in the action row is already showing a microphone there
+                (it is the way back to hold-to-talk), so this button used to put two identical
+                mic icons side by side the moment the user switched to the keyboard. */}
+            {mobile || holdToTalk ? null : <VoiceInputButton voice={voice} />}
           </div>
         }
         inputSlot={
-          <MentionEditor
-            ref={editorRef}
-            id="shirley-composer"
-            label="Send message"
-            value={input}
-            references={references}
-            placeholder="Message Shirley… (@ to reference files, / to invoke a skill)"
-            autoFocus={!mobile}
-            search={mentionSearch}
-            slash={slashSearch}
-            onChange={(text, refs) => {
-              setInput(text);
-              setReferences(refs);
-            }}
-            onAttachFiles={(files) => void uploadFiles(files)}
-            onSubmit={() => void send()}
-          />
+          holdToTalk ? (
+            <VoiceHoldBar
+              pressed={holding}
+              draft={input}
+              onPress={openHoldToTalk}
+              onHold={confirmHoldToTalk}
+              // The other half of the same touch: a short press is not a failed hold, it is the
+              // keyboard. Nothing switches modes from outside -- the field asks the gesture.
+              onTap={tapHoldToTalk}
+              onAbandon={dropHoldToTalk}
+            />
+          ) : (
+            // One line, two faces: the pill above and the editor here occupy the same slot, so
+            // "talk or type" is a property of the field rather than of a mode switch. Losing the
+            // keyboard puts the pill back -- dismissing the keyboard *is* how you go back to
+            // talking, and the draft survives in the pill, where a press appends and a tap edits.
+            <div
+              onBlur={() => {
+                if (mobile) setTyping(false);
+              }}
+            >
+              <MentionEditor
+                ref={editorRef}
+                id="shirley-composer"
+                label="Send message"
+                value={input}
+                references={references}
+                placeholder={mobile ? "Message Shirley…" : "Message Shirley… (@ to reference files, / to invoke a skill)"}
+                autoFocus={typing || !mobile}
+                // The editor is the pill's other face now: same height, same side padding,
+                // so tapping the field does not reflow the row it sits in.
+                className={mobile ? "min-h-9 px-3 py-2" : undefined}
+                search={mentionSearch}
+                slash={slashSearch}
+                onChange={(text, refs) => {
+                  setInput(text);
+                  setReferences(refs);
+                }}
+                onAttachFiles={(files) => void uploadFiles(files)}
+                onSubmit={() => void send()}
+              />
+            </div>
+          )
         }
       >
         <AssetUrlProvider project={activeProject}>
@@ -1844,6 +1980,17 @@ export function App() {
           />
         </AssetUrlProvider>
       </AiChatComposer>
+      {/* Kept up while the utterance is still becoming text (`armed` goes false when the finger
+          lifts): dropping the overlay on release left a several-second hole in which the user
+          had no idea whether their sentence had been heard. */}
+      {holding || voice.state === "transcribing" ? (
+        <VoiceHoldOverlay
+          voice={voice}
+          origin={holdOrigin.current}
+          armed={holding}
+          onFinish={finishHoldToTalk}
+        />
+      ) : null}
     </div>
   );
 

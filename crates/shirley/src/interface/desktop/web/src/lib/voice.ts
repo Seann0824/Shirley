@@ -60,6 +60,88 @@ export function speechRecognitionAvailable(): boolean {
 }
 
 
+/**
+ * The microphone, opened **once per session**.
+ *
+ * `getUserMedia` is the call that raises the permission prompt, and it used to run on every
+ * single hold: the browser remembers the grant, but a fresh capture session is what re-raises
+ * the prompt on iOS Safari and on webviews that hand out a new audio session per capture. So
+ * the stream is kept warm instead -- opened on the first hold, reused by the next ones, and
+ * released a minute after the last utterance so the OS microphone light does not stay on.
+ */
+const MIC_CONSTRAINTS: MediaStreamConstraints = {
+  audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+};
+
+/** How long a finished utterance keeps the microphone warm before the tracks are stopped. */
+const MIC_WARM_MS = 60_000;
+
+let warmStream: MediaStream | null = null;
+let warmTimer: number | null = null;
+/** Set once a capture has succeeded: the origin holds the grant, so no preflight is needed. */
+let micGranted = false;
+
+function streamIsLive(stream: MediaStream): boolean {
+  return stream.getAudioTracks().some((track) => track.readyState === "live");
+}
+
+function clearWarmTimer(): void {
+  if (warmTimer !== null) {
+    window.clearTimeout(warmTimer);
+    warmTimer = null;
+  }
+}
+
+/** The warm stream, opening the microphone (and asking for it) only when there is none. */
+export async function acquireMicStream(): Promise<MediaStream> {
+  clearWarmTimer();
+  if (warmStream && streamIsLive(warmStream)) return warmStream;
+  const stream = await navigator.mediaDevices.getUserMedia(MIC_CONSTRAINTS);
+  warmStream = stream;
+  micGranted = true;
+  return stream;
+}
+
+/** Stop the tracks right now: unmount, a revoked permission, a dead engine. */
+export function releaseMicNow(): void {
+  clearWarmTimer();
+  const stream = warmStream;
+  warmStream = null;
+  if (!stream) return;
+  for (const track of stream.getTracks()) track.stop();
+}
+
+/** Give the microphone back after a pause, so the next hold does not prompt again. */
+export function releaseMicSoon(): void {
+  if (!warmStream) return;
+  clearWarmTimer();
+  warmTimer = window.setTimeout(() => releaseMicNow(), MIC_WARM_MS);
+}
+
+/**
+ * Make sure this origin may use the microphone, without holding it.
+ *
+ * The browser recogniser opens its own capture. Asking for the microphone here first means the
+ * permission conversation happens once, against the origin, instead of per recogniser session;
+ * the stream is released immediately because two captures of one device fight each other.
+ */
+/**
+ * Whether this origin already holds the grant.
+ *
+ * The recogniser must be started **inside the gesture** (see `useVoiceInput.openWeb`), so the
+ * preflight below is only worth doing the once: awaiting it on every later press would push
+ * `start()` past the end of the touch, which on iOS is the difference between text and silence.
+ */
+export function micPermissionSettled(): boolean {
+  return micGranted;
+}
+
+export async function ensureMicPermission(): Promise<void> {
+  if (micGranted) return;
+  await acquireMicStream();
+  releaseMicNow();
+}
+
 /** One in-flight recording. */
 export type WavCapture = {
   /** Stop the microphone and return the encoded utterance. */
@@ -73,14 +155,12 @@ export type WavCapture = {
  * that to a one-line message.
  */
 export async function startWavCapture(): Promise<WavCapture> {
-  const stream = await navigator.mediaDevices.getUserMedia({
-    audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-  });
+  const stream = await acquireMicStream();
   const Ctor =
     window.AudioContext ??
     (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
   if (!Ctor) {
-    for (const track of stream.getTracks()) track.stop();
+    releaseMicNow();
     throw new Error("Audio capture is unavailable.");
   }
 
@@ -112,13 +192,14 @@ export async function startWavCapture(): Promise<WavCapture> {
     } catch {
       /* already detached */
     }
-    for (const track of stream.getTracks()) track.stop();
+    // The stream stays warm (`acquireMicStream`); only this utterance's graph is torn down.
     if (context.state !== "closed") void context.close().catch(() => {});
   };
 
   return {
     async stop() {
       teardown();
+      releaseMicSoon();
       const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
       const merged = new Float32Array(total);
       let offset = 0;
@@ -132,6 +213,7 @@ export async function startWavCapture(): Promise<WavCapture> {
     },
     cancel() {
       teardown();
+      releaseMicSoon();
       chunks.length = 0;
     },
   };

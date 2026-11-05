@@ -96,7 +96,6 @@ pub struct ProjectRuntimeManager {
     /// A `std::sync::Mutex` on purpose: the Tauri scheme handler is a synchronous function.
     assets: Arc<std::sync::Mutex<HashMap<String, AssetEntry>>>,
     /// Task pools, one per project, opened lazily like the runtimes (`../pool/mod.rs`).
-    #[cfg(feature = "desktop")]
     pools: Arc<Mutex<HashMap<String, Arc<Mutex<crate::pool::TaskPool>>>>>,
 }
 
@@ -145,7 +144,6 @@ impl ProjectRuntimeManager {
             status_sink: Arc::new(|_| {}),
             chat_root,
             assets: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            #[cfg(feature = "desktop")]
             pools: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -1507,7 +1505,6 @@ pub fn user_content(store: &ArtifactStore, prompt: &str, media: &[String]) -> Co
     Content::from(parts)
 }
 
-#[cfg(feature = "desktop")]
 mod pool;
 
 #[cfg(test)]

@@ -78,6 +78,11 @@ struct ServerState {
 // ---------------------------------------------------------------------------
 
 /// Start the cloud web server (async: runs on the shared tokio runtime).
+/// How often the resident scheduler sweeps the task queues. Short enough that a task dropped from
+/// a phone starts while the user still has the page open, long enough that an idle host does
+/// nothing but read a few small JSON files.
+const POOL_TICK: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
     let working_dir = factory.working_dir.clone();
     let registry =
@@ -133,6 +138,24 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         sequence,
         memory_root: crate::storage::global_root().join("memory"),
     });
+
+    // Resident scheduler: advance every project's task queue on a timer.
+    //
+    // The desktop pump lives in `TaskPoolPage`'s `setInterval` and dies with the window, so a
+    // queued task used to sit there until somebody opened the pool page. On an always-on host that
+    // is the difference between "a queue" and "an assistant".
+    {
+        let manager = Arc::clone(&state.manager);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(POOL_TICK);
+            // A sleeping laptop must not come back to a burst of catch-up ticks.
+            tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            loop {
+                tick.tick().await;
+                manager.pool_tick_all().await;
+            }
+        });
+    }
 
     // Serve the desktop React build. `dist` is produced by
     // `cd src/interface/desktop/web && npm run build`; override with `SHIRLEY_WEB_DIST`.
@@ -343,6 +366,13 @@ struct CmdArgs {
     archived: Option<bool>,
     #[serde(rename = "targetProject")]
     target_project: Option<String>,
+    /// Task-pool instruction (`agent_pool_enqueue`). `text` is accepted as an alias, so the chat
+    /// box can drop work into the queue without knowing two field names.
+    brief: Option<String>,
+    /// Rejection note (`agent_pool_reject`).
+    note: Option<String>,
+    /// Target workflow state (`agent_pool_transition`).
+    status: Option<crate::pool::TaskStatus>,
 }
 
 impl CmdArgs {
@@ -641,6 +671,55 @@ async fn dispatch(
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
             manager.cancel_subagent(&project, &session, &id).await?;
             no_content()
+        }
+
+        // -- task pool ----------------------------------------------------------------
+        // "Drop work and walk away": the one verb a phone needs that `agent_send` cannot express.
+        // Every mutation answers with the whole list, so the caller re-renders from one snapshot
+        // instead of reconciling a partial update against concurrent background progress.
+        "agent_pool_list" => {
+            let project = args.project()?;
+            ok_json(manager.pool_list(&project).await?)
+        }
+        "agent_pool_enqueue" => {
+            let project = args.project()?;
+            let brief = args
+                .brief
+                .or(args.text)
+                .ok_or_else(|| ApiError::bad("missing brief"))?;
+            ok_json(manager.pool_enqueue(&project, &brief).await?)
+        }
+        "agent_pool_accept" => {
+            let project = args.project()?;
+            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
+            ok_json(manager.pool_accept(&project, &id).await?)
+        }
+        "agent_pool_reject" => {
+            let project = args.project()?;
+            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
+            let note = args.note.unwrap_or_default();
+            ok_json(manager.pool_reject(&project, &id, &note).await?)
+        }
+        "agent_pool_retry" => {
+            let project = args.project()?;
+            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
+            ok_json(manager.pool_retry(&project, &id).await?)
+        }
+        "agent_pool_transition" => {
+            let project = args.project()?;
+            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
+            let status = args.status.ok_or_else(|| ApiError::bad("missing status"))?;
+            ok_json(manager.pool_transition(&project, &id, status).await?)
+        }
+        "agent_pool_cancel" => {
+            let project = args.project()?;
+            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
+            ok_json(manager.pool_cancel(&project, &id).await?)
+        }
+        "agent_pool_remove" => {
+            let project = args.project()?;
+            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
+            ok_json(manager.pool_remove(&project, &id).await?)
         }
 
         other => Err(ApiError::not_found(format!("unknown command: {other}"))),

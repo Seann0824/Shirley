@@ -25,6 +25,7 @@ export function ModelSelector({
   current,
   session,
   onSelect,
+  compact,
   className,
 }: {
   project: string;
@@ -32,6 +33,8 @@ export function ModelSelector({
   /** Foreground session name: the effort belongs to that session's live model config. */
   session?: string;
   onSelect: (value: string) => void;
+  /** Phone row: one line shared with the input, so the name gets a short budget. */
+  compact?: boolean;
   className?: string;
 }) {
   const [open, setOpen] = useState(false);
@@ -120,7 +123,7 @@ export function ModelSelector({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-label="Switch model"
-        className="max-w-[12rem] gap-1 px-2"
+        className={compact ? "max-w-[6.5rem] gap-1 px-1.5" : "max-w-[12rem] gap-1 px-2"}
         onClick={() => void toggle()}
       >
         <span className="truncate">{currentLabel || "No model selected"}</span>

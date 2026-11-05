@@ -231,11 +231,16 @@ impl Agent {
         if let Some(content) = self.pending_user.take() {
             added.push(message::Message::User { content });
         }
+        // A turn stopped **during thinking** streamed reasoning but no text. Reasoning is metadata
+        // that rides along with content, never a substitute for it: recording
+        // `content: None, reasoning_content: Some(..)` makes the *next* request invalid ("Invalid
+        // assistant message: content or tool_calls must be set") and gives the user nothing to
+        // read. Drop it -- there is no assistant turn to remember.
         let content = std::mem::take(&mut self.pending_content);
         let reasoning = std::mem::take(&mut self.pending_reasoning);
-        if !content.is_empty() || !reasoning.is_empty() {
+        if !content.trim().is_empty() {
             added.push(message::Message::Assistant {
-                content: (!content.is_empty()).then_some(content),
+                content: Some(content),
                 reasoning_content: (!reasoning.is_empty()).then_some(reasoning),
                 tool_calls: Vec::new(),
             });
@@ -818,6 +823,9 @@ impl Agent {
             .cloned()
             .collect();
         messages.extend(parts.to_compress.iter().cloned());
+        // This list comes from `active_history()`, not the filtered outbound view: a turn stopped
+        // during thinking is still in the log and would 400 the summary request the same way.
+        messages.retain(|message| !is_unsendable_assistant(message));
         // Explicitly tell the summarizer "what this turn's task is", so it doesn't guess from
         // history (guessing leads to inventing).
         if let Some(task) = &parts.current_task {
@@ -1075,8 +1083,6 @@ fn resolve_image_refs(message: &mut message::Message, resolver: &dyn Fn(&str) ->
     *content = message::MessageContent::from(parts);
 }
 
-/// True for an assistant message that carries neither text nor tool calls -- it has nothing to say
-/// and no provider accepts it.
 /// Filler result for a tool call whose execution never reported back.
 const INTERRUPTED_TOOL_RESULT: &str = "Tool call was interrupted while waiting; execution may have \
 produced side effects — check the actual state first.";
@@ -1153,20 +1159,23 @@ fn repair_tool_pairing(messages: &mut Vec<message::Message>) {
     }
 }
 
+/// True for an assistant message no provider will accept: it carries neither text nor tool calls,
+/// so the wire form is `{"role": "assistant", "content": null}` and the endpoint answers 400
+/// "content or tool_calls must be set".
+///
+/// `reasoning_content` is deliberately **not** counted. It is metadata that rides along with an
+/// answer, never a substitute for one; treating it as content is what let a turn stopped **during
+/// thinking** through to the next request.
 fn is_unsendable_assistant(message: &message::Message) -> bool {
     let message::Message::Assistant {
         content,
-        reasoning_content,
         tool_calls,
+        ..
     } = message
     else {
         return false;
     };
-    if !tool_calls.is_empty() {
-        return false;
-    }
-    let blank = |text: &Option<String>| text.as_deref().is_none_or(str::is_empty);
-    blank(content) && blank(reasoning_content)
+    tool_calls.is_empty() && content.as_deref().is_none_or(|text| text.trim().is_empty())
 }
 
 /// Parse a JSON value as multimodal content when it is **structured content**, i.e. it carries at

@@ -172,6 +172,53 @@ impl ProjectRuntimeManager {
         Ok(guard.ordered())
     }
 
+    /// Sweep every registered project once -- the resident scheduler's tick
+    /// (`interface/server::run`).
+    ///
+    /// Returns how many projects actually had work, so an idle host stays quiet.
+    pub async fn pool_tick_all(self: &Arc<Self>) -> usize {
+        // `list` hands back borrowed entries, so copy out what the tick needs before the lock drops:
+        // the sweep must not hold the registry across an `await`.
+        let entries: Vec<(String, std::path::PathBuf)> = {
+            let guard = self.registry.lock().await;
+            guard
+                .list(false)
+                .into_iter()
+                .map(|entry| (entry.id.clone(), entry.path.clone()))
+                .collect()
+        };
+        let mut busy = 0;
+        for (project, root) in entries {
+            match self.pool_tick(&project, &root).await {
+                Ok(true) => busy += 1,
+                Ok(false) => {}
+                Err(error) => eprintln!("[pool] tick failed for {project}: {error}"),
+            }
+        }
+        busy
+    }
+
+    /// One project's tick: start whatever is queued, or nothing at all.
+    ///
+    /// Cheap before it is eager on purpose -- it reads the queue file straight from the registry
+    /// path, so a project with nothing waiting never assembles a runtime. That is what makes a
+    /// sweep over every registered project affordable on an always-on host.
+    async fn pool_tick(
+        self: &Arc<Self>,
+        project: &str,
+        root: &std::path::Path,
+    ) -> Result<bool, String> {
+        let pending = TaskPool::open(pool_path(root))
+            .ordered()
+            .iter()
+            .any(|task| task.status == pool::TaskStatus::ToDo);
+        if !pending {
+            return Ok(false);
+        }
+        self.pool_pump(project).await?;
+        Ok(true)
+    }
+
     /// Start queued tasks until every execution slot is busy.
     pub async fn pool_pump(self: &Arc<Self>, project: &str) -> Result<(), String> {
         loop {

@@ -54,9 +54,9 @@ pub(crate) mod interface;
 // on purpose -- "how to poke another app's UI" is a product decision, not an SDK fundamental.
 pub(crate) mod computer;
 pub(crate) mod memory;
-// Desktop-only surface: the pool drives background sessions, which the server transport
-// does not expose. `test` is included so the model's unit tests still run under `--features server`.
-#[cfg(any(feature = "desktop", test))]
+// The task pool belongs to the personal-agent main line, not to the desktop ornament: the queue
+// has to keep running on the cloud host while nobody is looking at a window, so every interface
+// compiles it (`server` included -- `interface/server` drives `pool_tick_all` on a resident timer).
 pub(crate) mod pool;
 pub(crate) mod skills;
 pub(crate) mod subagent;
@@ -118,6 +118,15 @@ impl Mode {
 /// Returns [`AgentError`] if legacy migration, assembly, or the interface run fails.
 pub fn run() -> Result<(), AgentError> {
     let _ = dotenvy::dotenv();
+
+    // Headless one-shot entry (`shirley exec`): one prompt in, one answer out, then exit. It is
+    // intercepted here, **before** state migration / assembly / the sync worker, because a caller
+    // that fires one of these every few minutes must not pay — or mutate anything through — the
+    // interactive startup path. See `interface::exec`.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).is_some_and(|arg| arg == "exec") {
+        return interface::exec::run(&argv[2..]);
+    }
 
     // All interfaces (desktop / TUI / cloud server) share one state root: `~/.shirley`.
     // Running them on the same machine under the same OS user intentionally means they
