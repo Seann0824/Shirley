@@ -140,13 +140,20 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         });
     }
 
-    // Serve the bot-first web UI. Build: `cd src/interface/web && npm install && npm run build`.
-    // Override with `SHIRLEY_WEB_DIST` to point at an external build.
+    // Serve the web UI bundle. `build.rs` produces it; `SHIRLEY_WEB_DIST` points at another one.
     let dist = std::env::var_os("SHIRLEY_WEB_DIST").map_or_else(
         || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interface/web/dist"),
         PathBuf::from,
     );
     let index = dist.join("index.html");
+    let has_ui = index.is_file();
+    if !has_ui {
+        eprintln!(
+            "[server] no web UI at {}: install Node.js and re-run `cargo run`, or run \
+             `npm install && npm run build` in crates/shirley/src/interface/web",
+            dist.display()
+        );
+    }
     let static_files = ServeDir::new(&dist).fallback(ServeFile::new(index));
 
     let app = Router::new()
@@ -175,9 +182,20 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         // header, so the unguessable handle is the capability. It is only mintable through the
         // authorized `agent_asset_url` command.
         .route("/api/asset/{handle}", get(asset_handler))
-        .layer(DefaultBodyLimit::max(16 * 1024 * 1024))
-        .fallback_service(static_files)
-        .with_state(Arc::clone(&state));
+        .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
+    let app = if has_ui {
+        app.fallback_service(static_files)
+    } else {
+        app.fallback(|| async {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Shirley is running, but its web UI has not been built.\n\n\
+                 Install Node.js and run `cargo run` again, or build it by hand:\n\
+                 cd crates/shirley/src/interface/web && npm install && npm run build\n",
+            )
+        })
+    }
+    .with_state(Arc::clone(&state));
 
     let addr = std::env::var("SHIRLEY_SERVER_ADDR").unwrap_or_else(|_| "127.0.0.1:8787".to_owned());
     let listener = tokio::net::TcpListener::bind(&addr)
@@ -188,10 +206,7 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
             "SHIRLEY_SERVER_TOKEN is required when listening outside loopback",
         ));
     }
-    eprintln!(
-        "[server] cloud web listening on http://{addr} (dist: {})",
-        dist.display()
-    );
+    eprintln!("[server] listening on http://{addr}");
     axum::serve(listener, app)
         .await
         .map_err(|e| std::io::Error::other(e.to_string()))

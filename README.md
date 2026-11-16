@@ -18,15 +18,13 @@ it in the background and you come back to accept or return the result.
 ## Running
 
 ```sh
-# 1. build the web UI (once, and after UI changes)
-cd crates/shirley/src/interface/web && npm install && npm run build && cd -
-
-# 2. configure a model (see below), then start the server
-cargo run            # http://127.0.0.1:8787
+cp .env.example .env   # set LOCAL_BASE_URL / LOCAL_API_KEY / LOCAL_MODEL
+cargo run              # http://127.0.0.1:8787
 ```
 
-For UI development run `npm run dev` in the web directory instead (http://localhost:5173,
-`/api` is proxied to the server).
+`cargo run` also builds the web UI (it needs Node.js; the first run does `npm install`).
+For UI development run `npm run dev` in `crates/shirley/src/interface/web` instead
+(http://localhost:5173, `/api` is proxied to the server).
 
 `SHIRLEY_SERVER_ADDR` changes the listen address; listening outside loopback requires
 `SHIRLEY_SERVER_TOKEN` (open the UI with `?token=...`).

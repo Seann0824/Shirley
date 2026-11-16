@@ -9,6 +9,8 @@ env:
   CARGO_TERM_COLOR: always
   # Fail fast on Tier-1 lint regressions (they are `deny` in Cargo.toml).
   RUSTFLAGS: ""
+  # Rust jobs do not need the web bundle; the `web` job builds it.
+  SHIRLEY_SKIP_WEB_BUILD: "1"
 
 jobs:
   build-test-clippy:
@@ -25,22 +27,16 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      # --- Tier 1 hard gate: default build must compile ---
-      - name: Build (default features)
+      - name: Build
         run: cargo build --workspace --locked
 
-      # `server` feature is required for tests: crates/shirley/src/model_providers.rs references
-      # crate::interface::runtime, which is cfg-gated behind desktop/server.
-      - name: Build (server feature)
-        run: cargo build --workspace --features server --locked
-
-      - name: Test (server feature)
-        run: cargo test --workspace --features server --locked
+      - name: Test
+        run: cargo test --workspace --locked
 
       # Tier-1 rustc lints are `deny` in [workspace.lints]; a regression fails here.
       # Tier-2 clippy lints are `warn` and only print (advisory ratchet backlog).
       - name: Clippy (Tier-1 gate, Tier-2 advisory)
-        run: cargo clippy --workspace --all-targets --features server --locked
+        run: cargo clippy --workspace --all-targets --locked
 
   fmt:
     name: rustfmt
@@ -71,18 +67,16 @@ jobs:
       - name: cargo audit
         run: cargo audit
 
-  hack:
-    name: cargo-hack (feature matrix)
+  web:
+    name: web UI (typecheck · build)
     runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: crates/shirley/src/interface/web
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: taiki-e/install-action@v2
+      - uses: actions/setup-node@v4
         with:
-          tool: cargo-hack
-      # Verify every meaningful feature combination compiles. The `desktop` feature
-      # pulls in Tauri (needs a system webview toolchain) and is excluded; `server`
-      # plus the default (no-feature) build are the combinations that matter here.
-      # (MS: "cargo-hack validates that all combinations of crate features work".)
-      - name: cargo hack check (server, all targets)
-        run: cargo hack check --workspace --all-targets --feature-powerset --exclude-features desktop
+          node-version: 22
+      - run: npm ci
+      - run: npm run build

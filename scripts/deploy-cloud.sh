@@ -68,9 +68,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/.." && pwd)"
 
 TARGET="x86_64-unknown-linux-musl"
-FEATURES="server"
 BIN_NAME="Shirley"
-WEB_DIR="${REPO_ROOT}/crates/shirley/src/interface/desktop/web"
+WEB_DIR="${REPO_ROOT}/crates/shirley/src/interface/web"
 
 DEPLOY_HOST="${SHIRLEY_DEPLOY_HOST:-}"
 DEPLOY_PORT="${SHIRLEY_DEPLOY_PORT:-22}"
@@ -232,8 +231,8 @@ build_binary() {
   export ZIG_GLOBAL_CACHE_DIR="${ZIG_GLOBAL_CACHE_DIR:-/tmp/zig-global}"
   mkdir -p "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
 
-  log "binary: cargo zigbuild --release --target ${TARGET} --features ${FEATURES}"
-  ( cd "$REPO_ROOT" && cargo zigbuild --release --target "$TARGET" --features "$FEATURES" )
+  log "binary: cargo zigbuild --release --target ${TARGET}"
+  ( cd "$REPO_ROOT" && cargo zigbuild --release --target "$TARGET" )
 
   local bin="${REPO_ROOT}/target/${TARGET}/release/${BIN_NAME}"
   [[ -f "$bin" ]] || die "build finished but $bin is missing"
