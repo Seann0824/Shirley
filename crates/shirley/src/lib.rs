@@ -86,14 +86,6 @@ use shirley_agent_sdk::AgentError;
 pub fn run() -> Result<(), AgentError> {
     let _ = dotenvy::dotenv();
 
-    // Migrate legacy state root once.
-    if storage::migrate_legacy_root().map_err(|error| AgentError::Other(Box::new(error)))? {
-        eprintln!(
-            "[storage] migrated legacy state root into {}",
-            storage::global_root().display()
-        );
-    }
-
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .build()
