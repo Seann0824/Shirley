@@ -135,7 +135,7 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
             tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
                 tick.tick().await;
-                manager.pool_tick_all().await;
+                manager.pool_tick().await;
             }
         });
     }
@@ -356,6 +356,12 @@ struct CmdArgs {
     note: Option<String>,
     /// Target workflow state (`agent_pool_transition`).
     status: Option<crate::pool::TaskStatus>,
+    /// `agent_create_bot`: human-readable name, identity block, capability tools, skills.
+    #[serde(rename = "displayName")]
+    display_name: Option<String>,
+    persona: Option<String>,
+    tools: Option<Vec<String>>,
+    skills: Option<Vec<String>>,
 }
 
 impl CmdArgs {
@@ -364,10 +370,11 @@ impl CmdArgs {
             .clone()
             .ok_or_else(|| ApiError::bad("missing bot"))
     }
-    fn session(&self) -> Result<String, ApiError> {
+    /// The session a command targets; a bot's foreground conversation when none is named.
+    fn session(&self) -> String {
         self.session
             .clone()
-            .ok_or_else(|| ApiError::bad("missing session"))
+            .unwrap_or_else(|| super::runtime::MAIN_SESSION.to_owned())
     }
 }
 
@@ -393,7 +400,7 @@ async fn dispatch(
     match cmd.as_str() {
         // -- bot management ----------------------------------------------------------
         "agent_list_bots" => {
-            let bots_root = crate::storage::global_root().join("bots");
+            let bots_root = crate::storage::bots_root();
             let bots = crate::bot::BotSpec::list_all(&bots_root);
             #[derive(serde::Serialize)]
             struct BotWire {
@@ -458,17 +465,14 @@ async fn dispatch(
         }
         "agent_cancel" => {
             let bot = args.bot()?;
-            let session = args
-                .session
-                .or(args.name)
-                .ok_or_else(|| ApiError::bad("missing session"))?;
+            let session = args.session();
             manager.cancel(&bot, &session).await;
             no_content()
         }
         // -- subscription (events are broadcast globally on the SSE stream) -----------
         "agent_subscribe" => {
             let bot = args.bot()?;
-            let session = args.session()?;
+            let session = args.session();
             // The global SSE stream carries every event; the frontend buffers until this
             // snapshot lands, so a snapshot under the session lock is enough. We drop the
             // per-session receiver — SSE does not need the desktop pump channel.
@@ -562,7 +566,7 @@ async fn dispatch(
         }
         "agent_activate_skill" => {
             let bot = args.bot()?;
-            let session = args.session()?;
+            let session = args.session();
             let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
             manager.activate_skill(&bot, &session, &name).await?;
             no_content()
@@ -632,18 +636,18 @@ async fn dispatch(
         // -- subagents ----------------------------------------------------------------
         "agent_list_subagents" => {
             let bot = args.bot()?;
-            let session = args.session()?;
+            let session = args.session();
             ok_json(manager.list_subagents(&bot, &session).await?)
         }
         "agent_load_subagent" => {
             let bot = args.bot()?;
-            let session = args.session()?;
+            let session = args.session();
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
             ok_json(manager.load_subagent(&bot, &session, &id).await?)
         }
         "agent_cancel_subagent" => {
             let bot = args.bot()?;
-            let session = args.session()?;
+            let session = args.session();
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
             manager.cancel_subagent(&bot, &session, &id).await?;
             no_content()
@@ -653,10 +657,7 @@ async fn dispatch(
         // "Drop work and walk away": the one verb a phone needs that `agent_send` cannot express.
         // Every mutation answers with the whole list, so the caller re-renders from one snapshot
         // instead of reconciling a partial update against concurrent background progress.
-        "agent_pool_list" => {
-            let bot = args.bot()?;
-            ok_json(manager.pool_list(&bot).await?)
-        }
+        "agent_pool_list" => ok_json(manager.pool_list().await?),
         "agent_pool_enqueue" => {
             let bot = args.bot()?;
             let brief = args
@@ -666,36 +667,50 @@ async fn dispatch(
             ok_json(manager.pool_enqueue(&bot, &brief).await?)
         }
         "agent_pool_accept" => {
-            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            ok_json(manager.pool_accept(&bot, &id).await?)
+            ok_json(manager.pool_accept(&id).await?)
         }
         "agent_pool_reject" => {
-            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
             let note = args.note.unwrap_or_default();
-            ok_json(manager.pool_reject(&bot, &id, &note).await?)
+            ok_json(manager.pool_reject(&id, &note).await?)
         }
         "agent_pool_retry" => {
-            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            ok_json(manager.pool_retry(&bot, &id).await?)
+            ok_json(manager.pool_retry(&id).await?)
         }
         "agent_pool_transition" => {
-            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
             let status = args.status.ok_or_else(|| ApiError::bad("missing status"))?;
-            ok_json(manager.pool_transition(&bot, &id, status).await?)
+            ok_json(manager.pool_transition(&id, status).await?)
         }
         "agent_pool_cancel" => {
-            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            ok_json(manager.pool_cancel(&bot, &id).await?)
+            ok_json(manager.pool_cancel(&id).await?)
         }
         "agent_pool_remove" => {
-            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            ok_json(manager.pool_remove(&bot, &id).await?)
+            ok_json(manager.pool_remove(&id).await?)
+        }
+
+        // -- memory -------------------------------------------------------------------
+        "agent_memory_list" => {
+            let bot = args.bot()?;
+            ok_json(manager.memory_list(&bot).await?)
+        }
+
+        // -- bot administration -------------------------------------------------------
+        "agent_create_bot" => {
+            let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
+            let spec = crate::bot::BotSpec {
+                display_name: args.display_name.unwrap_or_else(|| name.clone()),
+                name,
+                tools: args.tools.unwrap_or_default(),
+                skills: args.skills.unwrap_or_default(),
+                system_prompt_extra: args.persona.filter(|p| !p.trim().is_empty()),
+            };
+            spec.save(&crate::storage::bots_root())?;
+            no_content()
         }
 
         other => Err(ApiError::not_found(format!("unknown command: {other}"))),

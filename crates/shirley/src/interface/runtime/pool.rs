@@ -1,91 +1,69 @@
 //! Task-pool scheduling for [`BotRuntimeManager`].
 //!
 //! The model lives in `crate::pool`; this file is the part that needs a running application: it
-//! turns a queued task into a background session, waits for that session's `Finished` event, turns
-//! the run's outcome into a [`Delivery`], and then starts the next queued task.
+//! turns a queued task into a background session of the task's bot, waits for that session's
+//! `Finished` event, turns the run's outcome into a [`Delivery`], and then starts the next queued
+//! task.
 //!
-//! Why a session per task instead of a new executor: sessions already own everything a job needs --
-//! an `Agent` with its own message history, a working directory, a persisted log, a broadcast
-//! channel, and the ability to run in the background while another session is in the foreground
-//! (`spawn_turn` takes the `Agent` out, `tokio::spawn`s the turn, and puts it back). A second
-//! executor would be a second copy of all of that.
+//! There is **one pool** for the whole platform (`~/.shirley/tasks.json`); each task records the
+//! bot that runs it. A session per task (rather than a second executor) is used on purpose:
+//! sessions already own an `Agent` with its own history, a persisted log, a broadcast channel and
+//! the ability to run in the background while the bot's main conversation is in the foreground.
 //!
-//! Consequences worth knowing:
-//!
-//! - The user's foreground selection is never touched: `create_pool_session` does not move the
-//!   `active` pointer.
+//! - A task's session is never the bot's `main` conversation, so the pool does not move the
+//!   foreground.
 //! - A rework reuses the task's session, so the agent keeps the context of what it already built.
 //! - Delivery files are collected by **time window** (`ArtifactStore::list` entries added after
-//!   this attempt started). The store is append-only per bot, so the window is the only honest
-//!   way to attribute files to one run without threading a counter through the SDK.
-//! - The frontend polls `pool_list` while the pool surface is open instead of us emitting a new
-//!   event channel: the pool is a small, low-frequency list, and polling keeps the wire contract
-//!   (already carrying `AgentEvent`) unchanged.
+//!   this attempt started): the store is append-only, so the window is the only honest way to
+//!   attribute files to one run.
+//! - The frontend polls `pool_list` while the task surface is open; the pool is a small,
+//!   low-frequency list.
 
 use std::sync::Arc;
 
 use shirley_agent_sdk::{AgentEvent, MessageContent};
-use tokio::sync::{Mutex, broadcast};
+use tokio::sync::broadcast;
 
 use super::BotRuntimeManager;
-use crate::pool::{self, Delivery, DeliveryFile, PoolTask, TaskPool};
+use crate::pool::{self, Delivery, DeliveryFile, PoolTask};
 
 /// A task whose turn has not finished by now is treated as lost (a wedged provider, an endless
 /// tool loop). It fails the task rather than holding an execution slot forever.
 const TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
 
-impl BotRuntimeManager {
-    /// The pool of `bot`, opened on first use.
-    pub async fn pool(&self, bot: &str) -> Result<Arc<Mutex<TaskPool>>, String> {
-        if let Some(handle) = self.pools.lock().await.get(bot) {
-            return Ok(Arc::clone(handle));
-        }
-        let _runtime = self.ensure_runtime(bot).await?;
-        let path = pool_path();
-        let handle = Arc::new(Mutex::new(TaskPool::open(path)));
-        self.pools
-            .lock()
-            .await
-            .insert(bot.to_owned(), Arc::clone(&handle));
-        Ok(handle)
-    }
+/// `tasks.json` under the application root.
+pub(super) fn pool_path() -> std::path::PathBuf {
+    crate::storage::global_root().join(pool::POOL_FILE_NAME)
+}
 
-    /// Tasks of a bot, ordered for the review surface. Opening the list also nudges the queue:
+impl BotRuntimeManager {
+    /// Every task, ordered for the review surface. Opening the list also nudges the queue:
     /// after a restart nothing else would ever start the tasks that were still waiting.
-    pub async fn pool_list(self: &Arc<Self>, bot: &str) -> Result<Vec<PoolTask>, String> {
-        let handle = self.pool(bot).await?;
-        let tasks = handle.lock().await.ordered();
+    pub async fn pool_list(self: &Arc<Self>) -> Result<Vec<PoolTask>, String> {
+        let tasks = self.pool.lock().await.ordered();
         if tasks
             .iter()
             .any(|task| task.status == pool::TaskStatus::ToDo)
         {
-            let manager = Arc::clone(self);
-            let bot = bot.to_owned();
-            tokio::spawn(async move {
-                if let Err(error) = manager.pool_pump(&bot).await {
-                    eprintln!("task pool pump failed for {bot}: {error}");
-                }
-            });
+            spawn_pump(Arc::clone(self));
         }
         Ok(tasks)
     }
 
-    /// Drop a new instruction into the queue and start it if a slot is free.
+    /// Drop a new instruction for `bot` into the queue and start it if a slot is free.
     pub async fn pool_enqueue(
         self: &Arc<Self>,
         bot: &str,
         brief: &str,
     ) -> Result<Vec<PoolTask>, String> {
-        let handle = self.pool(bot).await?;
-        handle.lock().await.enqueue(bot, brief)?;
-        self.pool_pump(bot).await?;
-        Ok(handle.lock().await.ordered())
+        self.pool.lock().await.enqueue(bot, brief)?;
+        self.pool_pump().await?;
+        Ok(self.pool.lock().await.ordered())
     }
 
     /// Accept a delivery: the task is finished for good.
-    pub async fn pool_accept(&self, bot: &str, id: &str) -> Result<Vec<PoolTask>, String> {
-        let handle = self.pool(bot).await?;
-        let mut guard = handle.lock().await;
+    pub async fn pool_accept(&self, id: &str) -> Result<Vec<PoolTask>, String> {
+        let mut guard = self.pool.lock().await;
         guard.accept(id)?;
         Ok(guard.ordered())
     }
@@ -94,114 +72,86 @@ impl BotRuntimeManager {
     /// session.
     pub async fn pool_reject(
         self: &Arc<Self>,
-        bot: &str,
         id: &str,
         note: &str,
     ) -> Result<Vec<PoolTask>, String> {
-        let handle = self.pool(bot).await?;
-        handle.lock().await.reject(id, note)?;
-        self.pool_pump(bot).await?;
-        Ok(handle.lock().await.ordered())
+        self.pool.lock().await.reject(id, note)?;
+        self.pool_pump().await?;
+        Ok(self.pool.lock().await.ordered())
     }
 
     /// Run a failed task again without changing its instruction.
-    pub async fn pool_retry(
-        self: &Arc<Self>,
-        bot: &str,
-        id: &str,
-    ) -> Result<Vec<PoolTask>, String> {
-        let handle = self.pool(bot).await?;
-        handle.lock().await.retry(id)?;
-        self.pool_pump(bot).await?;
-        Ok(handle.lock().await.ordered())
+    pub async fn pool_retry(self: &Arc<Self>, id: &str) -> Result<Vec<PoolTask>, String> {
+        self.pool.lock().await.retry(id)?;
+        self.pool_pump().await?;
+        Ok(self.pool.lock().await.ordered())
     }
 
-    /// Move a task along the workflow -- Jira's "transition issue": park it, start it, reopen it.
+    /// Move a task along the workflow: park it, start it, reopen it.
     ///
     /// The model owns what is legal; the only thing added here is the side effect: a task that just
-    /// became `To Do` re-runs the queue immediately (otherwise it would sit there until the next
-    /// click), and one that was cancelled mid-flight also stops its turn.
+    /// became `To Do` re-runs the queue immediately, and one that was cancelled mid-flight also
+    /// stops its turn.
     pub async fn pool_transition(
         self: &Arc<Self>,
-        bot: &str,
         id: &str,
         status: pool::TaskStatus,
     ) -> Result<Vec<PoolTask>, String> {
-        let handle = self.pool(bot).await?;
-        let session = {
-            let mut guard = handle.lock().await;
-            let session = guard.find(id).and_then(|task| task.session.clone());
+        let running = {
+            let mut guard = self.pool.lock().await;
+            let running = guard
+                .find(id)
+                .and_then(|task| Some((task.bot.clone(), task.session.clone()?)));
             guard.transition(id, status)?;
-            session
+            running
         };
         match status {
-            pool::TaskStatus::ToDo => self.pool_pump(bot).await?,
+            pool::TaskStatus::ToDo => self.pool_pump().await?,
             pool::TaskStatus::Cancelled => {
-                if let Some(session) = session {
-                    self.cancel(bot, &session).await;
+                if let Some((bot, session)) = running {
+                    self.cancel(&bot, &session).await;
                 }
             }
             _ => {}
         }
-        Ok(handle.lock().await.ordered())
+        Ok(self.pool.lock().await.ordered())
     }
 
     /// Withdraw a task. A running task also has its turn cancelled.
-    pub async fn pool_cancel(&self, bot: &str, id: &str) -> Result<Vec<PoolTask>, String> {
-        let handle = self.pool(bot).await?;
-        let session = {
-            let mut guard = handle.lock().await;
-            let session = guard.find(id).and_then(|task| task.session.clone());
+    pub async fn pool_cancel(&self, id: &str) -> Result<Vec<PoolTask>, String> {
+        let running = {
+            let mut guard = self.pool.lock().await;
+            let running = guard
+                .find(id)
+                .and_then(|task| Some((task.bot.clone(), task.session.clone()?)));
             guard.cancel(id)?;
-            session
+            running
         };
-        if let Some(session) = session {
-            self.cancel(bot, &session).await;
+        if let Some((bot, session)) = running {
+            self.cancel(&bot, &session).await;
         }
-        Ok(handle.lock().await.ordered())
+        Ok(self.pool.lock().await.ordered())
     }
 
     /// Forget a task (the session it used is left alone).
-    pub async fn pool_remove(&self, bot: &str, id: &str) -> Result<Vec<PoolTask>, String> {
-        let handle = self.pool(bot).await?;
-        let mut guard = handle.lock().await;
+    pub async fn pool_remove(&self, id: &str) -> Result<Vec<PoolTask>, String> {
+        let mut guard = self.pool.lock().await;
         guard.remove(id)?;
         Ok(guard.ordered())
     }
 
-    /// Tick the global task pool once — the resident scheduler's tick (`interface/server::run`).
-    ///
-    /// Returns 1 if there was work to do, 0 if the pool was idle.
-    pub async fn pool_tick_all(self: &Arc<Self>) -> usize {
-        match self.pool_tick().await {
-            Ok(true) => 1,
-            Ok(false) => 0,
-            Err(error) => {
-                eprintln!("[pool] tick failed: {error}");
-                0
-            }
+    /// The resident scheduler's tick (`interface/server::run`): start whatever is queued.
+    pub async fn pool_tick(self: &Arc<Self>) {
+        if let Err(error) = self.pool_pump().await {
+            eprintln!("[pool] tick failed: {error}");
         }
-    }
-
-    /// One tick: start whatever is queued in the global pool, or nothing at all.
-    async fn pool_tick(self: &Arc<Self>) -> Result<bool, String> {
-        let pending = TaskPool::open(pool_path())
-            .ordered()
-            .iter()
-            .any(|task| task.status == pool::TaskStatus::ToDo);
-        if !pending {
-            return Ok(false);
-        }
-        self.pool_pump(super::DEFAULT_BOT_ID).await?;
-        Ok(true)
     }
 
     /// Start queued tasks until every execution slot is busy.
-    pub async fn pool_pump(self: &Arc<Self>, bot: &str) -> Result<(), String> {
+    pub async fn pool_pump(self: &Arc<Self>) -> Result<(), String> {
         loop {
-            let handle = self.pool(bot).await?;
             let task = {
-                let guard = handle.lock().await;
+                let guard = self.pool.lock().await;
                 if guard.active() >= pool::MAX_CONCURRENT {
                     return Ok(());
                 }
@@ -210,14 +160,15 @@ impl BotRuntimeManager {
                     None => return Ok(()),
                 }
             };
-            self.pool_start(bot, task).await?;
+            self.pool_start(task).await?;
         }
     }
 
-    /// Take one task from `Queued` to `Running`: bind a session, subscribe **before** the turn
-    /// starts, and hand the waiting to a background watcher.
-    async fn pool_start(self: &Arc<Self>, bot: &str, task: PoolTask) -> Result<(), String> {
-        let runtime = self.ensure_runtime(bot).await?;
+    /// Take one task from `To Do` to `In Progress`: bind a session of the task's bot, subscribe
+    /// **before** the turn starts, and hand the waiting to a background watcher.
+    async fn pool_start(self: &Arc<Self>, task: PoolTask) -> Result<(), String> {
+        let bot = task.bot.clone();
+        let runtime = self.ensure_runtime(&bot).await?;
         // A task keeps one session for its whole life. A session recorded by a previous process is
         // no longer in memory, so a rework after a restart starts a fresh conversation rather than
         // reloading a log the user never asked to read.
@@ -235,8 +186,7 @@ impl BotRuntimeManager {
                     .map_err(|error| format!("could not open a session for the task: {error}"))?,
             }
         };
-        let handle = self.pool(bot).await?;
-        handle.lock().await.claim(&task.id, &session)?;
+        self.pool.lock().await.claim(&task.id, &session)?;
 
         // Subscribe before spawning: the turn publishes `Finished` into the session's broadcast, and
         // a receiver created afterwards would miss it.
@@ -245,7 +195,7 @@ impl BotRuntimeManager {
             guard.sessions.subscribe(&session)
         };
         let Some(receiver) = receiver else {
-            handle
+            self.pool
                 .lock()
                 .await
                 .fail(&task.id, "the task session is unavailable")?;
@@ -256,24 +206,18 @@ impl BotRuntimeManager {
         let window_start = pool::now_ms();
         if let Err(error) = self
             .spawn_turn(
-                bot,
+                &bot,
                 Some(session.clone()),
                 task.brief.clone(),
                 MessageContent::text(prompt),
             )
             .await
         {
-            handle.lock().await.fail(&task.id, error)?;
+            self.pool.lock().await.fail(&task.id, error)?;
             return Ok(());
         }
 
-        spawn_watch(
-            Arc::clone(self),
-            bot.to_owned(),
-            task.id.clone(),
-            window_start,
-            receiver,
-        );
+        spawn_watch(Arc::clone(self), bot, task.id.clone(), window_start, receiver);
         Ok(())
     }
 }
@@ -299,33 +243,23 @@ async fn pool_watch(
         Ok(Err(error)) => Delivery::failed(error),
         Err(_) => Delivery::failed("the task timed out"),
     };
-    let Ok(handle) = manager.pool(bot).await else {
-        return;
-    };
-    let mut guard = handle.lock().await;
-    let failed = delivery.error.is_some();
-    let written = if failed {
-        guard.fail(id, delivery.error.clone().unwrap_or_default())
-    } else {
-        guard.complete(id, delivery)
+    let mut guard = manager.pool.lock().await;
+    let written = match delivery.error.clone() {
+        Some(error) => guard.fail(id, error),
+        None => guard.complete(id, delivery),
     };
     if let Err(error) = written {
         eprintln!("task pool could not record {id}: {error}");
     }
-    drop(guard);
-
-    // Filling the freed slot from a fresh task keeps one task from serialising the whole queue.
-    spawn_pump(Arc::clone(manager), bot.to_owned());
 }
 
 /// Spawn the waiting side of one task.
 ///
 /// Both spawns below live in **sync** helpers on purpose: `tokio::spawn` inside `pool_start` would
-/// make the compiler infer `pool_start`'s opaque future while borrowing-checking a task that calls
-/// back into `pool_pump`, which in turn needs `pool_start` — reported as either
+/// make the compiler infer `pool_start`'s opaque future while borrow-checking a task that calls
+/// back into `pool_pump`, which in turn needs `pool_start` -- reported as either
 /// "cannot satisfy `impl Future: Send`" or E0391 "cycle detected when computing type of opaque".
-/// Outside the `async fn` bodies the recursive obligation is checked in a separate pass and the
-/// cycle disappears.
+/// Outside the `async fn` bodies the recursive obligation is checked in a separate pass.
 fn spawn_watch(
     manager: Arc<BotRuntimeManager>,
     bot: String,
@@ -335,15 +269,16 @@ fn spawn_watch(
 ) {
     tokio::spawn(async move {
         pool_watch(&manager, &bot, &id, window_start, receiver).await;
-        spawn_pump(manager, bot);
+        // Filling the freed slot keeps one task from serialising the whole queue.
+        spawn_pump(manager);
     });
 }
 
 /// Start queued tasks again once a slot is free.
-fn spawn_pump(manager: Arc<BotRuntimeManager>, bot: String) {
+fn spawn_pump(manager: Arc<BotRuntimeManager>) {
     tokio::spawn(async move {
-        if let Err(error) = manager.pool_pump(&bot).await {
-            eprintln!("task pool pump failed for {bot}: {error}");
+        if let Err(error) = manager.pool_pump().await {
+            eprintln!("task pool pump failed: {error}");
         }
     });
 }
@@ -366,10 +301,6 @@ async fn wait_finished(
 }
 
 /// Artifacts written during this attempt.
-///
-/// The store is asked through the bot runtime rather than from a captured `&AgentFactory`: a
-/// reference to a `Send`-but-not-`Sync` factory would make the waiting task non-`Send`, and a
-/// `MutexGuard` is not held across an await here.
 async fn artifact_files(
     manager: &BotRuntimeManager,
     bot: &str,
@@ -396,9 +327,4 @@ fn files_since(factory: &crate::bootstrap::AgentFactory, since_ms: u64) -> Vec<D
             bytes: entry.bytes,
         })
         .collect()
-}
-
-/// `task-pool.json` inside the bot's state directory (the same place sessions live).
-fn pool_path() -> std::path::PathBuf {
-    crate::storage::global_root().join(pool::POOL_FILE_NAME)
 }

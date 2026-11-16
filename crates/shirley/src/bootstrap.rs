@@ -281,6 +281,8 @@ impl AgentFactory {
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
         // Memory writes go **through no** tool; they are done only by the background curator (`docs/memory.md` decision 3).
         let _ = tool_manager.register(tools::RecallTool::new(Arc::clone(&memory)));
+        // Platform administration: any bot can define a new bot.
+        let _ = tool_manager.register(tools::CreateBotTool::new(self.global_root().join("bots")));
 
         // Computer use: drive other apps' windows through the accessibility API. Registered on
         // every platform -- the non-macOS build answers "unsupported" honestly instead of hiding

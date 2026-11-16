@@ -54,9 +54,9 @@ pub type EventSink = Arc<dyn Fn(AgentEventWire) + Send + Sync>;
 /// happens (that is the whole point of stall detection). See `docs/agent-status.md` §6.1.
 pub type StatusSink = Arc<dyn Fn(StateSnapshotWire) + Send + Sync>;
 
-/// The bot ID used when no specific bot name is provided.
-/// Bot-ui passes a bot slug here; the runtime creates one `BotRuntime` per bot lazily.
-pub const DEFAULT_BOT_ID: &str = "default";
+/// Every bot has exactly one foreground conversation, stored as `bots/<name>/sessions/main.jsonl`.
+/// Task-pool runs get their own sessions beside it and never touch this one.
+pub const MAIN_SESSION: &str = "main";
 
 /// A shared, interface-agnostic bot runtime manager.
 ///
@@ -74,8 +74,8 @@ pub struct BotRuntimeManager {
     ///
     /// A `std::sync::Mutex` on purpose: the Tauri scheme handler is a synchronous function.
     assets: Arc<std::sync::Mutex<HashMap<String, AssetEntry>>>,
-    /// Task pools, one per bot, opened lazily like the runtimes.
-    pools: Arc<Mutex<HashMap<String, Arc<Mutex<crate::pool::TaskPool>>>>>,
+    /// The platform's single task pool (`tasks.json`); each task names the bot that runs it.
+    pool: Arc<Mutex<crate::pool::TaskPool>>,
 }
 
 /// One minted asset handle. Deliberately holds the *resolved* jail file, not an id to re-resolve:
@@ -118,7 +118,7 @@ impl BotRuntimeManager {
             sink,
             status_sink: Arc::new(|_| {}),
             assets: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            pools: Arc::new(Mutex::new(HashMap::new())),
+            pool: Arc::new(Mutex::new(crate::pool::TaskPool::open(pool::pool_path()))),
         }
     }
 
@@ -138,7 +138,7 @@ impl BotRuntimeManager {
         }
         // Load the bot's spec from disk (or fall back to a platform default) and derive a
         // per-bot factory so each bot gets its own tool table and prompt configuration.
-        let bots_root = crate::storage::global_root().join("bots");
+        let bots_root = crate::storage::bots_root();
         let spec = crate::bot::BotSpec::load_or_default(bot, &bots_root);
         let factory = Arc::new(self.factory.for_bot(spec));
         let runtime = tokio::task::spawn_blocking(move || runtime_from_factory(factory))
@@ -439,6 +439,9 @@ impl BotRuntimeManager {
                     Ok(event) => sink_event(&sink, &bot_owned, &session_name, event.clone()),
                     Err(message) => sink_error(&sink, &bot_owned, &session_name, message),
                 }
+                // A bot's conversation never "ends" (no session switch, no exit), so the turn is
+                // the only moment memory can be distilled. Incremental and in the background.
+                rt.sessions.spawn_curation(&session_name);
             }
             emit_status(&status_sink, &bot_owned, &session_name, &status);
 
@@ -791,6 +794,20 @@ impl BotRuntimeManager {
         Ok(store.list())
     }
 
+    /// Memory entries `bot` can see: the shared root merged with the bot's private root.
+    pub async fn memory_list(&self, bot: &str) -> Result<Vec<MemoryEntryWire>, String> {
+        let runtime = self.ensure_runtime(bot).await?;
+        let store = runtime.lock().await.factory.memory_store();
+        let entries = tokio::task::spawn_blocking(move || store.list_entries())
+            .await
+            .map_err(|e| e.to_string())?
+            .map_err(|e| e.to_string())?;
+        Ok(entries
+            .into_iter()
+            .map(|(_, entry)| MemoryEntryWire::from_entry(entry))
+            .collect())
+    }
+
     /// Resolve a minted handle back to a jail file and its mime.
     ///
     /// Synchronous on purpose: Tauri's scheme handler is a synchronous function, and the lookup
@@ -913,27 +930,17 @@ impl BotRuntimeManager {
 // Runtime assembly
 // ---------------------------------------------------------------------------
 
-/// Build a bot runtime from an existing factory (resume the most recent session,
-/// else lazily open an empty one).
+/// Build a bot runtime from its factory: open the bot's [`MAIN_SESSION`] (resuming its log when
+/// there is one) as the foreground session.
 pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<BotRuntime, String> {
     let catalog = Arc::clone(&factory.session_catalog);
-    let latest = catalog
-        .list()
-        .map_err(|e| e.to_string())?
-        .into_iter()
-        .next();
-    let (name, store, from_disk) = if let Some(entry) = latest {
-        let store = catalog.open(&entry.name).map_err(|e| e.to_string())?;
-        (entry.name, store, true)
-    } else {
-        let (entry, store) = catalog.create_lazy(None).map_err(|e| e.to_string())?;
-        (entry.name, store, false)
-    };
+    let store = catalog.open(MAIN_SESSION).map_err(|e| e.to_string())?;
     let log = store.load().map_err(|e| e.to_string())?;
+    let from_disk = !log.is_empty();
     let built = factory.build_agent(log).map_err(|e| e.to_string())?;
     let mut sessions = SessionManager::with_factory(
         built.agent,
-        Some(name),
+        Some(MAIN_SESSION.to_owned()),
         catalog,
         Arc::clone(&factory),
         Some(store),
@@ -1112,6 +1119,38 @@ fn reasoning_efforts(entry: &crate::models::ModelEntry) -> (Vec<String>, Option<
 pub struct SkillEntryWire {
     pub name: String,
     pub description: String,
+}
+
+/// One memory entry as the memory page shows it.
+#[derive(Debug, Clone, Serialize)]
+pub struct MemoryEntryWire {
+    pub id: String,
+    /// `preference` / `fact` / `event` / `procedure`.
+    pub kind: &'static str,
+    /// `shared` (every bot sees it) or `bot` (this bot's private root).
+    pub scope: &'static str,
+    pub subject: String,
+    pub created_at: String,
+    pub status: &'static str,
+    pub body: String,
+}
+
+impl MemoryEntryWire {
+    fn from_entry(entry: crate::memory::format::Entry) -> Self {
+        use crate::memory::provider::{status_label, type_label};
+        Self {
+            kind: type_label(entry.entry_type),
+            scope: match entry.domain {
+                crate::memory::format::Domain::Personal => "shared",
+                crate::memory::format::Domain::Project => "bot",
+            },
+            status: status_label(entry.status),
+            id: entry.id,
+            subject: entry.subject,
+            created_at: entry.created_at,
+            body: entry.body,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]

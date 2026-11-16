@@ -1271,7 +1271,7 @@ impl SessionManager {
     ///
     /// Guarded by `Handle::try_current()`: curation is a background task and **never blocks** the synchronous
     /// session-switch path. Failures only log one stderr line and do not affect the main flow.
-    fn spawn_curation(&self, name: &str) {
+    pub(crate) fn spawn_curation(&self, name: &str) {
         let Some(inputs) = self.curation_inputs(name) else {
             return;
         };

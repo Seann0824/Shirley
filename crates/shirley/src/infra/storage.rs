@@ -20,6 +20,11 @@ pub fn global_root() -> PathBuf {
     )
 }
 
+/// Where bot definitions and per-bot state live: `~/.shirley/bots/<name>/`.
+pub fn bots_root() -> PathBuf {
+    global_root().join("bots")
+}
+
 /// One-time migration of the legacy state root (`<config_dir>/shirley`) into the unified
 /// root (`~/.shirley`). The desktop's real data used to live at the legacy path; on the
 /// first run after the switch we move it over so nothing appears "lost".

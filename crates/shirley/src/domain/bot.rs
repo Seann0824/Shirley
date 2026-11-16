@@ -136,6 +136,29 @@ impl BotSpec {
     pub fn has_tool_restriction(&self) -> bool {
         !self.tools.is_empty()
     }
+
+    /// A valid bot name: 1-32 chars of `a-z`, `0-9`, `-`, starting with a letter. It is a
+    /// directory name and a URL segment, so nothing else is accepted.
+    pub fn is_valid_name(name: &str) -> bool {
+        let mut chars = name.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_lowercase())
+            && name.len() <= 32
+            && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    }
+
+    /// Write this spec to `<bots_root>/<name>/spec.toml`, creating the bot's directory.
+    pub fn save(&self, bots_root: &Path) -> Result<(), String> {
+        if !Self::is_valid_name(&self.name) {
+            return Err(format!(
+                "invalid bot name `{}`: use 1-32 lowercase letters, digits or `-`, starting with a letter",
+                self.name
+            ));
+        }
+        let dir = bots_root.join(&self.name);
+        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
+        std::fs::write(dir.join("spec.toml"), text).map_err(|e| e.to_string())
+    }
 }
 
 impl Default for BotSpec {
