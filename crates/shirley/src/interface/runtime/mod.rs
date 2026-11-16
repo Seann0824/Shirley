@@ -38,7 +38,7 @@ use shirley_agent_sdk::{
 use crate::artifact::{ArtifactStore, LibraryEntry, human_bytes};
 use tokio::sync::{Mutex, broadcast, oneshot};
 
-use super::desktop::wire::{AgentEventWire, SessionSnapshotWire, StateSnapshotWire, TaskViewWire};
+use super::wire::{AgentEventWire, SessionSnapshotWire, StateSnapshotWire, TaskViewWire};
 use crate::bootstrap::AgentFactory;
 use crate::interface::session::SessionManager;
 use crate::session::{

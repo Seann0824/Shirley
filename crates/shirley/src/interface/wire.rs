@@ -10,15 +10,7 @@
 //! support tool cards (`arguments` / `ok` / `output` / `elapsed_ms`) — appending does
 //! not break existing consumers.
 //!
-//! The wire-format contract lives in `web/src/types/wire.ts`; both sides must stay in sync.
-
-#![cfg_attr(
-    not(feature = "desktop"),
-    allow(
-        dead_code,
-        reason = "only used when the relevant interface feature is enabled"
-    )
-)]
+//! The wire-format contract lives in `src/interface/web/src/bridge.ts`; both sides must stay in sync.
 
 use serde::Serialize;
 use shirley_agent_sdk::AgentEvent;

@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
 
-use super::desktop::wire::{AgentEventWire, StateSnapshotWire};
+use super::wire::{AgentEventWire, StateSnapshotWire};
 use super::runtime::{EventSink, ProjectRuntimeManager, SessionEntryWire, StatusSink};
 use crate::bootstrap::AgentFactory;
 

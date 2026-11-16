@@ -1,8 +1,8 @@
 [package]
 name = "Shirley"
-version = "0.0.4"
+version = "0.0.5"
 edition = "2024"
-description = "A coding agent written in Rust: TUI + desktop chat interface over the shirley-agent-sdk"
+description = "A bot-first agent platform: HTTP/SSE server + React web UI over the shirley-agent-sdk"
 license = "MIT OR Apache-2.0"
 readme = "../../README.md"
 repository = "https://github.com/Seann0824/Shirley"
@@ -36,11 +36,8 @@ url = "2.5.8"
 uuid = { version = "1", features = ["v4", "v5"] }
 chrono = "0.4.45"
 base64 = "0.22"
-tauri = { version = "2", optional = true, features = ["unstable"] }
-tauri-plugin-dialog = { version = "2.7.1", optional = true }
-# Cloud web server (axum HTTP + WebSocket). Off by default; only pulled in by the `server` feature.
-axum = { version = "0.8", optional = true, features = ["ws"] }
-tower-http = { version = "0.6", optional = true, features = ["fs", "trace"] }
+axum = { version = "0.8", features = ["ws"] }
+tower-http = { version = "0.6", features = ["fs", "trace"] }
 
 # Computer use (macOS accessibility API + CGEvent keystrokes). Gated by target so the other
 # platforms never link the framework bindings; `src/computer/stub.rs` covers them.
@@ -51,13 +48,6 @@ core-foundation-sys = "0.8.7"
 
 [features]
 default = []
-# Desktop interface (Tauri 2 shell). Off by default, to avoid forcing a TUI-only build to pull in webview deps.
-desktop = ["dep:tauri", "dep:tauri-plugin-dialog"]
-# Cloud web interface (HTTP command API + WebSocket event push + static frontend hosting).
-server = ["dep:axum", "dep:tower-http"]
-
-[build-dependencies]
-tauri-build = { version = "2", default-features = false }
 
 [lints]
 workspace = true

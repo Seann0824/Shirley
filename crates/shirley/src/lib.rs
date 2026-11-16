@@ -1,11 +1,11 @@
-//! # Shirley — application crate
+//! # Shirley — bot-first agent platform
 //!
-//! A runnable coding-agent application (TUI + desktop + cloud server) built on
-//! top of [`shirley_agent_sdk`]. The SDK owns business-agnostic agent
-//! fundamentals (messages, tools, the ReAct runtime, sandbox, workspace); this
-//! crate owns everything that is a *product* decision: how sessions are stored,
-//! what the task ledger records, how memory is curated, how the interfaces are
-//! assembled.
+//! An HTTP/SSE server that runs bots on the server side, serving a React web UI
+//! to any browser. Built on top of [`shirley_agent_sdk`]. The SDK owns
+//! business-agnostic agent fundamentals (messages, tools, the ReAct runtime,
+//! sandbox); this crate owns everything that is a *product* decision: how
+//! sessions are stored, what the task ledger records, how memory is curated,
+//! how bots and their tool sets are assembled.
 //!
 //! ## Why this lib exists
 //!
@@ -70,52 +70,25 @@ pub(crate) mod infra;
 // ── flat-path compatibility re-exports (crate-internal) ───────────────────
 pub(crate) use domain::{bot, model_providers, models, session, status, todo};
 pub(crate) use infra::{artifact, prompt_template, remote, settings, storage};
-// Dictation is reached only from the desktop commands (`crate::asr::…`), so the flat alias is
-// gated with them instead of warning as an unused import in a server-only build.
-#[cfg(feature = "desktop")]
-pub(crate) use infra::asr;
-
 use shirley_agent_sdk::AgentError;
 
-/// Interface mode: bot-first HTTP/SSE server.
+/// Application entry point.
 ///
-/// The only supported runtime mode. The `SHIRLEY_INTERFACE` env var is kept for
-/// forward compatibility but currently has no effect.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Mode {
-    /// Bot HTTP/SSE server (default and only mode).
-    Server,
-}
-
-impl Mode {
-    fn from_env_and_args() -> Self {
-        Mode::Server
-    }
-}
-
-/// Application entry point: migrate legacy state, assemble the [`bootstrap::AgentFactory`],
-/// start the shared sync worker, and hand off to the selected interface.
-///
-/// This is the crate's **only** public item. Everything else is `pub(crate)` — the
-/// application is not a reusable library, so it exposes just this one door.
+/// This is the crate's **only** public item. Everything else is `pub(crate)`.
 ///
 /// # Errors
 ///
-/// Returns [`AgentError`] if legacy migration, assembly, or the interface run fails.
+/// Returns [`AgentError`] if legacy migration, assembly, or the server fails.
 pub fn run() -> Result<(), AgentError> {
     let _ = dotenvy::dotenv();
 
-    // Headless one-shot entry (`shirley exec`): one prompt in, one answer out, then exit. It is
-    // intercepted here, **before** state migration / assembly / the sync worker, because a caller
-    // that fires one of these every few minutes must not pay — or mutate anything through — the
-    // interactive startup path. See `interface::exec`.
+    // Headless one-shot entry (`shirley exec`): one prompt in, one answer out, then exit.
     let argv: Vec<String> = std::env::args().collect();
     if argv.get(1).is_some_and(|arg| arg == "exec") {
         return interface::exec::run(&argv[2..]);
     }
 
-    // All interfaces share one state root: `~/.shirley`.
-    // Move the legacy `<config_dir>/shirley` root over once so the desktop's existing data does not appear lost.
+    // Migrate legacy state root once.
     if storage::migrate_legacy_root().map_err(|error| AgentError::Other(Box::new(error)))? {
         eprintln!(
             "[storage] migrated legacy state root into {}",
@@ -128,27 +101,12 @@ pub fn run() -> Result<(), AgentError> {
         .build()
         .map_err(|error| AgentError::Other(Box::new(error)))?;
 
-    let factory = runtime.block_on(async {
-        // Assembly and catalog prewarming may spawn background tasks.
+    runtime.block_on(async {
         let factory = bootstrap::AgentFactory::assemble()?;
         factory.prewarm_model_catalog();
-        // A local offline copy is used by every interface. The worker shares only personal entries.
         remote::start_sync_worker(storage::global_root());
-        Ok::<_, AgentError>(factory)
-    })?;
-
-    match Mode::from_env_and_args() {
-        #[cfg(feature = "server")]
-        Mode::Server => runtime
-            .block_on(interface::server::run(factory))
-            .map_err(|error| AgentError::Other(Box::new(error)))?,
-        #[cfg(not(feature = "server"))]
-        Mode::Server => {
-            return Err(AgentError::Other(Box::new(std::io::Error::other(
-                "server mode requires building with `--features server`",
-            ))))
-        }
-    }
-
-    Ok(())
+        interface::server::run(factory)
+            .await
+            .map_err(|error| AgentError::Other(Box::new(error)))
+    })
 }
