@@ -19,3 +19,7 @@ outputs
 # 本地构建/zig 缓存（交叉编译临时目录）
 .tmp
 .agent
+
+# Bot-first web UI build artifacts
+crates/shirley/src/interface/web/node_modules/
+crates/shirley/src/interface/web/dist/

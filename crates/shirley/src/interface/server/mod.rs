@@ -2,16 +2,14 @@
 //! side**, keeping the full tool set (bash / read / grep / todo / memory / skills /
 //! subagent) executing in the server's environment.
 //!
-//! # The web build IS the desktop frontend
+//! # Bot-first web UI
 //!
-//! The user's requirement is explicit: the cloud web version should feel like "the
-//! desktop frontend, running on a server" — the same React UI, the same design
-//! language, the same `AgentEventWire` contract. The only difference is **where the
-//! SDK data is processed**: on the server (this module) rather than in the Tauri
-//! process. So instead of building a second UI, we serve the desktop React build
-//! (`src/interface/desktop/web/dist`) verbatim and swap the transport in `bridge.ts`
-//! from Tauri `invoke` / `listen` to HTTP (`POST /api/cmd/{name}`) + one SSE stream
-//! (`GET /api/events`).
+//! The frontend lives at `src/interface/web/` (a Vite/React app). Build it with
+//! `cd src/interface/web && npm install && npm run build`; the resulting `dist/`
+//! is served verbatim. Override the path with `SHIRLEY_WEB_DIST`.
+//!
+//! The UI connects via `bridge.ts`: `POST /api/cmd/{name}` for commands and
+//! `GET /api/events` for the SSE stream of `AgentEventWire` events.
 //!
 //! # Thin transport over the shared core
 //!
@@ -142,10 +140,10 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         });
     }
 
-    // Serve the desktop React build. `dist` is produced by
-    // `cd src/interface/desktop/web && npm run build`; override with `SHIRLEY_WEB_DIST`.
+    // Serve the bot-first web UI. Build: `cd src/interface/web && npm install && npm run build`.
+    // Override with `SHIRLEY_WEB_DIST` to point at an external build.
     let dist = std::env::var_os("SHIRLEY_WEB_DIST").map_or_else(
-        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interface/desktop/web/dist"),
+        || PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/interface/web/dist"),
         PathBuf::from,
     );
     let index = dist.join("index.html");
