@@ -116,9 +116,10 @@ type Recognizer = {
   interimResults: boolean;
   onresult: ((event: { results: ArrayLike<ArrayLike<{ transcript: string }>> }) => void) | null;
   onend: (() => void) | null;
-  onerror: (() => void) | null;
+  onerror: ((event: { error?: string }) => void) | null;
   start(): void;
   stop(): void;
+  abort(): void;
 };
 
 function recognizer(): Recognizer | null {
@@ -130,6 +131,34 @@ function recognizer(): Recognizer | null {
   instance.continuous = true;
   instance.interimResults = true;
   return instance;
+}
+
+/** What went wrong, in words the user can act on. `fatal` = voice cannot work here right now. */
+function describeSpeechError(code: string | undefined): { text: string; fatal: boolean } | null {
+  switch (code) {
+    case "aborted":
+      return null;
+    case "no-speech":
+      return { text: "没有听到声音，请按住后再说", fatal: false };
+    case "not-allowed":
+      return {
+        text: "麦克风权限被拒绝。请在浏览器地址栏允许麦克风，并在「系统设置 › 隐私与安全性 › 麦克风」里允许此浏览器",
+        fatal: true,
+      };
+    case "service-not-allowed":
+      return {
+        text: "系统的语音识别未开启。Safari 需要在「系统设置 › 键盘 › 听写」里打开听写",
+        fatal: true,
+      };
+    case "audio-capture":
+      return { text: "找不到麦克风，请检查输入设备", fatal: true };
+    case "network":
+      return { text: "连不上语音识别服务（Chrome 使用在线识别），请改用文字或换 Safari", fatal: true };
+    case "language-not-supported":
+      return { text: "当前语言不支持语音识别", fatal: true };
+    default:
+      return { text: `语音识别出错（${code ?? "unknown"}）`, fatal: false };
+  }
 }
 
 /**
@@ -163,7 +192,7 @@ export function ComposerDock({
   const speech = useRef<Recognizer | null>(null);
   const transcript = useRef("");
 
-  useEffect(() => () => speech.current?.stop(), []);
+  useEffect(() => () => speech.current?.abort(), []);
 
   const send = (text: string) => {
     const trimmed = text.trim();
@@ -175,13 +204,15 @@ export function ComposerDock({
   };
 
   const startListening = () => {
+    if (speech.current) return;
     const instance = recognizer();
     if (!instance) {
-      setVoiceError("此浏览器不支持语音识别，请用文字输入");
+      setVoiceError("此浏览器不支持语音识别（可用 Chrome、Edge 或 Safari），请用文字输入");
       setTextMode(true);
       return;
     }
     transcript.current = "";
+    let failed = false;
     instance.onresult = (event) => {
       let text = "";
       for (let index = 0; index < event.results.length; index += 1) {
@@ -190,23 +221,49 @@ export function ComposerDock({
       transcript.current = text;
       onListeningChange?.(true, text);
     };
-    instance.onerror = () => setVoiceError("没有听清，请再试一次");
+    instance.onerror = (event) => {
+      const problem = describeSpeechError(event.error);
+      if (!problem) return;
+      failed = true;
+      setVoiceError(problem.text);
+      if (problem.fatal) setTextMode(true);
+    };
     instance.onend = () => {
+      speech.current = null;
       setListening(false);
       onListeningChange?.(false, transcript.current);
       if (transcript.current.trim()) send(transcript.current);
-      speech.current = null;
+      else if (!failed) setVoiceError("没有识别到内容。按住按钮，说完再松开");
     };
     speech.current = instance;
     setVoiceError(null);
+    try {
+      instance.start();
+    } catch {
+      speech.current = null;
+      setVoiceError("语音识别没有启动，请再试一次");
+      return;
+    }
     setListening(true);
     onListeningChange?.(true, "");
-    instance.start();
   };
 
   const stopListening = () => {
     speech.current?.stop();
   };
+
+  // The release can land outside the page (a permission prompt, another window): never stay
+  // stuck in "listening".
+  useEffect(() => {
+    if (!listening) return;
+    const release = () => speech.current?.stop();
+    window.addEventListener("pointerup", release);
+    window.addEventListener("blur", release);
+    return () => {
+      window.removeEventListener("pointerup", release);
+      window.removeEventListener("blur", release);
+    };
+  }, [listening]);
 
   return (
     <>
@@ -258,10 +315,14 @@ export function ComposerDock({
               </button>
               <button
                 className="composer-voice"
-                onPointerDown={startListening}
+                onPointerDown={(event) => {
+                  // Keep receiving the release even if the pointer drifts off the button.
+                  event.currentTarget.setPointerCapture(event.pointerId);
+                  startListening();
+                }}
                 onPointerUp={stopListening}
                 onPointerCancel={stopListening}
-                onPointerLeave={() => listening && stopListening()}
+                onContextMenu={(event) => event.preventDefault()}
                 aria-label="按住说话"
               >
                 <span className="button-wave" aria-hidden="true">

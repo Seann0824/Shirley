@@ -396,3 +396,9 @@ body {
   background: var(--fill);
   color: var(--secondary);
 }
+
+.composer-hint {
+  align-self: stretch;
+  line-height: 1.5;
+  text-align: center;
+}
