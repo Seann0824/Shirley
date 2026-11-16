@@ -996,8 +996,8 @@ function ChatView({
   const unsubRef = useRef<(() => void) | null>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
 
-  // bot name as server project id (lowercase slug)
-  const projectId = bot.toLowerCase();
+  // bot slug as the server-side id
+  const botId = bot.toLowerCase();
 
   useEffect(() => {
     const bridge = getBridge();
@@ -1005,7 +1005,7 @@ function ChatView({
     bridge.connect();
 
     const handler = (event: AgentEvent) => {
-      if (event.project && event.project !== projectId) return;
+      if (event.bot && event.bot !== botId) return;
 
       if (event.type === "content_delta") {
         setMessages((prev) => {
@@ -1039,7 +1039,7 @@ function ChatView({
     return () => {
       unsubRef.current?.();
     };
-  }, [projectId]);
+  }, [botId]);
 
   // Auto-scroll on new messages
   useEffect(() => {
@@ -1051,7 +1051,7 @@ function ChatView({
     setMessages((prev) => [...prev, { role: "user", text: text.trim(), attachments }]);
     setStreaming(true);
     try {
-      await getBridge().send(projectId, sessionRef.current, text.trim());
+      await getBridge().send(botId, sessionRef.current, text.trim());
     } catch {
       setStreaming(false);
       setMessages((prev) => [
@@ -1059,7 +1059,7 @@ function ChatView({
         { role: "assistant", text: "连接失败，请检查服务器是否运行。", streaming: false },
       ]);
     }
-  }, [projectId]);
+  }, [botId]);
 
   const botIcon =
     bot === "Patch" ? (

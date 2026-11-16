@@ -19,20 +19,20 @@ export interface BotWire {
 }
 
 export type AgentEvent =
-  | { type: "content_delta"; project?: string; session?: string; text: string; sequence?: number }
-  | { type: "message_added"; project?: string; session?: string; role: string; sequence?: number }
-  | { type: "tool_started"; project?: string; session?: string; call_id: string; name: string; arguments: string; sequence?: number }
-  | { type: "tool_finished"; project?: string; session?: string; call_id: string; name: string; ok: boolean; output: string; elapsed_ms: number; error_kind?: string; sequence?: number }
-  | { type: "finished"; project?: string; session?: string; stop_reason: string; sequence?: number }
-  | { type: "error"; project?: string; session?: string; message: string; sequence?: number }
-  | { type: "retrying"; project?: string; session?: string; attempt: number; reason: string; sequence?: number }
-  | { type: "usage"; project?: string; session?: string; usage: { input_tokens: number; output_tokens: number }; sequence?: number }
-  | { type: "todo_updated"; project?: string; session?: string; todo: unknown; sequence?: number }
-  | { type: "notice"; project?: string; session?: string; text: string; sequence?: number }
-  | { type: "compact"; project?: string; session?: string; content: string; sequence?: number }
-  | { type: "compaction_started"; project?: string; session?: string; sequence?: number }
-  | { type: "compaction_finished"; project?: string; session?: string; sequence?: number }
-  | { type: "context_usage"; project?: string; session?: string; used_tokens: number; limit_tokens: number; sequence?: number };
+  | { type: "content_delta"; bot?: string; session?: string; text: string; sequence?: number }
+  | { type: "message_added"; bot?: string; session?: string; role: string; sequence?: number }
+  | { type: "tool_started"; bot?: string; session?: string; call_id: string; name: string; arguments: string; sequence?: number }
+  | { type: "tool_finished"; bot?: string; session?: string; call_id: string; name: string; ok: boolean; output: string; elapsed_ms: number; error_kind?: string; sequence?: number }
+  | { type: "finished"; bot?: string; session?: string; stop_reason: string; sequence?: number }
+  | { type: "error"; bot?: string; session?: string; message: string; sequence?: number }
+  | { type: "retrying"; bot?: string; session?: string; attempt: number; reason: string; sequence?: number }
+  | { type: "usage"; bot?: string; session?: string; usage: { input_tokens: number; output_tokens: number }; sequence?: number }
+  | { type: "todo_updated"; bot?: string; session?: string; todo: unknown; sequence?: number }
+  | { type: "notice"; bot?: string; session?: string; text: string; sequence?: number }
+  | { type: "compact"; bot?: string; session?: string; content: string; sequence?: number }
+  | { type: "compaction_started"; bot?: string; session?: string; sequence?: number }
+  | { type: "compaction_finished"; bot?: string; session?: string; sequence?: number }
+  | { type: "context_usage"; bot?: string; session?: string; used_tokens: number; limit_tokens: number; sequence?: number };
 
 export interface BridgeOptions {
   baseUrl?: string;
@@ -129,11 +129,11 @@ export class Bridge {
    * Streaming response arrives via the SSE connection as `content_delta` / `finished` events.
    */
   async send(bot: string, session: string | undefined, text: string): Promise<void> {
-    await this.cmd("agent_send", { project: bot, session, text });
+    await this.cmd("agent_send", { bot, session, text });
   }
 
   async cancel(bot: string, session: string): Promise<void> {
-    await this.cmd("agent_cancel", { project: bot, session });
+    await this.cmd("agent_cancel", { bot, session });
   }
 
   /**
@@ -141,7 +141,7 @@ export class Bridge {
    * Call this after navigating to a chat to replay buffered events and get the cursor.
    */
   async subscribe(bot: string, session: string): Promise<{ sequence: number }> {
-    return this.cmd("agent_subscribe", { project: bot, session });
+    return this.cmd("agent_subscribe", { bot, session });
   }
 }
 

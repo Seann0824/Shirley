@@ -101,62 +101,6 @@ pub enum RenderPart {
     },
 }
 
-impl RenderPart {
-    /// A text part.
-    #[must_use]
-    pub fn text(text: impl Into<String>) -> Self {
-        Self::Text { text: text.into() }
-    }
-
-    /// True for [`RenderPart::Text`] (the part a text-only interface already knows how to draw).
-    #[must_use]
-    pub fn is_text(&self) -> bool {
-        matches!(self, Self::Text { .. })
-    }
-
-    /// The part rendered as plain text.
-    ///
-    /// **This is the contract's hard requirement**: whatever the medium, a text-only consumer (the
-    /// TUI, a cloud web client without a renderer, the session log, a model request) must get
-    /// something readable. Never empty, never an error.
-    #[must_use]
-    pub fn fallback_text(&self) -> String {
-        match self {
-            Self::Text { text } => text.clone(),
-            Self::Image { alt, mime, .. } => match mime {
-                Some(mime) => format!("[image: {alt} ({mime})]"),
-                None => format!("[image: {alt}]"),
-            },
-            Self::File { name, bytes, .. } => match bytes {
-                Some(bytes) => format!("[file: {name}, {bytes} bytes]"),
-                None => format!("[file: {name}]"),
-            },
-            Self::Link { url, title } => {
-                if title.is_empty() {
-                    format!("[link: {url}]")
-                } else {
-                    format!("[link: {title} <{url}>]")
-                }
-            }
-            Self::Data { schema, .. } => format!("[data: {schema}]"),
-        }
-    }
-}
-
-/// Render parts joined into plain text (non-text parts become their fallback line).
-///
-/// Used by interfaces that do not render media: the transcript never goes blank because a message
-/// happened to be an image.
-#[must_use]
-pub fn parts_fallback_text(parts: &[RenderPart]) -> String {
-    parts
-        .iter()
-        .map(RenderPart::fallback_text)
-        .filter(|text| !text.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
-}
-
 /// Extract render parts from a tool's raw return value.
 ///
 /// The **single convention** (`docs/render-parts.md` 4.1): a tool opts into rich rendering by
@@ -221,10 +165,9 @@ pub fn parts_from_message_content(content: &MessageContent) -> Vec<RenderPart> {
 pub enum Role {
     User,
     Assistant,
-    System,
     Error,
     /// A neutral system notice shown inline (e.g. "images were dropped, continuing"). Distinct
-    /// from `System` (command output) and `Error`; rendered muted, no label, not markdown.
+    /// from `Error`; rendered muted, no label, not markdown.
     Notice,
 }
 
@@ -279,15 +222,6 @@ impl ToolCallView {
             self.parts = parts;
         }
     }
-
-    /// The text a text-only interface should show for this call's result.
-    #[must_use]
-    pub fn result_text(&self) -> Option<String> {
-        if !self.parts.is_empty() {
-            return Some(parts_fallback_text(&self.parts));
-        }
-        self.output.clone()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -299,53 +233,12 @@ pub struct ToolGroup {
 pub enum Item {
     Message(ChatMessage),
     Tools(ToolGroup),
-    Compact { content: String, expanded: bool },
+    Compact { content: String },
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_part_degrades_to_text() {
-        let parts = vec![
-            RenderPart::Text {
-                text: "hello".into(),
-            },
-            RenderPart::Image {
-                source: AssetSource::Artifact {
-                    id: "sha256:abc".into(),
-                },
-                alt: "chart.png".into(),
-                mime: Some("image/png".into()),
-            },
-            RenderPart::File {
-                source: None,
-                path: "out/report.pdf".into(),
-                name: "report.pdf".into(),
-                mime: None,
-                bytes: Some(2048),
-            },
-            RenderPart::Link {
-                url: "https://example.com".into(),
-                title: "Example".into(),
-            },
-            RenderPart::Data {
-                schema: "table".into(),
-                value: serde_json::json!({ "rows": 2 }),
-            },
-        ];
-        let text = parts_fallback_text(&parts);
-        assert!(text.contains("hello"), "{text}");
-        assert!(text.contains("chart.png"), "{text}");
-        assert!(text.contains("report.pdf"), "{text}");
-        assert!(text.contains("https://example.com"), "{text}");
-        assert!(text.contains("table"), "{text}");
-        // No part may degrade to an empty line: that is exactly the "blank transcript" bug.
-        for part in &parts {
-            assert!(!part.fallback_text().is_empty(), "{part:?}");
-        }
-    }
 
     #[test]
     fn tool_value_parts_are_parsed_by_kind() {
@@ -359,7 +252,7 @@ mod tests {
         let parts = parts_from_tool_value(Some(&value));
         // The unknown kind is skipped, not fatal -- an older app reading a newer payload.
         assert_eq!(parts.len(), 2);
-        assert!(parts[0].is_text());
+        assert!(matches!(parts[0], RenderPart::Text { .. }));
         assert!(
             matches!(&parts[1], RenderPart::Image { source: AssetSource::Artifact { id }, .. } if id == "abc")
         );
@@ -387,7 +280,7 @@ mod tests {
             2,
             "the image must survive projection: {parts:?}"
         );
-        assert!(parts[0].is_text());
+        assert!(matches!(parts[0], RenderPart::Text { .. }));
         assert!(
             matches!(&parts[1], RenderPart::Image { source: AssetSource::Url { url }, .. } if url.starts_with("data:image/png"))
         );
@@ -396,9 +289,10 @@ mod tests {
     #[test]
     fn finishing_a_call_records_output_and_parts() {
         let mut call = ToolCallView::started("c1".into(), "read".into(), "{}".into());
-        assert_eq!(call.result_text(), None);
+        assert_eq!(call.output, None);
         call.finish(Some(true), "plain text".into(), Vec::new());
-        assert_eq!(call.result_text().as_deref(), Some("plain text"));
+        assert_eq!(call.output.as_deref(), Some("plain text"));
+        assert!(call.parts.is_empty());
         call.finish(
             Some(true),
             "{\"parts\":[]}".into(),
@@ -408,7 +302,6 @@ mod tests {
                 mime: None,
             }],
         );
-        // Parts win over the flattened text when both exist.
-        assert_eq!(call.result_text().as_deref(), Some("[image: x.png]"));
+        assert_eq!(call.parts.len(), 1);
     }
 }

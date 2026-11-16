@@ -195,7 +195,7 @@ impl AgentFactory {
         let home = skills::user_home().unwrap_or_else(|| paths.global.clone());
         Ok(Self {
             model_config,
-            system_prompt: prompt::build_with_roots(home, Vec::new(), subagent_enabled),
+            system_prompt: prompt::build_with_roots(home, Vec::new(), subagent_enabled, None),
             compaction_config,
             max_steps: settings.max_steps,
             model_catalog,
@@ -232,14 +232,17 @@ impl AgentFactory {
         self.build_agent_with(messages, None, None)
     }
 
+    fn prompt_home(&self) -> PathBuf {
+        skills::user_home().unwrap_or_else(|| self.global_root().to_path_buf())
+    }
+
     fn system_prompt_without_subagents(&self) -> SystemPrompt {
-        let home = skills::user_home().unwrap_or_else(|| {
-            self.model_providers_root()
-                .parent()
-                .map(|p| p.to_path_buf())
-                .unwrap_or_else(|| std::path::PathBuf::from("/"))
-        });
-        prompt::build_with_roots(home, Vec::new(), false)
+        prompt::build_with_roots(
+            self.prompt_home(),
+            Vec::new(),
+            false,
+            self.bot_spec.system_prompt_extra.clone(),
+        )
     }
 
     /// Build one `Agent`, optionally as a **child** with a filtered tool table (`docs/subagent.md` P0).
@@ -398,25 +401,49 @@ impl AgentFactory {
         config
     }
 
-    /// Create a derivative factory with a different [`BotSpec`] but all other settings shared.
+    /// Derive the factory for one bot from the platform factory.
     ///
-    /// Cheap: all Arc fields are cloned (not deep-copied). Used by `ProjectRuntimeManager` to
-    /// give each bot its own tool table and prompt without reassembling from scratch.
+    /// What is per bot: its identity block in the system prompt, its tool table, its skill
+    /// subset, its own session log directory (`bots/<name>/sessions`) and its private memory
+    /// root (`bots/<name>/memory`, read merged with the shared root, written for bot-scoped
+    /// entries). Everything else -- model config, catalogs, the media library, the embedder --
+    /// is shared by `Arc`, so this is cheap and does no I/O.
     pub fn for_bot(&self, spec: crate::bot::BotSpec) -> Self {
+        let bot_root = self.global_root().join("bots").join(&spec.name);
+        let session_catalog: Arc<dyn SessionCatalog> =
+            Arc::new(session::FileSessionCatalog::new(&bot_root));
+        let memory_roots = vec![self.memory_roots[0].clone(), bot_root.join("memory")];
+        let skill_catalog = if spec.skills.is_empty() {
+            self.skill_catalog.clone()
+        } else {
+            SkillCatalog::new(
+                self.skill_catalog
+                    .skills()
+                    .into_iter()
+                    .filter(|skill| spec.skills.contains(&skill.name))
+                    .collect(),
+            )
+        };
+        let system_prompt = prompt::build_with_roots(
+            self.prompt_home(),
+            Vec::new(),
+            self.subagent_enabled,
+            spec.system_prompt_extra.clone(),
+        );
         Self {
             model_config: self.model_config.clone(),
-            system_prompt: self.system_prompt.clone(),
+            system_prompt,
             compaction_config: self.compaction_config.clone(),
             max_steps: self.max_steps,
             model_catalog: Arc::clone(&self.model_catalog),
-            session_catalog: Arc::clone(&self.session_catalog),
+            session_catalog,
             needs_login: self.needs_login,
-            memory_roots: self.memory_roots.clone(),
+            memory_roots,
             curator_settings: self.curator_settings.clone(),
             consolidate_after_entries: self.consolidate_after_entries,
             embedder: self.embedder.clone(),
             artifacts: Arc::clone(&self.artifacts),
-            skill_catalog: self.skill_catalog.clone(),
+            skill_catalog,
             subagent_enabled: self.subagent_enabled,
             subagent_limits: self.subagent_limits.clone(),
             subagent_default_tools: self.subagent_default_tools.clone(),
@@ -425,36 +452,21 @@ impl AgentFactory {
         }
     }
 
-    pub fn model_providers_root(&self) -> &std::path::Path {
+    /// The application root (`~/.shirley`): the parent of the shared memory root.
+    pub fn global_root(&self) -> &std::path::Path {
         self.memory_roots[0]
             .parent()
             .expect("memory root has a parent")
+    }
+
+    pub fn model_providers_root(&self) -> &std::path::Path {
+        self.global_root()
     }
 
     pub fn default_model_config(&self) -> Result<ModelConfig, AgentError> {
         crate::model_providers::default_config(self.model_providers_root())
             .map(|config| config.unwrap_or_else(|| self.model_config.clone()))
             .map_err(|error| AgentError::Other(Box::new(std::io::Error::other(error))))
-    }
-
-    /// For `/login`: after changing the endpoint / key, recompute the model config (keep the current `model` if not filled).
-    ///
-    /// Fixes "`/login` does not re-determine the protocol": after switching from a content endpoint to another, the protocol follows back to
-    /// the config default and does not linger (`docs/tool-calling-refactor.md` Step 3). The protocol does not follow `model`
-    /// -- what `/login` fills is the "default model", whose declaration is unknown, so falling back to the config default is safest.
-    pub fn model_config_for_login(
-        &self,
-        base_url: String,
-        api_key: Option<String>,
-        model: Option<String>,
-    ) -> ModelConfig {
-        let mut config = self.model_config.clone();
-        config.base_url = base_url;
-        config.api_key = api_key;
-        if let Some(model) = model {
-            config.model = model;
-        }
-        config
     }
 
     /// Prewarm the model catalog: fetch the list once in the background so that the **first** open of `/model` also hits the cache.
@@ -885,7 +897,6 @@ mod tests {
         std::fs::write(legacy.join("sessions/existing.title"), "Existing title").unwrap();
         std::fs::write(legacy.join("memory/facts/project.md"), "---\nid: fact-project\ntype: fact\ndomain: project\nsubject: project\ncreated_at: 2026-10-16\nstatus: active\nconfidence: high\nsource:\n  - session: existing.jsonl#turn:1\n---\n\nExisting project fact.\n").unwrap();
         let factory = AgentFactory::assemble_at(root.join("global")).unwrap();
-        let sessions = factory.session_catalog.list().unwrap();
         // The workspace legacy migration is no longer triggered by assemble_at (bot-first mode has no workspace).
         // The legacy .shirley dir in the workspace is not auto-migrated; this test now just verifies the factory builds.
         assert!(factory.sessions_dir().starts_with(root.join("global")));

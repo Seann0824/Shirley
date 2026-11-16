@@ -37,25 +37,9 @@ const SUBAGENT_GUIDE_TEMPLATE: &str = include_str!("../prompts/subagent_guide.md
 const EXTRA_ROOTS_TEMPLATE: &str = include_str!("../prompts/extra_roots.md");
 /// Computer-use guidance. Only injected where the `computer_*` tools can actually work.
 const COMPUTER_TEMPLATE: &str = include_str!("../prompts/computer.md");
-
-/// Resolve the coding agent's workspace root.
-///
-/// Reads the `SHIRLEY_WORKSPACE` env var first (consistent with the `bash` tool, to avoid drift between the two),
-/// otherwise falls back to the current directory. The path is canonicalized; on failure it is returned as is, for the prompt to describe truthfully.
-pub fn workspace_root() -> PathBuf {
-    let raw = std::env::var("SHIRLEY_WORKSPACE")
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_else(|| PathBuf::from("."));
-    std::fs::canonicalize(&raw).unwrap_or(raw)
-}
-
-/// Read the project guide (`Agent.md`) in the workspace. Returns `None` if it does not exist or cannot be read.
-pub fn guide_path(root: &Path) -> PathBuf {
-    root.join(GUIDE_FILE_NAME)
-}
+/// Identity block used when a bot declares no `system_prompt_extra` of its own.
+const DEFAULT_IDENTITY: &str =
+    "You are Shirley, a personal agent running on the user's computer.";
 
 fn read_guide(root: &Path) -> Option<String> {
     let path = root.join(GUIDE_FILE_NAME);
@@ -70,23 +54,24 @@ fn read_guide(root: &Path) -> Option<String> {
 /// where the tool does not exist.
 #[cfg(test)]
 pub fn build_with_subagents(working_dir: PathBuf, subagents: bool) -> SystemPrompt {
-    build_with_roots(working_dir, Vec::new(), subagents)
+    build_with_roots(working_dir, Vec::new(), subagents, None)
 }
 
-/// Build the system prompt for a project that may attach **extra source folders** beyond its
-/// primary root. The extra roots are captured at construction time (they are fixed per project)
-/// and listed explicitly so the model knows relative paths may resolve against any of them.
+/// Build the system prompt. `identity` is the bot's own persona block (`BotSpec::system_prompt_extra`);
+/// `None` renders the platform default. Extra roots are listed explicitly so the model knows
+/// relative paths may resolve against any of them.
 pub fn build_with_roots(
     working_dir: PathBuf,
     extra_roots: Vec<PathBuf>,
     subagents: bool,
+    identity: Option<String>,
 ) -> SystemPrompt {
     SystemPrompt::from(move |context: &SystemPromptContext| {
         let root = context
             .working_dir
             .clone()
             .unwrap_or_else(|| working_dir.clone());
-        render_with_roots(&root, &extra_roots, subagents)
+        render_with_roots(&root, &extra_roots, subagents, identity.as_deref())
     })
 }
 
@@ -103,11 +88,16 @@ fn render(root: &Path) -> String {
 /// Assemble the final prompt. `subagents` controls whether the subagent guidance block is injected.
 #[cfg(test)]
 fn render_with_subagents(root: &Path, subagents: bool) -> String {
-    render_with_roots(root, &[], subagents)
+    render_with_roots(root, &[], subagents, None)
 }
 
 /// Assemble the final prompt, listing any extra source folders attached to the project.
-fn render_with_roots(root: &Path, extra_roots: &[PathBuf], subagents: bool) -> String {
+fn render_with_roots(
+    root: &Path,
+    extra_roots: &[PathBuf],
+    subagents: bool,
+    identity: Option<&str>,
+) -> String {
     // Project guide block: inline the original text if present, otherwise give a "explore on your own first" hint.
     let guide_block = match read_guide(root) {
         Some(guide) => render_template(
@@ -150,9 +140,14 @@ fn render_with_roots(root: &Path, extra_roots: &[PathBuf], subagents: bool) -> S
     };
 
     let working_dir = root.display().to_string();
+    let identity = identity
+        .map(str::trim)
+        .filter(|text| !text.is_empty())
+        .unwrap_or(DEFAULT_IDENTITY);
     render_template(
         SYSTEM_TEMPLATE,
         &[
+            ("identity", identity),
             ("working_dir", &working_dir),
             ("project_guide", &guide_block),
             ("subagent_guide", &subagent_block),

@@ -17,7 +17,7 @@
 //! `Finished` and collecting artifacts live in `interface/runtime/pool.rs`; the split keeps the
 //! state machine testable without an `Agent`.
 //!
-//! Storage is one JSON file per project (`task-pool.json` in the project's state dir), rewritten
+//! Storage is one JSON file per bot (`task-pool.json` in the bot's state dir), rewritten
 //! atomically on every transition: a pool that survives a crash is worth more than one that is
 //! clever about batching writes.
 
@@ -30,10 +30,10 @@ use uuid::Uuid;
 
 use crate::prompt_template;
 
-/// File name of the pool inside a project's state directory.
+/// File name of the pool inside a bot's state directory.
 pub const POOL_FILE_NAME: &str = "task-pool.json";
 
-/// How many tasks may execute at the same time in one project.
+/// How many tasks may execute at the same time in one bot.
 ///
 /// A pool that runs everything at once is not a pool, it is a stampede: each task is a full agent
 /// turn, and the user's only remaining job is judging output. Two keeps the queue visibly moving
@@ -176,8 +176,8 @@ impl Delivery {
 #[serde(rename_all = "camelCase")]
 pub struct PoolTask {
     pub id: String,
-    /// Project (workspace) this task belongs to; one project's pool never lists another's.
-    pub project: String,
+    /// Bot (workspace) this task belongs to; one bot's pool never lists another's.
+    pub bot: String,
     /// Short label derived from the instruction's first line.
     pub title: String,
     /// The user's instruction, verbatim. Also the definition of done.
@@ -200,7 +200,7 @@ pub struct PoolTask {
     pub note: Option<String>,
 }
 
-/// The pool of one project, plus the file it is stored in.
+/// The pool of one bot, plus the file it is stored in.
 #[derive(Debug)]
 pub struct TaskPool {
     path: PathBuf,
@@ -281,14 +281,14 @@ impl TaskPool {
     }
 
     /// Add an instruction to the end of the queue.
-    pub fn enqueue(&mut self, project: &str, brief: &str) -> Result<PoolTask, String> {
+    pub fn enqueue(&mut self, bot: &str, brief: &str) -> Result<PoolTask, String> {
         let brief = brief.trim();
         if brief.is_empty() {
             return Err("a task needs an instruction".to_owned());
         }
         let task = PoolTask {
             id: Uuid::new_v4().to_string(),
-            project: project.to_owned(),
+            bot: bot.to_owned(),
             title: derive_title(brief),
             brief: brief.to_owned(),
             // New work runs: the whole promise of the pool is that dropping an instruction in
@@ -648,9 +648,9 @@ mod tests {
         std::fs::write(
             &path,
             r#"[
-              {"id":"a","project":"p","title":"t","brief":"b","status":"queued","attempt":1,"createdMs":1},
-              {"id":"b","project":"p","title":"t","brief":"b","status":"accepted","attempt":1,"createdMs":2},
-              {"id":"c","project":"p","title":"t","brief":"b","status":"failed","attempt":1,"createdMs":3}
+              {"id":"a","bot":"p","title":"t","brief":"b","status":"queued","attempt":1,"createdMs":1},
+              {"id":"b","bot":"p","title":"t","brief":"b","status":"accepted","attempt":1,"createdMs":2},
+              {"id":"c","bot":"p","title":"t","brief":"b","status":"failed","attempt":1,"createdMs":3}
             ]"#,
         )
         .expect("write");

@@ -71,7 +71,7 @@ impl RemoteConfig {
         Ok(())
     }
 
-    #[cfg(any(feature = "desktop", test))]
+    #[cfg(test)]
     pub fn save(&self, global: &Path) -> Result<(), String> {
         if !self.url.is_empty() {
             self.validate()?;
@@ -132,7 +132,7 @@ impl RemoteConfig {
         }
     }
 
-    #[cfg(any(feature = "desktop", test))]
+    #[cfg(test)]
     pub async fn command(&self, command: &str, args: Value) -> Result<Value, String> {
         // Restrict the proxy to this application's command namespace.
         if !command.starts_with("agent_")
@@ -204,13 +204,13 @@ pub fn start_sync_worker(global: std::path::PathBuf) {
 }
 
 /// Incremental SSE decoder. Byte buffering preserves UTF-8 split across network chunks.
-#[cfg(any(feature = "desktop", test))]
+#[cfg(test)]
 #[derive(Default)]
 pub struct EventDecoder {
     buffer: Vec<u8>,
 }
 
-#[cfg(any(feature = "desktop", test))]
+#[cfg(test)]
 impl EventDecoder {
     pub fn push(&mut self, bytes: &[u8]) -> Result<Vec<Value>, String> {
         self.buffer.extend_from_slice(bytes);
@@ -341,7 +341,6 @@ mod tests {
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
-    #[cfg(feature = "server")]
     #[tokio::test]
     async fn command_proxy_keeps_remote_project_paths_and_execution_destination() {
         use axum::{Json, Router, extract::Path as ApiPath, routing::post};

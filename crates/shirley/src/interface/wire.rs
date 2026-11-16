@@ -48,35 +48,35 @@ fn error_kind_str(kind: ErrorKind) -> String {
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum AgentEventWire {
     Retrying {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         attempt: usize,
         reason: String,
     },
     ContentDelta {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         text: String,
     },
     MessageAdded {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         role: &'static str,
     },
     Compact {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         content: String,
     },
     ToolStarted {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         call_id: String,
         name: String,
         arguments: String,
     },
     ToolFinished {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         call_id: String,
         name: String,
@@ -93,22 +93,22 @@ pub enum AgentEventWire {
         elapsed_ms: u64,
     },
     Usage {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         usage: UsageWire,
     },
     ContextUsage {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         used_tokens: u64,
         limit_tokens: u64,
     },
     CompactionStarted {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
     },
     CompactionFinished {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
     },
     /// Structured snapshot after the task ledger (todo) changes. `todo: None` = ledger cleared.
@@ -117,24 +117,24 @@ pub enum AgentEventWire {
     /// emits one when the `todo` tool finishes; the frontend renders/updates the task
     /// card from this instead of parsing the XML injected into the model.
     TodoUpdated {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         todo: Option<TaskViewWire>,
     },
     /// A neutral, human-readable notice (not an error, not model content). The frontend shows
     /// it inline as muted text. Used for silent image degradation.
     Notice {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         text: String,
     },
     Finished {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         stop_reason: &'static str,
     },
     Error {
-        project: Option<String>,
+        bot: Option<String>,
         session: Option<String>,
         message: String,
     },
@@ -175,7 +175,7 @@ impl From<Usage> for UsageWire {
 /// derived at snapshot time, never carrying a wall-clock the UI has to reconcile.
 #[derive(Debug, Clone, Serialize)]
 pub struct StateSnapshotWire {
-    pub project: Option<String>,
+    pub bot: Option<String>,
     pub session: Option<String>,
     /// `idle` / `running` / `stalled` / `unreachable`.
     pub liveness: String,
@@ -226,7 +226,7 @@ impl StateSnapshotWire {
         });
         let now = std::time::Instant::now();
         Self {
-            project: None,
+            bot: None,
             session: None,
             liveness: liveness.to_owned(),
             health,
@@ -243,9 +243,9 @@ impl StateSnapshotWire {
         }
     }
 
-    /// Tag the snapshot with its source project + session (same routing key as `agent://event`).
-    pub fn with_route(mut self, project: &str, session: &str) -> Self {
-        self.project = Some(project.to_owned());
+    /// Tag the snapshot with its source bot + session (same routing key as `agent://event`).
+    pub fn with_route(mut self, bot: &str, session: &str) -> Self {
+        self.bot = Some(bot.to_owned());
         self.session = Some(session.to_owned());
         self
     }
@@ -291,7 +291,7 @@ impl From<TaskView> for TaskViewWire {
 impl AgentEventWire {
     /// Translate an internal event into wire format. `MessageAdded` only exposes the
     /// role (the frontend does not consume the body; it is pushed by delta events).
-    /// `project` / `session` are left empty here and tagged by [`Self::with_route`].
+    /// `bot` / `session` are left empty here and tagged by [`Self::with_route`].
     ///
     /// **Reasoning (`ReasoningDelta`) returns `None`**: the reasoning process is
     /// consumed internally and not shown to the user, so it does not enter the wire
@@ -299,7 +299,7 @@ impl AgentEventWire {
     pub fn from_event(event: AgentEvent) -> Option<Self> {
         let wire = match event {
             AgentEvent::Retrying { attempt, reason } => Self::Retrying {
-                project: None,
+                bot: None,
                 session: None,
                 attempt,
                 reason,
@@ -307,19 +307,19 @@ impl AgentEventWire {
             // Reasoning does not reach the UI: swallow it (the SDK still emits the event for internal observation).
             AgentEvent::ReasoningDelta(_) => return None,
             AgentEvent::ContentDelta(text) => Self::ContentDelta {
-                project: None,
+                bot: None,
                 session: None,
                 text,
             },
             AgentEvent::MessageAdded(shirley_agent_sdk::Message::ContextSummary { content }) => {
                 Self::Compact {
-                    project: None,
+                    bot: None,
                     session: None,
                     content,
                 }
             }
             AgentEvent::MessageAdded(message) => Self::MessageAdded {
-                project: None,
+                bot: None,
                 session: None,
                 role: message_role(&message),
             },
@@ -328,7 +328,7 @@ impl AgentEventWire {
                 name,
                 arguments,
             } => Self::ToolStarted {
-                project: None,
+                bot: None,
                 session: None,
                 call_id,
                 name,
@@ -343,7 +343,7 @@ impl AgentEventWire {
                 error_kind,
                 elapsed_ms,
             } => Self::ToolFinished {
-                project: None,
+                bot: None,
                 session: None,
                 call_id,
                 name,
@@ -354,7 +354,7 @@ impl AgentEventWire {
                 elapsed_ms,
             },
             AgentEvent::Usage(usage) => Self::Usage {
-                project: None,
+                bot: None,
                 session: None,
                 usage: usage.into(),
             },
@@ -362,26 +362,26 @@ impl AgentEventWire {
                 used_tokens,
                 limit_tokens,
             } => Self::ContextUsage {
-                project: None,
+                bot: None,
                 session: None,
                 used_tokens,
                 limit_tokens,
             },
             AgentEvent::CompactionStarted => Self::CompactionStarted {
-                project: None,
+                bot: None,
                 session: None,
             },
             AgentEvent::CompactionFinished => Self::CompactionFinished {
-                project: None,
+                bot: None,
                 session: None,
             },
             AgentEvent::Notice(text) => Self::Notice {
-                project: None,
+                bot: None,
                 session: None,
                 text,
             },
             AgentEvent::Finished(result) => Self::Finished {
-                project: None,
+                bot: None,
                 session: None,
                 stop_reason: match result.stop_reason {
                     shirley_agent_sdk::StopReason::Completed => "completed",
@@ -393,54 +393,54 @@ impl AgentEventWire {
         Some(wire)
     }
 
-    /// Tag the event with its source project + session (the frontend routes by this
-    /// with multiple projects and sessions).
+    /// Tag the event with its source bot + session (the frontend routes by this
+    /// with multiple bots and sessions).
     ///
-    /// The project id is globally unique (canonical path); the session name is unique
-    /// only within a project — together they form the frontend's routing key (matching
-    /// the backend pump's `project::session` key).
-    pub fn with_route(mut self, project: &str, session: &str) -> Self {
+    /// The bot id is globally unique (canonical path); the session name is unique
+    /// only within a bot — together they form the frontend's routing key (matching
+    /// the backend pump's `bot::session` key).
+    pub fn with_route(mut self, bot: &str, session: &str) -> Self {
         let (project_slot, session_slot) = match &mut self {
             Self::Retrying {
-                project, session, ..
+                bot, session, ..
             }
             | Self::ContentDelta {
-                project, session, ..
+                bot, session, ..
             }
             | Self::MessageAdded {
-                project, session, ..
+                bot, session, ..
             }
             | Self::Compact {
-                project, session, ..
+                bot, session, ..
             }
             | Self::ToolStarted {
-                project, session, ..
+                bot, session, ..
             }
             | Self::ToolFinished {
-                project, session, ..
+                bot, session, ..
             }
             | Self::Usage {
-                project, session, ..
+                bot, session, ..
             }
             | Self::ContextUsage {
-                project, session, ..
+                bot, session, ..
             }
-            | Self::CompactionStarted { project, session }
-            | Self::CompactionFinished { project, session }
+            | Self::CompactionStarted { bot, session }
+            | Self::CompactionFinished { bot, session }
             | Self::TodoUpdated {
-                project, session, ..
+                bot, session, ..
             }
             | Self::Finished {
-                project, session, ..
+                bot, session, ..
             }
             | Self::Notice {
-                project, session, ..
+                bot, session, ..
             }
             | Self::Error {
-                project, session, ..
-            } => (project, session),
+                bot, session, ..
+            } => (bot, session),
         };
-        *project_slot = Some(project.to_owned());
+        *project_slot = Some(bot.to_owned());
         *session_slot = Some(session.to_owned());
         self
     }
@@ -538,7 +538,6 @@ fn role_wire(role: crate::interface::view::Role) -> &'static str {
     match role {
         Role::User => "user",
         Role::Assistant => "assistant",
-        Role::System => "system",
         Role::Error => "error",
         Role::Notice => "notice",
     }
@@ -594,11 +593,11 @@ mod tests {
             keys,
             vec![
                 "activity",
+                "bot",
                 "health",
                 "health_detail",
                 "liveness",
                 "progress_seq",
-                "project",
                 "seconds_since_progress",
                 "seconds_since_turn_start",
                 "session",
@@ -606,7 +605,7 @@ mod tests {
             ]
         );
         // Routing + derived liveness are present; nothing content-bearing leaked in.
-        assert_eq!(json["project"], "proj");
+        assert_eq!(json["bot"], "proj");
         assert_eq!(json["session"], "sess");
         assert_eq!(json["liveness"], "running");
         assert_eq!(json["health"], "healthy");

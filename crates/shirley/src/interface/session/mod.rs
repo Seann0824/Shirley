@@ -117,16 +117,11 @@ pub struct Session {
     /// session's run state. The former `waiting` / `waiting_since` / `compressing` / `running`
     /// flags are now derived from this keeper (see `docs/agent-status.md` §6.1).
     pub status: Arc<StateKeeper>,
-    pub scroll: usize,
-    pub auto_scroll: bool,
-    pub max_scroll: usize,
     pub last_usage: Option<Usage>,
     pub total_usage: Usage,
     pub context_usage: Option<(u64, u64)>,
     /// The `items` index where this turn's streaming reply starts (used at wrap-up to truncate a half-finished streaming reply).
     pub streaming_delta_start: Option<usize>,
-    /// The user pressed Esc to request interrupting the current reply (read by the main loop to trigger cancellation).
-    pub interrupt_requested: bool,
     /// This session's event fan-out channel (multi-session: UI switches to a session -> subscribe, switches away -> unsubscribe).
     ///
     /// The channel is owned by the `Session` itself (symmetric with "each `Session` holds its own `Agent`", see
@@ -201,14 +196,10 @@ impl Session {
             model,
             items: Vec::new(),
             status: Arc::new(StateKeeper::new()),
-            scroll: 0,
-            auto_scroll: true,
-            max_scroll: 0,
             last_usage: None,
             total_usage: Usage::default(),
             context_usage: None,
             streaming_delta_start: None,
-            interrupt_requested: false,
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
             store,
             memory,
@@ -513,7 +504,6 @@ impl Session {
                 }
                 Message::ContextSummary { content } => items.push(Item::Compact {
                     content: content.clone(),
-                    expanded: false,
                 }),
                 Message::Tool {
                     tool_call_id,
@@ -608,7 +598,6 @@ impl Session {
             }
             Message::ContextSummary { content } => self.items.push(Item::Compact {
                 content,
-                expanded: false,
             }),
             // Restore path: the log has the flattened output but not the status / parts. Attach the
             // text so a rebuilt view is not missing tool results; the live `ToolFinished` arm above
@@ -802,6 +791,7 @@ pub struct SessionManager {
 
 impl SessionManager {
     /// Start a manager containing only a single session with an existing `Agent` (no factory, cannot create/switch).
+    #[cfg(test)]
     #[expect(
         clippy::too_many_arguments,
         reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
@@ -920,20 +910,6 @@ impl SessionManager {
     /// Foreground session name.
     pub fn active_name(&self) -> Option<&str> {
         self.active().name.as_deref()
-    }
-
-    /// Session catalog handle (for the main loop to load the list / create-switch).
-    pub fn catalog(&self) -> Arc<dyn SessionCatalog> {
-        Arc::clone(&self.catalog)
-    }
-
-    /// The factory that creates `Agent`s (read-only handle). Returns `None` when there is no factory (single-session fallback).
-    ///
-    /// The UI uses it to convert the "selected model entry" into a full `ModelConfig`
-    /// ([`AgentFactory::model_config_for`]), then issues it to the `Agent` in one shot
-    /// (`docs/tool-calling-refactor.md` Step 3).
-    pub fn factory(&self) -> Option<Arc<AgentFactory>> {
-        self.factory.clone()
     }
 
     /// Whether a loaded session already has this name (used to reuse the existing `Agent` when switching, without rebuilding).
@@ -1108,13 +1084,6 @@ impl SessionManager {
     /// user is looking at: creating it must not yank the sidebar selection out from under them, and
     /// it must not trigger the memory curation that a real switch implies. Everything else matches
     /// [`Self::create_new`] -- lazy on disk, same model as the current session.
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn create_pool_session(&mut self, title: Option<&str>) -> Result<String, String> {
         let use_profile_default = self.factory.as_ref().is_some_and(|f| {
             crate::model_providers::default_config(f.model_providers_root())
@@ -1163,13 +1132,6 @@ impl SessionManager {
     /// that have been opened are in memory. There is no in-memory orchestration to do for an unloaded session, and disk deletion is the caller's responsibility -- if
     /// this still reported "session does not exist", it would manifest as "you must open (select) it before deleting". Whether the name actually
     /// exists on disk is decided by the caller's `SessionCatalog::delete`.
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn delete_session(&mut self, name: &str) -> Result<(), String> {
         // Refused while running (to avoid deleting a log being written) -- `forget_session` includes this check.
         self.forget_session(name)
@@ -1185,13 +1147,6 @@ impl SessionManager {
     /// names it now, does not persist), so the foreground pointer is not dangling and `active_name()` no longer returns the removed name.
     /// **An unloaded session is allowed through directly** -- the list shows all sessions scanned from the catalog, and only those opened are
     /// in memory; there is no in-memory orchestration to do for an unloaded session.
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn forget_session(&mut self, name: &str) -> Result<(), String> {
         let Some(id) = self.id_of_name(name) else {
             return Ok(());
@@ -1220,50 +1175,22 @@ impl SessionManager {
     // have switched away, and fetching by `active` would misattribute events / Agents to another session (the root cause of cross-session bugs).
 
     /// The session named `name` (read-only).
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn session(&self, name: &str) -> Option<&Session> {
         self.id_of_name(name).and_then(|id| self.sessions.get(&id))
     }
 
     /// The session named `name` (mutable).
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn session_mut(&mut self, name: &str) -> Option<&mut Session> {
         self.id_of_name(name)
             .and_then(|id| self.sessions.get_mut(&id))
     }
 
     /// Subscribe to the event stream of the session named `name`. Returns `None` if the session does not exist.
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn subscribe(&self, name: &str) -> Option<broadcast::Receiver<Result<AgentEvent, String>>> {
         self.session(name).map(Session::subscribe)
     }
 
     /// View snapshot of the session named `name` (returns `None` if the session does not exist).
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn snapshot(&self, name: &str) -> Option<Vec<ItemWire>> {
         self.session(name).map(Session::snapshot)
     }
@@ -1277,13 +1204,6 @@ impl SessionManager {
     /// when switching away and back the snapshot rebuild lost the user message (this function's regression test covers this).
     ///
     /// Returns `None` if the session does not exist or is running.
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn begin_turn(&mut self, name: &str, user_message: String) -> Option<Agent> {
         let session = self.session_mut(name)?;
         // Sync the current model name into the mirror first, then `take` the `Agent` away -- the mirror can still answer this session's model during the run.
@@ -1295,13 +1215,6 @@ impl SessionManager {
     }
 
     /// Put the `Agent` back into the session named `name`.
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn restore_agent(&mut self, name: &str, agent: Agent) {
         if let Some(session) = self.session_mut(name) {
             session.agent = Some(agent);
@@ -1320,13 +1233,6 @@ impl SessionManager {
     /// orchestration lives here; the SDK only offers the atomic `Agent::truncate_messages`.
     ///
     /// Returns `None` when the session does not exist, is running, or has no user message.
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn rewind_last_turn(&mut self, name: &str) -> Option<String> {
         let session = self.session_mut(name)?;
         // Do not rewind while a turn is in flight (its `Agent` is out in a background task).
@@ -1349,13 +1255,6 @@ impl SessionManager {
     /// Accumulate one event into the session named `name`, and fan it out to its subscribers.
     ///
     /// Called during a run by the task driving `run_stream` (`SessionManager` acts as the task executor).
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn apply_event(&mut self, name: &str, event: Result<AgentEvent, String>) {
         if let Some(session) = self.session_mut(name) {
             session.apply_event(event.clone());
@@ -1382,24 +1281,7 @@ impl SessionManager {
         handle.spawn(Self::run_curation(inputs));
     }
 
-    /// Before exiting the program, run one curation for the **foreground session** and **wait for completion**.
-    ///
-    /// Complementary to [`Self::spawn_curation`] (triggered in the background on session switch): when a single session is chatted to the end and the program
-    /// exits directly, the switch path never happens, so curation never triggers (`docs/memory.md` section 5.1 known
-    /// gap). Exit is the most definite "turn ended" point, so one is added here. Uses `await` rather than
-    /// `spawn`: after the main loop exits the tokio runtime shuts down immediately, and a `spawn`ed task may be discarded
-    /// before it can finish -- on the exit path it must be awaited synchronously.
-    pub async fn finish(&self) {
-        if let Some(name) = self.active().name.clone()
-            && let Some(inputs) = self.curation_inputs(&name)
-        {
-            Self::run_curation(inputs).await;
-        }
-    }
-
     /// Collect all inputs needed for one curation; returns `None` if the conditions are not met (no factory / no memory / no messages).
-    /// Extracted so that [`Self::spawn_curation`] and [`Self::finish`] share the same
-    /// pre-check and snapshot logic.
     fn curation_inputs(&self, name: &str) -> Option<CurationInputs> {
         let factory = self.factory.clone()?;
         let session = self.session(name)?;
@@ -1503,39 +1385,18 @@ impl SessionManager {
     }
 
     /// Whether the **loaded** session named `name` is running (its `Agent` moved into a background task).
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn is_running(&self, name: &str) -> bool {
         self.session(name)
             .is_some_and(|session| session.status.is_active())
     }
 
     /// The foreground session's `Agent` (read-only). Returns `None` while running (moved into a background task).
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn active_agent(&self) -> Option<&Agent> {
         self.active().agent.as_ref()
     }
 
     /// The foreground session's current model name. **Also usable during a run** -- via [`Session::model_name`]'s mirror fallback,
     /// it does not depend on whether the `Agent` is present (the foreground session may be running when desktop switches away and back).
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
     pub fn active_model_name(&self) -> Option<&str> {
         self.active().model_name()
     }
@@ -1595,7 +1456,6 @@ mod tests {
             })
             .expect("the tool call is part of the restored view");
         assert_eq!(call.output.as_deref(), Some("file body"));
-        assert_eq!(call.result_text().as_deref(), Some("file body"));
         assert_eq!(
             call.ok, None,
             "the log carries no status, so it stays unknown"

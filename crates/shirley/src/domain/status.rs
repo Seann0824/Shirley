@@ -314,17 +314,6 @@ impl StateKeeper {
         !matches!(self.lock().liveness, Liveness::Idle)
     }
 
-    pub fn is_compacting(&self) -> bool {
-        matches!(self.lock().health, Health::Compacting)
-    }
-
-    /// Seconds since the current turn started (the "replying Ns" label).
-    pub fn elapsed_seconds(&self) -> Option<u64> {
-        self.lock()
-            .turn_started_at
-            .map(|t| Instant::now().duration_since(t).as_secs())
-    }
-
     /// Seconds since `progress_seq` last advanced — the "last real progress" figure.
     #[expect(
         dead_code,

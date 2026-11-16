@@ -23,8 +23,12 @@ pub struct BotSpec {
     /// Named = restrict to exactly these tool names.
     #[serde(default)]
     pub tools: Vec<String>,
-    /// System prompt override appended after the base platform prompt.
-    /// `None` = use the base prompt unchanged.
+    /// Skills (`SKILL.md` packages from the user-level skill roots) this bot may activate.
+    /// Empty = every discovered skill; named = exactly these.
+    #[serde(default)]
+    pub skills: Vec<String>,
+    /// The bot's identity block, rendered at the top of the system prompt in place of the
+    /// platform default. `None` = the generic Shirley identity.
     #[serde(default)]
     pub system_prompt_extra: Option<String>,
 }
@@ -36,6 +40,7 @@ impl BotSpec {
             name: "default".to_owned(),
             display_name: "Shirley".to_owned(),
             tools: Vec::new(),
+            skills: Vec::new(),
             system_prompt_extra: None,
         }
     }
@@ -47,6 +52,7 @@ impl BotSpec {
                 name: "nono".to_owned(),
                 display_name: "NONO".to_owned(),
                 tools: Vec::new(),
+                skills: Vec::new(),
                 system_prompt_extra: None,
             },
             Self {
@@ -57,6 +63,7 @@ impl BotSpec {
                     platform_tools::GREP.to_owned(),
                     platform_tools::READ.to_owned(),
                 ],
+                skills: Vec::new(),
                 system_prompt_extra: Some(
                     "You are Patch, a focused coding assistant. You help with code changes, reviews, and debugging.".to_owned(),
                 ),
@@ -68,6 +75,7 @@ impl BotSpec {
                     platform_tools::WEB_SEARCH.to_owned(),
                     platform_tools::READ.to_owned(),
                 ],
+                skills: Vec::new(),
                 system_prompt_extra: Some(
                     "You are Scout, a research assistant. You search the web and summarize information.".to_owned(),
                 ),
@@ -136,25 +144,29 @@ impl Default for BotSpec {
     }
 }
 
-/// Names of the platform's built-in tools, available to any bot.
+impl BotSpec {
+    /// The capability tools this bot actually gets: its own list, or the platform default set.
+    pub fn effective_tools(&self) -> Vec<String> {
+        if self.has_tool_restriction() {
+            self.tools.clone()
+        } else {
+            platform_tools::DEFAULT_SET
+                .iter()
+                .map(|name| (*name).to_owned())
+                .collect()
+        }
+    }
+}
+
+/// Names of the platform's **capability** tools -- the part of the table a bot may opt out of.
+/// Infrastructure tools (todo / recall / skills / computer) are always registered.
 pub mod platform_tools {
     pub const BASH: &str = "bash";
     pub const GREP: &str = "grep";
     pub const READ: &str = "read";
     pub const MEDIA: &str = "media";
     pub const WEB_SEARCH: &str = "web_search";
-    pub const TODO: &str = "todo";
-    pub const RECALL: &str = "recall";
-    pub const ACTIVATE_SKILL: &str = "activate_skill";
-    pub const READ_SKILL_FILE: &str = "read_skill_file";
-    pub const COMPUTER_APPS: &str = "computer_apps";
-    pub const COMPUTER_SNAPSHOT: &str = "computer_snapshot";
-    pub const COMPUTER_ACT: &str = "computer_act";
-    pub const COMPUTER_KEY: &str = "computer_key";
 
-    /// The default tool set every bot receives unless it overrides `tools`.
-    pub const DEFAULT_SET: &[&str] = &[
-        BASH, GREP, READ, MEDIA, WEB_SEARCH, TODO, RECALL, ACTIVATE_SKILL, READ_SKILL_FILE,
-        COMPUTER_APPS, COMPUTER_SNAPSHOT, COMPUTER_ACT, COMPUTER_KEY,
-    ];
+    /// The default capability set every bot receives unless it overrides `tools`.
+    pub const DEFAULT_SET: &[&str] = &[BASH, GREP, READ, MEDIA, WEB_SEARCH];
 }

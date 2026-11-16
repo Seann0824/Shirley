@@ -806,7 +806,6 @@ mod tests {
         assert!(exchange(&root.0.join("memory"), request(vec![])).is_err());
     }
 
-    #[cfg(feature = "server")]
     async fn cloud(root: PathBuf) -> (crate::remote::RemoteConfig, tokio::task::JoinHandle<()>) {
         use axum::{Json, Router, routing::post};
         let app = Router::new().route(
@@ -832,7 +831,6 @@ mod tests {
     }
 
     /// The only write path: upload the named entries, then the cloud's record set is installed back.
-    #[cfg(feature = "server")]
     #[tokio::test]
     async fn push_written_uploads_then_mirrors_the_cloud() {
         let server = Temp::new();
@@ -865,7 +863,6 @@ mod tests {
 
     /// Pull is authoritative: a local-only entry the cloud does not have is removed, and an offline
     /// local edit is overwritten by the cloud's value.
-    #[cfg(feature = "server")]
     #[tokio::test]
     async fn pull_overwrites_local_and_drops_offline_edits() {
         let server = Temp::new();
@@ -894,7 +891,6 @@ mod tests {
     }
 
     /// A failed pull leaves the local mirror readable (it is only a cache); the next pull reconciles.
-    #[cfg(feature = "server")]
     #[tokio::test]
     async fn offline_pull_keeps_local_mirror_readable() {
         let server = Temp::new();
@@ -908,7 +904,6 @@ mod tests {
     }
 
     /// Two devices converge because writes go through the cloud, not through local uploads.
-    #[cfg(feature = "server")]
     #[tokio::test]
     async fn two_devices_converge_through_cloud_writes() {
         let server = Temp::new();

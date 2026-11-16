@@ -13,8 +13,8 @@
 //!
 //! # Thin transport over the shared core
 //!
-//! All orchestration — the project registry, the lazily-loaded per-project runtimes,
-//! the turn driver, the wire DTOs — lives in [`super::runtime::ProjectRuntimeManager`],
+//! All orchestration — the bot registry, the lazily-loaded per-bot runtimes,
+//! the turn driver, the wire DTOs — lives in [`super::runtime::BotRuntimeManager`],
 //! shared verbatim with the Tauri shell (`interface/desktop/shell.rs`). This module is
 //! only the HTTP/SSE skin: it maps `POST /api/cmd/{name}` onto core methods and pipes
 //! the core's event sink into a global `broadcast` that `GET /api/events` fans out as
@@ -25,7 +25,7 @@
 //! - `POST /api/cmd/{name}` — one endpoint per `AgentBridge` method (body = args JSON,
 //!   response = JSON or a plain-text error with a non-2xx status). See [`dispatch`].
 //! - `GET /api/events` — Server-Sent Events. Each event is `event: agent_event` +
-//!   `data: <AgentEventWire json>`, tagged with `project` + `session` so the frontend
+//!   `data: <AgentEventWire json>`, tagged with `bot` + `session` so the frontend
 //!   routes events to the right session view.
 //! - everything else — the desktop React build, served from `dist` with an SPA fallback.
 
@@ -48,7 +48,7 @@ use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
 
 use super::wire::{AgentEventWire, StateSnapshotWire};
-use super::runtime::{EventSink, ProjectRuntimeManager, SessionEntryWire, StatusSink};
+use super::runtime::{EventSink, BotRuntimeManager, SessionEntryWire, StatusSink};
 use crate::bootstrap::AgentFactory;
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -58,7 +58,7 @@ const EVENT_CHANNEL_CAPACITY: usize = 256;
 // ---------------------------------------------------------------------------
 
 struct ServerState {
-    manager: Arc<ProjectRuntimeManager>,
+    manager: Arc<BotRuntimeManager>,
     /// Global fan-out of serialized wire events to every connected SSE client.
     events: broadcast::Sender<String>,
     /// Separate fan-out of **content-free** runtime-status snapshots (`/api/status`). Kept apart
@@ -107,7 +107,7 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
     });
 
     let manager = Arc::new(
-        ProjectRuntimeManager::new(Arc::new(factory), sink).with_status_sink(status_sink),
+        BotRuntimeManager::new(Arc::new(factory), sink).with_status_sink(status_sink),
     );
 
     let token = std::env::var("SHIRLEY_SERVER_TOKEN")
@@ -122,7 +122,7 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         memory_root: crate::storage::global_root().join("memory"),
     });
 
-    // Resident scheduler: advance every project's task queue on a timer.
+    // Resident scheduler: advance every bot's task queue on a timer.
     //
     // The desktop pump lives in `TaskPoolPage`'s `setInterval` and dies with the window, so a
     // queued task used to sit there until somebody opened the pool page. On an always-on host that
@@ -329,7 +329,7 @@ fn no_content() -> Result<Response, ApiError> {
 struct CmdArgs {
     action: Option<String>,
     input: Option<serde_json::Value>,
-    project: Option<String>,
+    bot: Option<String>,
     session: Option<String>,
     name: Option<String>,
     path: Option<String>,
@@ -347,8 +347,8 @@ struct CmdArgs {
     /// Content type for `agent_ingest_bytes`.
     mime: Option<String>,
     archived: Option<bool>,
-    #[serde(rename = "targetProject")]
-    target_project: Option<String>,
+    #[serde(rename = "targetBot")]
+    target_bot: Option<String>,
     /// Task-pool instruction (`agent_pool_enqueue`). `text` is accepted as an alias, so the chat
     /// box can drop work into the queue without knowing two field names.
     brief: Option<String>,
@@ -359,10 +359,10 @@ struct CmdArgs {
 }
 
 impl CmdArgs {
-    fn project(&self) -> Result<String, ApiError> {
-        self.project
+    fn bot(&self) -> Result<String, ApiError> {
+        self.bot
             .clone()
-            .ok_or_else(|| ApiError::bad("missing project"))
+            .ok_or_else(|| ApiError::bad("missing bot"))
     }
     fn session(&self) -> Result<String, ApiError> {
         self.session
@@ -400,13 +400,17 @@ async fn dispatch(
                 name: String,
                 display_name: String,
                 tools: Vec<String>,
+                skills: Vec<String>,
+                persona: Option<String>,
             }
             let wire: Vec<BotWire> = bots
                 .into_iter()
                 .map(|s| BotWire {
+                    tools: s.effective_tools(),
                     name: s.name,
                     display_name: s.display_name,
-                    tools: s.tools,
+                    skills: s.skills,
+                    persona: s.system_prompt_extra,
                 })
                 .collect();
             ok_json(wire)
@@ -425,11 +429,11 @@ async fn dispatch(
         }
         // -- turn --------------------------------------------------------------------
         "agent_send" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let text = args.text.ok_or_else(|| ApiError::bad("missing text"))?;
             manager
                 .send(
-                    &project,
+                    &bot,
                     args.session,
                     text,
                     args.references.unwrap_or_default(),
@@ -439,11 +443,11 @@ async fn dispatch(
             Ok(StatusCode::ACCEPTED.into_response())
         }
         "agent_resend" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let text = args.text.ok_or_else(|| ApiError::bad("missing text"))?;
             manager
                 .resend(
-                    &project,
+                    &bot,
                     args.session,
                     text,
                     args.references.unwrap_or_default(),
@@ -453,23 +457,23 @@ async fn dispatch(
             Ok(StatusCode::ACCEPTED.into_response())
         }
         "agent_cancel" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let session = args
                 .session
                 .or(args.name)
                 .ok_or_else(|| ApiError::bad("missing session"))?;
-            manager.cancel(&project, &session).await;
+            manager.cancel(&bot, &session).await;
             no_content()
         }
         // -- subscription (events are broadcast globally on the SSE stream) -----------
         "agent_subscribe" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let session = args.session()?;
             // The global SSE stream carries every event; the frontend buffers until this
             // snapshot lands, so a snapshot under the session lock is enough. We drop the
             // per-session receiver — SSE does not need the desktop pump channel.
             let (_rx, snapshot, cursor) = manager
-                .subscribe_with_cursor(&project, &session, || state.sequence.load(Ordering::SeqCst))
+                .subscribe_with_cursor(&bot, &session, || state.sequence.load(Ordering::SeqCst))
                 .await?;
             let mut value =
                 serde_json::to_value(snapshot).map_err(|e| ApiError::internal(e.to_string()))?;
@@ -480,61 +484,61 @@ async fn dispatch(
 
         // -- model -------------------------------------------------------------------
         "agent_model_name" => {
-            let project = args.project()?;
-            ok_json(manager.model_name(&project).await?)
+            let bot = args.bot()?;
+            ok_json(manager.model_name(&bot).await?)
         }
         "agent_list_models" => {
-            let project = args.project()?;
-            ok_json(manager.list_models(&project).await?)
+            let bot = args.bot()?;
+            ok_json(manager.list_models(&bot).await?)
         }
         "agent_set_model" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let model = args.model.ok_or_else(|| ApiError::bad("missing model"))?;
             manager
-                .set_model(&project, &model, args.session.as_deref())
+                .set_model(&bot, &model, args.session.as_deref())
                 .await?;
             no_content()
         }
         "agent_set_reasoning_effort" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             manager
-                .set_reasoning_effort(&project, args.effort.as_deref(), args.session.as_deref())
+                .set_reasoning_effort(&bot, args.effort.as_deref(), args.session.as_deref())
                 .await?;
             no_content()
         }
 
         // Asset channel (`docs/render-parts.md` P1): an artifact id in, an opaque URL out.
         "agent_asset_url" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let id = args
                 .id
                 .clone()
                 .ok_or_else(|| ApiError::bad("missing id".to_owned()))?;
-            let handle = manager.asset_handle(&project, &id).await?;
+            let handle = manager.asset_handle(&bot, &id).await?;
             ok_json(format!("/api/asset/{handle}"))
         }
         "agent_asset_text" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let id = args
                 .id
                 .clone()
                 .ok_or_else(|| ApiError::bad("missing id".to_owned()))?;
             // Served through the authorized command channel, not the public asset route: this
             // returns *source code* that the page then runs in a sandboxed frame.
-            ok_json(manager.asset_text(&project, &id).await?)
+            ok_json(manager.asset_text(&bot, &id).await?)
         }
         // Inbound media (`docs/render-parts.md` inbound channels). Two doors into the same
         // library: local paths (the server usually runs on the user's machine too) and raw
         // bytes (the browser cannot hand us a path). Both reuse the jail, allow-list and size
         // cap of the artifact store -- there is no second storage layer for user uploads.
         "agent_ingest_paths" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let paths = args.paths.unwrap_or_default();
-            let (entries, errors) = manager.ingest_paths(&project, paths).await?;
+            let (entries, errors) = manager.ingest_paths(&bot, paths).await?;
             ok_json(serde_json::json!({ "entries": entries, "errors": errors }))
         }
         "agent_ingest_bytes" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let mime = args
                 .mime
                 .ok_or_else(|| ApiError::bad("missing mime".to_owned()))?;
@@ -544,41 +548,41 @@ async fn dispatch(
                 .ok_or_else(|| ApiError::bad("missing data".to_owned()))?;
             let (_, bytes) = crate::artifact::decode_data_url(&data_url)
                 .map_err(|e| ApiError::bad(e.to_string()))?;
-            ok_json(manager.ingest_bytes(&project, &name, &mime, &bytes).await?)
+            ok_json(manager.ingest_bytes(&bot, &name, &mime, &bytes).await?)
         }
         // The library is an inventory, not a conversation: it outlives any one session, so the
         // page can answer "which file did I send you last week?" without scrolling a transcript.
         "agent_library_list" => {
-            let project = args.project()?;
-            ok_json(manager.library_list(&project).await?)
+            let bot = args.bot()?;
+            ok_json(manager.library_list(&bot).await?)
         }
         "agent_list_skills" => {
-            let project = args.project()?;
-            ok_json(manager.list_skills(&project).await?)
+            let bot = args.bot()?;
+            ok_json(manager.list_skills(&bot).await?)
         }
         "agent_activate_skill" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let session = args.session()?;
             let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
-            manager.activate_skill(&project, &session, &name).await?;
+            manager.activate_skill(&bot, &session, &name).await?;
             no_content()
         }
 
         // -- sessions -----------------------------------------------------------------
         "agent_list_sessions" => {
-            let project = args.project()?;
-            ok_json(manager.list_sessions(&project).await?)
+            let bot = args.bot()?;
+            ok_json(manager.list_sessions(&bot).await?)
         }
         "agent_current_session" => {
-            let project = args.project()?;
-            match manager.current_session(&project).await {
+            let bot = args.bot()?;
+            match manager.current_session(&bot).await {
                 Ok(name) => ok_json(Some(name)),
                 Err(_) => ok_json(Option::<String>::None),
             }
         }
         "agent_new_session" => {
-            let project = args.project()?;
-            let name = manager.new_session(&project, args.title).await?;
+            let bot = args.bot()?;
+            let name = manager.new_session(&bot, args.title).await?;
             ok_json(SessionEntryWire {
                 label: name.clone(),
                 name,
@@ -589,59 +593,59 @@ async fn dispatch(
             })
         }
         "agent_switch_session" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
-            manager.switch_session(&project, &name).await?;
+            manager.switch_session(&bot, &name).await?;
             no_content()
         }
         "agent_rename_session" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
             let title = args.title.ok_or_else(|| ApiError::bad("missing title"))?;
-            manager.rename_session(&project, &name, &title).await?;
+            manager.rename_session(&bot, &name, &title).await?;
             no_content()
         }
         "agent_delete_session" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
-            manager.delete_session(&project, &name).await?;
+            manager.delete_session(&bot, &name).await?;
             no_content()
         }
         "agent_move_session" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
             let target = args
-                .target_project
-                .ok_or_else(|| ApiError::bad("missing targetProject"))?;
-            manager.move_session(&project, &name, &target).await?;
+                .target_bot
+                .ok_or_else(|| ApiError::bad("missing targetBot"))?;
+            manager.move_session(&bot, &name, &target).await?;
             no_content()
         }
         // No dictation route on purpose: transcription happens on the user's own device
         // (browser recogniser, or this computer's whisper.cpp in the desktop app). A phone
-        // that opens a cloud project dictates with the phone's own ASR, so no audio ever
+        // that opens a cloud bot dictates with the phone's own ASR, so no audio ever
         // reaches this server. See `docs/voice-input.md`.
         "agent_load_history" => {
-            let project = args.project()?;
-            ok_json(manager.load_history(&project).await?)
+            let bot = args.bot()?;
+            ok_json(manager.load_history(&bot).await?)
         }
 
         // -- subagents ----------------------------------------------------------------
         "agent_list_subagents" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let session = args.session()?;
-            ok_json(manager.list_subagents(&project, &session).await?)
+            ok_json(manager.list_subagents(&bot, &session).await?)
         }
         "agent_load_subagent" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let session = args.session()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            ok_json(manager.load_subagent(&project, &session, &id).await?)
+            ok_json(manager.load_subagent(&bot, &session, &id).await?)
         }
         "agent_cancel_subagent" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let session = args.session()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            manager.cancel_subagent(&project, &session, &id).await?;
+            manager.cancel_subagent(&bot, &session, &id).await?;
             no_content()
         }
 
@@ -650,48 +654,48 @@ async fn dispatch(
         // Every mutation answers with the whole list, so the caller re-renders from one snapshot
         // instead of reconciling a partial update against concurrent background progress.
         "agent_pool_list" => {
-            let project = args.project()?;
-            ok_json(manager.pool_list(&project).await?)
+            let bot = args.bot()?;
+            ok_json(manager.pool_list(&bot).await?)
         }
         "agent_pool_enqueue" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let brief = args
                 .brief
                 .or(args.text)
                 .ok_or_else(|| ApiError::bad("missing brief"))?;
-            ok_json(manager.pool_enqueue(&project, &brief).await?)
+            ok_json(manager.pool_enqueue(&bot, &brief).await?)
         }
         "agent_pool_accept" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            ok_json(manager.pool_accept(&project, &id).await?)
+            ok_json(manager.pool_accept(&bot, &id).await?)
         }
         "agent_pool_reject" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
             let note = args.note.unwrap_or_default();
-            ok_json(manager.pool_reject(&project, &id, &note).await?)
+            ok_json(manager.pool_reject(&bot, &id, &note).await?)
         }
         "agent_pool_retry" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            ok_json(manager.pool_retry(&project, &id).await?)
+            ok_json(manager.pool_retry(&bot, &id).await?)
         }
         "agent_pool_transition" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
             let status = args.status.ok_or_else(|| ApiError::bad("missing status"))?;
-            ok_json(manager.pool_transition(&project, &id, status).await?)
+            ok_json(manager.pool_transition(&bot, &id, status).await?)
         }
         "agent_pool_cancel" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            ok_json(manager.pool_cancel(&project, &id).await?)
+            ok_json(manager.pool_cancel(&bot, &id).await?)
         }
         "agent_pool_remove" => {
-            let project = args.project()?;
+            let bot = args.bot()?;
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            ok_json(manager.pool_remove(&project, &id).await?)
+            ok_json(manager.pool_remove(&bot, &id).await?)
         }
 
         other => Err(ApiError::not_found(format!("unknown command: {other}"))),
@@ -841,7 +845,7 @@ fn read_range(file: tokio::fs::File, offset: u64, len: u64) -> axum::body::Body 
 /// rejected by the HTTP layer before any of it is buffered.
 const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
-/// `POST /api/upload?project=<id>&name=<file>&mime=<type>` with the file as the **raw body**.
+/// `POST /api/upload?bot=<id>&name=<file>&mime=<type>` with the file as the **raw body**.
 ///
 /// This is the cloud twin of the desktop's `agent_ingest_paths`: a browser cannot hand us a
 /// path, so it hands us the bytes. The declared `mime` is advisory -- the jail re-derives and
@@ -852,9 +856,9 @@ async fn upload_handler(
     axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let project = query
-        .get("project")
-        .ok_or_else(|| ApiError::bad("missing project".to_owned()))?;
+    let bot = query
+        .get("bot")
+        .ok_or_else(|| ApiError::bad("missing bot".to_owned()))?;
     let mime = query
         .get("mime")
         .ok_or_else(|| ApiError::bad("missing mime".to_owned()))?;
@@ -864,7 +868,7 @@ async fn upload_handler(
     }
     let entry = state
         .manager
-        .ingest_bytes(project, name, mime, &body)
+        .ingest_bytes(bot, name, mime, &body)
         .await?;
     ok_json(entry)
 }
@@ -925,7 +929,7 @@ mod tests {
             chrono::Utc::now().timestamp_nanos_opt().unwrap()
         ));
         let factory = Arc::new(crate::bootstrap::test_support::test_factory(dir.clone()));
-        let manager = Arc::new(ProjectRuntimeManager::new(factory, Arc::new(|_| {})));
+        let manager = Arc::new(BotRuntimeManager::new(factory, Arc::new(|_| {})));
         let (events, _) = broadcast::channel(8);
         let (status_events, _) = broadcast::channel(8);
         let state = Arc::new(ServerState {

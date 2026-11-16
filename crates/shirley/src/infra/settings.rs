@@ -287,29 +287,6 @@ impl FileSettings {
         })
     }
 
-    /// Write the current file settings back to `path` (atomic replacement: write a temp file then `rename`).
-    ///
-    /// Writing **overwrites the whole file** -- the caller should read existing content, change fields, then write back,
-    /// otherwise other keys in the file are lost. Missing directories are created automatically.
-    ///
-    /// After writing, tighten file permissions to `0600` (owner read/write only): the config file may contain
-    /// `api_key`, and the default `0644` would expose the key to other users on the same machine. A tightening failure is not treated as fatal
-    /// -- some filesystems (e.g. certain mounted volumes) do not support chmod, and being able to write matters more.
-    pub fn save(&self, path: &Path) -> Result<(), SettingsError> {
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let text = toml::to_string_pretty(self).map_err(|e| SettingsError::Parse {
-            path: path.to_path_buf(),
-            message: e.to_string(),
-        })?;
-        let tmp = path.with_extension("toml.tmp");
-        std::fs::write(&tmp, text)?;
-        std::fs::rename(&tmp, path)?;
-        restrict_permissions(path);
-        Ok(())
-    }
-
     /// Read the file; return `None` if it does not exist (missing config is not an error, it is "this layer said nothing").
     pub(crate) fn load_file(path: &Path) -> Result<Option<Self>, SettingsError> {
         match std::fs::read_to_string(path) {
@@ -408,17 +385,6 @@ impl Settings {
             .unwrap_or(64);
         // `max_steps == 0` is allowed and means "no execution cap" (see `RuntimeSettings`).
         Self::finalize(merged, compression, memory, subagent, max_steps)
-    }
-
-    /// Convenience entry point: uses the real `config_dir` and process env vars.
-    #[cfg(test)]
-    pub fn load_default(workspace_root: &Path) -> Result<Self, SettingsError> {
-        let paths =
-            crate::storage::StoragePaths::new(crate::storage::global_root(), workspace_root)?;
-        paths.migrate()?;
-        Self::load(Some(&crate::storage::config_path()), &|key| {
-            std::env::var(key).ok()
-        })
     }
 
     /// Whether model service configuration is complete (i.e. `base_url` is non-empty).
@@ -521,29 +487,6 @@ impl Settings {
             max_steps,
         })
     }
-}
-
-/// Tighten file permissions to owner read/write only (`0600`). Skipped on non-Unix platforms.
-fn restrict_permissions(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-}
-
-/// Write a set of provider config into the config file (**read first, modify, then write**; only overrides the passed-in fields,
-/// leaving other keys in the file untouched). Returns the written path for the caller to report to the user.
-///
-/// Persistence entry point for `/login`. Production callers pass the shared global
-/// config path; tests can inject an isolated temporary path.
-pub fn save_provider(path: &Path, provider: ProviderSettings) -> Result<PathBuf, SettingsError> {
-    let mut existing = FileSettings::load_file(path)?.unwrap_or_default();
-    merge_into(&mut existing.provider, provider);
-    existing.save(path)?;
-    Ok(path.to_path_buf())
 }
 
 /// The env var layer: maps the process environment into a [`ProviderSettings`].
@@ -829,71 +772,6 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, SettingsError::Invalid(_)));
-    }
-
-    #[test]
-    fn save_provider_preserves_other_keys() {
-        let root = temp_root("save_preserve");
-        let path = root.join("config.toml");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        // Pre-set a models_url (not overridden this time).
-        std::fs::write(
-            &path,
-            "[provider]\nmodels_url = \"http://keep/v1/models\"\nbase_url = \"http://old\"\n",
-        )
-        .unwrap();
-
-        save_provider(
-            &path,
-            ProviderSettings {
-                base_url: Some("http://new".into()),
-                api_key: Some("sk".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-
-        let saved = FileSettings::load_file(&path).unwrap().unwrap();
-        assert_eq!(saved.provider.base_url.as_deref(), Some("http://new"));
-        assert_eq!(saved.provider.api_key.as_deref(), Some("sk"));
-        assert_eq!(
-            saved.provider.models_url.as_deref(),
-            Some("http://keep/v1/models"),
-            "keys not overridden should be retained"
-        );
-    }
-
-    #[test]
-    fn save_provider_creates_missing_dirs() {
-        let root = temp_root("save_dirs");
-        let path = root.join("nested/deep/config.toml");
-        save_provider(
-            &path,
-            ProviderSettings {
-                base_url: Some("http://x".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        assert!(path.exists(), "should auto-create parent directories");
-    }
-
-    #[test]
-    fn saved_provider_round_trips_through_load() {
-        let root = temp_root("save_roundtrip");
-        let path = root.join("config.toml");
-        save_provider(
-            &path,
-            ProviderSettings {
-                base_url: Some("http://saved".into()),
-                model: Some("m".into()),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let settings = Settings::load(Some(&root.join("config.toml")), &env_of(&[])).unwrap();
-        assert_eq!(settings.base_url, "http://saved");
-        assert_eq!(settings.model, "m");
     }
 
     #[test]

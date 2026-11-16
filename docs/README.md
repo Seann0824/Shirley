@@ -29,9 +29,6 @@ This set of documents is a technical design proposal for the current repository 
 | `testing.md` | SDK unit-test strategy, cache hit-rate benchmarks | P1 |
 | `plan.md` | Error-handling unification: completed state + follow-up task list | P0 |
 | `web-search.md` | Web search tool `web_search`: Anthropic-compatible Messages API / normalization / configuration (**implemented**) | P1 |
-| `desktop-interface.md` | Desktop interface: Tauri 2 + React migration of the shiwen chat UI / shared LCA / stripping shiwen custom logic (**M0-M2 landed**) | P1 |
-| `cloud-web.md` | Cloud web transport: HTTP command endpoint (`POST /api/cmd/{name}`) + **SSE event stream** (`GET /api/events`) / `bridge.ts` three-state (Tauri / mock / HTTP) / static hosting of the desktop build / `spawn_turn` lifecycle (single-project implementation) | P1 |
-| `cloud-server.md` | Cloud server architecture: shared `ProjectRuntimeManager` (desktop Tauri + cloud HTTP) / session lazy loading (`index.json` metadata + two-phase first runtime) / cloud project creation (server-path textbox / `agent_browse_dirs`) / remote desktop via HTTP bridge (**design, not landed**) | P1 |
 | `model-providers.md` | Host-local provider profiles, manual model lists, credentials, per-chat selection, and manual acceptance steps | P1 |
 | `memory-sync.md` | Personal memory synchronization, legacy review, local/remote chat switching, authentication, and manual acceptance steps | P1 |
 | `memory.md` | Memory system: pure markdown + two-layer structure (always-resident overview auto-injected / on-demand detail retrieval) / background curator async curation / conflicts expressed via a timeline (**proposal, not landed**) | P1 |
@@ -64,4 +61,3 @@ The sandbox-layer landing design is in `sandbox.md`: it advances "secure by defa
 - Unwired configuration: **wired**. `temperature` / `max_output_tokens` / `tool_choice` go into the request body, and a new `extra_body` escape hatch is added (see `docs/sdk-gaps.md` gap-4; the `request_timeout` field has been removed)
 - Unused `StopReason`: `MaxStepsReached`, `Cancelled` (`Completed` is currently the only value that is ever produced)
 - Already landed (not yet done when the proposal was written): streaming output (`stream` config + `ContentDelta` / `ReasoningDelta` events + SSE incremental parsing), the TUI consuming `AgentEvent` directly
-| `docs/voice-input.md` | 语音输入：录音与转写都在用户设备上（浏览器 SpeechRecognition / 本机 whisper.cpp）、无引擎选择器、音频格式、语言码、macOS 权限 |

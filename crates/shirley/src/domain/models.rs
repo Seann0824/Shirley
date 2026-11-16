@@ -585,9 +585,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "live test; requires the real workspace config and a reachable endpoint"]
     async fn live_remote_catalog_from_workspace_config() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let settings =
-            crate::settings::Settings::load_default(&root).expect("failed to load settings");
+        let settings = crate::settings::Settings::load(
+            Some(&crate::storage::global_root().join("config.toml")),
+            &|key| std::env::var(key).ok(),
+        )
+        .expect("failed to load settings");
         let url = settings
             .models_url
             .clone()

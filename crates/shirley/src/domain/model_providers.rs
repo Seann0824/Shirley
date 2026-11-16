@@ -912,7 +912,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "server")]
     #[test]
     fn session_remembers_its_provider_after_default_changes_and_blocks_deleted_provider() {
         use crate::bootstrap::test_support::test_factory;
@@ -980,7 +979,6 @@ mod tests {
         );
     }
 
-    #[cfg(feature = "server")]
     #[tokio::test]
     async fn fetch_uses_correct_auth_and_does_not_save_draft_or_replace_model_metadata() {
         use axum::{Json, Router, http::HeaderMap, routing::get};
@@ -1003,7 +1001,6 @@ mod tests {
         assert!(!dir.0.join(FILE).exists());
         task.abort();
     }
-    #[cfg(feature = "server")]
     #[tokio::test]
     async fn child_request_uses_parent_selected_service_instead_of_factory_default() {
         use axum::{Json, Router, http::HeaderMap, routing::post};
@@ -1099,7 +1096,6 @@ mod tests {
         assert!(!target_dir.join(&binding_name).exists());
     }
 
-    #[cfg(feature = "server")]
     #[tokio::test]
     async fn unauthenticated_anthropic_catalog_still_sends_version_header() {
         use axum::{Json, Router, http::HeaderMap, routing::get};

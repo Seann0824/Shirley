@@ -52,6 +52,10 @@ pub(crate) mod interface;
 // ── capabilities ──────────────────────────────────────────────────────────
 // Computer use: drives other apps' windows through the macOS accessibility API. Application-layer
 // on purpose -- "how to poke another app's UI" is a product decision, not an SDK fundamental.
+#[cfg_attr(
+    not(target_os = "macos"),
+    allow(dead_code, reason = "the only backend is macOS; other platforms compile the stub")
+)]
 pub(crate) mod computer;
 pub(crate) mod memory;
 // The task pool belongs to the personal-agent main line, not to the desktop ornament: the queue
@@ -81,12 +85,6 @@ use shirley_agent_sdk::AgentError;
 /// Returns [`AgentError`] if legacy migration, assembly, or the server fails.
 pub fn run() -> Result<(), AgentError> {
     let _ = dotenvy::dotenv();
-
-    // Headless one-shot entry (`shirley exec`): one prompt in, one answer out, then exit.
-    let argv: Vec<String> = std::env::args().collect();
-    if argv.get(1).is_some_and(|arg| arg == "exec") {
-        return interface::exec::run(&argv[2..]);
-    }
 
     // Migrate legacy state root once.
     if storage::migrate_legacy_root().map_err(|error| AgentError::Other(Box::new(error)))? {

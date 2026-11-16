@@ -104,11 +104,6 @@ impl SkillCatalog {
         }
     }
 
-    /// The single directory a new skill should be installed into (see [`Self::install_roots`]).
-    pub fn install_root(&self) -> Option<PathBuf> {
-        self.install_roots().0
-    }
-
     /// Re-scan the discovery roots if the directory has changed since the last scan.
     ///
     /// Returns `true` when the catalog was replaced. If the scan produces the same set of skills
@@ -411,7 +406,6 @@ mod tests {
         // so the durable user-level root is the default landing spot.
         assert_eq!(default, Some(home.join(".agents/skills")));
         assert_eq!(override_root, Some(project.join(".agents/skills")));
-        assert_eq!(catalog.install_root(), default);
     }
 
     #[test]

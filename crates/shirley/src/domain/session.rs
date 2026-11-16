@@ -255,13 +255,6 @@ pub struct SessionEntry {
     pub turns: usize,
 }
 
-impl SessionEntry {
-    /// Whether the session has content (decides whether the UI shows a preview).
-    pub fn is_empty(&self) -> bool {
-        self.preview.is_empty()
-    }
-}
-
 /// Session catalog (application layer): list / open / create / rename / delete sessions.
 ///
 /// Symmetric with `models::ModelCatalog` -- it converges "which sessions are currently selectable and how they are managed" behind

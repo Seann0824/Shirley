@@ -3,10 +3,10 @@
 //! This module is the **interface-agnostic orchestration layer** the HTTP/SSE server
 //! transport wraps over. It owns:
 //!
-//! - the lazily-cached per-bot [`ProjectRuntime`] map (each = one [`AgentFactory`]
+//! - the lazily-cached per-bot [`BotRuntime`] map (each = one [`AgentFactory`]
 //!   + one [`SessionManager`]),
 //! - the per-`bot::session` cancel handles,
-//! - the **turn driver** ([`ProjectRuntimeManager::spawn_turn`]) that takes a session's
+//! - the **turn driver** ([`BotRuntimeManager::spawn_turn`]) that takes a session's
 //!   `Agent`, streams `run_stream`, feeds every `AgentEvent` back into the session and
 //!   fans it out through a transport-supplied `sink`,
 //! - all the query commands (sessions / model / skills / subagents) and wire DTOs.
@@ -14,14 +14,6 @@
 //! The core never holds a socket. Events leave it through a
 //! `sink: Arc<dyn Fn(AgentEventWire)>`: the server passes a sink that serialises to its
 //! global SSE broadcast.
-
-#![cfg_attr(
-    not(any(feature = "desktop", feature = "server")),
-    allow(
-        dead_code,
-        reason = "only used when the relevant interface feature is enabled"
-    )
-)]
 
 use std::collections::HashMap;
 use std::panic::AssertUnwindSafe;
@@ -31,7 +23,7 @@ use std::sync::Arc;
 use futures::{FutureExt, StreamExt};
 use serde::Serialize;
 use shirley_agent_sdk::{
-    Agent, AgentEvent, Content, ContentPart, ImagePart, ImageSource, Message, RunResult,
+    Agent, AgentEvent, MessageContent, ContentPart, ImagePart, ImageSource, Message, RunResult,
     StopReason, Usage,
 };
 
@@ -48,7 +40,7 @@ use crate::subagent::{SubagentInfo, SubagentManager};
 use crate::todo::TaskView;
 
 /// Runtime for a single bot: one assembled factory + its multi-session orchestrator.
-pub struct ProjectRuntime {
+pub struct BotRuntime {
     pub factory: Arc<AgentFactory>,
     pub sessions: SessionManager,
 }
@@ -63,20 +55,20 @@ pub type EventSink = Arc<dyn Fn(AgentEventWire) + Send + Sync>;
 pub type StatusSink = Arc<dyn Fn(StateSnapshotWire) + Send + Sync>;
 
 /// The bot ID used when no specific bot name is provided.
-/// Bot-ui passes a bot slug here; the runtime creates one `ProjectRuntime` per bot lazily.
+/// Bot-ui passes a bot slug here; the runtime creates one `BotRuntime` per bot lazily.
 pub const DEFAULT_BOT_ID: &str = "default";
 
 /// A shared, interface-agnostic bot runtime manager.
 ///
 /// Each bot is identified by a string slug (e.g. `"nono"`, `"patch"`, `"default"`).
 /// The runtime is created lazily on first use and cached for the lifetime of the server.
-pub struct ProjectRuntimeManager {
+pub struct BotRuntimeManager {
     /// Default factory used when creating new bot runtimes lazily.
     factory: Arc<AgentFactory>,
-    runtimes: Arc<Mutex<HashMap<String, Arc<Mutex<ProjectRuntime>>>>>,
+    runtimes: Arc<Mutex<HashMap<String, Arc<Mutex<BotRuntime>>>>>,
     cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
     sink: EventSink,
-    /// Content-free runtime-status fan-out (separate channel; no-op by default).
+    /// MessageContent-free runtime-status fan-out (separate channel; no-op by default).
     status_sink: StatusSink,
     /// Asset handles: `<handle>` -> (absolute file, mime).
     ///
@@ -87,7 +79,7 @@ pub struct ProjectRuntimeManager {
 }
 
 /// One minted asset handle. Deliberately holds the *resolved* jail file, not an id to re-resolve:
-/// resolution already happened once, under the project's own jail.
+/// resolution already happened once, under the bot's own jail.
 #[derive(Debug, Clone)]
 struct AssetEntry {
     path: PathBuf,
@@ -112,12 +104,12 @@ pub struct AssetText {
 /// it was on screen", not durable state: `agent_asset_url` re-mints on demand.
 const MAX_ASSET_HANDLES: usize = 512;
 
-/// Event pump / cancel key: unique across projects.
-pub fn route_key(project: &str, session: &str) -> String {
-    format!("{project}::{session}")
+/// Event pump / cancel key: unique across bots.
+pub fn route_key(bot: &str, session: &str) -> String {
+    format!("{bot}::{session}")
 }
 
-impl ProjectRuntimeManager {
+impl BotRuntimeManager {
     pub fn new(factory: Arc<AgentFactory>, sink: EventSink) -> Self {
         Self {
             factory,
@@ -140,7 +132,7 @@ impl ProjectRuntimeManager {
     pub async fn ensure_runtime(
         &self,
         bot: &str,
-    ) -> Result<Arc<Mutex<ProjectRuntime>>, String> {
+    ) -> Result<Arc<Mutex<BotRuntime>>, String> {
         if let Some(rt) = self.runtimes.lock().await.get(bot).cloned() {
             return Ok(rt);
         }
@@ -163,15 +155,15 @@ impl ProjectRuntimeManager {
     }
 
     // -----------------------------------------------------------------------
-    // (project management removed — bot configuration handled by BotSpec)
+    // (bot management removed — bot configuration handled by BotSpec)
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
     // Session commands
     // -----------------------------------------------------------------------
 
-    pub async fn list_sessions(&self, project: &str) -> Result<Vec<SessionEntryWire>, String> {
-        let runtime = self.ensure_runtime(project).await?;
+    pub async fn list_sessions(&self, bot: &str) -> Result<Vec<SessionEntryWire>, String> {
+        let runtime = self.ensure_runtime(bot).await?;
         let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
         let entries = tokio::task::spawn_blocking(move || catalog.list())
             .await
@@ -187,8 +179,8 @@ impl ProjectRuntimeManager {
             .collect())
     }
 
-    pub async fn current_session(&self, project: &str) -> Result<String, String> {
-        let runtime = self.ensure_runtime(project).await?;
+    pub async fn current_session(&self, bot: &str) -> Result<String, String> {
+        let runtime = self.ensure_runtime(bot).await?;
         let guard = runtime.lock().await;
         guard
             .sessions
@@ -199,27 +191,27 @@ impl ProjectRuntimeManager {
 
     pub async fn new_session(
         &self,
-        project: &str,
+        bot: &str,
         title: Option<String>,
     ) -> Result<String, String> {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let mut guard = runtime.lock().await;
         guard.sessions.create_new(title.as_deref())
     }
 
-    pub async fn switch_session(&self, project: &str, name: &str) -> Result<String, String> {
-        let runtime = self.ensure_runtime(project).await?;
+    pub async fn switch_session(&self, bot: &str, name: &str) -> Result<String, String> {
+        let runtime = self.ensure_runtime(bot).await?;
         let mut guard = runtime.lock().await;
         guard.sessions.switch_to(name)
     }
 
     pub async fn rename_session(
         &self,
-        project: &str,
+        bot: &str,
         name: &str,
         title: &str,
     ) -> Result<(), String> {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
         let name = name.to_owned();
         let title = title.to_owned();
@@ -229,8 +221,8 @@ impl ProjectRuntimeManager {
             .map_err(|e| e.to_string())
     }
 
-    pub async fn delete_session(&self, project: &str, name: &str) -> Result<(), String> {
-        let runtime = self.ensure_runtime(project).await?;
+    pub async fn delete_session(&self, bot: &str, name: &str) -> Result<(), String> {
+        let runtime = self.ensure_runtime(bot).await?;
         runtime.lock().await.sessions.delete_session(name)?;
         let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
         let name = name.to_owned();
@@ -242,15 +234,15 @@ impl ProjectRuntimeManager {
 
     pub async fn move_session(
         &self,
-        project: &str,
+        bot: &str,
         name: &str,
-        target_project: &str,
+        target_bot: &str,
     ) -> Result<(), String> {
-        if project == target_project {
-            return Err("source and target projects are the same".to_owned());
+        if bot == target_bot {
+            return Err("source and target bots are the same".to_owned());
         }
-        let source = self.ensure_runtime(project).await?;
-        let target = self.ensure_runtime(target_project).await?;
+        let source = self.ensure_runtime(bot).await?;
+        let target = self.ensure_runtime(target_bot).await?;
         {
             let mut guard = source.lock().await;
             guard.sessions.forget_session(name)?;
@@ -261,7 +253,7 @@ impl ProjectRuntimeManager {
             .factory
             .session_catalog
             .storage_dir()
-            .ok_or_else(|| "the target project does not support a session directory".to_owned())?;
+            .ok_or_else(|| "the target bot does not support a session directory".to_owned())?;
         let catalog = Arc::clone(&source.lock().await.factory.session_catalog);
         let name = name.to_owned();
         tokio::task::spawn_blocking(move || catalog.move_to(&name, &dest_dir))
@@ -277,32 +269,32 @@ impl ProjectRuntimeManager {
     /// Compose prompt + references, then drive one turn.
     pub async fn send(
         &self,
-        project: &str,
+        bot: &str,
         session: Option<String>,
         text: String,
         references: Vec<String>,
         images: Vec<String>,
     ) -> Result<(), String> {
         let store = {
-            let runtime = self.ensure_runtime(project).await?;
+            let runtime = self.ensure_runtime(bot).await?;
             let guard = runtime.lock().await;
             Arc::clone(&guard.factory.artifacts)
         };
         let prompt = compose_prompt(&text, &references);
         let user_content = user_content(&store, &prompt, &images);
-        self.spawn_turn(project, session, text, user_content).await
+        self.spawn_turn(bot, session, text, user_content).await
     }
 
     /// Rewind the last turn, then send the edited text as a new turn.
     pub async fn resend(
         &self,
-        project: &str,
+        bot: &str,
         session: Option<String>,
         text: String,
         references: Vec<String>,
         images: Vec<String>,
     ) -> Result<(), String> {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let store = {
             let mut guard = runtime.lock().await;
             let session_name = match session.clone() {
@@ -320,18 +312,18 @@ impl ProjectRuntimeManager {
         };
         let prompt = compose_prompt(&text, &references);
         let user_content = user_content(&store, &prompt, &images);
-        self.spawn_turn(project, session, text, user_content).await
+        self.spawn_turn(bot, session, text, user_content).await
     }
 
     /// Take the session's `Agent`, register the cancel handle, and spawn the run task.
     pub async fn spawn_turn(
         &self,
-        project: &str,
+        bot: &str,
         session: Option<String>,
         text: String,
-        user_content: Content,
+        user_content: MessageContent,
     ) -> Result<(), String> {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let (mut agent, memory, session_name, status) = {
             let mut guard = runtime.lock().await;
             let session_name = match session {
@@ -371,8 +363,8 @@ impl ProjectRuntimeManager {
         let sink = Arc::clone(&self.sink);
         let status_sink = Arc::clone(&self.status_sink);
         let cancels = Arc::clone(&self.cancels);
-        let key = route_key(project, &session_name);
-        let project_owned = project.to_owned();
+        let key = route_key(bot, &session_name);
+        let bot_owned = bot.to_owned();
         let (cancel_tx, cancel_rx) = oneshot::channel::<()>();
         self.cancels.lock().await.insert(key.clone(), cancel_tx);
 
@@ -380,7 +372,7 @@ impl ProjectRuntimeManager {
             // Safety net (`docs/agent-status.md` §5.6): if this task is aborted/dropped mid-turn the
             // guard flips the keeper to `Unreachable` + `stale`; disarmed on the normal path below.
             let mut turn_guard = crate::status::TurnGuard::new(Arc::clone(&status));
-            emit_status(&status_sink, &project_owned, &session_name, &status);
+            emit_status(&status_sink, &bot_owned, &session_name, &status);
             let terminal = guard_turn(async {
                 let mut cancel_rx = cancel_rx;
                 let mut stream = agent.run_stream_content(user_content);
@@ -400,7 +392,7 @@ impl ProjectRuntimeManager {
                         // turn still flips Running -> Stalled (docs §5.2).
                         _ = hb.tick() => {
                             status.tick();
-                            emit_status(&status_sink, &project_owned, &session_name, &status);
+                            emit_status(&status_sink, &bot_owned, &session_name, &status);
                         }
                         event = stream.next() => {
                             let event = event
@@ -414,13 +406,13 @@ impl ProjectRuntimeManager {
                                 let mut rt = runtime_for_task.lock().await;
                                 rt.sessions.apply_event(&session_name, Ok(event.clone()));
                                 // The cloud cursor and view must advance under the same lock.
-                                sink_event(&sink, &project_owned, &session_name, event);
+                                sink_event(&sink, &bot_owned, &session_name, event);
                                 if is_todo {
                                     let todo = rt.sessions.session(&session_name).and_then(super::session::Session::todo_view);
-                                    sink_todo(&sink, &project_owned, &session_name, todo);
+                                    sink_todo(&sink, &bot_owned, &session_name, todo);
                                 }
                             }
-                            emit_status(&status_sink, &project_owned, &session_name, &status);
+                            emit_status(&status_sink, &bot_owned, &session_name, &status);
                         }
                     }
                 }
@@ -444,11 +436,11 @@ impl ProjectRuntimeManager {
                 rt.sessions.restore_agent(&session_name, agent);
                 rt.sessions.apply_event(&session_name, terminal.clone());
                 match &terminal {
-                    Ok(event) => sink_event(&sink, &project_owned, &session_name, event.clone()),
-                    Err(message) => sink_error(&sink, &project_owned, &session_name, message),
+                    Ok(event) => sink_event(&sink, &bot_owned, &session_name, event.clone()),
+                    Err(message) => sink_error(&sink, &bot_owned, &session_name, message),
                 }
             }
-            emit_status(&status_sink, &project_owned, &session_name, &status);
+            emit_status(&status_sink, &bot_owned, &session_name, &status);
 
             turn_guard.disarm();
             if let Some((config, first)) = title_input {
@@ -463,8 +455,8 @@ impl ProjectRuntimeManager {
         Ok(())
     }
 
-    pub async fn cancel(&self, project: &str, session: &str) {
-        let key = route_key(project, session);
+    pub async fn cancel(&self, bot: &str, session: &str) {
+        let key = route_key(bot, session);
         if let Some(tx) = self.cancels.lock().await.remove(&key) {
             let _ = tx.send(());
         }
@@ -474,30 +466,13 @@ impl ProjectRuntimeManager {
     // Subscription
     // -----------------------------------------------------------------------
 
-    /// Return a snapshot of the session view + a live event receiver.
+    /// Return a snapshot of the session view + a live event receiver + the sink cursor.
     ///
     /// Subscribe and snapshot happen **under the same lock** so nothing is lost or
     /// duplicated: the snapshot covers before-subscribe, the receiver covers after.
-    #[cfg(feature = "desktop")]
-    pub async fn subscribe(
-        &self,
-        project: &str,
-        session: &str,
-    ) -> Result<
-        (
-            broadcast::Receiver<Result<AgentEvent, String>>,
-            SessionSnapshotWire,
-        ),
-        String,
-    > {
-        self.subscribe_with_cursor(project, session, || 0)
-            .await
-            .map(|(rx, snapshot, _)| (rx, snapshot))
-    }
-
     pub async fn subscribe_with_cursor(
         &self,
-        project: &str,
+        bot: &str,
         session: &str,
         cursor: impl FnOnce() -> u64,
     ) -> Result<
@@ -508,7 +483,7 @@ impl ProjectRuntimeManager {
         ),
         String,
     > {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let guard = runtime.lock().await;
         let rx = guard
             .sessions
@@ -531,8 +506,8 @@ impl ProjectRuntimeManager {
     // Model commands
     // -----------------------------------------------------------------------
 
-    pub async fn model_name(&self, project: &str) -> Result<String, String> {
-        let runtime = self.ensure_runtime(project).await?;
+    pub async fn model_name(&self, bot: &str) -> Result<String, String> {
+        let runtime = self.ensure_runtime(bot).await?;
         let guard = runtime.lock().await;
         if let Some(key) = &guard.sessions.active().model_selection {
             return Ok(key.clone());
@@ -544,8 +519,8 @@ impl ProjectRuntimeManager {
             .unwrap_or_default())
     }
 
-    pub async fn list_models(&self, project: &str) -> Result<Vec<ModelEntryWire>, String> {
-        let runtime = self.ensure_runtime(project).await?;
+    pub async fn list_models(&self, bot: &str) -> Result<Vec<ModelEntryWire>, String> {
+        let runtime = self.ensure_runtime(bot).await?;
         let catalog = Arc::clone(&runtime.lock().await.factory.model_catalog);
         let entries = catalog.list().await;
         Ok(entries
@@ -565,11 +540,11 @@ impl ProjectRuntimeManager {
 
     pub async fn set_model(
         &self,
-        project: &str,
+        bot: &str,
         model: &str,
         target_session: Option<&str>,
     ) -> Result<(), String> {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let (factory, session_name) = {
             let guard = runtime.lock().await;
             (
@@ -589,7 +564,7 @@ impl ProjectRuntimeManager {
         if model.starts_with("provider:") && entry.is_none() {
             return Err("服务商或模型已被移除，请刷新列表".into());
         }
-        // Resolve the full model config through the project factory (tool protocol etc.).
+        // Resolve the full model config through the bot factory (tool protocol etc.).
         let config = entry.as_ref().map(|entry| factory.model_config_for(entry));
         let mut guard = runtime.lock().await;
         let session = guard
@@ -626,11 +601,11 @@ impl ProjectRuntimeManager {
     /// persist to; only the live config changes then.
     pub async fn set_reasoning_effort(
         &self,
-        project: &str,
+        bot: &str,
         effort: Option<&str>,
         target_session: Option<&str>,
     ) -> Result<(), String> {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let (factory, session_name) = {
             let guard = runtime.lock().await;
             (
@@ -671,16 +646,16 @@ impl ProjectRuntimeManager {
     // Workspace files / skills
     // -----------------------------------------------------------------------
 
-    /// Mint an asset handle for an artifact id inside `project`'s jail.
+    /// Mint an asset handle for an artifact id inside `bot`'s jail.
     ///
-    /// This is the only way a handle comes into existence: it requires a project, so the jail is
-    /// the project's own, and it re-validates the id instead of trusting the render layer.
+    /// This is the only way a handle comes into existence: it requires a bot, so the jail is
+    /// the bot's own, and it re-validates the id instead of trusting the render layer.
     ///
     /// # Errors
-    /// Unknown project, or an id the jail rejects (malformed, escaping, not allow-listed, too
+    /// Unknown bot, or an id the jail rejects (malformed, escaping, not allow-listed, too
     /// large). The message is safe to hand straight back to the caller.
-    pub async fn asset_handle(&self, project: &str, id: &str) -> Result<String, String> {
-        let runtime = self.ensure_runtime(project).await?;
+    pub async fn asset_handle(&self, bot: &str, id: &str) -> Result<String, String> {
+        let runtime = self.ensure_runtime(bot).await?;
         let store = {
             let guard = runtime.lock().await;
             Arc::clone(&guard.factory.artifacts)
@@ -714,9 +689,9 @@ impl ProjectRuntimeManager {
     /// the file is textual, so a forged id cannot pull a binary through it.
     ///
     /// # Errors
-    /// Unknown project, an id the jail rejects, or an artifact whose mime is not textual.
-    pub async fn asset_text(&self, project: &str, id: &str) -> Result<AssetText, String> {
-        let runtime = self.ensure_runtime(project).await?;
+    /// Unknown bot, an id the jail rejects, or an artifact whose mime is not textual.
+    pub async fn asset_text(&self, bot: &str, id: &str) -> Result<AssetText, String> {
+        let runtime = self.ensure_runtime(bot).await?;
         let store = {
             let guard = runtime.lock().await;
             Arc::clone(&guard.factory.artifacts)
@@ -750,13 +725,13 @@ impl ProjectRuntimeManager {
     /// not throw the other four away.
     ///
     /// # Errors
-    /// Unknown project. Every other failure is reported per path in the returned tuple.
+    /// Unknown bot. Every other failure is reported per path in the returned tuple.
     pub async fn ingest_paths(
         &self,
-        project: &str,
+        bot: &str,
         paths: Vec<String>,
     ) -> Result<(Vec<LibraryEntry>, Vec<String>), String> {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let store = {
             let guard = runtime.lock().await;
             Arc::clone(&guard.factory.artifacts)
@@ -780,15 +755,15 @@ impl ProjectRuntimeManager {
     /// stream and names it from the request (`docs/render-parts.md` inbound channels).
     ///
     /// # Errors
-    /// Unknown project, or a type/size the jail rejects.
+    /// Unknown bot, or a type/size the jail rejects.
     pub async fn ingest_bytes(
         &self,
-        project: &str,
+        bot: &str,
         name: &str,
         mime: &str,
         bytes: &[u8],
     ) -> Result<LibraryEntry, String> {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let store = {
             let guard = runtime.lock().await;
             Arc::clone(&guard.factory.artifacts)
@@ -798,17 +773,17 @@ impl ProjectRuntimeManager {
             .map_err(|error| error.to_string())
     }
 
-    /// What is in this project's media library, newest first.
+    /// What is in this bot's media library, newest first.
     ///
     /// The library is an inventory, not a conversation: it survives session switches and shows
     /// everything the user has ever handed us (pasted, dropped, uploaded, or produced), so the
     /// "which file was that again?" question has an answer that is not "scroll the transcript".
-    /// The store owns the ordering (`added_ms` descending); this only adds the project jail.
+    /// The store owns the ordering (`added_ms` descending); this only adds the bot jail.
     ///
     /// # Errors
-    /// Unknown project.
-    pub async fn library_list(&self, project: &str) -> Result<Vec<LibraryEntry>, String> {
-        let runtime = self.ensure_runtime(project).await?;
+    /// Unknown bot.
+    pub async fn library_list(&self, bot: &str) -> Result<Vec<LibraryEntry>, String> {
+        let runtime = self.ensure_runtime(bot).await?;
         let store = {
             let guard = runtime.lock().await;
             Arc::clone(&guard.factory.artifacts)
@@ -819,7 +794,7 @@ impl ProjectRuntimeManager {
     /// Resolve a minted handle back to a jail file and its mime.
     ///
     /// Synchronous on purpose: Tauri's scheme handler is a synchronous function, and the lookup
-    /// is a map hit -- no project lock, no runtime assembly.
+    /// is a map hit -- no bot lock, no runtime assembly.
     #[must_use]
     pub fn asset_by_handle(&self, handle: &str) -> Option<(PathBuf, &'static str)> {
         let assets = self.assets.lock().ok()?;
@@ -828,8 +803,8 @@ impl ProjectRuntimeManager {
             .map(|entry| (entry.path.clone(), entry.mime))
     }
 
-    pub async fn list_skills(&self, project: &str) -> Result<Vec<SkillEntryWire>, String> {
-        let runtime = self.ensure_runtime(project).await?;
+    pub async fn list_skills(&self, bot: &str) -> Result<Vec<SkillEntryWire>, String> {
+        let runtime = self.ensure_runtime(bot).await?;
         let guard = runtime.lock().await;
         let skills = guard
             .sessions
@@ -846,11 +821,11 @@ impl ProjectRuntimeManager {
 
     pub async fn activate_skill(
         &self,
-        project: &str,
+        bot: &str,
         session: &str,
         name: &str,
     ) -> Result<(), String> {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let guard = runtime.lock().await;
         let session_ref = guard
             .sessions
@@ -875,8 +850,8 @@ impl ProjectRuntimeManager {
     // History / subagents
     // -----------------------------------------------------------------------
 
-    pub async fn load_history(&self, project: &str) -> Result<Vec<HistoryMessageWire>, String> {
-        let runtime = self.ensure_runtime(project).await?;
+    pub async fn load_history(&self, bot: &str) -> Result<Vec<HistoryMessageWire>, String> {
+        let runtime = self.ensure_runtime(bot).await?;
         let guard = runtime.lock().await;
         let agent = guard
             .sessions
@@ -887,10 +862,10 @@ impl ProjectRuntimeManager {
 
     async fn subagent_manager(
         &self,
-        project: &str,
+        bot: &str,
         session: &str,
     ) -> Result<Arc<SubagentManager>, String> {
-        let runtime = self.ensure_runtime(project).await?;
+        let runtime = self.ensure_runtime(bot).await?;
         let guard = runtime.lock().await;
         guard
             .sessions
@@ -901,10 +876,10 @@ impl ProjectRuntimeManager {
 
     pub async fn list_subagents(
         &self,
-        project: &str,
+        bot: &str,
         session: &str,
     ) -> Result<Vec<SubagentSummaryWire>, String> {
-        let manager = self.subagent_manager(project, session).await?;
+        let manager = self.subagent_manager(bot, session).await?;
         Ok(manager
             .list()
             .iter()
@@ -914,21 +889,21 @@ impl ProjectRuntimeManager {
 
     pub async fn load_subagent(
         &self,
-        project: &str,
+        bot: &str,
         session: &str,
         id: &str,
     ) -> Result<Vec<HistoryMessageWire>, String> {
-        let manager = self.subagent_manager(project, session).await?;
+        let manager = self.subagent_manager(bot, session).await?;
         Ok(history_from_messages(&manager.load_transcript(id)))
     }
 
     pub async fn cancel_subagent(
         &self,
-        project: &str,
+        bot: &str,
         session: &str,
         id: &str,
     ) -> Result<(), String> {
-        let manager = self.subagent_manager(project, session).await?;
+        let manager = self.subagent_manager(bot, session).await?;
         let _ = manager.cancel(id);
         Ok(())
     }
@@ -938,9 +913,9 @@ impl ProjectRuntimeManager {
 // Runtime assembly
 // ---------------------------------------------------------------------------
 
-/// Build a project runtime from an existing factory (resume the most recent session,
+/// Build a bot runtime from an existing factory (resume the most recent session,
 /// else lazily open an empty one).
-pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime, String> {
+pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<BotRuntime, String> {
     let catalog = Arc::clone(&factory.session_catalog);
     let latest = catalog
         .list()
@@ -970,39 +945,39 @@ pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime
     if from_disk {
         sessions.active_mut().rebuild_items_from_agent();
     }
-    Ok(ProjectRuntime { factory, sessions })
+    Ok(BotRuntime { factory, sessions })
 }
 
 // ---------------------------------------------------------------------------
 // Sink helpers
 // ---------------------------------------------------------------------------
 
-fn sink_event(sink: &EventSink, project: &str, session: &str, event: AgentEvent) {
-    if let Some(wire) = AgentEventWire::from_event(event).map(|w| w.with_route(project, session)) {
+fn sink_event(sink: &EventSink, bot: &str, session: &str, event: AgentEvent) {
+    if let Some(wire) = AgentEventWire::from_event(event).map(|w| w.with_route(bot, session)) {
         sink(wire);
     }
 }
 
 fn emit_status(
     sink: &StatusSink,
-    project: &str,
+    bot: &str,
     session: &str,
     keeper: &crate::status::StateKeeper,
 ) {
-    sink(StateSnapshotWire::from_snapshot(&keeper.snapshot()).with_route(project, session));
+    sink(StateSnapshotWire::from_snapshot(&keeper.snapshot()).with_route(bot, session));
 }
 
-fn sink_error(sink: &EventSink, project: &str, session: &str, message: &str) {
+fn sink_error(sink: &EventSink, bot: &str, session: &str, message: &str) {
     sink(AgentEventWire::Error {
-        project: Some(project.to_owned()),
+        bot: Some(bot.to_owned()),
         session: Some(session.to_owned()),
         message: message.to_owned(),
     });
 }
 
-fn sink_todo(sink: &EventSink, project: &str, session: &str, todo: Option<TaskView>) {
+fn sink_todo(sink: &EventSink, bot: &str, session: &str, todo: Option<TaskView>) {
     sink(AgentEventWire::TodoUpdated {
-        project: Some(project.to_owned()),
+        bot: Some(bot.to_owned()),
         session: Some(session.to_owned()),
         todo: todo.map(TaskViewWire::from),
     });
@@ -1134,13 +1109,6 @@ fn reasoning_efforts(entry: &crate::models::ModelEntry) -> (Vec<String>, Option<
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub struct FileEntryWire {
-    pub path: String,
-    pub name: String,
-    pub kind: &'static str,
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct SkillEntryWire {
     pub name: String,
     pub description: String,
@@ -1232,7 +1200,7 @@ pub fn compose_prompt(text: &str, references: &[String]) -> String {
 /// those on the way out of a *user* message, so the picture is only loaded when the model asks
 /// for it with the `media` tool. The application's own render path still sees the part and draws
 /// the card, which is how the human gets a preview without the log carrying base64.
-pub fn user_content(store: &ArtifactStore, prompt: &str, media: &[String]) -> Content {
+pub fn user_content(store: &ArtifactStore, prompt: &str, media: &[String]) -> MessageContent {
     let mut parts: Vec<ContentPart> = Vec::new();
     let mut entries = Vec::new();
     for (index, item) in media.iter().enumerate() {
@@ -1273,7 +1241,7 @@ pub fn user_content(store: &ArtifactStore, prompt: &str, media: &[String]) -> Co
     if !text.is_empty() {
         parts.insert(0, ContentPart::Text { text });
     }
-    Content::from(parts)
+    MessageContent::from(parts)
 }
 
 mod pool;
