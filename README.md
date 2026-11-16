@@ -43,6 +43,7 @@ tasks.json                  the task queue
 bots/<name>/spec.toml       a bot's definition (optional for the built-in bots)
 bots/<name>/sessions/       its conversation (main.jsonl) and task runs
 bots/<name>/memory/         memory only this bot sees
+bots/<name>/workspace/      where the bot works (bash cwd, relative paths)
 ```
 
 ```toml

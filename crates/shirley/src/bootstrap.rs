@@ -88,6 +88,9 @@ pub struct AgentFactory {
     subagent_default_timeout_ms: u64,
     /// Bot specification: controls which capability tools are available to this factory's sessions.
     pub bot_spec: crate::bot::BotSpec,
+    /// Where this bot's file tools work: the cwd of `bash`, the root `read` / `grep` resolve
+    /// relative paths against, and the directory the system prompt names.
+    workspace: PathBuf,
 }
 
 impl AgentFactory {
@@ -192,10 +195,15 @@ impl AgentFactory {
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
 
-        let home = skills::user_home().unwrap_or_else(|| paths.global.clone());
+        let workspace = paths.global.join("workspace");
         Ok(Self {
             model_config,
-            system_prompt: prompt::build_with_roots(home, Vec::new(), subagent_enabled, None),
+            system_prompt: prompt::build_with_roots(
+                workspace.clone(),
+                Vec::new(),
+                subagent_enabled,
+                None,
+            ),
             compaction_config,
             max_steps: settings.max_steps,
             model_catalog,
@@ -212,6 +220,7 @@ impl AgentFactory {
             subagent_default_tools,
             subagent_default_timeout_ms,
             bot_spec: crate::bot::BotSpec::default_bot(),
+            workspace,
         })
     }
 
@@ -232,13 +241,9 @@ impl AgentFactory {
         self.build_agent_with(messages, None, None)
     }
 
-    fn prompt_home(&self) -> PathBuf {
-        skills::user_home().unwrap_or_else(|| self.global_root().to_path_buf())
-    }
-
     fn system_prompt_without_subagents(&self) -> SystemPrompt {
         prompt::build_with_roots(
-            self.prompt_home(),
+            self.workspace.clone(),
             Vec::new(),
             false,
             self.bot_spec.system_prompt_extra.clone(),
@@ -276,6 +281,12 @@ impl AgentFactory {
         // tool definitions are stable (prefix-cache friendly), and `on_register` hooks (e.g. web_search's
         // credential injection) each run once -- state is isolated per tool instance anyway, which is acceptable (decision 5).
         let mut tool_manager = assemble_tools(self.artifacts.as_ref(), &self.bot_spec);
+        // The bot's own directory is where its file tools work. Created on demand; a failure
+        // surfaces later as a tool error naming the path.
+        let _ = std::fs::create_dir_all(&self.workspace);
+        tool_manager
+            .context_mut()
+            .insert(tools::read::WorkspaceRoots(vec![self.workspace.clone()]));
 
         let _ = tool_manager.register(tools::TodoTool::new(Arc::clone(&todo_store)));
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
@@ -357,6 +368,7 @@ impl AgentFactory {
         let agent = Agent::builder()
             .model_config(self.default_model_config()?)
             .system_prompt(system_prompt)
+            .working_dir(self.workspace.clone())
             .compaction_instruction(COMPRESSION_INSTRUCTION)
             .compaction_config(self.compaction_config.clone())
             .max_steps(max_steps.unwrap_or(self.max_steps))
@@ -415,6 +427,7 @@ impl AgentFactory {
         let session_catalog: Arc<dyn SessionCatalog> =
             Arc::new(session::FileSessionCatalog::new(&bot_root));
         let memory_roots = vec![self.memory_roots[0].clone(), bot_root.join("memory")];
+        let workspace = bot_root.join("workspace");
         let skill_catalog = if spec.skills.is_empty() {
             self.skill_catalog.clone()
         } else {
@@ -427,7 +440,7 @@ impl AgentFactory {
             )
         };
         let system_prompt = prompt::build_with_roots(
-            self.prompt_home(),
+            workspace.clone(),
             Vec::new(),
             self.subagent_enabled,
             spec.system_prompt_extra.clone(),
@@ -451,6 +464,7 @@ impl AgentFactory {
             subagent_default_tools: self.subagent_default_tools.clone(),
             subagent_default_timeout_ms: self.subagent_default_timeout_ms,
             bot_spec: spec,
+            workspace,
         }
     }
 
@@ -824,6 +838,7 @@ pub(crate) mod test_support {
             subagent_default_tools: None,
             subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
             bot_spec: crate::bot::BotSpec::default_bot(),
+            workspace: root.join("workspace"),
         }
     }
 
@@ -877,6 +892,7 @@ mod tests {
             subagent_default_tools: None,
             subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
             bot_spec: crate::bot::BotSpec::default_bot(),
+            workspace: root.join("workspace"),
         }
     }
 

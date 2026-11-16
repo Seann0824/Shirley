@@ -109,18 +109,38 @@ pub(crate) fn clip_to_budget(text: &str, budget: usize) -> &str {
 /// Returning plain text rather than structured JSON is deliberate -- directly readable by the model, and the line numbers make it easy to
 /// continue reading with `start_line`.
 #[tool(
-    description = "Read a file inside the workspace. Text is returned as line-numbered text; an image or a document (PDF, office, media) is attached to the chat so the human can see it, and you get a short description back instead of bytes. Reads have line and byte caps; when content is truncated, a hint on how to continue is shown at the end. For large files, first locate content with the grep tool, then use this tool to read the relevant range; do not read the whole file with cat."
+    description = "Read a file. Text is returned as line-numbered text; an image or a document (PDF, office, media) is attached to the chat so the human can see it, and you get a short description back instead of bytes. Reads have line and byte caps; when content is truncated, a hint on how to continue is shown at the end. For large files, first locate content with the grep tool, then use this tool to read the relevant range; do not read the whole file with cat."
 )]
 pub async fn read(
     ctx: &ToolContext,
     #[param(
-        description = "file path, relative to the workspace root; absolute paths or paths escaping the workspace are not accepted"
+        description = "file path: relative to your workspace directory, or an absolute path to a file elsewhere on this machine"
     )]
     path: String,
     #[param(description = "start line, 1-based; defaults to line 1")] start_line: Option<usize>,
     #[param(description = "maximum number of lines to read, defaults to 200, hard cap 2000")]
     line_count: Option<usize>,
 ) -> Result<serde_json::Value, ToolError> {
+    // An absolute path names a file outside the bot's workspace (something the user pointed at).
+    // It is read relative to its own directory, so the caps and the secret-file refusal below
+    // apply unchanged.
+    let absolute = std::path::Path::new(&path);
+    if absolute.is_absolute() {
+        let (Some(parent), Some(name)) = (
+            absolute.parent(),
+            absolute.file_name().and_then(|name| name.to_str()),
+        ) else {
+            return Err(ToolError::ArgumentsError(format!("not a file path: {path}")));
+        };
+        if absolute.is_file()
+            && let Some(value) = attach_artifact(ctx, &path, absolute)
+        {
+            return Ok(value);
+        }
+        return read_text_range(parent, name, &path, start_line, line_count)
+            .await
+            .map(serde_json::Value::String);
+    }
     let roots = resolve_workspace_roots(ctx)
         .ok_or_else(|| ToolError::ExecutionError("cannot determine the workspace root".into()))?;
     // Pick the first root that actually contains the requested path. Falling through to the
@@ -501,19 +521,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_absolute_path() {
+    async fn absolute_path_reads_outside_the_workspace_but_still_refuses_secrets() {
         let _guard = ENV_LOCK.lock().await;
         let dir = temp_workspace("absolute");
+        let outside = temp_workspace("absolute_outside");
+        std::fs::write(outside.join("notes.txt"), "hello from elsewhere\n").unwrap();
+        std::fs::write(outside.join(".env"), "KEY=secret\n").unwrap();
         // SAFETY: test-only env mutation; the test holds ENV_LOCK for its whole duration, so no other env-mutating test runs concurrently.
         unsafe { std::env::set_var("SHIRLEY_WORKSPACE", &dir) };
 
-        let err = read(&ToolContext::new(), "/etc/hosts".to_string(), None, None)
+        let path = outside.join("notes.txt").display().to_string();
+        let out = read(&ToolContext::new(), path, None, None).await.unwrap();
+        assert!(out.as_str().unwrap().contains("hello from elsewhere"));
+
+        let secret = outside.join(".env").display().to_string();
+        let err = read(&ToolContext::new(), secret, None, None)
             .await
             .unwrap_err();
-        assert!(
-            matches!(err, ToolError::ArgumentsError(_)),
-            "absolute path should be rejected: {err:?}"
-        );
+        assert!(matches!(err, ToolError::ArgumentsError(_)), "{err:?}");
+        let _ = std::fs::remove_dir_all(&outside);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

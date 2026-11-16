@@ -286,13 +286,11 @@ mod tests {
     }
 
     #[test]
-    fn render_notes_missing_guide() {
+    fn render_says_nothing_about_a_missing_guide() {
+        // A bot's workspace usually has no guide file; that is not worth a line of prompt.
         let dir = tempfile_dir("render_missing");
         let text = render(&dir);
-        assert!(
-            text.contains("not found"),
-            "should give a hint when the guide is missing: {text}"
-        );
+        assert!(!text.contains(GUIDE_FILE_NAME), "{text}");
     }
 
     #[test]

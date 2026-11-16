@@ -35,6 +35,7 @@ artifacts/                  media library (files bots produce or users attach)
 bots/<name>/spec.toml       a bot's definition (optional for built-in bots)
 bots/<name>/sessions/       main.jsonl + one log per task run
 bots/<name>/memory/         memory only this bot sees
+bots/<name>/workspace/      the bot's working directory (bash cwd, relative paths)
 ```
 
 Nothing is migrated from older layouts. The memory file format is unchanged from earlier versions.
@@ -103,6 +104,7 @@ app.css           additions for live data
 | Skills | `spec.skills`; empty = every discovered skill |
 | Session directory | `bots/<name>/sessions` |
 | Memory roots | `[~/.shirley/memory, bots/<name>/memory]` |
+| Workspace | `bots/<name>/workspace`: `bash` cwd, base for relative paths in `read` / `grep`, named in the system prompt. `read` also accepts absolute paths (secret-file refusal still applies) |
 
 Always registered regardless of the spec: `todo`, `recall`, `create_bot`, `activate_skill`, `read_skill_file`, `computer_*`, and `subagent` (top-level agents only).
 
@@ -189,7 +191,7 @@ Lints: `[workspace.lints]` in the root `Cargo.toml` is the single policy; Tier-1
 **7. Known gaps**
 
 1. **Sandbox**: no isolation (see section 1).
-2. **Working directory**: `bash` / `read` run in the directory the server was started from (or `SHIRLEY_WORKSPACE`), while the system prompt names the user's home. Bots have no per-bot working directory yet.
+2. **Windows**: paths are portable, but the `bash` tool needs a `bash` on `PATH`.
 3. **Model settings UI**: providers and models are configured through `.env` / `config.toml`; the API exists (`agent_model_providers`) but no page uses it.
 4. **Bot editing**: bots can be created (UI via NONO's `create_bot`, or by writing `spec.toml`) but not edited or deleted from the UI; hiding a bot on the home screen is a per-device preference.
 5. **Routing**: the home composer sends to the bot you pick. Nothing dispatches a task to the best-suited bot.

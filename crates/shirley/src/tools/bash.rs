@@ -5,17 +5,6 @@ use std::time::{Duration, SystemTime};
 use shirley_agent_sdk::sandbox::{Sandbox, SandboxOutput, SandboxSpec, backend::ProcessBackend};
 use shirley_agent_sdk::{ToolContext, tool};
 
-/// Workspace root: reads the `SHIRLEY_WORKSPACE` env var first, otherwise falls back to the current directory.
-///
-/// The sandbox uses it as the cwd and (in a real backend) restricts filesystem visibility based on it.
-fn workspace_root() -> Option<PathBuf> {
-    std::env::var("SHIRLEY_WORKSPACE")
-        .ok()
-        .filter(|s| !s.trim().is_empty())
-        .map(PathBuf::from)
-        .or_else(|| std::env::current_dir().ok())
-}
-
 /// Render the sandbox result into text the model can read.
 ///
 /// The model needs to see stderr and the exit code to self-correct (docs/security.md 6.1);
@@ -184,7 +173,7 @@ fn attach_products(
 
 // TODO: tool error messages should have a uniform format, so that execution failures can be reported back in a designed format.
 #[tool(
-    description = "Run shell commands such as python, find, or git. Use the grep tool for workspace content searches and read for file contents. Only the first 32 KiB of stdout and stderr are returned, with a truncation notice for larger output. A line limit such as head does not cap bytes. Redirect large output to a file and use read to inspect relevant ranges. Files the command produces (images, PDFs, decks, clips) are attached to the chat for the human automatically."
+    description = "Run shell commands such as python, find, or git. Commands start in your workspace directory. Use the grep tool for workspace content searches and read for file contents. Only the first 32 KiB of stdout and stderr are returned, with a truncation notice for larger output. A line limit such as head does not cap bytes. Redirect large output to a file and use read to inspect relevant ranges. Files the command produces (images, PDFs, decks, clips) are attached to the chat for the human automatically."
 )]
 pub async fn bash(
     ctx: &ToolContext,
@@ -205,7 +194,8 @@ pub async fn bash(
         .arg(&command)
         .timeout(Duration::from_secs(timeout.unwrap_or(60)));
 
-    let root = workspace_root();
+    // The bot's workspace (injected by the factory) is the command's cwd.
+    let root = super::read::resolve_workspace_roots(ctx).and_then(|roots| roots.into_iter().next());
     if let Some(root) = root.as_ref() {
         spec = spec.workspace_root(root.clone());
     }
