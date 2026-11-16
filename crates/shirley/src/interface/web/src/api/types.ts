@@ -1,0 +1,127 @@
+// Wire contract with the Shirley server. Mirrors `interface/wire.rs`, `interface/runtime/mod.rs`
+// and `pool/mod.rs`; keep both sides in sync.
+
+export interface Bot {
+  name: string;
+  display_name: string;
+  tools: string[];
+  skills: string[];
+  persona: string | null;
+}
+
+export type TaskStatus =
+  | "backlog"
+  | "to_do"
+  | "in_progress"
+  | "in_review"
+  | "blocked"
+  | "done"
+  | "cancelled";
+
+export interface DeliveryFile {
+  id: string;
+  name: string;
+  mime: string;
+  bytes: number;
+}
+
+export interface Delivery {
+  summary: string;
+  files: DeliveryFile[];
+  error?: string;
+}
+
+export interface PoolTask {
+  id: string;
+  bot: string;
+  title: string;
+  brief: string;
+  status: TaskStatus;
+  attempt: number;
+  createdMs: number;
+  startedMs?: number | null;
+  finishedMs?: number | null;
+  session?: string | null;
+  delivery?: Delivery | null;
+  note?: string | null;
+}
+
+export interface MemoryEntry {
+  id: string;
+  kind: string;
+  scope: "shared" | "bot";
+  subject: string;
+  created_at: string;
+  status: string;
+  body: string;
+}
+
+export type AssetSource = { kind: "artifact"; id: string } | { kind: "url"; url: string };
+
+export type RenderPart =
+  | { kind: "text"; text: string }
+  | { kind: "image"; source: AssetSource; alt: string; mime?: string | null }
+  | {
+      kind: "file";
+      source?: AssetSource | null;
+      path: string;
+      name: string;
+      mime?: string | null;
+      bytes?: number | null;
+    }
+  | { kind: "link"; url: string; title: string }
+  | { kind: "data"; schema: string; value: unknown };
+
+export interface ToolCallWire {
+  id: string;
+  name: string;
+  arguments: string;
+  output: string | null;
+  ok: boolean | null;
+  parts: RenderPart[];
+}
+
+export type ItemWire =
+  | { kind: "message"; role: string; content: string; parts: RenderPart[] }
+  | { kind: "compact"; content: string }
+  | { kind: "tools"; calls: ToolCallWire[] };
+
+export interface SessionSnapshot {
+  session: string;
+  items: ItemWire[];
+  running: boolean;
+  sequence: number;
+}
+
+interface Routed {
+  bot?: string | null;
+  session?: string | null;
+  sequence?: number;
+}
+
+export type AgentEvent = Routed &
+  (
+    | { type: "retrying"; attempt: number; reason: string }
+    | { type: "content_delta"; text: string }
+    | { type: "message_added"; role: string }
+    | { type: "compact"; content: string }
+    | { type: "tool_started"; call_id: string; name: string; arguments: string }
+    | {
+        type: "tool_finished";
+        call_id: string;
+        name: string;
+        ok: boolean;
+        output: string;
+        parts: RenderPart[];
+        error_kind?: string | null;
+        elapsed_ms: number;
+      }
+    | { type: "usage"; usage: unknown }
+    | { type: "context_usage"; used_tokens: number; limit_tokens: number }
+    | { type: "compaction_started" }
+    | { type: "compaction_finished" }
+    | { type: "todo_updated"; todo: unknown }
+    | { type: "notice"; text: string }
+    | { type: "finished"; stop_reason: string }
+    | { type: "error"; message: string }
+  );

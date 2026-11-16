@@ -1,63 +1,68 @@
 # Shirley
 
-A coding agent written in Rust, named after Shirley from *Code Geass*.
+A bot platform written in Rust, named after Shirley from *Code Geass*. One server runs
+your bots; a phone-first web UI talks to them.
 
-
-The repository is organized in three layers:
+A **bot** is a persona (system prompt) plus the tools and skills it may use. Every bot has
+one ongoing conversation, its own private memory, and shares a common memory with the
+other bots. Work you hand over from the home screen goes into a task queue: the bot runs
+it in the background and you come back to accept or return the result.
 
 | Layer | Location | Responsibility |
 | --- | --- | --- |
-| Application | `crates/shirley/src/` | A runnable TUI chat agent: registers tools and drives the interface |
+| Application | `crates/shirley/src/` | The server: bots, sessions, memory, task pool, HTTP/SSE API |
+| Web UI | `crates/shirley/src/interface/web/` | Vite + React + TypeScript client |
 | SDK | `crates/shirley-agent-sdk/` | Business-agnostic Agent primitives (published to crates.io) |
 | Macros | `crates/shirley-agent-sdk-macros/` | The `#[tool]` attribute macro |
 
 ## Running
 
-Tools execute directly without a permission profile, Jev review, or human approval prompt.
-The former `SHIRLEY_CAPABILITY_PROFILE`, `SHIRLEY_APPROVAL_*`, `SHIRLEY_SIDECAR_*`, and
-`JEV_API_KEY` settings are no longer used. Tool-local file access checks, command
-restrictions, and execution timeouts still apply. The current shell backend does not
-isolate filesystem or network access; see [security](docs/security.md).
-
 ```sh
-cp .env.example .env   # create it yourself using the keys documented in .env
-cargo run
+# 1. build the web UI (once, and after UI changes)
+cd crates/shirley/src/interface/web && npm install && npm run build && cd -
+
+# 2. configure a model (see below), then start the server
+cargo run            # http://127.0.0.1:8787
 ```
 
-Configuration comes from three layers, each overriding the previous one field by field:
+For UI development run `npm run dev` in the web directory instead (http://localhost:5173,
+`/api` is proxied to the server).
 
-1. built-in defaults (protocol, model, context window)
-2. global `<config_dir>/shirley/config.toml`
-3. environment variables (`LOCAL_*`)
+`SHIRLEY_SERVER_ADDR` changes the listen address; listening outside loopback requires
+`SHIRLEY_SERVER_TOKEN` (open the UI with `?token=...`).
 
-A layer only speaks for the keys it actually sets — anything omitted falls through to the layer below. All chats and projects read the same global configuration. `/login` saves there too.
+Tools execute directly, without a permission prompt. The shell backend does not isolate
+filesystem or network access; see [security](docs/security.md).
 
-Configure memory embeddings in the **global** config so ordinary Chat and project
-sessions inherit the same semantic retrieval settings. On macOS this file is
-`~/Library/Application Support/shirley/config.toml`:
+## Bots and data
+
+Everything lives under `~/.shirley/`:
+
+```text
+config.toml                 model + runtime settings
+memory/                     shared memory (every bot reads it)
+tasks.json                  the task queue
+bots/<name>/spec.toml       a bot's definition (optional for the built-in bots)
+bots/<name>/sessions/       its conversation (main.jsonl) and task runs
+bots/<name>/memory/         memory only this bot sees
+```
 
 ```toml
-[memory]
-embedding_base_url = "http://localhost:11434/v1/embeddings"
-embedding_model = "nomic-embed-text"
-# embedding_api_key = "..." # only when the service requires authentication
+# ~/.shirley/bots/clerk/spec.toml
+name = "clerk"
+display_name = "Clerk"
+tools = ["read", "grep"]            # of: bash grep read media web_search; empty = all
+skills = []                         # installed SKILL.md names; empty = all
+system_prompt_extra = "You are Clerk. You tidy documents and write summaries."
 ```
 
-The embedding service must be running. Restart Shirley after changing these settings,
-since loaded chat/project runtimes retain their embedding client.
+`nono` (generalist), `patch` (code) and `scout` (research) are built in. New bots can
+also be created from the UI's "+" button, which asks NONO to write the spec.
 
-All mutable application data lives under `<config_dir>/shirley/` (macOS:
-`~/Library/Application Support/shirley/`). `config.toml`, `projects.json` and personal
-`memory/` are shared globally. Each canonical workspace path maps to
-`workspaces/<workspace-id>/`, containing its `sessions/`, subagent transcripts, project
-`memory/` and a `workspace.json` identity record. Ordinary Chat uses the same storage rule.
+## Model configuration
 
-Existing project `.shirley/` directories are migrated on startup, including archived
-projects registered with Shirley. Missing global settings are imported once; existing
-global values win. Original project configs are retained as `legacy-config.toml` in the
-global workspace state directory. Divergent same-path files cause an error and are
-preserved rather than overwritten. Run `cargo run --features desktop -- --migrate-data`
-to migrate without opening a chat. See [global storage](docs/storage.md).
+Configuration comes from three layers, each overriding the previous one field by field:
+built-in defaults, `~/.shirley/config.toml`, then environment variables (`LOCAL_*`).
 
 The easiest path is to put it in `.env`:
 
@@ -138,7 +143,7 @@ api_key = "sk-..."
 
 Protocol differences are absorbed entirely by the adapter layer — the `Message` model and the rest of the SDK are protocol-agnostic. See [`docs/adapter-layer.md`](docs/adapter-layer.md) and the per-protocol notes in [`docs/`](docs/).
 
-To change the protocol, edit `LOCAL_PROTOCOL` or the global config file and restart. The TUI's `/login` can update `base_url` / `api_key` / `model` at runtime (writing the global config), and `/model` swaps the model name — but the protocol itself is set at startup.
+To change the protocol, edit `LOCAL_PROTOCOL` or the global config file and restart.
 
 ## Build and test
 
