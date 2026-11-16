@@ -402,3 +402,47 @@ body {
   line-height: 1.5;
   text-align: center;
 }
+
+/* Chat markdown: a reply is split into one bubble per paragraph. */
+.message-row.continued {
+  margin-top: -6px;
+}
+.message-row.continued .message-avatar,
+.tools-row .message-avatar {
+  visibility: hidden;
+}
+.md-line {
+  display: block;
+}
+.message-bubble code {
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.06);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+}
+.md-code {
+  margin: 0;
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.md-code code {
+  padding: 0;
+  background: none;
+}
+.message-bubble.streaming p::after {
+  content: none;
+}
+.message-bubble.streaming .md-line:last-child::after {
+  content: "▍";
+  opacity: 0.5;
+}
+.message-bubble strong {
+  font-weight: 650;
+}
+.message-bubble code {
+  overflow-wrap: anywhere;
+}

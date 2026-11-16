@@ -5,6 +5,7 @@ import type { Bot, RenderPart, ToolCallWire } from "../api/types";
 import { BotAvatar, botTone } from "../components/BotAvatar";
 import { ComposerDock, readAsDataUrl, type Attachment } from "../components/Composer";
 import { Icon } from "../components/Icon";
+import { MarkdownBlock, splitBlocks } from "../components/Markdown";
 import { useConversation, type ConversationItem } from "../state/useConversation";
 
 const TOOL_LABELS: Record<string, string> = {
@@ -115,24 +116,39 @@ function Item({ bot, item }: { bot: Bot; item: ConversationItem }) {
           </div>
         );
       }
-      return (
-        <div className="message-row bot-message">
-          <div className={`message-avatar ${botTone(bot.name)}`}>
-            <BotAvatar name={bot.name} size={27} />
-          </div>
-          {item.streaming && !item.content ? (
+      if (item.streaming && !item.content) {
+        return (
+          <div className="message-row bot-message">
+            <div className={`message-avatar ${botTone(bot.name)}`}>
+              <BotAvatar name={bot.name} size={27} />
+            </div>
             <div className="message-bubble typing-bubble" aria-label={`${bot.display_name} 正在输入`}>
               <i />
               <i />
               <i />
             </div>
-          ) : (
-            <div className={`message-bubble ${item.streaming ? "streaming" : ""}`}>
-              <p>{item.content}</p>
-              <Parts bot={bot.name} parts={item.parts.filter((part) => part.kind !== "text")} />
+          </div>
+        );
+      }
+      // One reply, several bubbles: each paragraph is its own message, like a person texting.
+      return (
+        <>
+          {splitBlocks(item.content).map((block, index, blocks) => (
+            <div className={`message-row bot-message ${index > 0 ? "continued" : ""}`} key={index}>
+              <div className={`message-avatar ${botTone(bot.name)}`}>
+                <BotAvatar name={bot.name} size={27} />
+              </div>
+              <div
+                className={`message-bubble ${item.streaming && index === blocks.length - 1 ? "streaming" : ""}`}
+              >
+                <MarkdownBlock text={block} />
+                {index === blocks.length - 1 && (
+                  <Parts bot={bot.name} parts={item.parts.filter((part) => part.kind !== "text")} />
+                )}
+              </div>
             </div>
-          )}
-        </div>
+          ))}
+        </>
       );
     case "tools":
       return (
