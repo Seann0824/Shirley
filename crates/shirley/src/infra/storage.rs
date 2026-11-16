@@ -141,6 +141,17 @@ impl StoragePaths {
         })
     }
 
+    /// Global-state paths: no workspace, all sessions/artifacts live directly under the global root.
+    /// Used by the bot-first runtime where there is no per-workspace session storage.
+    pub fn for_global(global: PathBuf) -> io::Result<Self> {
+        fs::create_dir_all(&global)?;
+        Ok(Self {
+            workspace: global.clone(),
+            state: global.clone(),
+            global,
+        })
+    }
+
     #[cfg(test)]
     pub fn sessions(&self) -> PathBuf {
         self.state.join("sessions")
@@ -152,7 +163,13 @@ impl StoragePaths {
     }
 
     pub fn memory_roots(&self) -> Vec<PathBuf> {
-        vec![self.global.join("memory"), self.state.join("memory")]
+        let global_mem = self.global.join("memory");
+        let state_mem = self.state.join("memory");
+        if global_mem == state_mem {
+            vec![global_mem]
+        } else {
+            vec![global_mem, state_mem]
+        }
     }
 
     /// Reentrant across startup/project loading; no overwriting divergent data.

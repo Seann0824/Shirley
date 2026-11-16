@@ -856,7 +856,8 @@ impl SessionManager {
         subagents: Option<Arc<SubagentManager>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        let request_session_id = proxy_session_id(&factory.working_dir, name.as_deref());
+        let request_session_id =
+            proxy_session_id(&crate::storage::global_root(), name.as_deref());
         {
             let dir = catalog.storage_dir();
             if let (Some(manager), Some(name), Some(dir)) =
@@ -967,7 +968,9 @@ impl SessionManager {
         let request_session_id = self
             .factory
             .as_ref()
-            .and_then(|factory| proxy_session_id(&factory.working_dir, name.as_deref()));
+            .and_then(|_factory| {
+                proxy_session_id(&crate::storage::global_root(), name.as_deref())
+            });
         self.attach_subagent_store(subagents.as_ref(), name.as_deref());
         self.sessions.insert(
             id,

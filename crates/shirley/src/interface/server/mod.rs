@@ -52,7 +52,6 @@ use tower_http::services::{ServeDir, ServeFile};
 use super::desktop::wire::{AgentEventWire, StateSnapshotWire};
 use super::runtime::{EventSink, ProjectRuntimeManager, SessionEntryWire, StatusSink};
 use crate::bootstrap::AgentFactory;
-use crate::project::ProjectRegistry;
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
@@ -84,9 +83,6 @@ struct ServerState {
 const POOL_TICK: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
-    let working_dir = factory.working_dir.clone();
-    let registry =
-        ProjectRegistry::load_default().map_err(|e| std::io::Error::other(e.to_string()))?;
     let (events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
     let (status_events, _) = broadcast::channel(EVENT_CHANNEL_CAPACITY);
 
@@ -112,20 +108,9 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         }
     });
 
-    // Chat uses the same persistent workspace as the desktop interface.
     let manager = Arc::new(
-        ProjectRuntimeManager::new(
-            Arc::new(tokio::sync::Mutex::new(registry)),
-            Some(crate::storage::global_root().join("chat")),
-            sink,
-        )
-        .with_status_sink(status_sink),
+        ProjectRuntimeManager::new(Arc::new(factory), sink).with_status_sink(status_sink),
     );
-    // Register the server's default workspace so the UI always has a project to show.
-    manager
-        .register_default(working_dir)
-        .await
-        .map_err(std::io::Error::other)?;
 
     let token = std::env::var("SHIRLEY_SERVER_TOKEN")
         .ok()
@@ -419,32 +404,6 @@ async fn dispatch(
                     .await?;
             ok_json(result)
         }
-        // -- projects ----------------------------------------------------------------
-        "agent_list_projects" => {
-            ok_json(manager.list_projects(args.archived.unwrap_or(false)).await)
-        }
-        "agent_add_project" => {
-            let path = args.path.ok_or_else(|| ApiError::bad("missing path"))?;
-            let entry = manager.add_project(PathBuf::from(path), args.name).await?;
-            ok_json(Some(entry))
-        }
-        "agent_rename_project" => {
-            let project = args.project()?;
-            let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
-            manager.rename_project(&project, &name).await?;
-            no_content()
-        }
-        "agent_archive_project" => {
-            let project = args.project()?;
-            manager.archive_project(&project).await?;
-            no_content()
-        }
-        "agent_restore_project" => {
-            let project = args.project()?;
-            manager.restore_project(&project).await?;
-            no_content()
-        }
-
         // -- turn --------------------------------------------------------------------
         "agent_send" => {
             let project = args.project()?;
@@ -525,12 +484,6 @@ async fn dispatch(
             no_content()
         }
 
-        // -- workspace files / skills -------------------------------------------------
-        "agent_search_files" => {
-            let project = args.project()?;
-            let query = args.query.unwrap_or_default();
-            ok_json(manager.search_files(&project, query).await?)
-        }
         // Asset channel (`docs/render-parts.md` P1): an artifact id in, an opaque URL out.
         "agent_asset_url" => {
             let project = args.project()?;
@@ -952,13 +905,8 @@ mod tests {
             std::process::id(),
             chrono::Utc::now().timestamp_nanos_opt().unwrap()
         ));
-        let manager = Arc::new(ProjectRuntimeManager::new(
-            Arc::new(tokio::sync::Mutex::new(
-                ProjectRegistry::load(dir.join("projects.json")).unwrap(),
-            )),
-            None,
-            Arc::new(|_| {}),
-        ));
+        let factory = Arc::new(crate::bootstrap::test_support::test_factory(dir.clone()));
+        let manager = Arc::new(ProjectRuntimeManager::new(factory, Arc::new(|_| {})));
         let (events, _) = broadcast::channel(8);
         let (status_events, _) = broadcast::channel(8);
         let state = Arc::new(ServerState {
@@ -991,7 +939,6 @@ mod tests {
         });
         let client = reqwest::Client::new();
         for path in [
-            "api/cmd/agent_list_projects",
             "api/cmd/agent_model_providers",
             "api/memory/sync",
             "api/memory/review",

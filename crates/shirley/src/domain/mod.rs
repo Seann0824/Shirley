@@ -1,14 +1,12 @@
-//! Application domain state and types: sessions, projects, the status
-//! projection, the model catalog, the task ledger, and workspace search.
+//! Application domain state and types: sessions, the status projection,
+//! the model catalog, and the task ledger.
 //!
-//! These describe *what the application is about* (a session, a project, a
-//! turn's health, a model, a task) without rendering it. Interfaces render
-//! these; `bootstrap` wires them together.
+//! These describe *what the application is about* without rendering it.
+//! Interfaces render these; `bootstrap` wires them together.
 
+pub mod bot;
 pub mod model_providers;
 pub mod models;
-pub mod project;
 pub mod session;
 pub mod status;
 pub mod todo;
-pub mod workspace_search;

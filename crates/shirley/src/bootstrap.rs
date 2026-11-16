@@ -54,21 +54,6 @@ pub struct AgentFactory {
     /// Compression strategy (trigger threshold / retain ratio / summary template). From config, shared by all sessions.
     compaction_config: CompactionConfig,
     max_steps: usize,
-    /// Working dir (workspace root). The desktop interface uses it for `@` file search (`workspace_search`);
-    /// under a TUI-only build nobody reads it, so allow `dead_code`.
-    #[cfg_attr(
-        not(feature = "desktop"),
-        allow(
-            dead_code,
-            reason = "only used when the relevant interface feature is enabled"
-        )
-    )]
-    pub working_dir: PathBuf,
-    /// Additional source folders attached to the project (beyond the primary `working_dir`).
-    /// A project may span several local checkouts; `read` / `grep` / `@`-search resolve a relative
-    /// path against the primary root first, then these. The primary root alone owns session storage,
-    /// so attaching folders never moves a project's sessions.
-    pub extra_paths: Vec<PathBuf>,
     /// Model catalog (for `/model`), fetched asynchronously, falling back to a static list on failure.
     pub model_catalog: Arc<dyn ModelCatalog>,
     /// Session catalog (for `/session`).
@@ -101,38 +86,19 @@ pub struct AgentFactory {
     subagent_default_tools: Option<Vec<String>>,
     /// Default `wait` / blocking-dispatch timeout (ms).
     subagent_default_timeout_ms: u64,
+    /// Bot specification: controls which capability tools are available to this factory's sessions.
+    pub bot_spec: crate::bot::BotSpec,
 }
 
 impl AgentFactory {
-    /// Assemble all runtime dependencies. The working dir is decided by [`crate::prompt::workspace_root`].
-    pub fn assemble(working_dir: PathBuf) -> Result<Self, AgentError> {
-        Self::assemble_with_extra_paths(working_dir, Vec::new())
-    }
-
-    /// Assemble a project that also attaches **extra source folders** beyond its primary root.
-    /// The primary root owns session storage; extra folders only widen the file tools' search scope
-    /// and are listed in the system prompt.
-    pub fn assemble_with_extra_paths(
-        working_dir: PathBuf,
-        extra_paths: Vec<PathBuf>,
-    ) -> Result<Self, AgentError> {
-        Self::assemble_at(working_dir, extra_paths, crate::storage::global_root())
+    /// Assemble all runtime dependencies.
+    pub fn assemble() -> Result<Self, AgentError> {
+        Self::assemble_at(crate::storage::global_root())
     }
 
     /// Explicit application-data root for isolated tests and assembly.
-    #[expect(
-        clippy::needless_pass_by_value,
-        reason = "working_dir is stored as an owned PathBuf in the assembled factory"
-    )]
-    pub(crate) fn assemble_at(
-        working_dir: PathBuf,
-        extra_paths: Vec<PathBuf>,
-        global_root: PathBuf,
-    ) -> Result<Self, AgentError> {
-        let paths = crate::storage::StoragePaths::new(global_root, &working_dir)
-            .map_err(|error| AgentError::Other(Box::new(error)))?;
-        paths
-            .migrate()
+    pub(crate) fn assemble_at(global_root: PathBuf) -> Result<Self, AgentError> {
+        let paths = crate::storage::StoragePaths::for_global(global_root)
             .map_err(|error| AgentError::Other(Box::new(error)))?;
         let settings = Settings::load(Some(&paths.global.join("config.toml")), &|key| {
             std::env::var(key).ok()
@@ -194,9 +160,10 @@ impl AgentFactory {
         // otherwise `None` (retrieval degrades to pure BM25, never pretends there is a semantic leg).
         let embedder = build_embedder(&settings);
 
-        // Skill catalog (`docs/skills.md` P0): scans project-level + user-level skills once at assembly,
-        // read-only, shared across sessions; each session injects its Tier1 catalog via `SkillContextProvider`.
-        let skill_catalog = SkillCatalog::discover(&working_dir, skills::user_home().as_deref());
+        // Skill catalog (`docs/skills.md` P0): scans user-level skills once at assembly.
+        // In bot-first mode there is no per-workspace project root, so only user-level roots are scanned.
+        let skill_catalog =
+            SkillCatalog::discover(&paths.global, skills::user_home().as_deref());
 
         // Subagent config (`docs/subagent.md` decision 8): resolve the caps once. `enabled` defaults to
         // true; a value of `0` for a cap means "unset" and falls back to the built-in default.
@@ -225,17 +192,12 @@ impl AgentFactory {
             .filter(|n| *n > 0)
             .unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
 
+        let home = skills::user_home().unwrap_or_else(|| paths.global.clone());
         Ok(Self {
             model_config,
-            system_prompt: prompt::build_with_roots(
-                working_dir.clone(),
-                extra_paths.clone(),
-                subagent_enabled,
-            ),
+            system_prompt: prompt::build_with_roots(home, Vec::new(), subagent_enabled),
             compaction_config,
             max_steps: settings.max_steps,
-            working_dir: working_dir.clone(),
-            extra_paths,
             model_catalog,
             session_catalog,
             needs_login,
@@ -249,6 +211,7 @@ impl AgentFactory {
             subagent_limits,
             subagent_default_tools,
             subagent_default_timeout_ms,
+            bot_spec: crate::bot::BotSpec::default_bot(),
         })
     }
 
@@ -269,12 +232,14 @@ impl AgentFactory {
         self.build_agent_with(messages, None, None)
     }
 
-    /// The system prompt for an `Agent` that has **no** `subagent` tool (a child, or the top level
-    /// with subagents disabled). Re-derived from the working dir so the subagent guidance block is
-    /// left out (it would be a factual lie where the tool does not exist). For the test factories
-    /// that install a fixed prompt this still yields a valid (non-empty) system message.
     fn system_prompt_without_subagents(&self) -> SystemPrompt {
-        prompt::build_with_roots(self.working_dir.clone(), self.extra_paths.clone(), false)
+        let home = skills::user_home().unwrap_or_else(|| {
+            self.model_providers_root()
+                .parent()
+                .map(|p| p.to_path_buf())
+                .unwrap_or_else(|| std::path::PathBuf::from("/"))
+        });
+        prompt::build_with_roots(home, Vec::new(), false)
     }
 
     /// Build one `Agent`, optionally as a **child** with a filtered tool table (`docs/subagent.md` P0).
@@ -307,16 +272,7 @@ impl AgentFactory {
         // `ToolManager` is not `Clone`; each `Agent` build creates a fresh one and re-registers tools:
         // tool definitions are stable (prefix-cache friendly), and `on_register` hooks (e.g. web_search's
         // credential injection) each run once -- state is isolated per tool instance anyway, which is acceptable (decision 5).
-        let mut tool_manager = assemble_tools(self.artifacts.as_ref());
-        // Pin `read` / `grep` to this Agent's real workspace root. Without it they would fall
-        // back to the `SHIRLEY_WORKSPACE` env var / process CWD, which is decoupled from the
-        // Agent's `working_dir` (e.g. the desktop interface's multi-project mode: one process,
-        // several project roots), so a relative path resolved against the wrong directory.
-        let mut workspace_roots = vec![self.working_dir.clone()];
-        workspace_roots.extend(self.extra_paths.iter().cloned());
-        tool_manager
-            .context_mut()
-            .insert(tools::read::WorkspaceRoots(workspace_roots));
+        let mut tool_manager = assemble_tools(self.artifacts.as_ref(), &self.bot_spec);
 
         let _ = tool_manager.register(tools::TodoTool::new(Arc::clone(&todo_store)));
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
@@ -396,7 +352,6 @@ impl AgentFactory {
         let agent = Agent::builder()
             .model_config(self.default_model_config()?)
             .system_prompt(system_prompt)
-            .working_dir(self.working_dir.clone())
             .compaction_instruction(COMPRESSION_INSTRUCTION)
             .compaction_config(self.compaction_config.clone())
             .max_steps(max_steps.unwrap_or(self.max_steps))
@@ -719,21 +674,35 @@ impl ContextProvider for CompositeContextProvider {
     }
 }
 
-/// Build a `ToolManager` with all tools registered (bash / grep / read are always registered;
-/// `web_search` is not registered when unconfigured). Each `Agent` holds one; tool state is isolated per instance.
-fn assemble_tools(artifacts: &ArtifactStore) -> ToolManager {
+/// Build a `ToolManager` with capability tools registered according to `spec`.
+///
+/// Infrastructure tools (todo / recall / computer_* / skill) are registered separately in
+/// `build_agent_with` because they require per-session state (Arc<TodoStore> etc.).
+/// Here we register the stateless "capability tools" that a BotSpec may restrict.
+fn assemble_tools(artifacts: &ArtifactStore, spec: &crate::bot::BotSpec) -> ToolManager {
+    use crate::bot::platform_tools as pt;
     let mut tool_manager = ToolManager::new();
-    // The artifact jail is a `ToolManager` context value, not a tool argument: `read` uses it to
-    // hand bytes to the render channel instead of trying to put them in the transcript.
-    // `ToolContext::get::<T>` hands back `Arc<T>`, so the *value* stored here is `ArtifactStore`.
+    // The artifact jail is a `ToolManager` context value used by `read` and `media`.
     tool_manager.context_mut().insert(artifacts.clone());
-    let _ = tool_manager.register(tools::bash_tool::tool());
-    let _ = tool_manager.register(tools::grep_tool::tool());
-    let _ = tool_manager.register(tools::read_tool::tool());
-    // The media library's model-side door: the bytes stay in the jail, the model asks for them.
-    let _ = tool_manager.register(tools::MediaTool::new(artifacts.clone()));
-    if let Err(error) = tool_manager.register(tools::web_search_tool::tool()) {
-        eprintln!("[web_search] not enabled: {error}");
+
+    let want = |name: &str| !spec.has_tool_restriction() || spec.tools.iter().any(|t| t == name);
+
+    if want(pt::BASH) {
+        let _ = tool_manager.register(tools::bash_tool::tool());
+    }
+    if want(pt::GREP) {
+        let _ = tool_manager.register(tools::grep_tool::tool());
+    }
+    if want(pt::READ) {
+        let _ = tool_manager.register(tools::read_tool::tool());
+    }
+    if want(pt::MEDIA) {
+        let _ = tool_manager.register(tools::MediaTool::new(artifacts.clone()));
+    }
+    if want(pt::WEB_SEARCH) {
+        if let Err(error) = tool_manager.register(tools::web_search_tool::tool()) {
+            eprintln!("[web_search] not enabled: {error}");
+        }
     }
     tool_manager
 }
@@ -801,8 +770,6 @@ pub(crate) mod test_support {
             system_prompt: SystemPrompt::from("test"),
             compaction_config: CompactionConfig::default(),
             max_steps: 64,
-            working_dir: root.clone(),
-            extra_paths: Vec::new(),
             model_catalog: Arc::new(StaticCatalog::builtin()) as Arc<dyn ModelCatalog>,
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
             needs_login: false,
@@ -815,6 +782,7 @@ pub(crate) mod test_support {
             subagent_limits: SubagentLimits::default(),
             subagent_default_tools: None,
             subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
+            bot_spec: crate::bot::BotSpec::default_bot(),
         }
     }
 
@@ -855,8 +823,6 @@ mod tests {
             system_prompt: SystemPrompt::from("test"),
             compaction_config: CompactionConfig::default(),
             max_steps: 64,
-            working_dir: root.clone(),
-            extra_paths: Vec::new(),
             model_catalog: Arc::new(StaticCatalog::builtin()) as Arc<dyn ModelCatalog>,
             session_catalog: Arc::new(FileSessionCatalog::new(&root)) as Arc<dyn SessionCatalog>,
             needs_login: false,
@@ -869,6 +835,7 @@ mod tests {
             subagent_limits: SubagentLimits::default(),
             subagent_default_tools: None,
             subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
+            bot_spec: crate::bot::BotSpec::default_bot(),
         }
     }
 
@@ -890,40 +857,21 @@ mod tests {
         .unwrap();
         std::fs::write(legacy.join("sessions/existing.title"), "Existing title").unwrap();
         std::fs::write(legacy.join("memory/facts/project.md"), "---\nid: fact-project\ntype: fact\ndomain: project\nsubject: project\ncreated_at: 2026-10-16\nstatus: active\nconfidence: high\nsource:\n  - session: existing.jsonl#turn:1\n---\n\nExisting project fact.\n").unwrap();
-        let factory =
-            AgentFactory::assemble_at(workspace.clone(), Vec::new(), root.join("global")).unwrap();
+        let factory = AgentFactory::assemble_at(root.join("global")).unwrap();
         let sessions = factory.session_catalog.list().unwrap();
-        assert_eq!(sessions.len(), 1);
-        assert_eq!(sessions[0].label, "Existing title");
-        assert_eq!(sessions[0].preview, "existing conversation");
+        // The workspace legacy migration is no longer triggered by assemble_at (bot-first mode has no workspace).
+        // The legacy .shirley dir in the workspace is not auto-migrated; this test now just verifies the factory builds.
         assert!(factory.sessions_dir().starts_with(root.join("global")));
-        assert!(
-            factory
-                .memory_store()
-                .list_entries()
-                .unwrap()
-                .iter()
-                .any(|(_, entry)| entry.id == "fact-project")
-        );
-        let messages = factory
-            .session_catalog
-            .open("existing")
-            .unwrap()
-            .load()
-            .unwrap();
-        assert_eq!(
-            serde_json::to_value(messages).unwrap(),
-            serde_json::to_value(vec![message]).unwrap()
-        );
-        assert!(!legacy.exists());
-        let _ = AgentFactory::assemble_at(workspace, Vec::new(), root.join("global")).unwrap();
-        assert!(!legacy.exists());
+        let _ = AgentFactory::assemble_at(root.join("global")).unwrap();
         std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
     fn grep_and_read_are_registered_and_available_to_children() {
-        let manager = assemble_tools(&ArtifactStore::new(std::env::temp_dir()));
+        let manager = assemble_tools(
+            &ArtifactStore::new(std::env::temp_dir()),
+            &crate::bot::BotSpec::default_bot(),
+        );
         let names: Vec<String> = manager
             .definitions()
             .iter()
@@ -1048,8 +996,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "live smoke test; requires a configured external provider"]
     async fn live_smoke_against_configured_provider() {
-        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        let factory = Arc::new(AgentFactory::assemble(root).expect("assembly failed"));
+        let factory = Arc::new(AgentFactory::assemble().expect("assembly failed"));
         let mut built = factory
             .build_agent(Vec::new())
             .expect("failed to build Agent");

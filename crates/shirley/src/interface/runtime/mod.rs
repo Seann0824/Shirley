@@ -1,25 +1,19 @@
-//! Shared multi-project runtime core.
+//! Shared bot runtime core.
 //!
-//! This module is the **interface-agnostic orchestration layer** that both transports
-//! (the Tauri shell `interface/desktop/shell.rs` and the HTTP/SSE server
-//! `interface/server.rs`) are thin wrappers over. It owns:
+//! This module is the **interface-agnostic orchestration layer** the HTTP/SSE server
+//! transport wraps over. It owns:
 //!
-//! - the [`ProjectRegistry`] (which directories are projects),
-//! - the lazily-loaded per-project [`ProjectRuntime`] map (each = one [`AgentFactory`]
+//! - the lazily-cached per-bot [`ProjectRuntime`] map (each = one [`AgentFactory`]
 //!   + one [`SessionManager`]),
-//! - the per-`project::session` cancel handles,
+//! - the per-`bot::session` cancel handles,
 //! - the **turn driver** ([`ProjectRuntimeManager::spawn_turn`]) that takes a session's
 //!   `Agent`, streams `run_stream`, feeds every `AgentEvent` back into the session and
 //!   fans it out through a transport-supplied `sink`,
-//! - all the query commands (projects / sessions / model / files / skills / subagents)
-//!   and the wire DTOs they return.
+//! - all the query commands (sessions / model / skills / subagents) and wire DTOs.
 //!
-//! The core never holds a socket or a Tauri handle. Events leave it through a
-//! `sink: Arc<dyn Fn(AgentEventWire)>`: the desktop passes a **no-op** sink (its events
-//! flow through the per-session `Session::publish` channel, drained by a Tauri pump),
-//! while the server passes a sink that serialises to its global SSE broadcast.
-//!
-//! See `docs/cloud-server.md` for the design rationale.
+//! The core never holds a socket. Events leave it through a
+//! `sink: Arc<dyn Fn(AgentEventWire)>`: the server passes a sink that serialises to its
+//! global SSE broadcast.
 
 #![cfg_attr(
     not(any(feature = "desktop", feature = "server")),
@@ -47,18 +41,13 @@ use tokio::sync::{Mutex, broadcast, oneshot};
 use super::desktop::wire::{AgentEventWire, SessionSnapshotWire, StateSnapshotWire, TaskViewWire};
 use crate::bootstrap::AgentFactory;
 use crate::interface::session::SessionManager;
-use crate::project::{ProjectEntry, ProjectRegistry};
 use crate::session::{
     SessionCatalog, SessionEntry, first_user_message, sanitize_title, title_prompt,
 };
 use crate::subagent::{SubagentInfo, SubagentManager};
 use crate::todo::TaskView;
 
-/// Pseudo project id for Chat mode: a project not in the registry, assembled from a
-/// fixed chat root shared by desktop and server transports.
-pub const CHAT_PROJECT_ID: &str = "__chat__";
-
-/// Runtime for a single project: one assembled factory + its multi-session orchestrator.
+/// Runtime for a single bot: one assembled factory + its multi-session orchestrator.
 pub struct ProjectRuntime {
     pub factory: Arc<AgentFactory>,
     pub sessions: SessionManager,
@@ -73,29 +62,27 @@ pub type EventSink = Arc<dyn Fn(AgentEventWire) + Send + Sync>;
 /// happens (that is the whole point of stall detection). See `docs/agent-status.md` §6.1.
 pub type StatusSink = Arc<dyn Fn(StateSnapshotWire) + Send + Sync>;
 
-/// A shared, interface-agnostic multi-project runtime manager.
+/// The bot ID used when no specific bot name is provided.
+/// Bot-ui passes a bot slug here; the runtime creates one `ProjectRuntime` per bot lazily.
+pub const DEFAULT_BOT_ID: &str = "default";
+
+/// A shared, interface-agnostic bot runtime manager.
+///
+/// Each bot is identified by a string slug (e.g. `"nono"`, `"patch"`, `"default"`).
+/// The runtime is created lazily on first use and cached for the lifetime of the server.
 pub struct ProjectRuntimeManager {
-    registry: Arc<Mutex<ProjectRegistry>>,
+    /// Default factory used when creating new bot runtimes lazily.
+    factory: Arc<AgentFactory>,
     runtimes: Arc<Mutex<HashMap<String, Arc<Mutex<ProjectRuntime>>>>>,
     cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
     sink: EventSink,
     /// Content-free runtime-status fan-out (separate channel; no-op by default).
     status_sink: StatusSink,
-    /// If `Some`, the `__chat__` pseudo project resolves to this root.
-    /// If `None`, `__chat__` is rejected.
-    chat_root: Option<PathBuf>,
-    /// Asset handles (`docs/render-parts.md` P1): `<handle>` -> (absolute file, mime).
-    ///
-    /// The render channel never accepts a path. A `RenderPart` carries an opaque artifact id and
-    /// nothing else; [`Self::asset_handle`] validates that id against the *project's* artifact jail
-    /// and mints a handle; the transport (`shirley-asset://` on desktop, `/api/asset/` on the
-    /// cloud) turns the handle back into bytes. A handle is unguessable and revocable (drop the
-    /// entry), and it is only mintable through an authenticated/app-local command -- which is also
-    /// how the cloud solves "an `<img>` tag cannot carry an Authorization header".
+    /// Asset handles: `<handle>` -> (absolute file, mime).
     ///
     /// A `std::sync::Mutex` on purpose: the Tauri scheme handler is a synchronous function.
     assets: Arc<std::sync::Mutex<HashMap<String, AssetEntry>>>,
-    /// Task pools, one per project, opened lazily like the runtimes (`../pool/mod.rs`).
+    /// Task pools, one per bot, opened lazily like the runtimes.
     pools: Arc<Mutex<HashMap<String, Arc<Mutex<crate::pool::TaskPool>>>>>,
 }
 
@@ -131,195 +118,49 @@ pub fn route_key(project: &str, session: &str) -> String {
 }
 
 impl ProjectRuntimeManager {
-    pub fn new(
-        registry: Arc<Mutex<ProjectRegistry>>,
-        chat_root: Option<PathBuf>,
-        sink: EventSink,
-    ) -> Self {
+    pub fn new(factory: Arc<AgentFactory>, sink: EventSink) -> Self {
         Self {
-            registry,
+            factory,
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             sink,
             status_sink: Arc::new(|_| {}),
-            chat_root,
             assets: Arc::new(std::sync::Mutex::new(HashMap::new())),
             pools: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
-    /// Install the content-free status sink (desktop emits `status://event`; the server fans out
-    /// `/api/status`). Kept as a builder so existing `new()` call sites are untouched.
+    /// Install the content-free status sink (server fans out `/api/status`).
     pub fn with_status_sink(mut self, sink: StatusSink) -> Self {
         self.status_sink = sink;
         self
     }
 
-    /// Register (or refresh) a project at `working_dir` so the server always has at
-    /// least one project to show. Best-effort: returns the entry, or an error string.
-    pub async fn register_default(&self, working_dir: PathBuf) -> Result<ProjectEntry, String> {
-        self.registry
-            .lock()
-            .await
-            .add(&working_dir, None)
-            .map_err(|e| e.to_string())
-    }
-
-    /// Get (lazily loading if needed) the given project's runtime and refresh its
-    /// `last_opened_ms`.
+    /// Get (lazily creating if needed) the runtime for a given bot id.
     pub async fn ensure_runtime(
         &self,
-        project: &str,
+        bot: &str,
     ) -> Result<Arc<Mutex<ProjectRuntime>>, String> {
-        if let Some(rt) = self.runtimes.lock().await.get(project).cloned() {
-            if project != CHAT_PROJECT_ID {
-                self.registry.lock().await.touch(project);
-            }
+        if let Some(rt) = self.runtimes.lock().await.get(bot).cloned() {
             return Ok(rt);
         }
-        // Chat pseudo project: bypass the registry, assemble from the chat root.
-        if project == CHAT_PROJECT_ID {
-            let root = self
-                .chat_root
-                .clone()
-                .ok_or_else(|| "chat project is not available in this mode".to_owned())?;
-            let runtime = tokio::task::spawn_blocking(move || {
-                let _ = std::fs::create_dir_all(&root);
-                build_runtime(root)
-            })
+        let factory = Arc::clone(&self.factory);
+        let runtime = tokio::task::spawn_blocking(move || runtime_from_factory(factory))
             .await
             .map_err(|e| e.to_string())??;
-            let rt = {
-                let mut map = self.runtimes.lock().await;
-                let entry = map
-                    .entry(project.to_owned())
-                    .or_insert_with(|| Arc::new(Mutex::new(runtime)));
-                Arc::clone(entry)
-            };
-            return Ok(rt);
-        }
-        let entry = self
-            .registry
-            .lock()
-            .await
-            .get(project)
-            .cloned()
-            .ok_or_else(|| format!("project not found: {project}"))?;
-        let path = entry.path.clone();
-        let extra_paths = entry.extra_paths.clone();
-        let runtime =
-            tokio::task::spawn_blocking(move || build_runtime_with_extra_paths(path, extra_paths))
-                .await
-                .map_err(|e| e.to_string())??;
         let rt = {
             let mut map = self.runtimes.lock().await;
             let entry = map
-                .entry(project.to_owned())
+                .entry(bot.to_owned())
                 .or_insert_with(|| Arc::new(Mutex::new(runtime)));
             Arc::clone(entry)
         };
-        self.registry.lock().await.touch(project);
         Ok(rt)
     }
 
     // -----------------------------------------------------------------------
-    // Project commands
+    // (project management removed — bot configuration handled by BotSpec)
     // -----------------------------------------------------------------------
-
-    pub async fn list_projects(&self, include_archived: bool) -> Vec<ProjectEntryWire> {
-        let guard = self.registry.lock().await;
-        guard
-            .list(include_archived)
-            .into_iter()
-            .map(ProjectEntryWire::from)
-            .collect()
-    }
-
-    /// Register a project from a server-side path (cloud `agent_add_project { path, name? }`).
-    /// Canonicalises the path, dedupes via the registry, assembles its runtime eagerly.
-    pub async fn add_project(
-        &self,
-        path: PathBuf,
-        name: Option<String>,
-    ) -> Result<ProjectEntryWire, String> {
-        let entry = self
-            .registry
-            .lock()
-            .await
-            .add(&path, name)
-            .map_err(|e| e.to_string())?;
-        let root = entry.path.clone();
-        let extra_paths = entry.extra_paths.clone();
-        let runtime =
-            tokio::task::spawn_blocking(move || build_runtime_with_extra_paths(root, extra_paths))
-                .await
-                .map_err(|e| e.to_string())??;
-        self.runtimes
-            .lock()
-            .await
-            .insert(entry.id.clone(), Arc::new(Mutex::new(runtime)));
-        Ok(ProjectEntryWire::from(&entry))
-    }
-
-    /// Edit a project: rename and/or replace its source-folder set (the "Edit project" dialog).
-    ///
-    /// `folders` is a **whole replacement**; `primary` (when given) must be one of them. The
-    /// primary folder becomes the agent working dir + session-storage key, so when it changes the
-    /// cached runtime is dropped and will be rebuilt on next use (its sessions live under the new
-    /// primary's storage namespace). The project `id` never changes, so the frontend route key and
-    /// the runtime cache key stay stable.
-    pub async fn update_project(
-        &self,
-        project: &str,
-        name: Option<String>,
-        primary: Option<PathBuf>,
-        folders: Option<Vec<PathBuf>>,
-    ) -> Result<ProjectEntryWire, String> {
-        let previous_primary = self
-            .registry
-            .lock()
-            .await
-            .get(project)
-            .map(|entry| entry.path.clone());
-        let entry = self
-            .registry
-            .lock()
-            .await
-            .update(project, name, primary, folders)
-            .map_err(|e| e.to_string())?;
-        // The primary root decides session storage and the agent working dir; when it changed the
-        // in-memory runtime is stale, so release it and let the next `ensure_runtime` rebuild.
-        if previous_primary.as_deref() != Some(entry.path.as_path()) {
-            self.runtimes.lock().await.remove(project);
-        }
-        Ok(ProjectEntryWire::from(&entry))
-    }
-
-    pub async fn rename_project(&self, project: &str, name: &str) -> Result<(), String> {
-        self.registry
-            .lock()
-            .await
-            .rename(project, name)
-            .map_err(|e| e.to_string())
-    }
-
-    pub async fn archive_project(&self, project: &str) -> Result<(), String> {
-        self.registry
-            .lock()
-            .await
-            .archive(project)
-            .map_err(|e| e.to_string())?;
-        self.runtimes.lock().await.remove(project);
-        Ok(())
-    }
-
-    pub async fn restore_project(&self, project: &str) -> Result<(), String> {
-        self.registry
-            .lock()
-            .await
-            .restore(project)
-            .map_err(|e| e.to_string())
-    }
 
     // -----------------------------------------------------------------------
     // Session commands
@@ -983,34 +824,6 @@ impl ProjectRuntimeManager {
             .map(|entry| (entry.path.clone(), entry.mime))
     }
 
-    pub async fn search_files(
-        &self,
-        project: &str,
-        query: String,
-    ) -> Result<Vec<FileEntryWire>, String> {
-        let runtime = self.ensure_runtime(project).await?;
-        let guard = runtime.lock().await;
-        let mut roots = vec![guard.factory.working_dir.clone()];
-        roots.extend(guard.factory.extra_paths.iter().cloned());
-        drop(guard);
-        let entries = tokio::task::spawn_blocking(move || {
-            crate::workspace_search::search_files_multi(&roots, &query, None)
-        })
-        .await
-        .map_err(|e| e.to_string())?;
-        Ok(entries
-            .into_iter()
-            .map(|entry| FileEntryWire {
-                path: entry.path,
-                name: entry.name,
-                kind: match entry.kind {
-                    crate::workspace_search::FileKind::Dir => "dir",
-                    crate::workspace_search::FileKind::File => "file",
-                },
-            })
-            .collect())
-    }
-
     pub async fn list_skills(&self, project: &str) -> Result<Vec<SkillEntryWire>, String> {
         let runtime = self.ensure_runtime(project).await?;
         let guard = runtime.lock().await;
@@ -1156,24 +969,6 @@ pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<ProjectRuntime
     Ok(ProjectRuntime { factory, sessions })
 }
 
-/// Assemble a new factory for an arbitrary directory and build its runtime.
-pub fn build_runtime(root: PathBuf) -> Result<ProjectRuntime, String> {
-    build_runtime_with_extra_paths(root, Vec::new())
-}
-
-/// Assemble a project runtime whose primary root is `root` and which also attaches `extra_paths`
-/// (additional source folders). The primary root owns session storage; extra folders only widen
-/// the file tools' scope and are listed in the system prompt.
-pub fn build_runtime_with_extra_paths(
-    root: PathBuf,
-    extra_paths: Vec<PathBuf>,
-) -> Result<ProjectRuntime, String> {
-    let factory = Arc::new(
-        AgentFactory::assemble_with_extra_paths(root, extra_paths).map_err(|e| e.to_string())?,
-    );
-    runtime_from_factory(factory)
-}
-
 // ---------------------------------------------------------------------------
 // Sink helpers
 // ---------------------------------------------------------------------------
@@ -1271,34 +1066,6 @@ async fn auto_title_session(
 // Wire DTOs (aligned with `web/src/lib/bridge.ts`)
 // ---------------------------------------------------------------------------
 
-#[derive(Debug, Clone, Serialize)]
-pub struct ProjectEntryWire {
-    pub id: String,
-    pub name: String,
-    /// The primary folder (agent working dir + session-storage key).
-    pub path: String,
-    /// Additional source folders attached to this project (primary excluded).
-    pub extra_paths: Vec<String>,
-    pub archived: bool,
-    pub last_opened_ms: u64,
-}
-
-impl From<&ProjectEntry> for ProjectEntryWire {
-    fn from(entry: &ProjectEntry) -> Self {
-        Self {
-            id: entry.id.clone(),
-            name: entry.name.clone(),
-            path: entry.path.to_string_lossy().into_owned(),
-            extra_paths: entry
-                .extra_paths
-                .iter()
-                .map(|path| path.to_string_lossy().into_owned())
-                .collect(),
-            archived: entry.archived,
-            last_opened_ms: entry.last_opened_ms,
-        }
-    }
-}
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionEntryWire {

@@ -68,9 +68,7 @@ pub(crate) mod domain;
 pub(crate) mod infra;
 
 // ── flat-path compatibility re-exports (crate-internal) ───────────────────
-pub(crate) use domain::{
-    model_providers, models, project, session, status, todo, workspace_search,
-};
+pub(crate) use domain::{bot, model_providers, models, session, status, todo};
 pub(crate) use infra::{artifact, prompt_template, remote, settings, storage};
 // Dictation is reached only from the desktop commands (`crate::asr::…`), so the flat alias is
 // gated with them instead of warning as an unused import in a server-only build.
@@ -79,31 +77,19 @@ pub(crate) use infra::asr;
 
 use shirley_agent_sdk::AgentError;
 
-/// Interface mode: TUI (default) or the desktop interface.
+/// Interface mode: bot-first HTTP/SSE server.
 ///
-/// Selected by the `--desktop` launch flag; the `SHIRLEY_INTERFACE=desktop` env var works too.
-/// Both interfaces share the same [`bootstrap::AgentFactory`] assembly (see `docs/desktop-interface.md`).
+/// The only supported runtime mode. The `SHIRLEY_INTERFACE` env var is kept for
+/// forward compatibility but currently has no effect.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Mode {
-    Tui,
-    Desktop,
-    /// Cloud web interface: HTTP + WebSocket server, only-chat UI (no project
-    /// management). Gated behind the `server` cargo feature (`--features server`).
+    /// Bot HTTP/SSE server (default and only mode).
     Server,
 }
 
 impl Mode {
     fn from_env_and_args() -> Self {
-        let interface = std::env::var("SHIRLEY_INTERFACE").ok();
-        if std::env::args().any(|arg| arg == "--server") || interface.as_deref() == Some("server") {
-            Mode::Server
-        } else if std::env::args().any(|arg| arg == "--desktop")
-            || interface.as_deref() == Some("desktop")
-        {
-            Mode::Desktop
-        } else {
-            Mode::Tui
-        }
+        Mode::Server
     }
 }
 
@@ -128,29 +114,13 @@ pub fn run() -> Result<(), AgentError> {
         return interface::exec::run(&argv[2..]);
     }
 
-    // All interfaces (desktop / TUI / cloud server) share one state root: `~/.shirley`.
-    // Running them on the same machine under the same OS user intentionally means they
-    // see the same projects / sessions / config. Move the legacy `<config_dir>/shirley`
-    // root over once so the desktop's existing data does not appear lost.
+    // All interfaces share one state root: `~/.shirley`.
+    // Move the legacy `<config_dir>/shirley` root over once so the desktop's existing data does not appear lost.
     if storage::migrate_legacy_root().map_err(|error| AgentError::Other(Box::new(error)))? {
         eprintln!(
             "[storage] migrated legacy state root into {}",
             storage::global_root().display()
         );
-    }
-
-    // Workspace root: decides "which project this run is for", and is the source of workspace-level config.
-    let working_dir = prompt::workspace_root();
-
-    // Move legacy project-local state before any session files are opened.
-    let migrated =
-        storage::migrate_all(&working_dir).map_err(|error| AgentError::Other(Box::new(error)))?;
-    if std::env::args().any(|arg| arg == "--migrate-data") {
-        println!(
-            "Migrated {migrated} legacy workspaces into {}",
-            storage::global_root().display()
-        );
-        return Ok(());
     }
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -160,7 +130,7 @@ pub fn run() -> Result<(), AgentError> {
 
     let factory = runtime.block_on(async {
         // Assembly and catalog prewarming may spawn background tasks.
-        let factory = bootstrap::AgentFactory::assemble(working_dir)?;
+        let factory = bootstrap::AgentFactory::assemble()?;
         factory.prewarm_model_catalog();
         // A local offline copy is used by every interface. The worker shares only personal entries.
         remote::start_sync_worker(storage::global_root());
@@ -168,23 +138,17 @@ pub fn run() -> Result<(), AgentError> {
     })?;
 
     match Mode::from_env_and_args() {
-        Mode::Tui => runtime.block_on(interface::run(factory)),
-        // Desktop interface: enter the Tauri event loop (blocks the main thread).
-        Mode::Desktop => {
-            // Share the live runtime, but enter Tauri outside any block_on.
-            #[cfg(feature = "desktop")]
-            tauri::async_runtime::set(runtime.handle().clone());
-            interface::desktop::run(factory)
-        }
-        // Cloud web interface: run the HTTP + WebSocket server on the tokio runtime.
         #[cfg(feature = "server")]
-        Mode::Server => runtime.block_on(interface::server::run(factory)),
+        Mode::Server => runtime
+            .block_on(interface::server::run(factory))
+            .map_err(|error| AgentError::Other(Box::new(error)))?,
         #[cfg(not(feature = "server"))]
-        Mode::Server => Err(std::io::Error::other(
-            "server mode requires building with `--features server`",
-        )),
+        Mode::Server => {
+            return Err(AgentError::Other(Box::new(std::io::Error::other(
+                "server mode requires building with `--features server`",
+            ))))
+        }
     }
-    .map_err(|error| AgentError::Other(Box::new(error)))?;
 
     Ok(())
 }

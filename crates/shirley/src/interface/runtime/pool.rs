@@ -40,11 +40,8 @@ impl ProjectRuntimeManager {
         if let Some(handle) = self.pools.lock().await.get(project) {
             return Ok(Arc::clone(handle));
         }
-        let runtime = self.ensure_runtime(project).await?;
-        let path = {
-            let guard = runtime.lock().await;
-            pool_path(&guard.factory.working_dir)
-        };
+        let _runtime = self.ensure_runtime(project).await?;
+        let path = pool_path();
         let handle = Arc::new(Mutex::new(TaskPool::open(path)));
         self.pools
             .lock()
@@ -172,50 +169,30 @@ impl ProjectRuntimeManager {
         Ok(guard.ordered())
     }
 
-    /// Sweep every registered project once -- the resident scheduler's tick
-    /// (`interface/server::run`).
+    /// Tick the global task pool once — the resident scheduler's tick (`interface/server::run`).
     ///
-    /// Returns how many projects actually had work, so an idle host stays quiet.
+    /// Returns 1 if there was work to do, 0 if the pool was idle.
     pub async fn pool_tick_all(self: &Arc<Self>) -> usize {
-        // `list` hands back borrowed entries, so copy out what the tick needs before the lock drops:
-        // the sweep must not hold the registry across an `await`.
-        let entries: Vec<(String, std::path::PathBuf)> = {
-            let guard = self.registry.lock().await;
-            guard
-                .list(false)
-                .into_iter()
-                .map(|entry| (entry.id.clone(), entry.path.clone()))
-                .collect()
-        };
-        let mut busy = 0;
-        for (project, root) in entries {
-            match self.pool_tick(&project, &root).await {
-                Ok(true) => busy += 1,
-                Ok(false) => {}
-                Err(error) => eprintln!("[pool] tick failed for {project}: {error}"),
+        match self.pool_tick().await {
+            Ok(true) => 1,
+            Ok(false) => 0,
+            Err(error) => {
+                eprintln!("[pool] tick failed: {error}");
+                0
             }
         }
-        busy
     }
 
-    /// One project's tick: start whatever is queued, or nothing at all.
-    ///
-    /// Cheap before it is eager on purpose -- it reads the queue file straight from the registry
-    /// path, so a project with nothing waiting never assembles a runtime. That is what makes a
-    /// sweep over every registered project affordable on an always-on host.
-    async fn pool_tick(
-        self: &Arc<Self>,
-        project: &str,
-        root: &std::path::Path,
-    ) -> Result<bool, String> {
-        let pending = TaskPool::open(pool_path(root))
+    /// One tick: start whatever is queued in the global pool, or nothing at all.
+    async fn pool_tick(self: &Arc<Self>) -> Result<bool, String> {
+        let pending = TaskPool::open(pool_path())
             .ordered()
             .iter()
             .any(|task| task.status == pool::TaskStatus::ToDo);
         if !pending {
             return Ok(false);
         }
-        self.pool_pump(project).await?;
+        self.pool_pump(super::DEFAULT_BOT_ID).await?;
         Ok(true)
     }
 
@@ -422,8 +399,6 @@ fn files_since(factory: &crate::bootstrap::AgentFactory, since_ms: u64) -> Vec<D
 }
 
 /// `task-pool.json` inside the project's state directory (the same place sessions live).
-fn pool_path(working_dir: &std::path::Path) -> std::path::PathBuf {
-    crate::storage::StoragePaths::new(crate::storage::global_root(), working_dir)
-        .map_or_else(|_| working_dir.join(".shirley"), |paths| paths.state)
-        .join(pool::POOL_FILE_NAME)
+fn pool_path() -> std::path::PathBuf {
+    crate::storage::global_root().join(pool::POOL_FILE_NAME)
 }
