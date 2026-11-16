@@ -2,22 +2,18 @@
 
 **Shirley technical design index**
 
-This set of documents is a technical design proposal for the current repository (the v0.1 state described by `Agent.md`). The goal is not a rewrite, but to close the "can I use it with confidence" gaps on top of the existing three-layer structure (application layer / SDK / macro), and to put the capabilities that `plan.md` has already sketched a direction for, but that have not yet landed, into an executable order.
+Design notes for the runtime underneath the bot platform (SDK, tools, memory, sessions, skills). The product shape — bots, their storage layout, how to run — is in the root `README.md`. Some notes predate the bot platform and still say "TUI" or "desktop" where they mean "the interface".
 
 **Document list**
 
 | Document | What it solves | Priority |
 | --- | --- | --- |
-| `architecture.md` | Architecture diagram + which node each feature lands on | Read this first |
-| `storage.md` | Global configuration/state layout, project namespaces and lossless legacy migration (**implemented**) | P0 |
-| `roadmap.md` | Overall roadmap: phases, dependencies, acceptance criteria | Second |
 | `security.md` | Permission layer, bash boundary, secrets, workspace isolation | P0 |
 | `sandbox.md` | Process sandbox: spec / backend / degraded / timeout / ownership of the execution strategy | P0 |
 | `runtime-hardening.md` | max_steps, retry, timeout, cancellation, compaction robustness | P0 |
 | `compaction.md` | Context compaction optimization: cut-point compaction + layered retention | P0 |
 | `todo.md` | Task ledger `todo`: model self-maintained, task state that survives compaction / injected at the end of each round (**implemented**; the ledger lives in the application layer `crates/shirley/src/todo.rs`, the SDK only keeps the generic seam `ContextProvider`) | P0 |
 | `session.md` | Session persistence and restore: application-layer SessionStore contract / rewind semantics / event-driven persistence | P0 |
-| `multi-session.md` | Multi-session parallelism: multiple Agents each running their own / events isolated per session (the channel is held by each Session) / per-session spawn + limit / remove `switch_session` (orchestration goes to the application layer) / same-session multiple drivers not supported (**P1 landed**: SessionManager + AgentFactory + SDK removal of switch_session; P2/P3 not landed) | P1 |
 | `streaming.md` | Streaming output and reasoning streaming | P1 |
 | `adapter-layer.md` | Protocol adapter middle layer, tool-argument normalization, multi-protocol | P1 |
 | `responses-api.md` | Responses protocol adapter: request item expansion / response decoding / streaming events / how it lands | P1 |
@@ -27,7 +23,6 @@ This set of documents is a technical design proposal for the current repository 
 | `tool-lifecycle.md` | Tool lifecycle: `ToolContext` belongs to `ToolManager` / `on_register` (created) / `on_unregister` (destroy) / `unregister` (**implemented**) | P0 |
 | `tool-macro.md` | Tool macro expressiveness: function macro extended with optional companion hooks (`on_register` / `on_unregister`), lifecycle wired by the macro (**implemented**) | P1 |
 | `testing.md` | SDK unit-test strategy, cache hit-rate benchmarks | P1 |
-| `plan.md` | Error-handling unification: completed state + follow-up task list | P0 |
 | `web-search.md` | Web search tool `web_search`: Anthropic-compatible Messages API / normalization / configuration (**implemented**) | P1 |
 | `model-providers.md` | Host-local provider profiles, manual model lists, credentials, per-chat selection, and manual acceptance steps | P1 |
 | `memory-sync.md` | Personal memory synchronization, legacy review, local/remote chat switching, authentication, and manual acceptance steps | P1 |
@@ -49,15 +44,3 @@ This set of documents is a technical design proposal for the current repository 
 4. **Use the right tool for the diagram**. Diagrams in the docs choose their carrier by what they express; do not force everything into one form for the sake of uniformity: **hierarchical structures** like directory / file layout use an **ASCII tree** (`├──` / `└──`) -- mermaid has no native tree syntax, and forcing it into `graph TD` is verbose and distorted; relationships like **flows, dependencies, data flow, sequences** use **mermaid** (the architecture diagram keeps a single legend at the top of `architecture.md`, explaining the semantics of boxes / solid lines / dashed lines / diamonds / `subgraph`). The criterion: is the reader trying to "see the structure" or "see the flow" -- the former is ASCII, the latter is mermaid.
 
 The sandbox-layer landing design is in `sandbox.md`: it advances "secure by default" from "statically reject dangerous commands" to "physically unable to run outside a fake world", and is the second half of the `bash` boundary.
-
----
-
-**Current state baseline (measured after checking the code)**
-
-- Code size: `src` + `crates` total 2809 lines
-- Tests: 3 (all in the `read` tool), 0 on the SDK side
-- clippy: 36 warnings (`shirley-agent-sdk` 32 + application layer 4)
-- Known panic points: **cleared**. The unimplemented protocols in `codec` / `invoke` now return `Err(UnsupportedProtocol)` (see `docs/runtime-hardening.md`)
-- Unwired configuration: **wired**. `temperature` / `max_output_tokens` / `tool_choice` go into the request body, and a new `extra_body` escape hatch is added (see `docs/sdk-gaps.md` gap-4; the `request_timeout` field has been removed)
-- Unused `StopReason`: `MaxStepsReached`, `Cancelled` (`Completed` is currently the only value that is ever produced)
-- Already landed (not yet done when the proposal was written): streaming output (`stream` config + `ContentDelta` / `ReasoningDelta` events + SSE incremental parsing), the TUI consuming `AgentEvent` directly

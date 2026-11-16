@@ -2,7 +2,7 @@
 //!
 //! Why not let `AgentEvent` derive `Serialize` directly: the SDK's public contract
 //! must stay small, and protocol/UI differences are contained at the boundary
-//! (`docs/README.md` principle 1, `docs/desktop-interface.md` section 6). Here we
+//! (`docs/README.md` principle 1). Here we
 //! translate internal events into JSON the frontend can consume; the SDK gains no
 //! new public types for the interface.
 //!

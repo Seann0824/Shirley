@@ -14,7 +14,7 @@ Shirley is a **personal agent** written in Rust: an agent you deploy on your own
 
 > from the phone, hand a task to the machine on the cloud -> it operates the software and finishes it -> a delivery comes back to you.
 
-Everything else is either a means to that loop or frozen. A coding agent is a *subset* of this (writing code is one of the things the machine does), not the product. This is not a rebrand on paper: the code already moved. `crates/shirley/src/pool/` is the queue, `interface/runtime/pool.rs` is the executor, `tools/computer.rs` is the hands, `interface/server/` is the always-on transport, `docs/cloud-server.md` and `docs/mobile-web.md` are its entry points. What was missing was the bridge between the queue and the always-on host; `interface/server` now sweeps it on a resident timer (`ProjectRuntimeManager::pool_tick_all`), so **the queue advances with no browser open**.
+Everything else is either a means to that loop or frozen. A coding agent is a *subset* of this (writing code is one of the things the machine does), not the product. This is not a rebrand on paper: the code already moved. `crates/shirley/src/pool/` is the queue, `interface/runtime/pool.rs` is the executor, `tools/computer.rs` is the hands, `interface/server/` is the always-on transport. What was missing was the bridge between the queue and the always-on host; `interface/server` now sweeps it on a resident timer (`BotRuntimeManager::pool_tick`), so **the queue advances with no browser open**.
 
 **The acceptance test is exactly one line**: *are you still using it every day, two weeks from now?* Not "are the features complete". A capability that does not make that answer yes is not a priority -- it is a distraction, however good it is.
 
@@ -67,9 +67,6 @@ The core design goal is written in the root `plan.md`: the SDK should only accum
 | Document | What it solves |
 | --- | --- |
 | `docs/README.md` | Document index + three global design principles |
-| `docs/architecture.md` | Architecture diagram + where each feature lives |
-| `docs/storage.md` | Global configuration/state layout, project namespaces and legacy .shirley migration |
-| `docs/roadmap.md` | Overall roadmap: phases, dependencies, acceptance criteria |
 | `docs/security.md` | Permission layer, bash boundary, secrets, workspace isolation |
 | `docs/grep.md` | Workspace grep: nested ignore rules, structured filters and bounded search results |
 | `docs/sandbox.md` | Process sandbox: spec / backend / degraded / timeout |
@@ -80,10 +77,8 @@ The core design goal is written in the root `plan.md`: the SDK should only accum
 | `docs/anthropic-messages-api.md` | Anthropic Messages protocol adapter: content blocks / streaming fragment aggregation / usage semantics (**implemented**) |
 | `docs/todo.md` | The `todo` task ledger: model self-maintained, task state that survives compaction / injected at the end of each round (**implemented**; the ledger lives in the application layer `crates/shirley/src/domain/todo.rs`, the SDK only keeps the generic seam `ContextProvider`) |
 | `docs/testing.md` | SDK unit-test strategy, cache hit-rate benchmarks |
-| `docs/plan.md` | Error-handling unification: completed state + follow-up task list |
 | `docs/tool-lifecycle.md` | Tool lifecycle: `ToolContext` belongs to `ToolManager` / `on_register` (created) / `on_unregister` (destroy) / `unregister` (**implemented**) |
 | `docs/tool-macro.md` | Tool macro expressiveness: function macro extended with optional companion hooks, lifecycle wired by the macro (**implemented**) |
-| `docs/desktop-interface.md` | Desktop interface: Tauri 2 + React migration of the shiwen chat UI / shared LCA (`AgentEvent`) / stripping shiwen custom logic (**M0-M3 landed**, including `@` reference rebinding to workspace files, markdown rendering alignment, fixed chat width `max-w-190`, consecutive tool calls collected into a collapsible area, **multi-project multi-workspace**: register / switch / rename / archive / restore) |
 | `docs/skills.md` | Skills: embracing the Agent Skills open standard (`SKILL.md` directory / frontmatter) / progressive disclosure (catalog always resident + activate on demand + read resources on demand) / `SkillContextProvider` appended injection at the end of each round (catalog + activated body, survives compaction, KV-friendly) / application-layer implementation, zero SDK change (**P0+P1+P2(slash) landed**: `crates/shirley/src/skills/` discovery + parsing + catalog + `activate_skill` / `SkillRuntime` activation + `read_skill_file` resource reading + `/<skill-name>` command-layer direct activation) |
 | `docs/multimodal.md` | Multimodal input (images): SDK mechanism (structured `ContentPart` in `Message` / image encoding across ChatCompletions + Responses + Anthropic / `ModelConfig.supports_images` + send-time guard) vs application-layer policy (capability source, attach-image UI, session stores references not bytes) (**proposal, not landed**) |
 

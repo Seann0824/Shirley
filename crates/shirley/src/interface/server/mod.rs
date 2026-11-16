@@ -627,7 +627,7 @@ async fn dispatch(
         // No dictation route on purpose: transcription happens on the user's own device
         // (browser recogniser, or this computer's whisper.cpp in the desktop app). A phone
         // that opens a cloud bot dictates with the phone's own ASR, so no audio ever
-        // reaches this server. See `docs/voice-input.md`.
+        // reaches this server..
         "agent_load_history" => {
             let bot = args.bot()?;
             ok_json(manager.load_history(&bot).await?)

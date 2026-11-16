@@ -1,6 +1,6 @@
 //! Regression tests for the public system-prompt contract.
 //!
-//! These lock two public promises (see `docs/architecture.md` and section 3 of `Agent.md`):
+//! These lock two public promises:
 //!
 //! 1. `SystemPrompt` accepts both a fixed string and a **function**; the function receives
 //!    a `SystemPromptContext` (the current working directory).

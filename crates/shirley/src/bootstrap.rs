@@ -1,6 +1,6 @@
 //! Application assembly (Bootstrap): decouples "where config comes from" from "which interface renders it".
 //!
-//! Before the desktop interface was introduced (`docs/desktop-interface.md`), the assembly logic was hardcoded in `main.rs`
+//! Before the desktop interface was introduced, the assembly logic was hardcoded in `main.rs`
 //! and called `interface::run` directly after assembling. Now it is extracted into an [`AgentFactory`]:
 //! **the TUI and the desktop interface share the same assembly output** (the same model config / tools / session catalog),
 //! only the rendering differs.
@@ -8,7 +8,7 @@
 //! This is **one of the LCAs** in "sibling interfaces, shared LCA": the SDK's `Agent` is the other.
 //! Both interfaces are its consumers; neither monopolizes assembly.
 //!
-//! Multi-session (`docs/multi-session.md` decision 5): assembly is no longer "build one `Agent`",
+//! Multi-session: assembly is no longer "build one `Agent`",
 //! but produces an [`AgentFactory`] -- **a factory that can repeatedly build `Agent`s per session**.
 //! Each session gets its own independent `Agent` via [`AgentFactory::build_agent`] (model config /
 //! tool definitions are reused by the factory; `todo` / session logs are isolated per instance inside `Agent::new`),
@@ -215,7 +215,7 @@ impl AgentFactory {
         })
     }
 
-    /// Build an independent `Agent` from the **restored message working set** (`docs/multi-session.md` decision 5).
+    /// Build an independent `Agent` from the **restored message working set**.
     ///
     /// Session persistence has moved up to the application layer: the caller first `SessionStore::load()`s the history, then hands it here
     /// to start an `Agent` (empty `Vec` = a fresh session). `Agent::new` generates the system prompt fresh and puts it at the top --

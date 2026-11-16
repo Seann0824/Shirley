@@ -1081,7 +1081,7 @@ pub struct ModelEntryWire {
     pub label: String,
     pub value: String,
     pub provider: String,
-    /// Reasoning-effort levels this model accepts (`docs/desktop-interface.md`).
+    /// Reasoning-effort levels this model accepts.
     ///
     /// Empty means "no effort affordance": either the model is not host-configured, or it is on
     /// a protocol where the SDK deliberately ignores `reasoning_effort` (Anthropic Messages).

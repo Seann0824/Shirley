@@ -1,4 +1,4 @@
-//! Application-layer multi-session runtime container (`docs/multi-session.md` decision 4).
+//! Application-layer multi-session runtime container.
 //!
 //! This is the application layer's **single orchestration entry point**: it gathers three things in one place:
 //! "where sessions come from" (`SessionCatalog`), "how far each session has run" ([`Session`]),
@@ -34,7 +34,7 @@ use crate::subagent::{SubagentManager, SubagentStore};
 use crate::todo::{TaskView, TodoStore};
 
 /// Event fan-out channel capacity. A running subscriber that falls more than this far behind gets `Lagged`, and the subscriber (desktop
-/// pump) skips and realigns by resending a snapshot (see `docs/multi-session.md`).
+/// pump) skips and realigns by resending a snapshot.
 const EVENT_CHANNEL_CAPACITY: usize = 256;
 
 /// Attach a tool result to its call in the view, matched by `call_id`.
@@ -124,8 +124,8 @@ pub struct Session {
     pub streaming_delta_start: Option<usize>,
     /// This session's event fan-out channel (multi-session: UI switches to a session -> subscribe, switches away -> unsubscribe).
     ///
-    /// The channel is owned by the `Session` itself (symmetric with "each `Session` holds its own `Agent`", see
-    /// `docs/multi-session.md` decision 2): `SessionManager` only feeds each
+    /// The channel is owned by the `Session` itself (symmetric with "each `Session` holds its
+    /// own `Agent`"): `SessionManager` only feeds each
     /// `AgentEvent` to the corresponding session, it does not hold channels.
     events: broadcast::Sender<Result<AgentEvent, String>>,
     /// This session's persistent store (`None` = no persistence, for tests).
@@ -701,7 +701,7 @@ impl Session {
     }
 }
 
-/// Neutral wire format for UI items (`docs/multi-session.md` decision 4): mapped from [`Item`],
+/// Neutral wire format for UI items: mapped from [`Item`],
 /// for the UI to rebuild the view when subscribing to a session that has accumulated history. The TUI does not consume it (it reads [`Item`] directly);
 /// the desktop side converts it into a frontend DTO (`desktop::wire::ItemWire`).
 #[derive(Debug, Clone)]
