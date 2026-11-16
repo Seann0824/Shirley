@@ -4,6 +4,8 @@
 //! The platform catalog (`crate::tools`) registers all available tools; each bot references
 //! tools by name. If `tools` is empty the bot gets the full default tool set.
 
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 
 /// Declaration of a bot's identity and tool set.
@@ -36,6 +38,90 @@ impl BotSpec {
             tools: Vec::new(),
             system_prompt_extra: None,
         }
+    }
+
+    /// Built-in platform bots seeded when no user-defined spec exists.
+    pub fn platform_defaults() -> Vec<Self> {
+        vec![
+            Self {
+                name: "nono".to_owned(),
+                display_name: "NONO".to_owned(),
+                tools: Vec::new(),
+                system_prompt_extra: None,
+            },
+            Self {
+                name: "patch".to_owned(),
+                display_name: "Patch".to_owned(),
+                tools: vec![
+                    platform_tools::BASH.to_owned(),
+                    platform_tools::GREP.to_owned(),
+                    platform_tools::READ.to_owned(),
+                ],
+                system_prompt_extra: Some(
+                    "You are Patch, a focused coding assistant. You help with code changes, reviews, and debugging.".to_owned(),
+                ),
+            },
+            Self {
+                name: "scout".to_owned(),
+                display_name: "Scout".to_owned(),
+                tools: vec![
+                    platform_tools::WEB_SEARCH.to_owned(),
+                    platform_tools::READ.to_owned(),
+                ],
+                system_prompt_extra: Some(
+                    "You are Scout, a research assistant. You search the web and summarize information.".to_owned(),
+                ),
+            },
+        ]
+    }
+
+    /// Load a spec from `<bots_root>/<name>/spec.toml`, or fall back to a platform default if the
+    /// bot name matches one of the built-in bots, or finally return the generic default bot.
+    pub fn load_or_default(name: &str, bots_root: &Path) -> Self {
+        let spec_path = bots_root.join(name).join("spec.toml");
+        if let Ok(text) = std::fs::read_to_string(&spec_path) {
+            if let Ok(spec) = toml::from_str::<Self>(&text) {
+                return spec;
+            }
+        }
+        // Fall back to a named platform default.
+        Self::platform_defaults()
+            .into_iter()
+            .find(|s| s.name == name)
+            .unwrap_or_else(|| Self {
+                name: name.to_owned(),
+                display_name: name.to_owned(),
+                ..Self::default_bot()
+            })
+    }
+
+    /// List all bots: user-defined ones under `<bots_root>/` plus any platform defaults not
+    /// overridden by a user file.
+    pub fn list_all(bots_root: &Path) -> Vec<Self> {
+        let mut specs: Vec<Self> = Vec::new();
+        let mut seen_names = std::collections::HashSet::new();
+
+        // User-defined bots first.
+        if let Ok(entries) = std::fs::read_dir(bots_root) {
+            for entry in entries.flatten() {
+                let spec_path = entry.path().join("spec.toml");
+                if let Ok(text) = std::fs::read_to_string(&spec_path) {
+                    if let Ok(spec) = toml::from_str::<Self>(&text) {
+                        seen_names.insert(spec.name.clone());
+                        specs.push(spec);
+                    }
+                }
+            }
+        }
+
+        // Then platform defaults not already covered.
+        for default in Self::platform_defaults() {
+            if !seen_names.contains(&default.name) {
+                specs.push(default);
+            }
+        }
+
+        specs
     }
 
     /// Whether the spec restricts tools, or accepts the full default set.

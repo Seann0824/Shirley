@@ -144,7 +144,11 @@ impl ProjectRuntimeManager {
         if let Some(rt) = self.runtimes.lock().await.get(bot).cloned() {
             return Ok(rt);
         }
-        let factory = Arc::clone(&self.factory);
+        // Load the bot's spec from disk (or fall back to a platform default) and derive a
+        // per-bot factory so each bot gets its own tool table and prompt configuration.
+        let bots_root = crate::storage::global_root().join("bots");
+        let spec = crate::bot::BotSpec::load_or_default(bot, &bots_root);
+        let factory = Arc::new(self.factory.for_bot(spec));
         let runtime = tokio::task::spawn_blocking(move || runtime_from_factory(factory))
             .await
             .map_err(|e| e.to_string())??;

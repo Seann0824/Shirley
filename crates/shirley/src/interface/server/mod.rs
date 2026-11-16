@@ -393,6 +393,27 @@ async fn dispatch(
     };
     let manager = &state.manager;
     match cmd.as_str() {
+        // -- bot management ----------------------------------------------------------
+        "agent_list_bots" => {
+            let bots_root = crate::storage::global_root().join("bots");
+            let bots = crate::bot::BotSpec::list_all(&bots_root);
+            #[derive(serde::Serialize)]
+            struct BotWire {
+                name: String,
+                display_name: String,
+                tools: Vec<String>,
+            }
+            let wire: Vec<BotWire> = bots
+                .into_iter()
+                .map(|s| BotWire {
+                    name: s.name,
+                    display_name: s.display_name,
+                    tools: s.tools,
+                })
+                .collect();
+            ok_json(wire)
+        }
+        // -- model providers ---------------------------------------------------------
         "agent_model_providers" => {
             let action = args.action.ok_or_else(|| ApiError::bad("missing action"))?;
             let global = state

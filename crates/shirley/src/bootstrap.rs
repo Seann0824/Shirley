@@ -398,6 +398,33 @@ impl AgentFactory {
         config
     }
 
+    /// Create a derivative factory with a different [`BotSpec`] but all other settings shared.
+    ///
+    /// Cheap: all Arc fields are cloned (not deep-copied). Used by `ProjectRuntimeManager` to
+    /// give each bot its own tool table and prompt without reassembling from scratch.
+    pub fn for_bot(&self, spec: crate::bot::BotSpec) -> Self {
+        Self {
+            model_config: self.model_config.clone(),
+            system_prompt: self.system_prompt.clone(),
+            compaction_config: self.compaction_config.clone(),
+            max_steps: self.max_steps,
+            model_catalog: Arc::clone(&self.model_catalog),
+            session_catalog: Arc::clone(&self.session_catalog),
+            needs_login: self.needs_login,
+            memory_roots: self.memory_roots.clone(),
+            curator_settings: self.curator_settings.clone(),
+            consolidate_after_entries: self.consolidate_after_entries,
+            embedder: self.embedder.clone(),
+            artifacts: Arc::clone(&self.artifacts),
+            skill_catalog: self.skill_catalog.clone(),
+            subagent_enabled: self.subagent_enabled,
+            subagent_limits: self.subagent_limits.clone(),
+            subagent_default_tools: self.subagent_default_tools.clone(),
+            subagent_default_timeout_ms: self.subagent_default_timeout_ms,
+            bot_spec: spec,
+        }
+    }
+
     pub fn model_providers_root(&self) -> &std::path::Path {
         self.memory_roots[0]
             .parent()
