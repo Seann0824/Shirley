@@ -80,12 +80,14 @@ memory/ skills/ subagent/ tools/ computer/    capabilities
 ```text
 api/types.ts      the wire contract (mirrors wire.rs, runtime/mod.rs, pool/mod.rs)
 api/bridge.ts     fetch commands + one shared EventSource
-state/            hooks: useBots, useConversation, useTasks, useMemory
+state/            hooks: useBots, useConversation, useTasks, useMemory, useWide
 components/       Icon, BotAvatar, BotRow, Composer, Chrome
 views/            Home, Chat, Tasks, Work, Memory, NewBot
 index.css         the design-system stylesheet (from the original design)
 app.css           additions for live data
 ```
+
+Layout: one full-viewport column on phones; from 900px, the bot list on the left and the open view (a conversation by default) on the right. There is no device mock-up. Do not animate `transform` on a view container: the composer is absolutely positioned against its pane, and a transformed ancestor captures it.
 
 `build.rs` runs `npm install` (first time) and `npm run build` when UI sources change, so `cargo run` serves a current page. `SHIRLEY_SKIP_WEB_BUILD=1` skips it. `dist/` is not checked in.
 

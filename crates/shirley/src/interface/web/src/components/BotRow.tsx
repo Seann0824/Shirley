@@ -37,7 +37,9 @@ export function SwipeBotRow({
   };
 
   return (
-    <div className={`swipe-row ${pinned ? "pinned" : ""} ${muted ? "muted" : ""}`}>
+    <div
+      className={`swipe-row ${pinned ? "pinned" : ""} ${muted ? "muted" : ""} ${open || offset !== 0 ? "revealing" : ""}`}
+    >
       <div className="swipe-actions">
         <button
           className={pinned ? "active" : ""}

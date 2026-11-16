@@ -14,27 +14,6 @@
   color: var(--red);
 }
 
-.bot-chips {
-  display: flex;
-  gap: 8px;
-  padding: 0 20px 8px;
-  overflow-x: auto;
-  scrollbar-width: none;
-}
-.bot-chips button {
-  flex: none;
-  padding: 6px 12px;
-  border-radius: 999px;
-  background: var(--fill);
-  color: var(--secondary);
-  font-size: 13px;
-  font-weight: 600;
-}
-.bot-chips button.active {
-  background: var(--label);
-  color: #fff;
-}
-
 .composer-hint {
   margin: 0 16px 6px;
   font-size: 12px;
@@ -251,5 +230,169 @@
   white-space: pre-wrap;
   font-size: 13px;
   line-height: 1.5;
+  color: var(--secondary);
+}
+
+/* ------------------------------------------------------------------------
+   Shell: full-viewport panes (no device mock), one column on phones,
+   bot list + content side by side on wide screens.
+   ------------------------------------------------------------------------ */
+
+html,
+body,
+#root {
+  height: 100%;
+}
+body {
+  background: #fff;
+  overscroll-behavior: none;
+}
+
+.app-shell {
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  background: #fff;
+}
+
+.pane {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.pane .page {
+  padding: max(12px, env(safe-area-inset-top)) 17px calc(34px + env(safe-area-inset-bottom));
+}
+.home-pane .page {
+  padding-bottom: calc(168px + env(safe-area-inset-bottom));
+}
+.chat-pane .page {
+  padding-bottom: calc(112px + env(safe-area-inset-bottom));
+}
+.pane:has(.composer-dock .attachment-tray) .page {
+  padding-bottom: calc(232px + env(safe-area-inset-bottom));
+}
+
+/* Views fade in. No transform here: an element with a transform animation stays the containing
+   block of its absolutely positioned descendants, which lifted the composer off the bottom. */
+@keyframes pane-enter {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+.view-transition {
+  animation: pane-enter 0.22s ease both;
+}
+
+.composer-dock {
+  bottom: calc(19px + env(safe-area-inset-bottom));
+}
+
+/* "Send to" picker, inside the home composer. */
+.bot-chips {
+  align-self: stretch;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+.bot-chips::-webkit-scrollbar {
+  display: none;
+}
+.bot-chips span {
+  flex: none;
+  font-size: 12px;
+  color: var(--tertiary);
+}
+.bot-chips button {
+  flex: none;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--fill);
+  color: var(--secondary);
+  font-size: 12px;
+  font-weight: 600;
+}
+.bot-chips button.active {
+  background: var(--label);
+  color: #fff;
+}
+
+/* Chat: the thread scrolls, the header stays. */
+.chat-pane .page {
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+.chat-pane .view-transition {
+  flex: 1;
+  min-height: 0;
+}
+.chat-view {
+  height: 100%;
+  min-height: 0;
+}
+.conversation {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: none;
+}
+.conversation::-webkit-scrollbar {
+  display: none;
+}
+
+/* Two panes. */
+.is-wide .pane-side {
+  flex: 0 0 372px;
+  border-right: 1px solid var(--separator);
+  background: #fafafa;
+}
+.is-wide .pane-side .home-bot-list {
+  background: transparent;
+  box-shadow: none;
+}
+.is-wide .home-bot-card.selected {
+  background: #ececee;
+}
+.is-wide .pane-main .view-transition {
+  width: 100%;
+  max-width: 760px;
+  margin: 0 auto;
+}
+.is-wide .pane-main .composer-dock {
+  left: 50%;
+  right: auto;
+  width: min(726px, calc(100% - 34px));
+  translate: -50% 0;
+}
+.is-wide .chat-header .back-button {
+  visibility: hidden;
+}
+
+/* Swipe actions exist only while a row is being swiped; otherwise they showed through
+   translucent rows and at the list's rounded corners. */
+.swipe-row:not(.revealing) .swipe-actions {
+  visibility: hidden;
+}
+
+.bot-builder-chat {
+  min-height: calc(100dvh - 130px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+}
+
+/* Monochrome, like the rest of the theme. */
+.project .memory-icon {
+  background: #717174;
+}
+.memory-block small {
+  background: var(--fill);
   color: var(--secondary);
 }

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { Icon } from "./Icon";
 
@@ -142,14 +142,19 @@ export function ComposerDock({
   busy,
   onStop,
   placeholder = "输入消息",
+  above,
 }: {
   onSend: (text: string, attachments: Attachment[]) => void;
   onListeningChange?: (listening: boolean, transcript: string) => void;
   busy?: boolean;
   onStop?: () => void;
   placeholder?: string;
+  /** Rendered inside the dock, above the controls (e.g. the "send to" picker). */
+  above?: ReactNode;
 }) {
-  const [textMode, setTextMode] = useState(false);
+  // A keyboard is the natural input on a wide screen; hold-to-talk is the phone default.
+  const prefersText = window.matchMedia("(min-width: 900px)").matches;
+  const [textMode, setTextMode] = useState(prefersText);
   const [value, setValue] = useState("");
   const [listening, setListening] = useState(false);
   const [attachments, setAttachments] = useState<Attachment[]>([]);
@@ -166,7 +171,7 @@ export function ComposerDock({
     onSend(trimmed, attachments);
     setValue("");
     setAttachments([]);
-    setTextMode(false);
+    setTextMode(prefersText);
   };
 
   const startListening = () => {
@@ -206,6 +211,7 @@ export function ComposerDock({
   return (
     <>
       <div className={`composer-dock ${listening ? "is-listening" : ""}`}>
+        {above}
         {attachments.length > 0 && (
           <AttachmentTray
             attachments={attachments}

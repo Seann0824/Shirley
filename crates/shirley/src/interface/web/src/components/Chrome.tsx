@@ -1,18 +1,5 @@
 import { Icon } from "./Icon";
 
-export function StatusBar() {
-  return (
-    <div className="status-bar">
-      <span>{new Date().toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" })}</span>
-      <div className="device-status">
-        <i />
-        <i />
-        <b />
-      </div>
-    </div>
-  );
-}
-
 export function BackHeader({ title, onBack }: { title: string; onBack: () => void }) {
   return (
     <header className="back-header">

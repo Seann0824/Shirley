@@ -87,17 +87,25 @@ export function Home({
   onNavigate,
   onOpenBot,
   onDispatch,
+  selected,
 }: {
   bots: ReturnType<typeof useBots>;
   tasks: PoolTask[];
   onNavigate: (view: Tab) => void;
   onOpenBot: (bot: string) => void;
   onDispatch: (bot: string, brief: string) => Promise<void>;
+  /** The bot whose conversation is open beside the list (two-pane layout only). */
+  selected?: string;
 }) {
   const visible = bots.visible;
   const [target, setTarget] = useState<string | null>(null);
   const [dispatched, setDispatched] = useState<{ bot: string; nonce: number } | null>(null);
-  const targetBot = visible.find((bot) => bot.name === target) ?? visible[0];
+  // Default recipient: the open conversation's bot, else the generalist, else the first one.
+  const targetBot =
+    visible.find((bot) => bot.name === target) ??
+    visible.find((bot) => bot.name === selected) ??
+    visible.find((bot) => bot.name === "nono") ??
+    visible[0];
 
   useEffect(() => {
     if (!dispatched) return;
@@ -151,7 +159,7 @@ export function Home({
             <SwipeBotRow
               key={bot.name}
               name={bot.display_name}
-              className={`${tone} ${receiving ? "receiving" : ""}`}
+              className={`${tone} ${receiving ? "receiving" : ""} ${selected === bot.name ? "selected" : ""}`}
               pinned={bots.prefs.pinned.includes(bot.name)}
               muted={bots.prefs.muted.includes(bot.name)}
               onOpen={() => onOpenBot(bot.name)}
@@ -178,23 +186,25 @@ export function Home({
         {visible.length === 0 && !bots.error && <p className="empty-note">没有可用的 Bot</p>}
       </section>
 
-      {visible.length > 1 && (
-        <div className="bot-chips" role="radiogroup" aria-label="派发给">
-          {visible.map((bot) => (
-            <button
-              key={bot.name}
-              role="radio"
-              aria-checked={targetBot?.name === bot.name}
-              className={targetBot?.name === bot.name ? "active" : ""}
-              onClick={() => setTarget(bot.name)}
-            >
-              {bot.display_name}
-            </button>
-          ))}
-        </div>
-      )}
-
       <ComposerDock
+        above={
+          visible.length > 1 ? (
+            <div className="bot-chips" role="radiogroup" aria-label="派发给">
+              <span>交给</span>
+              {visible.map((bot) => (
+                <button
+                  key={bot.name}
+                  role="radio"
+                  aria-checked={targetBot?.name === bot.name}
+                  className={targetBot?.name === bot.name ? "active" : ""}
+                  onClick={() => setTarget(bot.name)}
+                >
+                  {bot.display_name}
+                </button>
+              ))}
+            </div>
+          ) : undefined
+        }
         onSend={(text, attachments) => void dispatch(text, attachments)}
         placeholder={targetBot ? `交给 ${targetBot.display_name} 去做…` : "输入任务"}
       />
