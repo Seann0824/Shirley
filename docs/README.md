@@ -8,6 +8,7 @@ Design notes for the runtime underneath the bot platform (SDK, tools, memory, se
 
 | Document | What it solves | Priority |
 | --- | --- | --- |
+| `voice-input.md` | Voice input: server-side whisper.cpp with live previews, deploying it on CentOS 7 | P1 |
 | `security.md` | Permission layer, bash boundary, secrets, workspace isolation | P0 |
 | `sandbox.md` | Process sandbox: spec / backend / degraded / timeout / ownership of the execution strategy | P0 |
 | `runtime-hardening.md` | max_steps, retry, timeout, cancellation, compaction robustness | P0 |

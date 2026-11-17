@@ -703,3 +703,7 @@ body {
 .task-card strong {
   font-weight: 650;
 }
+.voice-live-tail {
+  color: var(--tertiary);
+  font-size: 12px;
+}

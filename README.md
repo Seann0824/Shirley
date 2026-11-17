@@ -58,6 +58,13 @@ system_prompt_extra = "You are Clerk. You tidy documents and write summaries."
 `nono` (generalist), `patch` (code) and `scout` (research) are built in. New bots can
 also be created from the UI's "+" button, which asks NONO to write the spec.
 
+## Voice input
+
+Hold the button and speak; the text appears as you talk and lands in the input field for you to
+check. Transcription runs on the server with `whisper.cpp` and detects Chinese or English by
+itself; without it the browser's recogniser is used (Chinese only). The microphone needs the page
+on **https** (or `localhost`). Setup, including CentOS 7: [docs/voice-input.md](docs/voice-input.md).
+
 ## Model configuration
 
 Configuration comes from three layers, each overriding the previous one field by field:

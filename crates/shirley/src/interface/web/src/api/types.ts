@@ -47,6 +47,19 @@ export interface PoolTask {
   pendingNotes?: string[];
 }
 
+/** Whether the server transcribes speech (`infra/asr.rs`). */
+export interface AsrStatus {
+  available: boolean;
+  model_ready: boolean;
+  hint: string;
+}
+
+/** One transcription; `text` is null when a live preview was skipped because the server was busy. */
+export interface Transcript {
+  text: string | null;
+  language?: string | null;
+}
+
 /** A media-library entry (`artifact::LibraryEntry`). */
 export interface LibraryEntry {
   id: string;

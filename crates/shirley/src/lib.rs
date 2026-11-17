@@ -76,7 +76,7 @@ pub(crate) mod infra;
 
 // ── flat-path compatibility re-exports (crate-internal) ───────────────────
 pub(crate) use domain::{bot, model_providers, models, session, status, todo};
-pub(crate) use infra::{artifact, prompt_template, remote, settings, storage};
+pub(crate) use infra::{artifact, asr, prompt_template, remote, settings, storage};
 use shirley_agent_sdk::AgentError;
 
 /// Application entry point.

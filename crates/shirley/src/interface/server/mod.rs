@@ -138,6 +138,9 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
             }
         });
     }
+    // Fetch the speech model now, so the first press of the mic does not wait for it.
+    crate::asr::prepare(crate::storage::global_root());
+
     // A bot dispatching work should not wait for the next tick.
     if let Some(mut wake) = state.manager.take_pool_wake() {
         let manager = Arc::clone(&state.manager);
@@ -174,18 +177,24 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
             "/api/memory/confirm-personal",
             post(memory_confirm_personal),
         )
-        .route_layer(middleware::from_fn_with_state(
-            Arc::clone(&state),
-            authorize,
-        ))
         // Raw-byte upload (`docs/render-parts.md` inbound channels). It needs its own route
         // rather than an `/api/cmd` arm for two reasons: the shared JSON body limit is 16MiB
         // while a library entry may be 64MiB, and base64-in-JSON would inflate the body by a
-        // third and parse it twice. Declared after `route_layer`, so it is authorized.
+        // third and parse it twice. `route_layer` only guards routes declared *before* it, so
+        // this must stay above it.
         .route(
             "/api/upload",
             post(upload_handler).layer(DefaultBodyLimit::max(MAX_UPLOAD_BYTES)),
         )
+        // Voice input: a WAV body in, text out (`infra/asr.rs`).
+        .route(
+            "/api/transcribe",
+            post(transcribe_handler).layer(DefaultBodyLimit::max(crate::asr::MAX_AUDIO_BYTES)),
+        )
+        .route_layer(middleware::from_fn_with_state(
+            Arc::clone(&state),
+            authorize,
+        ))
         // Deliberately *after* `route_layer`: an `<img src>` cannot carry an Authorization
         // header, so the unguessable handle is the capability. It is only mintable through the
         // authorized `agent_asset_url` command.
@@ -445,6 +454,8 @@ async fn dispatch(
                 .collect();
             ok_json(wire)
         }
+        // -- voice input -------------------------------------------------------------
+        "agent_asr_status" => ok_json(crate::asr::status(&crate::storage::global_root())),
         // -- model providers ---------------------------------------------------------
         "agent_model_providers" => {
             let action = args.action.ok_or_else(|| ApiError::bad("missing action"))?;
@@ -920,6 +931,25 @@ async fn upload_handler(
     }
     let entry = state.manager.ingest_bytes(bot, name, mime, &body).await?;
     ok_json(entry)
+}
+
+/// `POST /api/transcribe[?partial=1][&language=zh]` with a 16 kHz mono WAV body.
+///
+/// `partial` is the live preview while the user still speaks: it answers `{"text":null}` when
+/// the transcriber is busy instead of queueing. `language` is what an earlier request for the
+/// same recording reported, so detection runs once per utterance.
+async fn transcribe_handler(
+    axum::extract::Query(query): axum::extract::Query<std::collections::HashMap<String, String>>,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let partial = query.get("partial").is_some_and(|value| value == "1");
+    let language = query.get("language").map(String::as_str);
+    let global = crate::storage::global_root();
+    match crate::asr::transcribe(&global, &body, partial, language).await {
+        Ok(result) => ok_json(result),
+        Err(crate::asr::AsrError::Busy) => ok_json(serde_json::json!({ "text": null })),
+        Err(crate::asr::AsrError::Failed(message)) => Err(ApiError::bad(message)),
+    }
 }
 
 async fn events_handler(

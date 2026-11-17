@@ -3,6 +3,8 @@
 
 import type {
   AgentEvent,
+  AsrStatus,
+  Transcript,
   Bot,
   LibraryEntry,
   MemoryEntry,
@@ -115,6 +117,31 @@ export const api = {
 
   /** A URL the browser may load for an artifact id (minted per request). */
   assetUrl: (bot: string, id: string) => cmd<string>("agent_asset_url", { bot, id }),
+
+  /** Whether the server can transcribe speech. Asked once per page load. */
+  asrStatus: (() => {
+    let pending: Promise<AsrStatus> | null = null;
+    return () => {
+      pending ??= cmd<AsrStatus>("agent_asr_status").catch(() => ({
+        available: false,
+        model_ready: false,
+        hint: "",
+      }));
+      return pending;
+    };
+  })(),
+
+  /** Transcribe a WAV recording on the server. `partial` = live preview, skipped when busy. */
+  async transcribe(wav: Blob, options: { partial?: boolean; language?: string | null } = {}): Promise<Transcript> {
+    const query = new URLSearchParams();
+    if (options.partial) query.set("partial", "1");
+    if (options.language) query.set("language", options.language);
+    const headers: Record<string, string> = { "Content-Type": "audio/wav" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const response = await fetch(`/api/transcribe?${query}`, { method: "POST", headers, body: wav });
+    if (!response.ok) throw new Error((await response.text().catch(() => "")) || "语音转写失败");
+    return (await response.json()) as Transcript;
+  },
 
   /** Put a file into the media library; the entry's id is what a message references. */
   async upload(bot: string, file: File): Promise<LibraryEntry> {

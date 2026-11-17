@@ -59,10 +59,9 @@ pub struct FileSettings {
 
 /// Voice input ASR config (the `[asr]` table in the config file).
 ///
-/// Deliberately **not** part of the merged [`Settings`]: dictation is an input-side
-/// utility read on demand (`asr::capabilities` / `asr::transcribe`), and its environment
-/// overrides use their own `SHIRLEY_ASR_*` names. Keeping it out of `Settings` means the
-/// TUI startup path is untouched by this feature.
+/// Deliberately **not** part of the merged [`Settings`]: voice input is read on demand
+/// (`asr::status` / `asr::transcribe`), and its environment overrides use their own
+/// `SHIRLEY_ASR_*` names.
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct AsrSettings {
@@ -86,6 +85,9 @@ pub struct AsrSettings {
     pub local_language: Option<String>,
     /// Worker threads for the local CLI. Default: available cores, capped at 8.
     pub local_threads: Option<u32>,
+    /// Initial prompt for whisper. Default nudges Chinese towards simplified characters;
+    /// set an empty string to send none.
+    pub prompt: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]

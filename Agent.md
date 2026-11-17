@@ -137,6 +137,7 @@ The home composer asks `agent_route` which bot should hear the message, then ope
 | `agent_pool_list`, `agent_pool_enqueue {brief, bot?}`, `agent_pool_note {id, note}`, `agent_pool_accept/reject/retry/cancel/remove {id}` | The task pool (tasks are normally created by a bot's `dispatch_task`) |
 | `agent_memory_list {bot}` | Entries the bot sees, tagged `shared` / `bot` |
 | `agent_asset_url {bot, id}`, `POST /api/upload` | Media library out / in |
+| `agent_asr_status`, `POST /api/transcribe[?partial=1&language=]` | Voice input: a WAV body in, text out (`infra/asr.rs`, `docs/voice-input.md`) |
 | `agent_model_providers`, `agent_list_models`, `agent_set_model` | Model configuration (no UI yet) |
 
 A client opens a conversation by subscribing, then applies stream events whose `sequence` is greater than the snapshot's. `SHIRLEY_SERVER_TOKEN` enables bearer auth (required when listening outside loopback); `EventSource` passes it as `?token=`.

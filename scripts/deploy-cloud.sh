@@ -232,7 +232,7 @@ build_binary() {
   mkdir -p "$ZIG_LOCAL_CACHE_DIR" "$ZIG_GLOBAL_CACHE_DIR"
 
   log "binary: cargo zigbuild --release --target ${TARGET}"
-  ( cd "$REPO_ROOT" && cargo zigbuild --release --target "$TARGET" )
+  ( cd "$REPO_ROOT" && SHIRLEY_SKIP_WEB_BUILD=1 cargo zigbuild --release --target "$TARGET" )
 
   local bin="${REPO_ROOT}/target/${TARGET}/release/${BIN_NAME}"
   [[ -f "$bin" ]] || die "build finished but $bin is missing"

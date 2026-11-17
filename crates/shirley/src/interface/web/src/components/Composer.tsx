@@ -1,7 +1,9 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type ReactNode } from "react";
 
+import { api } from "../api/bridge";
 import { filesToAttachments, pastedFiles, toAttachments, type Attachment } from "./attachments";
 import { Icon } from "./Icon";
+import { microphoneError, previewInterval, startRecording, type Recording } from "./recorder";
 
 export type { Attachment } from "./attachments";
 
@@ -97,10 +99,9 @@ type Recognizer = {
   abort(): void;
 };
 
-// The browser recogniser cannot detect the language; it must be told one. Chinese, not
-// `navigator.language`: the UI is Chinese, and an English system with a Chinese-speaking user
-// would otherwise transcribe Chinese as English. English words inside Chinese speech still come
-// through. Real detection needs server-side transcription.
+// Fallback when the server has no whisper.cpp. The browser recogniser cannot detect the
+// language; it must be told one. Chinese, not `navigator.language`: the UI is Chinese, and an
+// English system with a Chinese-speaking user would otherwise transcribe Chinese as English.
 const VOICE_LANG = "zh-CN";
 
 function recognizer(): Recognizer | null {
@@ -177,10 +178,33 @@ export function ComposerDock({
   const [showSheet, setShowSheet] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [liveText, setLiveText] = useState("");
+  const [transcribing, setTranscribing] = useState(false);
   const speech = useRef<Recognizer | null>(null);
   const transcript = useRef("");
+  // Server transcription (preferred): one recording per press, previews while it grows.
+  const [serverAsr, setServerAsr] = useState(false);
+  const recording = useRef<Recording | null>(null);
+  const pressed = useRef(false);
+  const utterance = useRef(0);
+  const language = useRef<string | null>(null);
+  const previewTimer = useRef<number | null>(null);
 
-  useEffect(() => () => speech.current?.abort(), []);
+  useEffect(() => {
+    let alive = true;
+    void api.asrStatus().then((status) => alive && setServerAsr(status.available));
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  useEffect(
+    () => () => {
+      speech.current?.abort();
+      recording.current?.cancel();
+      if (previewTimer.current !== null) window.clearInterval(previewTimer.current);
+    },
+    [],
+  );
 
   // The page keeps room for the dock below its last line; the dock grows with the tray, the
   // live transcript and the pills above it, so the room follows its real height.
@@ -239,7 +263,97 @@ export function ComposerDock({
     return () => document.removeEventListener("paste", onPagePaste);
   }, [claimsPagePaste]);
 
+  // Heard text goes into the field to be checked, never straight out.
+  const placeHeard = (heard: string) => {
+    const text = heard.trim();
+    if (!text) return false;
+    setValue((current) => (current.trim() ? `${current.trim()} ${text}` : text));
+    setTextMode(true);
+    return true;
+  };
+
+  const startServerListening = async () => {
+    if (recording.current || transcribing) return;
+    const id = (utterance.current += 1);
+    pressed.current = true;
+    language.current = null;
+    setVoiceError(null);
+    setLiveText("");
+    setListening(true);
+    let rec: Recording;
+    try {
+      rec = await startRecording();
+    } catch (cause) {
+      setListening(false);
+      setVoiceError(microphoneError(cause));
+      return;
+    }
+    // Released while the microphone was still opening (or a permission prompt was answered).
+    if (!pressed.current || utterance.current !== id) {
+      rec.cancel();
+      setListening(false);
+      return;
+    }
+    recording.current = rec;
+    let inFlight = false;
+    let lastSent = performance.now();
+    previewTimer.current = window.setInterval(() => {
+      const seconds = rec.seconds();
+      if (inFlight || seconds < 0.8 || performance.now() - lastSent < previewInterval(seconds)) return;
+      inFlight = true;
+      lastSent = performance.now();
+      api
+        .transcribe(rec.snapshot(), { partial: true, language: language.current })
+        .then((result) => {
+          if (utterance.current !== id || recording.current !== rec) return;
+          if (result.language) language.current = result.language;
+          if (result.text !== null) setLiveText(result.text);
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          inFlight = false;
+        });
+    }, 200);
+  };
+
+  const stopServerListening = async () => {
+    pressed.current = false;
+    const rec = recording.current;
+    if (!rec) return;
+    recording.current = null;
+    if (previewTimer.current !== null) window.clearInterval(previewTimer.current);
+    previewTimer.current = null;
+    const id = utterance.current;
+    const tooShort = rec.seconds() < 0.3;
+    const wav = rec.stop();
+    setListening(false);
+    if (tooShort) {
+      setLiveText("");
+      setVoiceError("按住按钮，说完再松开");
+      return;
+    }
+    setTranscribing(true);
+    try {
+      const result = await api.transcribe(wav, { language: language.current });
+      if (utterance.current !== id) return;
+      if (!placeHeard(result.text ?? "")) setVoiceError("没有识别到内容，请再说一次");
+    } catch (cause) {
+      if (utterance.current === id) {
+        setVoiceError(cause instanceof Error ? cause.message : "语音转写失败，请再试一次");
+      }
+    } finally {
+      if (utterance.current === id) {
+        setTranscribing(false);
+        setLiveText("");
+      }
+    }
+  };
+
   const startListening = () => {
+    if (serverAsr) {
+      void startServerListening();
+      return;
+    }
     if (speech.current) return;
     const instance = recognizer();
     if (!instance) {
@@ -272,12 +386,7 @@ export function ComposerDock({
       setListening(false);
       onListeningChange?.(false, transcript.current);
       setLiveText("");
-      // Never send what the recogniser heard unseen: it goes into the text field to check first.
-      const heard = transcript.current.trim();
-      if (heard) {
-        setValue((current) => (current.trim() ? `${current.trim()} ${heard}` : heard));
-        setTextMode(true);
-      } else if (!failed) {
+      if (!placeHeard(transcript.current) && !failed) {
         setVoiceError("没有识别到内容。按住按钮，说完再松开");
       }
     };
@@ -295,14 +404,20 @@ export function ComposerDock({
   };
 
   const stopListening = () => {
+    if (serverAsr) {
+      void stopServerListening();
+      return;
+    }
     speech.current?.stop();
   };
+  const stopRef = useRef(stopListening);
+  stopRef.current = stopListening;
 
   // The release can land outside the page (a permission prompt, another window): never stay
   // stuck in "listening".
   useEffect(() => {
     if (!listening) return;
-    const release = () => speech.current?.stop();
+    const release = () => stopRef.current();
     window.addEventListener("pointerup", release);
     window.addEventListener("blur", release);
     return () => {
@@ -321,9 +436,10 @@ export function ComposerDock({
             onRemove={(id) => setAttachments((items) => items.filter((item) => item.id !== id))}
           />
         )}
-        {listening && (
+        {(listening || transcribing) && (
           <p className={`voice-live ${liveText ? "" : "waiting"}`} aria-live="polite">
-            {liveText || "正在听…"}
+            {liveText || (transcribing ? "正在整理…" : "正在听…")}
+            {transcribing && liveText && <span className="voice-live-tail"> · 整理中</span>}
           </p>
         )}
         {voiceError && <p className="composer-hint">{voiceError}</p>}
@@ -383,7 +499,7 @@ export function ComposerDock({
                   <i />
                   <i />
                 </span>
-                <strong>{listening ? "松开结束" : "按住说话"}</strong>
+                <strong>{listening ? "松开结束" : transcribing ? "整理中…" : "按住说话"}</strong>
               </button>
               <button className="composer-side" onClick={() => setTextMode(true)} aria-label="文字输入">
                 <Icon name="keyboard" size={20} />
