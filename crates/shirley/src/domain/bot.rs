@@ -53,7 +53,12 @@ impl BotSpec {
                 display_name: "NONO".to_owned(),
                 tools: Vec::new(),
                 skills: Vec::new(),
-                system_prompt_extra: None,
+                system_prompt_extra: Some(
+                    "You are NONO, the user's general assistant on this platform. You take on \
+                     anything that does not belong to a more specialised bot, and you set up new \
+                     bots when the user wants one."
+                        .to_owned(),
+                ),
             },
             Self {
                 name: "patch".to_owned(),

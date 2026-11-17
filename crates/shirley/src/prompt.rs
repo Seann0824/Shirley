@@ -1,16 +1,18 @@
 //! Application-side system prompt construction.
 //!
-//! The SDK only provides the mechanism that "the prompt can be a function and receives the runtime context"
-//! (`shirley_agent_sdk::SystemPrompt` / `SystemPromptContext`). **What content to assemble** is a
-//! business decision, and it lives here.
+//! The SDK only provides the mechanism ("the prompt can be a function of the runtime context",
+//! `shirley_agent_sdk::SystemPrompt`); what the prompt says is a product decision and lives here.
+//! The text is maintained in `prompts/*.md`; this file only picks templates and fills
+//! placeholders.
 //!
-//! **Text separated from code**: the prompt body is maintained in `prompts/*.md` (embedded at compile time via `include_str!`);
-//! the code only "picks a template + fills placeholders". It currently assembles three blocks:
+//! There are two prompts, because a bot does two different jobs:
 //!
-//! 1. Role and work boundary (fixed text in `prompts/system.md`).
-//! 2. The current working directory -- a pain point noted in `plan.md`: if the AI does not know the workspace it will start
-//!    searching randomly from the filesystem root, wasting tokens. Telling it the root explicitly narrows the search scope.
-//! 3. The project guide file (`Agent.md`) -- tells the AI "how this project runs and how the code is organized".
+//! - **conversation** (`prompts/conversation.md`): the bot talking with the user. Short replies,
+//!   hand longer work off with `dispatch_task`, never narrate tool use.
+//! - **worker** (`prompts/worker.md`): an agent doing a dispatched task (or a subagent) in the
+//!   background. Plans with `todo`, reads files economically, may use subagents and computer use.
+//!
+//! Both share the memory, file-showing and workspace blocks.
 
 use std::path::{Path, PathBuf};
 
@@ -18,310 +20,205 @@ use shirley_agent_sdk::{SystemPrompt, SystemPromptContext};
 
 use crate::prompt_template::render as render_template;
 
-/// Project guide file name. Placed at the workspace root as the Agent's working reference.
+/// Guide file name. When a bot's workspace contains one, its text is inlined into worker prompts.
 pub const GUIDE_FILE_NAME: &str = "Agent.md";
 
-/// System prompt template (role / work boundary / workspace / project guide).
-const SYSTEM_TEMPLATE: &str = include_str!("../prompts/system.md");
-/// Inline template for when the project guide is present.
+const CONVERSATION_TEMPLATE: &str = include_str!("../prompts/conversation.md");
+const WORKER_TEMPLATE: &str = include_str!("../prompts/worker.md");
+const MEMORY_BLOCK: &str = include_str!("../prompts/memory.md");
+const FILES_BLOCK: &str = include_str!("../prompts/files.md");
+const WORKSPACE_TEMPLATE: &str = include_str!("../prompts/workspace.md");
 const GUIDE_TEMPLATE: &str = include_str!("../prompts/project_guide.md");
-/// Hint template for when the project guide is missing.
-const GUIDE_MISSING_TEMPLATE: &str = include_str!("../prompts/project_guide_missing.md");
-/// Subagent guidance, injected **only for the top-level agent when the `subagent` tool is enabled**.
-/// A child agent has no `subagent` tool (structural recursion guard), so telling it about one would
-/// be a factual lie; hence this block is conditional.
+/// Subagent guidance: only where the `subagent` tool exists (a top-level worker).
 const SUBAGENT_GUIDE_TEMPLATE: &str = include_str!("../prompts/subagent_guide.md");
-/// Additional source folders block, injected only when a project attaches extra folders beyond
-/// its primary root. `plan.md` records that an AI without the workspace root wanders from the
-/// filesystem root; the same applies to every attached folder, so they must be told explicitly.
-const EXTRA_ROOTS_TEMPLATE: &str = include_str!("../prompts/extra_roots.md");
-/// Computer-use guidance. Only injected where the `computer_*` tools can actually work.
+/// Computer-use guidance: only for workers, and only where the `computer_*` tools work.
 const COMPUTER_TEMPLATE: &str = include_str!("../prompts/computer.md");
 /// Identity block used when a bot declares no `system_prompt_extra` of its own.
 const DEFAULT_IDENTITY: &str = "You are Shirley, a personal agent running on the user's computer.";
 
-fn read_guide(root: &Path) -> Option<String> {
-    let path = root.join(GUIDE_FILE_NAME);
-    let content = std::fs::read_to_string(path).ok()?;
-    (!content.trim().is_empty()).then_some(content)
+/// Which job the prompt is for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Role {
+    /// The bot talking with the user.
+    Conversation,
+    /// Background work; `subagents` when the `subagent` tool is registered.
+    Worker { subagents: bool },
 }
 
-/// Build the application-side system prompt, deciding whether to inject the subagent guidance.
-///
-/// `subagents = true` is passed only for the **top-level** agent when the `subagent` tool is
-/// registered; child agents (and a disabled config) get `false`, so the guidance never appears
-/// where the tool does not exist.
-#[cfg(test)]
-pub fn build_with_subagents(working_dir: PathBuf, subagents: bool) -> SystemPrompt {
-    build_with_roots(working_dir, Vec::new(), subagents, None)
-}
-
-/// Build the system prompt. `identity` is the bot's own persona block (`BotSpec::system_prompt_extra`);
-/// `None` renders the platform default. Extra roots are listed explicitly so the model knows
-/// relative paths may resolve against any of them.
-pub fn build_with_roots(
-    working_dir: PathBuf,
-    extra_roots: Vec<PathBuf>,
-    subagents: bool,
-    identity: Option<String>,
-) -> SystemPrompt {
+/// Build the system prompt for `role`. `identity` is the bot's persona
+/// (`BotSpec::system_prompt_extra`); `None` uses the platform default.
+pub fn build(working_dir: PathBuf, role: Role, identity: Option<String>) -> SystemPrompt {
     SystemPrompt::from(move |context: &SystemPromptContext| {
         let root = context
             .working_dir
             .clone()
             .unwrap_or_else(|| working_dir.clone());
-        render_with_roots(&root, &extra_roots, subagents, identity.as_deref())
+        render(&root, role, identity.as_deref())
     })
 }
 
-/// Assemble the role, working directory, and project guide into the final text.
-///
-/// Split out so it is independently testable: no dependency on the closure or runtime context.
-#[cfg(test)]
-fn render(root: &Path) -> String {
-    // Default: inject the subagent guidance (the top-level agent). Tests that do not care about
-    // subagents go through here and still get the full prompt.
-    render_with_subagents(root, true)
+fn read_guide(root: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(root.join(GUIDE_FILE_NAME)).ok()?;
+    (!content.trim().is_empty()).then_some(content)
 }
 
-/// Assemble the final prompt. `subagents` controls whether the subagent guidance block is injected.
-#[cfg(test)]
-fn render_with_subagents(root: &Path, subagents: bool) -> String {
-    render_with_roots(root, &[], subagents, None)
-}
-
-/// Assemble the final prompt, listing any extra source folders attached to the project.
-fn render_with_roots(
-    root: &Path,
-    extra_roots: &[PathBuf],
-    subagents: bool,
-    identity: Option<&str>,
-) -> String {
-    // Project guide block: inline the original text if present, otherwise give a "explore on your own first" hint.
-    let guide_block = match read_guide(root) {
-        Some(guide) => render_template(
-            GUIDE_TEMPLATE,
-            &[("guide_file", GUIDE_FILE_NAME), ("guide", &guide)],
-        ),
-        None => render_template(GUIDE_MISSING_TEMPLATE, &[("guide_file", GUIDE_FILE_NAME)]),
-    };
-
-    // Subagent guidance is only injected where the `subagent` tool exists; otherwise the placeholder
-    // renders to the empty string (the renderer keeps unknown placeholders verbatim, so an empty
-    // value is passed explicitly).
-    let subagent_block = if subagents {
-        SUBAGENT_GUIDE_TEMPLATE.to_owned()
-    } else {
-        String::new()
-    };
-
-    // Extra source folders: rendered as a bullet list, or empty (placeholder substituted away) when
-    // the project has a single root.
-    let extra_block = if extra_roots.is_empty() {
-        String::new()
-    } else {
-        let mut list = String::new();
-        for path in extra_roots {
-            list.push_str("- ");
-            list.push_str(&path.display().to_string());
-            list.push('\n');
-        }
-        render_template(EXTRA_ROOTS_TEMPLATE, &[("extra_roots", list.trim_end())])
-    };
-
-    // Computer use exists only on macOS: the tools are registered everywhere (a stable tool table
-    // keeps the prompt prefix identical), but describing them on a platform where they can only
-    // answer "unsupported" would send the model chasing a capability it does not have.
-    let computer_block = if cfg!(target_os = "macos") {
-        COMPUTER_TEMPLATE.to_owned()
-    } else {
-        String::new()
-    };
-
-    let working_dir = root.display().to_string();
+/// Assemble the final text. Split out so it is testable without the closure.
+fn render(root: &Path, role: Role, identity: Option<&str>) -> String {
     let identity = identity
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .unwrap_or(DEFAULT_IDENTITY);
-    render_template(
-        SYSTEM_TEMPLATE,
-        &[
-            ("identity", identity),
-            ("working_dir", &working_dir),
-            ("project_guide", &guide_block),
-            ("subagent_guide", &subagent_block),
-            ("extra_roots", &extra_block),
-            ("computer", &computer_block),
-        ],
-    )
+    let working_dir = root.display().to_string();
+    let workspace = render_template(WORKSPACE_TEMPLATE, &[("working_dir", &working_dir)]);
+    match role {
+        Role::Conversation => render_template(
+            CONVERSATION_TEMPLATE,
+            &[
+                ("identity", identity),
+                ("memory", MEMORY_BLOCK),
+                ("files", FILES_BLOCK),
+                ("workspace", &workspace),
+            ],
+        ),
+        Role::Worker { subagents } => {
+            let guide = read_guide(root).map_or_else(String::new, |guide| {
+                render_template(
+                    GUIDE_TEMPLATE,
+                    &[("guide_file", GUIDE_FILE_NAME), ("guide", &guide)],
+                )
+            });
+            let subagent_guide = if subagents {
+                format!("{SUBAGENT_GUIDE_TEMPLATE}\n")
+            } else {
+                String::new()
+            };
+            // Computer use works only on macOS; describing it elsewhere would send the model
+            // chasing a capability it does not have.
+            let computer = if cfg!(target_os = "macos") {
+                format!("{COMPUTER_TEMPLATE}\n")
+            } else {
+                String::new()
+            };
+            render_template(
+                WORKER_TEMPLATE,
+                &[
+                    ("identity", identity),
+                    ("subagent_guide", &subagent_guide),
+                    ("computer", &computer),
+                    ("memory", MEMORY_BLOCK),
+                    ("files", FILES_BLOCK),
+                    ("workspace", &workspace),
+                    ("project_guide", &guide),
+                ],
+            )
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn render_includes_role_and_working_dir() {
-        let dir = tempfile_dir("render_role");
-        let text = render(&dir);
-        assert!(
-            text.contains("You are Shirley"),
-            "should contain the role setting: {text}"
-        );
-        assert!(
-            text.contains(&dir.display().to_string()),
-            "should contain the working directory: {text}"
-        );
+    const WORKER: Role = Role::Worker { subagents: true };
+
+    fn tempfile_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("shirley_prompt_{tag}_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        dir
     }
 
     #[test]
-    fn render_teaches_the_computer_tools_only_where_they_work() {
-        // The computer tools are registered on every platform, but the guidance must only promise
-        // them on macOS (elsewhere they can only answer "unsupported").
-        let dir = tempfile_dir("render_computer");
-        let text = render(&dir);
-        if cfg!(target_os = "macos") {
+    fn no_placeholder_is_left_unfilled() {
+        let dir = tempfile_dir("placeholders");
+        for role in [
+            Role::Conversation,
+            WORKER,
+            Role::Worker { subagents: false },
+        ] {
+            let text = render(&dir, role, None);
+            assert!(!text.contains("{{"), "{role:?}: {text}");
+            assert!(text.contains("You are Shirley"), "{role:?}");
+            assert!(text.contains(&dir.display().to_string()), "{role:?}");
             assert!(
-                text.contains("computer_snapshot"),
-                "macOS prompt should teach the computer tools: {text}"
+                text.contains("do not mistake the model service"),
+                "{role:?}"
             );
+            assert!(text.contains("`recall`"), "{role:?}");
+        }
+    }
+
+    #[test]
+    fn the_conversation_talks_and_hands_off_but_never_narrates() {
+        let text = render(
+            &tempfile_dir("conversation"),
+            Role::Conversation,
+            Some("You are NONO."),
+        );
+        assert!(text.starts_with("You are NONO."), "{text}");
+        assert!(
+            text.contains("dispatch_task") && text.contains("task_note"),
+            "{text}"
+        );
+        assert!(text.contains("Do not narrate your process"), "{text}");
+        // Worker machinery stays out of the chat.
+        for absent in [
+            "`todo` tool",
+            "`subagent` tool",
+            "computer_snapshot",
+            "SAME assistant message",
+        ] {
             assert!(
-                text.contains("@e7") || text.contains("ref"),
-                "macOS prompt should explain refs: {text}"
-            );
-        } else {
-            assert!(
-                !text.contains("computer_snapshot"),
-                "non-macOS prompt should not advertise the computer tools: {text}"
+                !text.contains(absent),
+                "conversation mentions {absent}: {text}"
             );
         }
     }
 
     #[test]
-    fn render_instructs_todo_ledger_usage() {
-        // A multi-step task should be broken down first, and each step's status and conclusion recorded with the todo ledger.
-        // This assertion prevents this instruction from being lost in a future prompt edit.
-        let dir = tempfile_dir("render_todo");
-        let text = render(&dir);
-        assert!(
-            text.contains("`todo` tool"),
-            "should instruct using the todo tool: {text}"
-        );
-        assert!(
-            text.contains("break it down"),
-            "should break the task down first: {text}"
+    fn the_worker_plans_reads_economically_and_finishes() {
+        let text = render(&tempfile_dir("worker"), WORKER, None);
+        assert!(text.contains("`todo` tool"), "{text}");
+        assert!(text.contains("ends your turn"), "{text}");
+        assert!(text.contains("`grep` tool"), "{text}");
+        assert!(!text.contains("dispatch_task"), "{text}");
+    }
+
+    #[test]
+    fn subagent_guidance_only_where_the_tool_exists() {
+        let dir = tempfile_dir("subagent");
+        assert!(render(&dir, WORKER, None).contains("`subagent` tool"));
+        assert!(!render(&dir, Role::Worker { subagents: false }, None).contains("`subagent` tool"));
+    }
+
+    #[test]
+    fn computer_use_is_taught_only_to_workers_on_macos() {
+        let text = render(&tempfile_dir("computer"), WORKER, None);
+        assert_eq!(
+            text.contains("computer_snapshot"),
+            cfg!(target_os = "macos")
         );
     }
 
     #[test]
-    fn render_keeps_preamble_in_same_message_as_tool_calls() {
-        // The preamble must be written in the **same** assistant message as the tool calls, not split across two turns:
-        // a message without tool_calls ends the turn (the runtime's is_finished check),
-        // so sending the preamble on its own would make the ReAct loop "stop for no reason" mid-exploration.
-        // This assertion prevents this instruction from being lost in a future prompt edit.
-        let dir = tempfile_dir("render_content_first");
-        let text = render(&dir);
-        assert!(
-            text.contains("SAME assistant message"),
-            "should require the preamble and tool calls in the same message: {text}"
-        );
-        assert!(
-            text.contains("ends your turn"),
-            "should explain that a message without tool_calls ends the turn: {text}"
-        );
+    fn a_workspace_guide_is_inlined_for_workers_only() {
+        let dir = tempfile_dir("guide");
+        std::fs::write(dir.join(GUIDE_FILE_NAME), "# Notes\nrun cargo test first").unwrap();
+        assert!(render(&dir, WORKER, None).contains("run cargo test first"));
+        assert!(!render(&dir, Role::Conversation, None).contains("run cargo test first"));
+        let empty = tempfile_dir("no_guide");
+        assert!(!render(&empty, WORKER, None).contains(GUIDE_FILE_NAME));
     }
 
     #[test]
-    fn render_includes_guide_when_present() {
-        let dir = tempfile_dir("render_guide");
-        std::fs::write(
-            dir.join(GUIDE_FILE_NAME),
-            "# Project notes\nrun cargo test first",
-        )
-        .unwrap();
-        let text = render(&dir);
-        assert!(
-            text.contains("run cargo test first"),
-            "should inline Agent.md: {text}"
-        );
-    }
-
-    #[test]
-    fn render_instructs_tool_environment_is_authoritative() {
-        // Business-side correction (the figma special-case sentence in the original SDK prompt, migrated to the app layer in Step 7).
-        // Prevents it from being lost in a future prompt edit.
-        let dir = tempfile_dir("render_tool_env");
-        let text = render(&dir);
-        assert!(
-            text.contains("do not mistake the model service"),
-            "should state that the tool execution environment is authoritative: {text}"
-        );
-    }
-
-    #[test]
-    fn render_injects_subagent_guide_only_when_enabled() {
-        // The guidance must appear exactly where the `subagent` tool exists (top level, enabled),
-        // and be absent for child agents (which have no such tool).
-        let dir = tempfile_dir("render_subagent");
-        let with = render_with_subagents(&dir, true);
-        assert!(
-            with.contains("`subagent` tool"),
-            "top level should get the subagent guidance: {with}"
-        );
-        let without = render_with_subagents(&dir, false);
-        assert!(
-            !without.contains("`subagent` tool"),
-            "child agent must not get the subagent guidance: {without}"
-        );
-        // The placeholder must be fully substituted, never left verbatim.
-        assert!(
-            !with.contains("{{subagent_guide}}"),
-            "placeholder must be substituted"
-        );
-        assert!(
-            !without.contains("{{subagent_guide}}"),
-            "placeholder must be substituted"
-        );
-    }
-
-    #[test]
-    fn render_says_nothing_about_a_missing_guide() {
-        // A bot's workspace usually has no guide file; that is not worth a line of prompt.
-        let dir = tempfile_dir("render_missing");
-        let text = render(&dir);
-        assert!(!text.contains(GUIDE_FILE_NAME), "{text}");
-    }
-
-    #[test]
-    fn build_resolves_context_dir_over_default() {
-        // When the context explicitly gives a directory, it should win over the construction-time default.
+    fn the_context_directory_wins_over_the_default() {
         let default_dir = tempfile_dir("build_default");
         let ctx_dir = tempfile_dir("build_ctx");
-        let prompt = build_with_subagents(default_dir, true);
+        let prompt = build(default_dir.clone(), Role::Conversation, None);
         let resolved = prompt.resolve(&SystemPromptContext {
             working_dir: Some(ctx_dir.clone()),
         });
-        assert!(
-            resolved.contains(&ctx_dir.display().to_string()),
-            "should use the context directory: {resolved}"
-        );
-    }
-
-    #[test]
-    fn build_falls_back_to_default_dir() {
-        let default_dir = tempfile_dir("build_fallback");
-        let prompt = build_with_subagents(default_dir.clone(), true);
-        let resolved = prompt.resolve(&SystemPromptContext { working_dir: None });
-        assert!(
-            resolved.contains(&default_dir.display().to_string()),
-            "should fall back to the default directory without context: {resolved}"
-        );
-    }
-
-    /// Create a unique temporary directory to avoid cross-test pollution.
-    fn tempfile_dir(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("shirley_prompt_{tag}_{}", std::process::id()));
-        let _ = std::fs::create_dir_all(&dir);
-        dir
+        assert!(resolved.contains(&ctx_dir.display().to_string()));
+        let fallback = prompt.resolve(&SystemPromptContext { working_dir: None });
+        assert!(fallback.contains(&default_dir.display().to_string()));
     }
 }

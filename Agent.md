@@ -101,7 +101,7 @@ Layout: one full-viewport column on phones; from 900px, the bot list on the left
 
 | Per bot | Source |
 | --- | --- |
-| Identity block at the top of the system prompt | `spec.system_prompt_extra` -> `{{identity}}` in `prompts/system.md` |
+| Identity block at the top of the system prompt | `spec.system_prompt_extra` -> `{{identity}}` in `prompts/conversation.md` and `prompts/worker.md` |
 | Capability tools (`bash` `grep` `read` `media` `web_search`) | `spec.tools`; empty = all (`bot::platform_tools`) |
 | Skills | `spec.skills`; empty = every discovered skill |
 | Session directory | `bots/<name>/sessions` |
@@ -111,6 +111,8 @@ Layout: one full-viewport column on phones; from 900px, the bot list on the left
 Always registered regardless of the spec: `todo`, `recall`, `create_bot`, `activate_skill`, `read_skill_file`, `computer_*`, and `subagent` (top-level agents only).
 
 `BotRuntimeManager::ensure_runtime(bot)` loads the spec (`spec.toml`, else a built-in default: `nono` generalist, `patch` code, `scout` research, else a generic bot of that name), derives the factory, opens `main`, and caches the runtime.
+
+**Two prompts** (`prompt.rs`). A bot's conversation with the user gets `prompts/conversation.md`: reply like a person texting, hand longer work off with `dispatch_task`, never narrate tool use. Its tool table has no `todo`, `subagent` or `computer_*`. Workers and subagents get `prompts/worker.md`: plan with `todo`, read economically, finish with a deliverable. Both include `memory.md`, `files.md` and `workspace.md`.
 
 **Memory scoping** reuses the store's two-root design: an entry's `domain` decides where it is written -- `personal` -> the shared root, `project` -> the bot's private root. Reads merge both. The curator (a background model call) runs **after every turn**, because a conversation that never ends has no other moment to distil memory. Memory is never written by a tool.
 

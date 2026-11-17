@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { api } from "../api/bridge";
 import type { Bot, RenderPart, ToolCallWire } from "../api/types";
@@ -281,11 +281,37 @@ export function Chat({
     else onOpenTasks();
   };
 
+  // The conversation opens at its latest message and stays pinned there while it grows (new
+  // tokens, images and cards loading), unless the user has scrolled up to read.
+  const pinned = useRef(true);
+  const toBottom = () => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  };
+  useLayoutEffect(() => {
+    if (pinned.current) toBottom();
+  }, [conversation.items, conversation.loaded]);
   useEffect(() => {
-    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [conversation.items]);
+    const el = scrollRef.current;
+    const content = el?.firstElementChild;
+    if (!el || !content) return;
+    const onScroll = () => {
+      pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+    };
+    const observer = new ResizeObserver(() => {
+      if (pinned.current) toBottom();
+    });
+    el.addEventListener("scroll", onScroll, { passive: true });
+    observer.observe(content);
+    observer.observe(el);
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      observer.disconnect();
+    };
+  }, []);
 
   const send = async (text: string, attachments: Attachment[]) => {
+    pinned.current = true;
     // Pictures go through the same upload as files: a data URL in the JSON body is a third larger
     // and hits the command body limit on a big screenshot.
     const { entries, failed } = await uploadAll(attachments, (file) => api.upload(bot.name, file));

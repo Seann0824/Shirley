@@ -200,10 +200,11 @@ impl AgentFactory {
         let workspace = paths.global.join("workspace");
         Ok(Self {
             model_config,
-            system_prompt: prompt::build_with_roots(
+            system_prompt: prompt::build(
                 workspace.clone(),
-                Vec::new(),
-                subagent_enabled,
+                prompt::Role::Worker {
+                    subagents: subagent_enabled,
+                },
                 None,
             ),
             compaction_config,
@@ -244,11 +245,10 @@ impl AgentFactory {
         self.build_agent_with(messages, None, None)
     }
 
-    fn system_prompt_without_subagents(&self) -> SystemPrompt {
-        prompt::build_with_roots(
+    fn system_prompt_for(&self, role: prompt::Role) -> SystemPrompt {
+        prompt::build(
             self.workspace.clone(),
-            Vec::new(),
-            false,
+            role,
             self.bot_spec.system_prompt_extra.clone(),
         )
     }
@@ -317,7 +317,14 @@ impl AgentFactory {
             .context_mut()
             .insert(tools::read::WorkspaceRoots(vec![self.workspace.clone()]));
 
-        let _ = tool_manager.register(tools::TodoTool::new(Arc::clone(&todo_store)));
+        // A bot's conversation with the user (as opposed to a worker or a subagent): it talks and
+        // hands work off, so it gets the task desk and none of the worker machinery -- no `todo`
+        // ledger (and its nagging reminder), no subagents, no computer use.
+        let conversation = with_desk && tool_filter.is_none() && self.tasks.is_some();
+
+        if !conversation {
+            let _ = tool_manager.register(tools::TodoTool::new(Arc::clone(&todo_store)));
+        }
         // Active memory recall tool (read-only): shares the same `MemoryRuntime` as automatic injection.
         // Memory writes go **through no** tool; they are done only by the background curator (`docs/memory.md` decision 3).
         let _ = tool_manager.register(tools::RecallTool::new(Arc::clone(&memory)));
@@ -327,10 +334,12 @@ impl AgentFactory {
         // Computer use: drive other apps' windows through the accessibility API. Registered on
         // every platform -- the non-macOS build answers "unsupported" honestly instead of hiding
         // the tools, so the tool table (and therefore the prompt prefix) is identical everywhere.
-        let _ = tool_manager.register(tools::computer_apps::tool());
-        let _ = tool_manager.register(tools::computer_snapshot::tool());
-        let _ = tool_manager.register(tools::computer_act::tool());
-        let _ = tool_manager.register(tools::computer_key::tool());
+        if !conversation {
+            let _ = tool_manager.register(tools::computer_apps::tool());
+            let _ = tool_manager.register(tools::computer_snapshot::tool());
+            let _ = tool_manager.register(tools::computer_act::tool());
+            let _ = tool_manager.register(tools::computer_key::tool());
+        }
 
         // Skill runtime (application-layer capability): the catalog is read-only and shared across sessions; the activated set is **created fresh per session**
         // (activation state is isolated per session). `activate_skill` writes, `SkillContextProvider` reads,
@@ -355,7 +364,7 @@ impl AgentFactory {
                 None
             }
             None => {
-                if self.subagent_enabled {
+                if self.subagent_enabled && !conversation {
                     // Top level: create the manager (holding this factory) and expose the `subagent` tool.
                     let mut manager = SubagentManager::new(
                         Arc::clone(self),
@@ -376,20 +385,20 @@ impl AgentFactory {
 
         // The SDK `Agent` accepts only a **single** `context_provider`, but here we need to inject several
         // (task ledger + memory + skills) -- use `CompositeContextProvider` to concatenate in order.
-        let mut providers: Vec<Arc<dyn ContextProvider>> = vec![
-            Arc::new(TodoContextProvider::new(Arc::clone(&todo_store))) as Arc<dyn ContextProvider>,
+        let mut providers: Vec<Arc<dyn ContextProvider>> = Vec::new();
+        if !conversation {
+            providers.push(Arc::new(TodoContextProvider::new(Arc::clone(&todo_store))));
+        }
+        providers.extend([
             Arc::new(MemoryContextProvider::new(Arc::clone(&memory))) as Arc<dyn ContextProvider>,
             // Skills (Tier1 catalog + Tier2 activated text): appended at the end of each round, KV-friendly.
             Arc::new(SkillContextProvider::new(Arc::clone(&skill_runtime)))
                 as Arc<dyn ContextProvider>,
-        ];
+        ]);
         // A bot's conversation (not a worker, not a subagent) can dispatch tasks and is reminded
         // of them every turn. Registered after `available_tools` was taken, so subagents never
         // inherit these tools.
-        if with_desk
-            && tool_filter.is_none()
-            && let Some(desk) = &self.tasks
-        {
+        if conversation && let Some(desk) = &self.tasks {
             let bot = self.bot_spec.name.clone();
             let _ = tool_manager.register(tools::DispatchTaskTool::new(desk.clone(), bot.clone()));
             let _ = tool_manager.register(tools::TaskNoteTool::new(desk.clone(), bot.clone()));
@@ -404,10 +413,12 @@ impl AgentFactory {
         // a child has no `subagent` tool (structural recursion guard), so it must not be told about one.
         // A test factory may set a fixed `SystemPrompt::from("test")`; only re-derive for the real
         // function-form prompt built by `assemble`.
-        let system_prompt = if tool_filter.is_none() && self.subagent_enabled {
+        let system_prompt = if conversation {
+            self.system_prompt_for(prompt::Role::Conversation)
+        } else if tool_filter.is_none() && self.subagent_enabled {
             self.system_prompt.clone()
         } else {
-            self.system_prompt_without_subagents()
+            self.system_prompt_for(prompt::Role::Worker { subagents: false })
         };
 
         let agent = Agent::builder()
@@ -484,10 +495,11 @@ impl AgentFactory {
                     .collect(),
             )
         };
-        let system_prompt = prompt::build_with_roots(
+        let system_prompt = prompt::build(
             workspace.clone(),
-            Vec::new(),
-            self.subagent_enabled,
+            prompt::Role::Worker {
+                subagents: self.subagent_enabled,
+            },
             spec.system_prompt_extra.clone(),
         );
         Self {
@@ -985,9 +997,14 @@ mod tests {
         let mut conversation = factory.build_agent(Vec::new()).unwrap().agent;
         assert!(conversation.unregister_tool("dispatch_task").is_ok());
         assert!(conversation.unregister_tool("task_note").is_ok());
+        // The conversation talks; the worker machinery is not in its table.
+        for tool in ["todo", "subagent", "computer_snapshot"] {
+            assert!(conversation.unregister_tool(tool).is_err(), "{tool}");
+        }
         let mut worker = factory.build_worker_agent(Vec::new()).unwrap().agent;
         assert!(worker.unregister_tool("dispatch_task").is_err());
         assert!(worker.unregister_tool("task_note").is_err());
+        assert!(worker.unregister_tool("todo").is_ok());
         let _ = std::fs::remove_dir_all(root);
     }
 
