@@ -484,17 +484,16 @@ impl AgentFactory {
             Arc::new(session::FileSessionCatalog::new(&bot_root));
         let memory_roots = vec![self.memory_roots[0].clone(), bot_root.join("memory")];
         let workspace = bot_root.join("workspace");
-        let skill_catalog = if spec.skills.is_empty() {
-            self.skill_catalog.clone()
-        } else {
-            SkillCatalog::new(
-                self.skill_catalog
-                    .skills()
-                    .into_iter()
-                    .filter(|skill| spec.skills.contains(&skill.name))
-                    .collect(),
-            )
-        };
+        // The bot's own skills (installed from the market, or written by the bot) come first and
+        // win a name clash; then the platform's user-level skills `spec.skills` allows.
+        let own = skills::discovery::scan_roots(&[skills::market::installed_root(&bot_root)]).skills;
+        let shared = self
+            .skill_catalog
+            .skills()
+            .into_iter()
+            .filter(|skill| spec.skills.is_empty() || spec.skills.contains(&skill.name))
+            .filter(|skill| !own.iter().any(|mine| mine.name == skill.name));
+        let skill_catalog = SkillCatalog::new(own.iter().cloned().chain(shared).collect());
         let system_prompt = prompt::build(
             workspace.clone(),
             prompt::Role::Worker {

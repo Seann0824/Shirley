@@ -8,12 +8,13 @@ import { useTasks } from "./state/useTasks";
 import { useWide } from "./state/useWide";
 import { Chat, type Seed } from "./views/Chat";
 import { Home } from "./views/Home";
-import { NewBot, createBotPrompt } from "./views/NewBot";
+import { NewBot } from "./views/NewBot";
+import { Skills } from "./views/Skills";
 
-type Tab = "home" | "chat" | "new";
+type Tab = "home" | "chat" | "new" | "skills";
 
-/** The bot that builds other bots: the generalist. */
-const BUILDER_BOT = "nono";
+/** The generalist: open first, and where unroutable messages go. */
+const DEFAULT_BOT = "nono";
 
 /** One scrolling column. The composer dock positions itself against the pane. */
 function Pane({ className, viewKey, children }: { className: string; viewKey: string; children: ReactNode }) {
@@ -28,9 +29,14 @@ function Pane({ className, viewKey, children }: { className: string; viewKey: st
   );
 }
 
+/** Panes with a floating composer leave room for it at the bottom. */
+function paneClass(view: Tab): string {
+  return view === "chat" ? "chat-pane" : view === "new" ? "new-pane" : "";
+}
+
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
-  const [selected, setSelected] = useState<string>(BUILDER_BOT);
+  const [selected, setSelected] = useState<string>(DEFAULT_BOT);
   const [seed, setSeed] = useState<Seed | undefined>(undefined);
   const wide = useWide();
   const bots = useBots();
@@ -49,7 +55,7 @@ export default function App() {
     const bot = await api
       .route(text.trim() || "处理这些附件")
       .then((answer) => answer.bot)
-      .catch(() => BUILDER_BOT);
+      .catch(() => DEFAULT_BOT);
     setSelected(bot);
     setSeed({ text, attachments, nonce: Date.now() });
     setTab("chat");
@@ -77,16 +83,17 @@ export default function App() {
           seed={seed?.text !== undefined && selectedBot.name === selected ? seed : undefined}
           tasks={tasks}
           onBack={() => setTab("home")}
+          onSkills={() => setTab("skills")}
           onTurnFinished={() => void bots.refresh()}
         />
       )}
+      {view === "skills" && selectedBot && <Skills bot={selectedBot} onBack={() => setTab("chat")} />}
       {view === "new" && (
         <NewBot
           onBack={() => setTab("home")}
-          onSubmit={(description) => {
-            setSelected(BUILDER_BOT);
-            setSeed({ text: createBotPrompt(description), attachments: [], nonce: Date.now() });
-            setTab("chat");
+          onCreated={async (bot) => {
+            await bots.refresh();
+            openBot(bot);
           }}
         />
       )}
@@ -100,13 +107,13 @@ export default function App() {
           <Pane className="pane-side home-pane" viewKey="home">
             {home}
           </Pane>
-          <Pane className={`pane-main ${view === "chat" ? "chat-pane" : "new-pane"}`} viewKey={`${view}:${selectedBot?.name}`}>
+          <Pane className={`pane-main ${paneClass(view)}`} viewKey={`${view}:${selectedBot?.name}`}>
             {content}
           </Pane>
         </>
       ) : (
         <Pane
-          className={tab === "home" ? "home-pane" : tab === "chat" ? "chat-pane" : "new-pane"}
+          className={tab === "home" ? "home-pane" : paneClass(tab)}
           viewKey={tab}
         >
           {tab === "home" ? home : content}

@@ -11,6 +11,7 @@ import type {
   PoolTask,
   SessionSnapshot,
   TaskStatus,
+  SkillMarket,
 } from "./types";
 
 const token = new URLSearchParams(window.location.search).get("token") ?? undefined;
@@ -95,6 +96,11 @@ export const api = {
     skills?: string[];
   }) => cmd<void>("agent_create_bot", spec),
 
+  /** Describe a bot; the platform designs, saves and equips it. */
+  designBot: (brief: string) => cmd<{ bot: string; display_name: string }>("agent_design_bot", { brief }),
+  skillMarket: (bot: string) => cmd<SkillMarket>("agent_skill_market", { bot }),
+  installSkill: (bot: string, id: string) => cmd<void>("agent_skill_install", { bot, id }),
+  uninstallSkill: (bot: string, id: string) => cmd<void>("agent_skill_uninstall", { bot, id }),
   subscribe: (bot: string) => cmd<SessionSnapshot>("agent_subscribe", { bot }),
   send: (bot: string, text: string, images: string[] = []) =>
     cmd<void>("agent_send", { bot, text, images }),

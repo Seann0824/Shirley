@@ -150,3 +150,27 @@ export type AgentEvent = Routed &
     /** Client-side: events may have been missed (lagged or reconnected stream); reload. */
     | { type: "resync" }
   );
+
+/** A skill the market offers. */
+export interface MarketSkill {
+  id: string;
+  title: string;
+  summary: string;
+  category: string;
+  repo: string;
+  ref: string;
+  path: string;
+  license: string;
+}
+
+/** A skill in one bot's own directory; `market` is the entry it came from, if any. */
+export interface InstalledSkill {
+  id: string;
+  description: string;
+  market: string | null;
+}
+
+export interface SkillMarket {
+  market: MarketSkill[];
+  installed: InstalledSkill[];
+}

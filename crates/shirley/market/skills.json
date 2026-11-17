@@ -1,0 +1,124 @@
+{
+  "skills": [
+    {
+      "id": "pdf",
+      "title": "PDF 处理",
+      "summary": "读取 PDF、提取文字和表格、合并拆分、填写表单、生成新的 PDF。",
+      "category": "文档",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/pdf",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "docx",
+      "title": "Word 文档",
+      "summary": "创建和修改 .docx：标题目录、表格图片、修订和批注，保留原有格式。",
+      "category": "文档",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/docx",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "xlsx",
+      "title": "Excel 表格",
+      "summary": "读写 .xlsx / .csv：公式、格式、图表，以及整理杂乱的数据。",
+      "category": "文档",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/xlsx",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "pptx",
+      "title": "PPT 演示文稿",
+      "summary": "生成和修改幻灯片：版式、配图、演讲者备注。",
+      "category": "文档",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/pptx",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "doc-coauthoring",
+      "title": "文档共创",
+      "summary": "按步骤和你一起写方案、提案、技术文档：收集背景、逐节打磨、找读者视角的漏洞。",
+      "category": "写作",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/doc-coauthoring",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "frontend-design",
+      "title": "网页设计",
+      "summary": "做有设计感的网页和界面，避免千篇一律的模板风格。",
+      "category": "设计",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/frontend-design",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "canvas-design",
+      "title": "海报与视觉",
+      "summary": "以设计理念出发，生成 PNG / PDF 海报和视觉作品。",
+      "category": "设计",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/canvas-design",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "theme-factory",
+      "title": "主题配色",
+      "summary": "给幻灯片、文档、报告和网页套用一致的配色与字体主题。",
+      "category": "设计",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/theme-factory",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "algorithmic-art",
+      "title": "生成艺术",
+      "summary": "用 p5.js 和随机种子创作可交互的算法艺术。",
+      "category": "设计",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/algorithmic-art",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "webapp-testing",
+      "title": "网页测试",
+      "summary": "用 Playwright 打开本地网页应用，点击、截图、看控制台日志来验证功能。",
+      "category": "开发",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/webapp-testing",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "mcp-builder",
+      "title": "MCP 服务开发",
+      "summary": "编写高质量 MCP server，让模型通过工具接入外部服务。",
+      "category": "开发",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/mcp-builder",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "skill-creator",
+      "title": "技能创作",
+      "summary": "编写新技能、改进已有技能，并评测它们的效果。",
+      "category": "开发",
+      "repo": "anthropics/skills",
+      "ref": "main",
+      "path": "skills/skill-creator",
+      "license": "Apache-2.0"
+    }
+  ]
+}

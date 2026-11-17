@@ -66,6 +66,8 @@ pub struct BotRuntimeManager {
     /// Default factory used when creating new bot runtimes lazily.
     factory: Arc<AgentFactory>,
     runtimes: Arc<Mutex<HashMap<String, Arc<Mutex<BotRuntime>>>>>,
+    /// Bots whose spec or skills changed: their runtime is rebuilt the next time it is idle.
+    stale: Arc<Mutex<std::collections::HashSet<String>>>,
     cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
     sink: EventSink,
     /// MessageContent-free runtime-status fan-out (separate channel; no-op by default).
@@ -120,6 +122,7 @@ impl BotRuntimeManager {
         Self {
             factory,
             runtimes: Arc::new(Mutex::new(HashMap::new())),
+            stale: Arc::new(Mutex::new(std::collections::HashSet::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             sink,
             status_sink: Arc::new(|_| {}),
@@ -146,8 +149,15 @@ impl BotRuntimeManager {
 
     /// Get (lazily creating if needed) the runtime for a given bot id.
     pub async fn ensure_runtime(&self, bot: &str) -> Result<Arc<Mutex<BotRuntime>>, String> {
-        if let Some(rt) = self.runtimes.lock().await.get(bot).cloned() {
-            return Ok(rt);
+        // Bound first: an `if let` scrutinee's lock guard would live through the body below.
+        let cached = self.runtimes.lock().await.get(bot).cloned();
+        if let Some(rt) = cached {
+            if !self.stale.lock().await.contains(bot) || self.is_busy(bot).await {
+                return Ok(rt);
+            }
+            // Changed and idle: drop it; the sessions reload from their logs below.
+            self.stale.lock().await.remove(bot);
+            self.runtimes.lock().await.remove(bot);
         }
         // Load the bot's spec from disk (or fall back to a platform default) and derive a
         // per-bot factory so each bot gets its own tool table and prompt configuration.
@@ -165,6 +175,18 @@ impl BotRuntimeManager {
             Arc::clone(entry)
         };
         Ok(rt)
+    }
+
+    /// Pick up a changed spec or skill set. Sessions keep a snapshot of the skill catalog, so the
+    /// runtime is rebuilt -- at once when idle, otherwise when its running turns are over.
+    pub async fn reload_bot(&self, bot: &str) {
+        self.stale.lock().await.insert(bot.to_owned());
+    }
+
+    /// Whether any turn of the bot (its conversation or a task it works on) is running.
+    async fn is_busy(&self, bot: &str) -> bool {
+        let prefix = route_key(bot, "");
+        self.cancels.lock().await.keys().any(|key| key.starts_with(&prefix))
     }
 
     // -----------------------------------------------------------------------
@@ -1324,6 +1346,7 @@ pub fn user_content(store: &ArtifactStore, prompt: &str, media: &[String]) -> Me
     MessageContent::from(parts)
 }
 
+mod design;
 mod pool;
 mod route;
 

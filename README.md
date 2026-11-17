@@ -44,6 +44,7 @@ bots/<name>/spec.toml       a bot's definition (optional for the built-in bots)
 bots/<name>/sessions/       its conversation (main.jsonl) and task runs
 bots/<name>/memory/         memory only this bot sees
 bots/<name>/workspace/      where the bot works (bash cwd, relative paths)
+bots/<name>/skills/         skills only this bot has (from the market, or its own)
 ```
 
 ```toml
@@ -51,12 +52,14 @@ bots/<name>/workspace/      where the bot works (bash cwd, relative paths)
 name = "clerk"
 display_name = "Clerk"
 tools = ["read", "grep"]            # of: bash grep read media web_search; empty = all
-skills = []                         # installed SKILL.md names; empty = all
+skills = []                         # user-level skills (~/.agents/skills) allowed; empty = all
 system_prompt_extra = "You are Clerk. You tidy documents and write summaries."
 ```
 
-`nono` (generalist), `patch` (code) and `scout` (research) are built in. New bots can
-also be created from the UI's "+" button, which asks NONO to write the spec.
+`nono` (generalist), `patch` (code) and `scout` (research) are built in. The UI's "+"
+button creates a bot from a description: one model call designs it and picks market skills,
+then its conversation opens. Each bot's skills page (✦ in the chat header) installs skills
+from the market into that bot; see [docs/skill-market.md](docs/skill-market.md).
 
 ## Voice input
 

@@ -8,7 +8,7 @@ import { Icon, type IconName } from "../components/Icon";
 import type { useBots } from "../state/useBots";
 import { useWide } from "../state/useWide";
 
-type Tab = "home" | "chat" | "new";
+type Tab = "home" | "chat" | "new" | "skills";
 
 const TOOL_ICONS: Record<string, IconName> = {
   bash: "code",

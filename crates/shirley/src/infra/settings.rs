@@ -55,6 +55,16 @@ pub struct FileSettings {
     pub subagent: SubagentSettings,
     /// Voice input (dictation) config (the `[asr]` table in the config file).
     pub asr: AsrSettings,
+    /// Skill market (the `[market]` table).
+    pub market: MarketSettings,
+}
+
+/// Skill market config (the `[market]` table).
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct MarketSettings {
+    /// An index to list instead of the built-in one (same shape as `market/skills.json`).
+    pub index_url: Option<String>,
 }
 
 /// Voice input ASR config (the `[asr]` table in the config file).

@@ -103,7 +103,7 @@ Layout: one full-viewport column on phones; from 900px, the bot list on the left
 | --- | --- |
 | Identity block at the top of the system prompt | `spec.system_prompt_extra` -> `{{identity}}` in `prompts/conversation.md` and `prompts/worker.md` |
 | Capability tools (`bash` `grep` `read` `media` `web_search`) | `spec.tools`; empty = all (`bot::platform_tools`) |
-| Skills | `spec.skills`; empty = every discovered skill |
+| Skills | `bots/<name>/skills/` (market installs and the bot's own; win a name clash), plus the user-level skills `spec.skills` allows (empty = all). Read when the runtime is built: `reload_bot` rebuilds it once idle after an install |
 | Session directory | `bots/<name>/sessions` |
 | Memory roots | `[~/.shirley/memory, bots/<name>/memory]` |
 | Workspace | `bots/<name>/workspace`: `bash` cwd, base for relative paths in `read` / `grep`, named in the system prompt. `read` also accepts absolute paths (secret-file refusal still applies) |

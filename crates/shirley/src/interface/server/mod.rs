@@ -761,6 +761,44 @@ async fn dispatch(
             no_content()
         }
 
+        // -- bot design + skill market -------------------------------------------------
+        // The user says what they need; the platform designs, saves and equips the bot.
+        "agent_design_bot" => {
+            let brief = args
+                .brief
+                .or(args.text)
+                .ok_or_else(|| ApiError::bad("missing brief"))?;
+            let spec = manager.design_bot(&brief).await?;
+            ok_json(serde_json::json!({ "bot": spec.name, "display_name": spec.display_name }))
+        }
+        // The market as one bot sees it: what it can install, and what it has.
+        "agent_skill_market" => {
+            let bot = args.bot()?;
+            let bot_root = crate::storage::bots_root().join(&bot);
+            let installed = crate::skills::market::installed(&bot_root);
+            let market = crate::skills::market::index(manager.market_index_url().as_deref()).await;
+            ok_json(serde_json::json!({ "market": market, "installed": installed }))
+        }
+        "agent_skill_install" => {
+            let bot = args.bot()?;
+            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
+            let market = crate::skills::market::index(manager.market_index_url().as_deref()).await;
+            let skill = market
+                .into_iter()
+                .find(|skill| skill.id == id)
+                .ok_or_else(|| ApiError::not_found(format!("no skill {id} in the market")))?;
+            crate::skills::market::install(&crate::storage::bots_root().join(&bot), &skill).await?;
+            manager.reload_bot(&bot).await;
+            no_content()
+        }
+        "agent_skill_uninstall" => {
+            let bot = args.bot()?;
+            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
+            crate::skills::market::uninstall(&crate::storage::bots_root().join(&bot), &id)?;
+            manager.reload_bot(&bot).await;
+            no_content()
+        }
+
         other => Err(ApiError::not_found(format!("unknown command: {other}"))),
     }
 }

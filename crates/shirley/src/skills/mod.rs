@@ -24,6 +24,7 @@
 
 pub mod catalog;
 pub mod discovery;
+pub mod market;
 pub mod parse;
 pub mod provider;
 pub mod runtime;

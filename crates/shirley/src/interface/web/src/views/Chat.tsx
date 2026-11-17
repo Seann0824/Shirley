@@ -251,12 +251,14 @@ export function Chat({
   seed,
   tasks,
   onBack,
+  onSkills,
   onTurnFinished,
 }: {
   bot: Bot;
   seed?: Seed;
   tasks: Tasks;
   onBack: () => void;
+  onSkills: () => void;
   onTurnFinished?: () => void;
 }) {
   const conversation = useConversation(bot.name, onTurnFinished);
@@ -347,9 +349,9 @@ export function Chat({
             <i />
           </span>
         </div>
-        {/* The memory page is hidden for now: nobody needs to read what the bot remembers. Keeps the
-            title centred. */}
-        <span aria-hidden="true" />
+        <button className="skills-button" onClick={onSkills} aria-label={`${bot.display_name} 的技能`}>
+          <Icon name="spark" size={19} />
+        </button>
       </header>
 
       <div className="conversation" ref={scrollRef}>
