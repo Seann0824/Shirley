@@ -1,6 +1,5 @@
-import { useState } from "react";
-
 import { BackHeader } from "../components/Chrome";
+import { ComposerDock } from "../components/Composer";
 import { Icon } from "../components/Icon";
 
 /** Turn the user's description into the request a bot-building bot acts on. */
@@ -22,7 +21,6 @@ export function NewBot({
   onBack: () => void;
   onSubmit: (description: string) => void;
 }) {
-  const [brief, setBrief] = useState("");
   return (
     <>
       <BackHeader title="新 Bot" onBack={onBack} />
@@ -35,26 +33,15 @@ export function NewBot({
             <p>告诉我你需要一个怎样的 Bot。我会替你定好它的名字、性格和能用的工具。</p>
           </div>
         </div>
-        <form
-          className="builder-composer"
-          onSubmit={(event) => {
-            event.preventDefault();
-            if (!brief.trim()) return;
-            onSubmit(brief.trim());
-          }}
-        >
-          <input
-            value={brief}
-            onChange={(event) => setBrief(event.target.value)}
-            placeholder="例如：帮我跟踪竞品并整理周报"
-            aria-label="描述 Bot 能力"
-            autoFocus
-          />
-          <button type="submit" disabled={!brief.trim()} aria-label="发送">
-            <Icon name="arrow" size={18} />
-          </button>
-        </form>
       </section>
+      {/* The same composer as home and chat: talk or type the description. */}
+      <ComposerDock
+        claimsPagePaste
+        placeholder="例如：帮我跟踪竞品并整理周报"
+        onSend={(text) => {
+          if (text.trim()) onSubmit(text.trim());
+        }}
+      />
     </>
   );
 }

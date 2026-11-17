@@ -121,6 +121,11 @@ function DispatchedTask({ bot, call, tasks }: { bot: Bot; call: ToolCallWire; ta
   );
 }
 
+/** A picture stands on its own, like a photo in a chat app; a file or link gets a chip. */
+function mediaClass(part: RenderPart): string {
+  return part.kind === "image" ? "message-media" : `message-bubble media-bubble ${part.kind}`;
+}
+
 const TASK_TOOLS = new Set(["dispatch_task", "task_note"]);
 
 function Item({ bot, item, tasks }: { bot: Bot; item: ConversationItem; tasks: Tasks }) {
@@ -133,7 +138,7 @@ function Item({ bot, item, tasks }: { bot: Bot; item: ConversationItem; tasks: T
           <>
             {media.map((part, index) => (
               <div className="message-row user-message" key={`m${index}`}>
-                <div className={`message-bubble media-bubble ${part.kind}`}>
+                <div className={mediaClass(part)}>
                   <Parts bot={bot.name} parts={[part]} />
                 </div>
               </div>
@@ -193,7 +198,7 @@ function Item({ bot, item, tasks }: { bot: Bot; item: ConversationItem; tasks: T
                 <div className={`message-avatar ${botTone(bot.name)}`}>
                   <BotAvatar name={bot.name} size={27} />
                 </div>
-                <div className={`message-bubble media-bubble ${part.kind}`}>
+                <div className={mediaClass(part)}>
                   <Parts bot={bot.name} parts={[part]} />
                 </div>
               </div>
@@ -246,16 +251,12 @@ export function Chat({
   seed,
   tasks,
   onBack,
-  onMemory,
-  onOpenTasks,
   onTurnFinished,
 }: {
   bot: Bot;
   seed?: Seed;
   tasks: Tasks;
   onBack: () => void;
-  onMemory: () => void;
-  onOpenTasks: () => void;
   onTurnFinished?: () => void;
 }) {
   const conversation = useConversation(bot.name, onTurnFinished);
@@ -277,8 +278,7 @@ export function Chat({
     const card = waiting
       .map((task) => document.getElementById(`task-${task.id}`))
       .find((element) => element !== null);
-    if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
-    else onOpenTasks();
+    card?.scrollIntoView({ behavior: "smooth", block: "center" });
   };
 
   // The conversation opens at its latest message and stays pinned there while it grows (new
@@ -347,9 +347,9 @@ export function Chat({
             <i />
           </span>
         </div>
-        <button className="memory-button" onClick={onMemory} aria-label={`${bot.display_name} 的记忆`}>
-          <Icon name="brain" size={19} />
-        </button>
+        {/* The memory page is hidden for now: nobody needs to read what the bot remembers. Keeps the
+            title centred. */}
+        <span aria-hidden="true" />
       </header>
 
       <div className="conversation" ref={scrollRef}>

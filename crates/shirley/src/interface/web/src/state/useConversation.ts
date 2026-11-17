@@ -3,6 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api, onAgentEvent } from "../api/bridge";
 import type { AgentEvent, RenderPart } from "../api/types";
 import {
+  appendUser,
   fromSnapshot,
   reduce,
   type ConversationItem,
@@ -18,7 +19,10 @@ const MAIN_SESSION = "main";
  */
 export function useConversation(bot: string, onTurnFinished?: () => void) {
   const [items, setItems] = useState<ConversationItem[]>([]);
-  const [running, setRunning] = useState(false);
+  // Turns asked for and not yet finished. Sending mid-reply interrupts it: the old turn's
+  // `finished` arrives after the new turn was asked for, and must not clear the new one.
+  const [outstanding, setOutstanding] = useState(0);
+  const running = outstanding > 0;
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const cursor = useRef<number | null>(null);
@@ -37,7 +41,7 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
     const apply = (event: AgentEvent) => {
       setItems((current) => reduce(current, event));
       if (event.type === "finished" || event.type === "error") {
-        setRunning(false);
+        setOutstanding((count) => Math.max(0, count - 1));
         finishedCallback.current?.();
       }
     };
@@ -48,7 +52,7 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
         .then((snapshot) => {
           if (cancelled) return;
           setItems(fromSnapshot(snapshot.items, snapshot.running));
-          setRunning(snapshot.running);
+          setOutstanding(snapshot.running ? 1 : 0);
           cursor.current = snapshot.sequence;
           setLoaded(true);
           for (const event of buffered.current) {
@@ -88,13 +92,13 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
 
   const send = useCallback(
     async (text: string, images: string[] = [], parts: RenderPart[] = []) => {
-      setItems((current) => [...current, { kind: "message", role: "user", content: text, parts }]);
-      setRunning(true);
+      setItems((current) => appendUser(current, text, parts));
+      setOutstanding((count) => count + 1);
       try {
         // The bubble matched what was typed; the wire still needs something to answer.
         await api.send(bot, text.trim() || (images.length ? "请处理这些附件" : ""), images);
       } catch (reason) {
-        setRunning(false);
+        setOutstanding((count) => Math.max(0, count - 1));
         setItems((current) => [
           ...current,
           {

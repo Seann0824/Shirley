@@ -88,6 +88,9 @@ pub struct AsrSettings {
     /// Initial prompt for whisper. Default nudges Chinese towards simplified characters;
     /// set an empty string to send none.
     pub prompt: Option<String>,
+    /// Languages detection may pick (`["zh", "en"]` by default). A detection outside the list
+    /// (short Chinese clips are often heard as Japanese) is transcribed as the first entry.
+    pub languages: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]

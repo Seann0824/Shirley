@@ -45,6 +45,14 @@ function sealStreaming(items: ConversationItem[]): ConversationItem[] {
   return settleTools(sealed);
 }
 
+/**
+ * The user's own message. Sending mid-reply interrupts the reply, so whatever was streaming is
+ * finished as it stands (its `finished` event arrives later, when the user message is last).
+ */
+export function appendUser(items: ConversationItem[], content: string, parts: RenderPart[]): ConversationItem[] {
+  return [...sealStreaming(items), { kind: "message", role: "user", content, parts }];
+}
+
 export function reduce(items: ConversationItem[], event: AgentEvent): ConversationItem[] {
   switch (event.type) {
     case "content_delta": {

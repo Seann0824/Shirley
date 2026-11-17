@@ -270,7 +270,7 @@ impl BotRuntimeManager {
     // Turn driver
     // -----------------------------------------------------------------------
 
-    /// Compose prompt + references, then drive one turn.
+    /// Compose prompt + references, then drive one turn, interrupting the one still running.
     pub async fn send(
         &self,
         bot: &str,
@@ -279,14 +279,26 @@ impl BotRuntimeManager {
         references: Vec<String>,
         images: Vec<String>,
     ) -> Result<(), String> {
-        let store = {
-            let runtime = self.ensure_runtime(bot).await?;
+        let runtime = self.ensure_runtime(bot).await?;
+        let (store, session) = {
             let guard = runtime.lock().await;
-            Arc::clone(&guard.factory.artifacts)
+            let session = match session {
+                Some(name) => name,
+                None => guard
+                    .sessions
+                    .active_name()
+                    .map(str::to_owned)
+                    .ok_or_else(|| "current session is not yet persisted".to_owned())?,
+            };
+            (Arc::clone(&guard.factory.artifacts), session)
         };
+        // A message sent while the bot is still replying interrupts the reply, the way a person
+        // cuts in: what was said so far stays in the conversation, then the new message is
+        // answered.
+        self.interrupt(bot, &runtime, &session).await?;
         let prompt = compose_prompt(&text, &references);
         let user_content = user_content(&store, &prompt, &images);
-        self.spawn_turn(bot, session, text, user_content).await
+        self.spawn_turn(bot, Some(session), text, user_content).await
     }
 
     /// Rewind the last turn, then send the edited text as a new turn.
@@ -460,6 +472,39 @@ impl BotRuntimeManager {
         });
 
         Ok(())
+    }
+
+    /// Stop the session's running turn, if any, and wait until its agent is back. The cancelled
+    /// turn keeps what it produced (`finish_interrupted_turn`).
+    async fn interrupt(
+        &self,
+        bot: &str,
+        runtime: &Arc<Mutex<BotRuntime>>,
+        session: &str,
+    ) -> Result<(), String> {
+        const WAIT: std::time::Duration = std::time::Duration::from_secs(10);
+        const POLL: std::time::Duration = std::time::Duration::from_millis(25);
+        let deadline = tokio::time::Instant::now() + WAIT;
+        let mut cancelled = false;
+        loop {
+            let idle = runtime
+                .lock()
+                .await
+                .sessions
+                .session(session)
+                .is_none_or(|entry| entry.agent.is_some());
+            if idle {
+                return Ok(());
+            }
+            if !cancelled {
+                self.cancel(bot, session).await;
+                cancelled = true;
+            }
+            if tokio::time::Instant::now() >= deadline {
+                return Err("the previous reply did not stop in time; try again".to_owned());
+            }
+            tokio::time::sleep(POLL).await;
+        }
     }
 
     pub async fn cancel(&self, bot: &str, session: &str) {

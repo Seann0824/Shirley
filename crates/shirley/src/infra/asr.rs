@@ -71,6 +71,10 @@ const MIN_MODEL_BYTES: usize = 8 * 1024 * 1024;
 /// Steers Chinese output to simplified characters (whisper often writes traditional ones). It
 /// only biases wording; the language is still detected from the audio.
 const DEFAULT_PROMPT: &str = "以下是普通话的句子，使用简体中文。";
+/// Audio needed before a detected language is reported back and kept for the utterance.
+const MIN_DETECT_SECONDS: f64 = 1.5;
+/// Languages detection may settle on unless `[asr] languages` says otherwise.
+const DEFAULT_LANGUAGES: [&str; 2] = ["zh", "en"];
 
 /// What the server can do, computed on every call so installing whisper.cpp takes effect
 /// without a restart.
@@ -114,6 +118,7 @@ struct AsrConfig {
     local_language: Option<String>,
     local_threads: Option<u32>,
     prompt: Option<String>,
+    languages: Vec<String>,
 }
 
 impl AsrConfig {
@@ -136,7 +141,34 @@ impl AsrConfig {
             local_language: env("SHIRLEY_ASR_LANGUAGE").or(file.local_language),
             local_threads: file.local_threads,
             prompt: file.prompt,
+            languages: allowed_languages(file.languages),
         }
+    }
+}
+
+/// Languages auto-detection may settle on: the configured list (plain codes only), else zh, en.
+fn allowed_languages(configured: Option<Vec<String>>) -> Vec<String> {
+    let list: Vec<String> = configured
+        .unwrap_or_default()
+        .iter()
+        .map(|tag| whisper_language(Some(tag)))
+        .filter(|code| code != "auto")
+        .collect();
+    if list.is_empty() {
+        DEFAULT_LANGUAGES.iter().map(|&code| code.to_owned()).collect()
+    } else {
+        list
+    }
+}
+
+/// What detection settled on, or the first allowed language when it heard something else.
+/// `None` (nothing detected) is left alone.
+fn constrain_language(detected: Option<String>, allowed: &[String]) -> Option<String> {
+    let detected = detected?;
+    if allowed.contains(&detected) {
+        Some(detected)
+    } else {
+        allowed.first().cloned()
     }
 }
 
@@ -223,9 +255,15 @@ pub async fn transcribe(
         .as_deref()
         .or(language)
         .map_or_else(|| "auto".to_owned(), |tag| whisper_language(Some(tag)));
-    let (text, language) = transcribe_local(&config, global, wav, language, partial)
+    let detecting = language == "auto";
+    let (text, mut language) = transcribe_local(&config, global, wav, language, partial)
         .await
         .map_err(AsrError::Failed)?;
+    // A guess from the first second of speech is not worth keeping for the whole utterance:
+    // report it only once there is enough audio, so the next preview detects again.
+    if detecting && wav_seconds(wav) < MIN_DETECT_SECONDS {
+        language = None;
+    }
     Ok(AsrResult {
         text,
         language,
@@ -304,12 +342,23 @@ async fn transcribe_local(
             let _ = tokio::fs::remove_file(&audio_path).await;
             let _ = tokio::fs::remove_file(&transcript_path).await;
             if !looks_like_usage(&String::from_utf8_lossy(&output.stdout)) {
-                let used = if language == "auto" {
-                    detected_language(&String::from_utf8_lossy(&output.stderr))
-                } else {
-                    Some(language)
-                };
-                return Ok((clean_transcript(&written), used));
+                if language != "auto" {
+                    return Ok((clean_transcript(&written, prompt), Some(language)));
+                }
+                let detected = detected_language(&String::from_utf8_lossy(&output.stderr));
+                let used = constrain_language(detected.clone(), &config.languages);
+                // Heard as a language the user does not speak: transcribe again as one they do.
+                if used != detected && !retried {
+                    if let Some(code) = used {
+                        language = code;
+                        retried = true;
+                        tokio::fs::write(&audio_path, wav)
+                            .await
+                            .map_err(|_error| GENERIC_FAILURE.to_owned())?;
+                        continue;
+                    }
+                }
+                return Ok((clean_transcript(&written, prompt), used));
             }
         }
         let noise = format!(
@@ -487,8 +536,9 @@ fn looks_like_usage(text: &str) -> bool {
     text.contains("usage:") && (text.contains("--help") || text.contains("supported audio formats"))
 }
 
-/// The transcript, on one line, without what whisper writes for silence.
-fn clean_transcript(text: &str) -> String {
+/// The transcript, on one line, without what whisper writes for silence and without the prompt
+/// echoed back (whole, or a clause of it at either end: "……，使用简体中文。").
+fn clean_transcript(text: &str, prompt: &str) -> String {
     let joined = text
         .lines()
         .map(str::trim)
@@ -496,8 +546,11 @@ fn clean_transcript(text: &str) -> String {
         .collect::<Vec<_>>()
         .join(" ");
     let mut out = joined.replace("[BLANK_AUDIO]", "");
-    // Silence often comes back as the prompt itself.
-    out = out.replace(DEFAULT_PROMPT, "");
+    let prompt = prompt.trim();
+    if !prompt.is_empty() {
+        out = out.replace(prompt, "");
+        out = strip_prompt_clauses(&out, prompt);
+    }
     let out = out.split_whitespace().collect::<Vec<_>>().join(" ");
     // Near-silence also comes back as a caption-like aside -- "(字幕:)", "[音乐]", "(笑)". A
     // transcript that is nothing but one bracketed aside was never said.
@@ -507,6 +560,35 @@ fn clean_transcript(text: &str) -> String {
         return String::new();
     }
     out
+}
+
+/// Remove clauses of the prompt from the start and end of `text`, with their punctuation.
+fn strip_prompt_clauses(text: &str, prompt: &str) -> String {
+    const PUNCTUATION: &[char] = &['，', '。', ',', '.', '、', '！', '？', ' '];
+    let clauses: Vec<&str> = prompt
+        .split(PUNCTUATION)
+        .map(str::trim)
+        .filter(|clause| clause.chars().count() >= 3)
+        .collect();
+    let mut out = text.trim().to_owned();
+    loop {
+        let before = out.clone();
+        for clause in &clauses {
+            if let Some(rest) = out.strip_suffix(PUNCTUATION).unwrap_or(&out).strip_suffix(clause) {
+                out = rest.trim_end_matches(PUNCTUATION).to_owned();
+                // Keep the sentence's own full stop if the echo replaced it.
+                if !out.is_empty() && text.trim_end().ends_with('。') {
+                    out.push('。');
+                }
+            }
+            if let Some(rest) = out.strip_prefix(clause) {
+                out = rest.trim_start_matches(PUNCTUATION).to_owned();
+            }
+        }
+        if out == before {
+            return out;
+        }
+    }
 }
 
 /// Worker count: available cores, capped so the server stays responsive.
@@ -668,12 +750,31 @@ mod tests {
 
     #[test]
     fn the_transcript_drops_silence_markers_and_the_prompt() {
-        assert_eq!(clean_transcript(" 你好\n\n世界 \n"), "你好 世界");
-        assert_eq!(clean_transcript("[BLANK_AUDIO]\n"), "");
-        assert_eq!(clean_transcript(DEFAULT_PROMPT), "");
-        assert_eq!(clean_transcript("(字幕:)"), "");
-        assert_eq!(clean_transcript("（笑）"), "");
-        assert_eq!(clean_transcript("明天(周二)开会"), "明天(周二)开会");
+        let clean = |text: &str| clean_transcript(text, DEFAULT_PROMPT);
+        assert_eq!(clean(" 你好\n\n世界 \n"), "你好 世界");
+        assert_eq!(clean("[BLANK_AUDIO]\n"), "");
+        assert_eq!(clean(DEFAULT_PROMPT), "");
+        assert_eq!(clean("(字幕:)"), "");
+        assert_eq!(clean("（笑）"), "");
+        assert_eq!(clean("明天(周二)开会"), "明天(周二)开会");
+        // A clause of the prompt echoed onto what was said.
+        assert_eq!(clean("你有什么技能，使用简体中文。"), "你有什么技能。");
+        assert_eq!(clean("你有什么技能使用简体中文"), "你有什么技能");
+        assert_eq!(clean("以下是普通话的句子，今天天气不错"), "今天天气不错");
+        // Words that merely appear inside the sentence stay.
+        assert_eq!(clean("请用简体中文回答"), "请用简体中文回答");
+        assert_eq!(clean_transcript("你好，使用简体中文", ""), "你好，使用简体中文");
+    }
+
+    #[test]
+    fn detection_stays_within_the_languages_the_user_speaks() {
+        let allowed = allowed_languages(None);
+        assert_eq!(allowed, ["zh", "en"]);
+        assert_eq!(constrain_language(Some("ja".into()), &allowed).as_deref(), Some("zh"));
+        assert_eq!(constrain_language(Some("en".into()), &allowed).as_deref(), Some("en"));
+        assert_eq!(constrain_language(None, &allowed), None);
+        assert_eq!(allowed_languages(Some(vec!["en-US".into(), "bad;x".into()])), ["en"]);
+        assert_eq!(allowed_languages(Some(vec![])), ["zh", "en"]);
     }
 
     #[test]

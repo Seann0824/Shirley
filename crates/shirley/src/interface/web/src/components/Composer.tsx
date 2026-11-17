@@ -143,6 +143,9 @@ function describeSpeechError(code: string | undefined): { text: string; fatal: b
   }
 }
 
+/** How far (px) to slide up from the hold-to-talk button to send on release. */
+const SLIDE_TO_SEND = 60;
+
 /**
  * The input dock: hold-to-talk by default, a text field on demand, attachments via a sheet.
  * `onSend` receives the text and the attached files; the caller decides what to do with them.
@@ -169,6 +172,9 @@ export function ComposerDock({
    */
   claimsPagePaste?: boolean;
 }) {
+  // While the bot replies the input stays open: sending interrupts the reply, and with nothing
+  // typed the send button stops it.
+  const canStop = Boolean(busy && onStop);
   // A keyboard is the natural input on a wide screen; hold-to-talk is the phone default.
   const prefersText = window.matchMedia("(min-width: 900px)").matches;
   const [textMode, setTextMode] = useState(prefersText);
@@ -188,6 +194,10 @@ export function ComposerDock({
   const utterance = useRef(0);
   const language = useRef<string | null>(null);
   const previewTimer = useRef<number | null>(null);
+  // Hold-to-talk gesture: slide up past the threshold to send on release instead of editing.
+  const pressY = useRef(0);
+  const slideSend = useRef(false);
+  const [sliding, setSliding] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -228,6 +238,11 @@ export function ComposerDock({
     setAttachments([]);
     setTextMode(prefersText);
   };
+  // The transcript lands after an await; these see the latest field and attachments.
+  const sendRef = useRef(send);
+  sendRef.current = send;
+  const valueRef = useRef(value);
+  valueRef.current = value;
 
   // Screenshots arrive through the clipboard, not the file picker: turn them into the same
   // attachments the tray already renders, and let plain text pastes through untouched.
@@ -263,11 +278,19 @@ export function ComposerDock({
     return () => document.removeEventListener("paste", onPagePaste);
   }, [claimsPagePaste]);
 
-  // Heard text goes into the field to be checked, never straight out.
+  // Released in place, heard text goes into the field to be checked; slid up first, it is sent.
   const placeHeard = (heard: string) => {
     const text = heard.trim();
     if (!text) return false;
-    setValue((current) => (current.trim() ? `${current.trim()} ${text}` : text));
+    const typed = valueRef.current.trim();
+    const combined = typed ? `${typed} ${text}` : text;
+    if (slideSend.current) {
+      slideSend.current = false;
+      setSliding(false);
+      sendRef.current(combined);
+      return true;
+    }
+    setValue(combined);
     setTextMode(true);
     return true;
   };
@@ -428,7 +451,7 @@ export function ComposerDock({
 
   return (
     <>
-      <div ref={dockRef} className={`composer-dock ${listening ? "is-listening" : ""}`} onPaste={onPaste}>
+      <div ref={dockRef} className={`composer-dock ${listening ? "is-listening" : ""} ${listening && sliding ? "is-sliding" : ""}`} onPaste={onPaste}>
         {above}
         {attachments.length > 0 && (
           <AttachmentTray
@@ -444,12 +467,7 @@ export function ComposerDock({
         )}
         {voiceError && <p className="composer-hint">{voiceError}</p>}
         <div className="composer-controls">
-          {busy && onStop ? (
-            <button className="composer-stop" onClick={onStop}>
-              <Icon name="stop" size={18} />
-              <strong>停止</strong>
-            </button>
-          ) : textMode ? (
+          {textMode ? (
             <form
               className="unified-text-composer"
               onSubmit={(event) => {
@@ -466,17 +484,28 @@ export function ComposerDock({
                 placeholder={attachments.length ? "添加说明…" : placeholder}
                 autoFocus
               />
-              <button
-                type="submit"
-                className="unified-send"
-                disabled={!value.trim() && !attachments.length}
-                aria-label="发送"
-              >
-                <Icon name="arrow" size={18} />
-              </button>
+              {canStop && !value.trim() && !attachments.length ? (
+                <button type="button" className="unified-send stop" onClick={onStop} aria-label="停止">
+                  <Icon name="stop" size={16} />
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  className="unified-send"
+                  disabled={!value.trim() && !attachments.length}
+                  aria-label="发送"
+                >
+                  <Icon name="arrow" size={18} />
+                </button>
+              )}
             </form>
           ) : (
             <>
+              {canStop && (
+                <button className="composer-side stop" onClick={onStop} aria-label="停止">
+                  <Icon name="stop" size={16} />
+                </button>
+              )}
               <button className="composer-side" onClick={() => setShowSheet(true)} aria-label="添加附件">
                 <Icon name="plus" size={20} />
               </button>
@@ -485,7 +514,18 @@ export function ComposerDock({
                 onPointerDown={(event) => {
                   // Keep receiving the release even if the pointer drifts off the button.
                   event.currentTarget.setPointerCapture(event.pointerId);
+                  pressY.current = event.clientY;
+                  slideSend.current = false;
+                  setSliding(false);
                   startListening();
+                }}
+                onPointerMove={(event) => {
+                  if (!listening) return;
+                  const up = pressY.current - event.clientY > SLIDE_TO_SEND;
+                  if (up !== slideSend.current) {
+                    slideSend.current = up;
+                    setSliding(up);
+                  }
                 }}
                 onPointerUp={stopListening}
                 onPointerCancel={stopListening}
@@ -499,7 +539,9 @@ export function ComposerDock({
                   <i />
                   <i />
                 </span>
-                <strong>{listening ? "松开结束" : transcribing ? "整理中…" : "按住说话"}</strong>
+                <strong>
+                  {listening ? (sliding ? "松开发送" : "松开编辑 · 上滑发送") : transcribing ? "整理中…" : "按住说话"}
+                </strong>
               </button>
               <button className="composer-side" onClick={() => setTextMode(true)} aria-label="文字输入">
                 <Icon name="keyboard" size={20} />

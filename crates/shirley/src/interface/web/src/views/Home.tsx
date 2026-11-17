@@ -8,7 +8,7 @@ import { Icon, type IconName } from "../components/Icon";
 import type { useBots } from "../state/useBots";
 import { useWide } from "../state/useWide";
 
-type Tab = "home" | "tasks" | "work" | "memory" | "chat" | "new";
+type Tab = "home" | "chat" | "new";
 
 const TOOL_ICONS: Record<string, IconName> = {
   bash: "code",
@@ -18,7 +18,7 @@ const TOOL_ICONS: Record<string, IconName> = {
   web_search: "globe",
 };
 
-function HomeHeader({ onNavigate, pending }: { onNavigate: (view: Tab) => void; pending: boolean }) {
+function HomeHeader({ onNavigate }: { onNavigate: (view: Tab) => void }) {
   return (
     <header className="home-header">
       <span className="mini-avatar" aria-hidden="true">
@@ -32,13 +32,6 @@ function HomeHeader({ onNavigate, pending }: { onNavigate: (view: Tab) => void; 
       <div className="header-actions">
         <button onClick={() => onNavigate("new")} aria-label="创建 Bot">
           <Icon name="plus" size={20} />
-        </button>
-        <button onClick={() => onNavigate("tasks")} aria-label="任务">
-          <Icon name="clock" size={20} />
-          {pending && <i />}
-        </button>
-        <button onClick={() => onNavigate("work")} aria-label="交付">
-          <Icon name="box" size={20} />
         </button>
       </div>
     </header>
@@ -107,7 +100,10 @@ export function Home({
   const busyBots = new Set(
     tasks.filter((task) => task.status === "in_progress" || task.status === "to_do").map((task) => task.bot),
   );
-  const pendingReview = tasks.some((task) => task.status === "in_review" || task.status === "blocked");
+  // Work lives in each bot's conversation; the list only says which bot has something to look at.
+  const reviewBots = new Set(
+    tasks.filter((task) => task.status === "in_review" || task.status === "blocked").map((task) => task.bot),
+  );
 
   const ask = async (text: string, attachments: Attachment[]) => {
     if (!text.trim() && !attachments.length) return;
@@ -121,7 +117,7 @@ export function Home({
 
   return (
     <>
-      <HomeHeader onNavigate={onNavigate} pending={pendingReview} />
+      <HomeHeader onNavigate={onNavigate} />
 
       {bots.error && <p className="error-note">无法连接服务器：{bots.error}</p>}
       {asking && (
@@ -153,8 +149,10 @@ export function Home({
               <div className="home-bot-info">
                 <div>
                   <strong>{bot.display_name}</strong>
-                  <span className={`status ${busyBots.has(bot.name) ? "busy" : ""}`}>
-                    <i /> {busyBots.has(bot.name) ? "工作中" : "空闲"}
+                  <span
+                    className={`status ${busyBots.has(bot.name) ? "busy" : ""} ${reviewBots.has(bot.name) ? "review" : ""}`}
+                  >
+                    <i /> {reviewBots.has(bot.name) ? "有结果待看" : busyBots.has(bot.name) ? "工作中" : "空闲"}
                   </span>
                 </div>
                 <CapabilityStrip bot={bot} />

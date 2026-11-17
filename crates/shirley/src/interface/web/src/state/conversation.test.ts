@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
 import type { ItemWire } from "../api/types";
-import { fromSnapshot, reduce, type ConversationItem } from "./conversation";
+import { appendUser, fromSnapshot, reduce, type ConversationItem } from "./conversation";
 
 const done: ItemWire = {
   kind: "tools",
@@ -81,5 +81,21 @@ describe("reduce", () => {
     items = reduce(items, { type: "tool_started", call_id: "a", name: "bash", arguments: "{}" });
     items = reduce(items, { type: "finished", stop_reason: "completed" });
     expect(items[0]).toMatchObject({ kind: "tools", settled: true });
+  });
+});
+
+describe("appendUser", () => {
+  it("finishes a reply the user cut into, and the new turn streams below the message", () => {
+    let items: ConversationItem[] = [
+      { kind: "message", role: "assistant", content: "half a sen", parts: [], streaming: true },
+    ];
+    items = appendUser(items, "stop, something else", []);
+    expect(items[0]).toMatchObject({ role: "assistant", streaming: false });
+    expect(items[1]).toMatchObject({ role: "user", content: "stop, something else" });
+    // The interrupted turn's `finished`, then the new turn's reply.
+    items = reduce(items, { type: "finished" } as never);
+    items = reduce(items, { type: "content_delta", text: "ok" } as never);
+    expect(items).toHaveLength(3);
+    expect(items[2]).toMatchObject({ role: "assistant", content: "ok", streaming: true });
   });
 });

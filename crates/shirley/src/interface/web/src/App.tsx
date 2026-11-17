@@ -8,12 +8,9 @@ import { useTasks } from "./state/useTasks";
 import { useWide } from "./state/useWide";
 import { Chat, type Seed } from "./views/Chat";
 import { Home } from "./views/Home";
-import { Memory } from "./views/Memory";
 import { NewBot, createBotPrompt } from "./views/NewBot";
-import { Tasks } from "./views/Tasks";
-import { Work } from "./views/Work";
 
-type Tab = "home" | "tasks" | "work" | "memory" | "chat" | "new";
+type Tab = "home" | "chat" | "new";
 
 /** The bot that builds other bots: the generalist. */
 const BUILDER_BOT = "nono";
@@ -73,10 +70,6 @@ export default function App() {
   const view: Tab = wide && tab === "home" ? "chat" : tab;
   const content = (
     <>
-      {view === "tasks" && <Tasks tasks={tasks} bots={bots.bots} onBack={() => setTab("home")} />}
-      {view === "work" && (
-        <Work tasks={tasks.tasks} loaded={tasks.loaded} bots={bots.bots} onBack={() => setTab("home")} />
-      )}
       {view === "chat" && selectedBot && (
         <Chat
           key={selectedBot.name}
@@ -84,12 +77,9 @@ export default function App() {
           seed={seed?.text !== undefined && selectedBot.name === selected ? seed : undefined}
           tasks={tasks}
           onBack={() => setTab("home")}
-          onMemory={() => setTab("memory")}
-          onOpenTasks={() => setTab("tasks")}
           onTurnFinished={() => void bots.refresh()}
         />
       )}
-      {view === "memory" && selectedBot && <Memory bot={selectedBot} onBack={() => setTab("chat")} />}
       {view === "new" && (
         <NewBot
           onBack={() => setTab("home")}
@@ -110,13 +100,13 @@ export default function App() {
           <Pane className="pane-side home-pane" viewKey="home">
             {home}
           </Pane>
-          <Pane className={`pane-main ${view === "chat" ? "chat-pane" : ""}`} viewKey={`${view}:${selectedBot?.name}`}>
+          <Pane className={`pane-main ${view === "chat" ? "chat-pane" : "new-pane"}`} viewKey={`${view}:${selectedBot?.name}`}>
             {content}
           </Pane>
         </>
       ) : (
         <Pane
-          className={tab === "home" ? "home-pane" : tab === "chat" ? "chat-pane" : ""}
+          className={tab === "home" ? "home-pane" : tab === "chat" ? "chat-pane" : "new-pane"}
           viewKey={tab}
         >
           {tab === "home" ? home : content}

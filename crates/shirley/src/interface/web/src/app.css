@@ -19,17 +19,10 @@
   font-size: 12px;
   color: var(--secondary);
 }
-.composer-stop {
-  flex: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  height: 52px;
-  border-radius: 26px;
+.unified-send.stop,
+.composer-side.stop {
   background: var(--label);
   color: #fff;
-  font-size: 15px;
 }
 
 .message-bubble.notice {
@@ -123,16 +116,6 @@
   border-top-color: var(--label);
   animation: install-spin 0.9s linear infinite;
 }
-.delivery-summary {
-  white-space: pre-wrap;
-  color: var(--label);
-}
-.delivery-error {
-  color: var(--red);
-}
-.delivery-note {
-  color: var(--secondary);
-}
 .task-actions {
   display: flex;
   gap: 8px;
@@ -150,51 +133,6 @@
   color: #fff;
 }
 
-.work-stats-copy {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-}
-.work-stats-copy small {
-  color: var(--secondary);
-}
-.delivery-list {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  padding: 0 20px 24px;
-}
-.delivery-card {
-  padding: 14px 16px;
-  border-radius: 18px;
-  background: var(--glass-strong);
-}
-.delivery-card header {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  margin-bottom: 6px;
-}
-.delivery-card header small {
-  color: var(--secondary);
-}
-.delivery-card > p {
-  white-space: pre-wrap;
-  font-size: 14px;
-  line-height: 1.5;
-}
-.delivery-card .asset-grid {
-  margin-top: 10px;
-  padding: 0;
-}
-.asset-file-preview {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  height: 64px;
-  border-radius: 14px;
-  background: var(--fill);
-}
 .asset-pending {
   font-size: 12px;
   color: var(--tertiary);
@@ -276,7 +214,8 @@ body {
 }
 /* Room for the floating composer: its measured height (see ComposerDock) plus its offset. */
 .home-pane .page,
-.chat-pane .page {
+.chat-pane .page,
+.new-pane .page {
   padding-bottom: calc(var(--dock-height, 72px) + 32px + env(safe-area-inset-bottom));
 }
 
@@ -451,7 +390,6 @@ body {
   overflow-wrap: anywhere;
 }
 
-
 /* Live transcript while holding to talk: what will go into the text field on release. */
 .voice-live {
   align-self: stretch;
@@ -470,13 +408,21 @@ body {
 }
 
 /* A long press must start talking, not select the label or open a callout. */
+/* Hold-to-talk takes the whole row between the side buttons: the bigger the target, the easier
+   to hit without looking. */
 .composer-voice {
+  flex: 1;
+  min-width: 0;
   user-select: none;
   -webkit-user-select: none;
   -webkit-touch-callout: none;
 }
 
 /* A picture or file is a message of its own. */
+.message-media {
+  max-width: 76%;
+  line-height: 0;
+}
 .message-row .message-bubble.media-bubble {
   padding: 0;
   border: 0;
@@ -485,7 +431,10 @@ body {
   box-shadow: none;
   overflow: hidden;
 }
-.message-bubble.media-bubble.image img {
+.message-media .asset-pending {
+  line-height: 1.4;
+}
+.message-media img {
   display: block;
   max-width: min(240px, 62vw);
   max-height: 320px;
@@ -706,4 +655,23 @@ body {
 .voice-live-tail {
   color: var(--tertiary);
   font-size: 12px;
+}
+
+.status.review {
+  color: #0a60c2;
+  background: rgba(0, 122, 255, 0.1);
+}
+.status.review i {
+  background: var(--blue);
+}
+
+/* Long paths and file names in a result must wrap, not push the card off screen. */
+.task-card {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* Slid up: releasing now sends the words instead of putting them in the field. */
+.composer-dock.is-sliding .composer-voice {
+  background: var(--blue);
 }

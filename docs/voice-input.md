@@ -13,9 +13,15 @@ transcribes it with the `whisper.cpp` CLI (`crates/shirley/src/infra/asr.rs`).
   (each preview re-transcribes everything said so far). A preview is skipped, not queued, when
   the server is busy (at most two whisper processes at once).
 - **On release**: one final `POST /api/transcribe`, with beam search for accuracy.
-- **Language**: detected by whisper on the first preview of each utterance and sent back with
-  every later request for that utterance (detection costs an extra second and a half).
-  `[asr] local_language` pins it instead.
+- **Language**: detected by whisper once there are 1.5 s of speech, then sent back with every
+  later request for that utterance (detection costs an extra second and a half). Detection is
+  kept to `[asr] languages` (default `zh`, `en`): short Chinese clips are often heard as Japanese,
+  and such a result is transcribed again as the first listed language. `[asr] local_language`
+  pins one language instead.
+- **Prompt echo**: whisper sometimes repeats a clause of its prompt ("使用简体中文。") at the start
+  or end of a transcript; those are stripped.
+- **Gesture**: release in place and the text goes into the field to check; slide up before
+  releasing and it is sent.
 - **No whisper.cpp on the server**: the page falls back to the browser's own recogniser, fixed to
   Chinese (browsers cannot detect the language).
 
@@ -100,6 +106,7 @@ local_binary   = "/opt/whisper.cpp/build/bin/whisper-cli"   # default: auto-dete
 local_model    = "/data/models/ggml-base-q5_1.bin"          # default: managed download
 model_url      = "https://example.com/ggml-base-q5_1.bin"   # where to download it from
 local_language = "zh"        # pin the language; default: detect per utterance
+languages      = ["zh", "en"] # what detection may pick; anything else becomes the first
 local_threads  = 4           # default: cores, at most 8
 prompt         = ""          # default nudges Chinese to simplified characters; "" sends none
 ```
