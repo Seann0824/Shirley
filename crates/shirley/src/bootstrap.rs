@@ -165,8 +165,7 @@ impl AgentFactory {
 
         // Skill catalog (`docs/skills.md` P0): scans user-level skills once at assembly.
         // In bot-first mode there is no per-workspace project root, so only user-level roots are scanned.
-        let skill_catalog =
-            SkillCatalog::discover(&paths.global, skills::user_home().as_deref());
+        let skill_catalog = SkillCatalog::discover(&paths.global, skills::user_home().as_deref());
 
         // Subagent config (`docs/subagent.md` decision 8): resolve the caps once. `enabled` defaults to
         // true; a value of `0` for a cap means "unset" and falls back to the built-in default.
@@ -1220,7 +1219,11 @@ mod tests {
             None,
             None,
         );
-        assert!(manager.begin_turn("s", "hello".into()).is_some());
+        assert!(
+            manager
+                .begin_turn("s", "hello".into(), Vec::new())
+                .is_some()
+        );
 
         assert!(
             manager.delete_session("s").is_err(),

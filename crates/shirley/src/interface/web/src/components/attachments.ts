@@ -1,4 +1,4 @@
-import type { RenderPart } from "../api/types";
+import type { LibraryEntry, RenderPart } from "../api/types";
 
 /** Attachment model shared by the composer, the preview tray and the chat view. */
 export interface Attachment {
@@ -102,4 +102,33 @@ export function userMessageParts(attachments: Attachment[]): RenderPart[] {
           bytes: attachment.file.size,
         },
   );
+}
+
+/** Upload every attachment to `bot`'s media library. Failures are returned by name, not thrown. */
+export async function uploadAll(
+  attachments: Attachment[],
+  upload: (file: File) => Promise<LibraryEntry>,
+): Promise<{ entries: LibraryEntry[]; failed: string[] }> {
+  const entries: LibraryEntry[] = [];
+  const failed: string[] = [];
+  for (const attachment of attachments) {
+    try {
+      entries.push(await upload(attachment.file));
+    } catch {
+      failed.push(attachment.name);
+    }
+  }
+  return { entries, failed };
+}
+
+/**
+ * A task brief that carries its attachments as library references, in the same one-line form a
+ * chat turn uses (`[name · mime · size · id=…]`), so the bot can open them with its `media` tool.
+ */
+export function briefWithAttachments(brief: string, entries: LibraryEntry[]): string {
+  if (!entries.length) return brief;
+  const lines = entries.map(
+    (entry) => `[${entry.name} · ${entry.mime} · ${formatSize(entry.bytes)} · id=${entry.id}]`,
+  );
+  return `${brief}\n\n${lines.join("\n")}`;
 }

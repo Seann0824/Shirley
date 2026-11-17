@@ -47,8 +47,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
 
+use super::runtime::{BotRuntimeManager, EventSink, SessionEntryWire, StatusSink};
 use super::wire::{AgentEventWire, StateSnapshotWire};
-use super::runtime::{EventSink, BotRuntimeManager, SessionEntryWire, StatusSink};
 use crate::bootstrap::AgentFactory;
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
@@ -106,9 +106,8 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         }
     });
 
-    let manager = Arc::new(
-        BotRuntimeManager::new(Arc::new(factory), sink).with_status_sink(status_sink),
-    );
+    let manager =
+        Arc::new(BotRuntimeManager::new(Arc::new(factory), sink).with_status_sink(status_sink));
 
     let token = std::env::var("SHIRLEY_SERVER_TOKEN")
         .ok()
@@ -381,9 +380,7 @@ struct CmdArgs {
 
 impl CmdArgs {
     fn bot(&self) -> Result<String, ApiError> {
-        self.bot
-            .clone()
-            .ok_or_else(|| ApiError::bad("missing bot"))
+        self.bot.clone().ok_or_else(|| ApiError::bad("missing bot"))
     }
     /// The session a command targets; a bot's foreground conversation when none is named.
     fn session(&self) -> String {
@@ -896,10 +893,7 @@ async fn upload_handler(
     if body.is_empty() {
         return Err(ApiError::bad("empty upload".to_owned()));
     }
-    let entry = state
-        .manager
-        .ingest_bytes(bot, name, mime, &body)
-        .await?;
+    let entry = state.manager.ingest_bytes(bot, name, mime, &body).await?;
     ok_json(entry)
 }
 

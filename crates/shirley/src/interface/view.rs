@@ -124,6 +124,24 @@ pub fn parts_from_tool_value(value: Option<&serde_json::Value>) -> Vec<RenderPar
         .collect()
 }
 
+/// The text of a user message as the human wrote it.
+///
+/// A turn with attachments carries one `[name · mime · size · id=…]` line per attachment after
+/// the typed text (`runtime::user_content`). Those lines are for the model, which needs the id;
+/// the person already sees the attachment as a card, so they are dropped here.
+#[must_use]
+pub fn user_display_text(content: &MessageContent) -> String {
+    let text = content.as_text();
+    let kept: Vec<&str> = text
+        .lines()
+        .filter(|line| {
+            let line = line.trim();
+            !(line.starts_with('[') && line.ends_with(']') && line.contains(" · id="))
+        })
+        .collect();
+    kept.join("\n").trim_end().to_owned()
+}
+
 /// Project a model-facing message body into render parts.
 ///
 /// This is the fix for "stored but not renderable": the SDK's `MessageContent` already carries
@@ -239,6 +257,17 @@ pub enum Item {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn user_text_hides_attachment_reference_lines() {
+        let content = MessageContent::text(
+            "看看这张图\n\n[粘贴图片-1.png · image/png · 942 B · id=abc.png]\n[b.pdf · application/pdf · 2 KB · id=def.pdf]",
+        );
+        assert_eq!(user_display_text(&content), "看看这张图");
+        // Ordinary bracketed text the person typed is kept.
+        let typed = MessageContent::text("[TODO] 明天 · 记得发周报");
+        assert_eq!(user_display_text(&typed), "[TODO] 明天 · 记得发周报");
+    }
 
     #[test]
     fn tool_value_parts_are_parsed_by_kind() {

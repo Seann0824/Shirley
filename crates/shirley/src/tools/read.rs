@@ -130,7 +130,9 @@ pub async fn read(
             absolute.parent(),
             absolute.file_name().and_then(|name| name.to_str()),
         ) else {
-            return Err(ToolError::ArgumentsError(format!("not a file path: {path}")));
+            return Err(ToolError::ArgumentsError(format!(
+                "not a file path: {path}"
+            )));
         };
         if absolute.is_file()
             && let Some(value) = attach_artifact(ctx, &path, absolute)

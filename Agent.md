@@ -183,6 +183,7 @@ UI development: `npm run dev` in `interface/web` (port 5173, `/api` proxied to t
 cargo test --workspace                     # all Rust tests
 cargo clippy --workspace --all-targets     # lint gate
 cargo fmt --all -- --check
+npm test                                   # in interface/web: vitest
 npm run build                              # in interface/web: tsc + vite
 ```
 

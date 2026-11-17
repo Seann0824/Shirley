@@ -401,44 +401,20 @@ impl AgentEventWire {
     /// the backend pump's `bot::session` key).
     pub fn with_route(mut self, bot: &str, session: &str) -> Self {
         let (project_slot, session_slot) = match &mut self {
-            Self::Retrying {
-                bot, session, ..
-            }
-            | Self::ContentDelta {
-                bot, session, ..
-            }
-            | Self::MessageAdded {
-                bot, session, ..
-            }
-            | Self::Compact {
-                bot, session, ..
-            }
-            | Self::ToolStarted {
-                bot, session, ..
-            }
-            | Self::ToolFinished {
-                bot, session, ..
-            }
-            | Self::Usage {
-                bot, session, ..
-            }
-            | Self::ContextUsage {
-                bot, session, ..
-            }
+            Self::Retrying { bot, session, .. }
+            | Self::ContentDelta { bot, session, .. }
+            | Self::MessageAdded { bot, session, .. }
+            | Self::Compact { bot, session, .. }
+            | Self::ToolStarted { bot, session, .. }
+            | Self::ToolFinished { bot, session, .. }
+            | Self::Usage { bot, session, .. }
+            | Self::ContextUsage { bot, session, .. }
             | Self::CompactionStarted { bot, session }
             | Self::CompactionFinished { bot, session }
-            | Self::TodoUpdated {
-                bot, session, ..
-            }
-            | Self::Finished {
-                bot, session, ..
-            }
-            | Self::Notice {
-                bot, session, ..
-            }
-            | Self::Error {
-                bot, session, ..
-            } => (bot, session),
+            | Self::TodoUpdated { bot, session, .. }
+            | Self::Finished { bot, session, .. }
+            | Self::Notice { bot, session, .. }
+            | Self::Error { bot, session, .. } => (bot, session),
         };
         *project_slot = Some(bot.to_owned());
         *session_slot = Some(session.to_owned());

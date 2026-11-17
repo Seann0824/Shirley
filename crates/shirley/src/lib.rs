@@ -54,7 +54,10 @@ pub(crate) mod interface;
 // on purpose -- "how to poke another app's UI" is a product decision, not an SDK fundamental.
 #[cfg_attr(
     not(target_os = "macos"),
-    allow(dead_code, reason = "the only backend is macOS; other platforms compile the stub")
+    allow(
+        dead_code,
+        reason = "the only backend is macOS; other platforms compile the stub"
+    )
 )]
 pub(crate) mod computer;
 pub(crate) mod memory;

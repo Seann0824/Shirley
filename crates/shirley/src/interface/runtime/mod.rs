@@ -23,7 +23,7 @@ use std::sync::Arc;
 use futures::{FutureExt, StreamExt};
 use serde::Serialize;
 use shirley_agent_sdk::{
-    Agent, AgentEvent, MessageContent, ContentPart, ImagePart, ImageSource, Message, RunResult,
+    Agent, AgentEvent, ContentPart, ImagePart, ImageSource, Message, MessageContent, RunResult,
     StopReason, Usage,
 };
 
@@ -129,10 +129,7 @@ impl BotRuntimeManager {
     }
 
     /// Get (lazily creating if needed) the runtime for a given bot id.
-    pub async fn ensure_runtime(
-        &self,
-        bot: &str,
-    ) -> Result<Arc<Mutex<BotRuntime>>, String> {
+    pub async fn ensure_runtime(&self, bot: &str) -> Result<Arc<Mutex<BotRuntime>>, String> {
         if let Some(rt) = self.runtimes.lock().await.get(bot).cloned() {
             return Ok(rt);
         }
@@ -189,11 +186,7 @@ impl BotRuntimeManager {
             .ok_or_else(|| "no active session".to_owned())
     }
 
-    pub async fn new_session(
-        &self,
-        bot: &str,
-        title: Option<String>,
-    ) -> Result<String, String> {
+    pub async fn new_session(&self, bot: &str, title: Option<String>) -> Result<String, String> {
         let runtime = self.ensure_runtime(bot).await?;
         let mut guard = runtime.lock().await;
         guard.sessions.create_new(title.as_deref())
@@ -205,12 +198,7 @@ impl BotRuntimeManager {
         guard.sessions.switch_to(name)
     }
 
-    pub async fn rename_session(
-        &self,
-        bot: &str,
-        name: &str,
-        title: &str,
-    ) -> Result<(), String> {
+    pub async fn rename_session(&self, bot: &str, name: &str, title: &str) -> Result<(), String> {
         let runtime = self.ensure_runtime(bot).await?;
         let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
         let name = name.to_owned();
@@ -341,7 +329,7 @@ impl BotRuntimeManager {
                 .model_availability()?;
             let agent = guard
                 .sessions
-                .begin_turn(&session_name, text.clone())
+                .begin_turn(&session_name, text.clone(), attached_parts(&user_content))
                 .ok_or_else(|| "agent is currently running".to_owned())?;
             let memory = guard
                 .sessions
@@ -836,12 +824,7 @@ impl BotRuntimeManager {
             .collect())
     }
 
-    pub async fn activate_skill(
-        &self,
-        bot: &str,
-        session: &str,
-        name: &str,
-    ) -> Result<(), String> {
+    pub async fn activate_skill(&self, bot: &str, session: &str, name: &str) -> Result<(), String> {
         let runtime = self.ensure_runtime(bot).await?;
         let guard = runtime.lock().await;
         let session_ref = guard
@@ -914,12 +897,7 @@ impl BotRuntimeManager {
         Ok(history_from_messages(&manager.load_transcript(id)))
     }
 
-    pub async fn cancel_subagent(
-        &self,
-        bot: &str,
-        session: &str,
-        id: &str,
-    ) -> Result<(), String> {
+    pub async fn cancel_subagent(&self, bot: &str, session: &str, id: &str) -> Result<(), String> {
         let manager = self.subagent_manager(bot, session).await?;
         let _ = manager.cancel(id);
         Ok(())
@@ -955,6 +933,14 @@ pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<BotRuntime, St
     Ok(BotRuntime { factory, sessions })
 }
 
+/// The non-text parts of a user turn (attached pictures), for the session's view.
+fn attached_parts(content: &MessageContent) -> Vec<crate::interface::view::RenderPart> {
+    crate::interface::view::parts_from_message_content(content)
+        .into_iter()
+        .filter(|part| !matches!(part, crate::interface::view::RenderPart::Text { .. }))
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Sink helpers
 // ---------------------------------------------------------------------------
@@ -965,12 +951,7 @@ fn sink_event(sink: &EventSink, bot: &str, session: &str, event: AgentEvent) {
     }
 }
 
-fn emit_status(
-    sink: &StatusSink,
-    bot: &str,
-    session: &str,
-    keeper: &crate::status::StateKeeper,
-) {
+fn emit_status(sink: &StatusSink, bot: &str, session: &str, keeper: &crate::status::StateKeeper) {
     sink(StateSnapshotWire::from_snapshot(&keeper.snapshot()).with_route(bot, session));
 }
 
@@ -1051,7 +1032,6 @@ async fn auto_title_session(
 // ---------------------------------------------------------------------------
 // Wire DTOs (aligned with `web/src/lib/bridge.ts`)
 // ---------------------------------------------------------------------------
-
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SessionEntryWire {

@@ -1,11 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import {
+  briefWithAttachments,
   filesToAttachments,
   formatSize,
   kindOf,
   pastedFiles,
   toAttachments,
+  uploadAll,
   userMessageParts,
 } from "./attachments";
 
@@ -115,21 +117,15 @@ describe("kind and size", () => {
 
 describe("userMessageParts", () => {
   it("renders a pasted image in the sent bubble from its local preview", () => {
-    const [image] = pastedFiles(
-      {
-        items: [{ kind: "file", type: "image/png", getAsFile: () => new File(["x"], "", { type: "image/png" }) }],
-        files: [],
-      },
-      new Date("2026-05-01T09:07:00"),
-    );
+    const [image] = filesToAttachments(pastedFiles(fakeClipboard([file("", "image/png", 1)]), PASTED_AT));
     const parts = userMessageParts([image]);
     expect(parts).toHaveLength(1);
     expect(parts[0]).toMatchObject({ kind: "image", source: { kind: "url" }, alt: image.name });
   });
 
   it("labels a non-image attachment as a file with its size", () => {
-    const [file] = toAttachments([new File(["abc"], "report.pdf", { type: "application/pdf" })]);
-    expect(userMessageParts([file])[0]).toMatchObject({
+    const [pdf] = toAttachments([file("report.pdf", "application/pdf", 3)] as unknown as FileList);
+    expect(userMessageParts([pdf])[0]).toMatchObject({
       kind: "file",
       name: "report.pdf",
       bytes: 3,
@@ -139,5 +135,31 @@ describe("userMessageParts", () => {
 
   it("has nothing to render when nothing was attached", () => {
     expect(userMessageParts([])).toEqual([]);
+  });
+});
+
+describe("briefWithAttachments", () => {
+  const entry = { id: "sha256:abc", name: "粘贴图片-093015-1.png", mime: "image/png", bytes: 2048, addedMs: 0 };
+
+  it("leaves a brief without attachments untouched", () => {
+    expect(briefWithAttachments("整理周报", [])).toBe("整理周报");
+  });
+
+  it("appends one reference line per attachment, in the form a chat turn uses", () => {
+    expect(briefWithAttachments("看看这张图", [entry])).toBe(
+      "看看这张图\n\n[粘贴图片-093015-1.png · image/png · 2 KB · id=sha256:abc]",
+    );
+  });
+});
+
+describe("uploadAll", () => {
+  it("keeps going past a failed upload and reports it by name", async () => {
+    const [good, bad] = filesToAttachments([file("a.png", "image/png"), file("b.png", "image/png")]);
+    const { entries, failed } = await uploadAll([good, bad], async (picked) => {
+      if (picked.name === "b.png") throw new Error("too large");
+      return { id: "id-a", name: picked.name, mime: picked.type, bytes: picked.size, addedMs: 0 };
+    });
+    expect(entries.map((item) => item.id)).toEqual(["id-a"]);
+    expect(failed).toEqual(["b.png"]);
   });
 });

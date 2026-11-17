@@ -1,11 +1,14 @@
 import { useEffect, useState } from "react";
 
+import { api } from "../api/bridge";
 import type { Bot, PoolTask } from "../api/types";
 import { BotAvatar, botTone } from "../components/BotAvatar";
 import { SwipeBotRow } from "../components/BotRow";
 import { ComposerDock, type Attachment } from "../components/Composer";
+import { briefWithAttachments, uploadAll } from "../components/attachments";
 import { Icon, type IconName } from "../components/Icon";
 import type { useBots } from "../state/useBots";
+import { useWide } from "../state/useWide";
 
 type Tab = "home" | "tasks" | "work" | "memory" | "chat" | "new";
 
@@ -99,6 +102,9 @@ export function Home({
 }) {
   const visible = bots.visible;
   const [target, setTarget] = useState<string | null>(null);
+  // On a wide screen the conversation beside the list takes page-level pastes.
+  const wide = useWide();
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [dispatched, setDispatched] = useState<{ bot: string; nonce: number } | null>(null);
   // Default recipient: the open conversation's bot, else the generalist, else the first one.
   const targetBot =
@@ -120,9 +126,12 @@ export function Home({
 
   const dispatch = async (text: string, attachments: Attachment[]) => {
     if (!targetBot) return;
-    const brief = text || (attachments.length ? "处理这些附件" : "");
+    const bot = targetBot.name;
+    const { entries, failed } = await uploadAll(attachments, (file) => api.upload(bot, file));
+    setUploadError(failed.length ? `附件上传失败：${failed.join("、")}` : null);
+    const brief = text || (entries.length ? "处理这些附件" : "");
     if (!brief) return;
-    await onDispatch(targetBot.name, brief);
+    await onDispatch(bot, briefWithAttachments(brief, entries));
     setDispatched({ bot: targetBot.name, nonce: Date.now() });
   };
 
@@ -131,6 +140,7 @@ export function Home({
       <HomeHeader onNavigate={onNavigate} pending={pendingReview} />
 
       {bots.error && <p className="error-note">无法连接服务器：{bots.error}</p>}
+      {uploadError && <p className="error-note">{uploadError}</p>}
 
       {dispatched && targetBot && (
         <section className="route-result" role="status" aria-label={`任务已发送给 ${targetBot.display_name}`}>
@@ -187,6 +197,7 @@ export function Home({
       </section>
 
       <ComposerDock
+        claimsPagePaste={!wide}
         above={
           visible.length > 1 ? (
             <div className="bot-chips" role="radiogroup" aria-label="派发给">

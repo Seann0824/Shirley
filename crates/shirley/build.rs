@@ -40,7 +40,14 @@ fn run(program: &str, args: &[&str], dir: &Path) -> bool {
                 args.join(" ")
             );
             let text = String::from_utf8_lossy(&output.stderr);
-            for line in text.lines().rev().take(8).collect::<Vec<_>>().into_iter().rev() {
+            for line in text
+                .lines()
+                .rev()
+                .take(8)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+            {
                 println!("cargo:warning=  {line}");
             }
             false

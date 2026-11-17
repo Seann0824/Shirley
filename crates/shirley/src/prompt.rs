@@ -38,8 +38,7 @@ const EXTRA_ROOTS_TEMPLATE: &str = include_str!("../prompts/extra_roots.md");
 /// Computer-use guidance. Only injected where the `computer_*` tools can actually work.
 const COMPUTER_TEMPLATE: &str = include_str!("../prompts/computer.md");
 /// Identity block used when a bot declares no `system_prompt_extra` of its own.
-const DEFAULT_IDENTITY: &str =
-    "You are Shirley, a personal agent running on the user's computer.";
+const DEFAULT_IDENTITY: &str = "You are Shirley, a personal agent running on the user's computer.";
 
 fn read_guide(root: &Path) -> Option<String> {
     let path = root.join(GUIDE_FILE_NAME);

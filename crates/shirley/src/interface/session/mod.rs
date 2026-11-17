@@ -24,7 +24,7 @@ use uuid::Uuid;
 use crate::bootstrap::AgentFactory;
 use crate::interface::view::{
     ChatMessage, Item, RenderPart, Role, ToolCallView, ToolGroup, parts_from_message_content,
-    parts_from_tool_value,
+    parts_from_tool_value, user_display_text,
 };
 use crate::memory::MemoryRuntime;
 use crate::session::{SessionCatalog, SessionStore};
@@ -471,7 +471,7 @@ impl Session {
             match message {
                 Message::User { content } => items.push(Item::Message(ChatMessage {
                     role: Role::User,
-                    content: content.as_text(),
+                    content: user_display_text(content),
                     parts: parts_from_message_content(content),
                 })),
                 Message::Assistant {
@@ -577,7 +577,7 @@ impl Session {
             Message::User { content } => {
                 // Project images too: `as_text()` alone is what silently dropped them on restore.
                 let parts = parts_from_message_content(&content);
-                self.push_message_with_parts(Role::User, content.as_text(), parts);
+                self.push_message_with_parts(Role::User, user_display_text(&content), parts);
             }
             Message::Assistant {
                 content,
@@ -596,9 +596,7 @@ impl Session {
                     self.start_tool_calls(calls);
                 }
             }
-            Message::ContextSummary { content } => self.items.push(Item::Compact {
-                content,
-            }),
+            Message::ContextSummary { content } => self.items.push(Item::Compact { content }),
             // Restore path: the log has the flattened output but not the status / parts. Attach the
             // text so a rebuilt view is not missing tool results; the live `ToolFinished` arm above
             // fills the rest (it runs right after this message in the same turn).
@@ -846,8 +844,7 @@ impl SessionManager {
         subagents: Option<Arc<SubagentManager>>,
     ) -> Self {
         let mut sessions = HashMap::new();
-        let request_session_id =
-            proxy_session_id(&crate::storage::global_root(), name.as_deref());
+        let request_session_id = proxy_session_id(&crate::storage::global_root(), name.as_deref());
         {
             let dir = catalog.storage_dir();
             if let (Some(manager), Some(name), Some(dir)) =
@@ -944,9 +941,7 @@ impl SessionManager {
         let request_session_id = self
             .factory
             .as_ref()
-            .and_then(|_factory| {
-                proxy_session_id(&crate::storage::global_root(), name.as_deref())
-            });
+            .and_then(|_factory| proxy_session_id(&crate::storage::global_root(), name.as_deref()));
         self.attach_subagent_store(subagents.as_ref(), name.as_deref());
         self.sessions.insert(
             id,
@@ -1204,13 +1199,20 @@ impl SessionManager {
     /// when switching away and back the snapshot rebuild lost the user message (this function's regression test covers this).
     ///
     /// Returns `None` if the session does not exist or is running.
-    pub fn begin_turn(&mut self, name: &str, user_message: String) -> Option<Agent> {
+    /// `parts` are the message's non-text parts (attached images), so a snapshot taken while the
+    /// turn runs shows them -- the `MessageAdded(User)` event that would carry them is ignored.
+    pub fn begin_turn(
+        &mut self,
+        name: &str,
+        user_message: String,
+        parts: Vec<RenderPart>,
+    ) -> Option<Agent> {
         let session = self.session_mut(name)?;
         // Sync the current model name into the mirror first, then `take` the `Agent` away -- the mirror can still answer this session's model during the run.
         session.remember_model();
         let agent = session.agent.take()?;
         session.status.begin_turn();
-        session.push_message(Role::User, user_message);
+        session.push_message_with_parts(Role::User, user_message, parts);
         Some(agent)
     }
 
@@ -1537,7 +1539,7 @@ mod tests {
     #[test]
     fn begin_turn_records_user_message_into_snapshot() {
         let mut manager = manager();
-        let agent = manager.begin_turn("s", "hello".into());
+        let agent = manager.begin_turn("s", "hello".into(), Vec::new());
         assert!(
             agent.is_some(),
             "the first turn should be able to take the Agent"
@@ -1562,7 +1564,11 @@ mod tests {
         }
 
         // The same session must not start again while running (do not concurrently drive the same Agent).
-        assert!(manager.begin_turn("s", "again".into()).is_none());
+        assert!(
+            manager
+                .begin_turn("s", "again".into(), Vec::new())
+                .is_none()
+        );
     }
 
     /// Regression: while a session is running (its `Agent` has been `take`n away) its model name can still be queried.
@@ -1581,7 +1587,7 @@ mod tests {
             "reads the live Agent when idle"
         );
 
-        let _agent = manager.begin_turn("s", "hi".into()).unwrap();
+        let _agent = manager.begin_turn("s", "hi".into(), Vec::new()).unwrap();
         assert!(manager.is_running("s"));
         assert_eq!(
             manager.active_model_name(),

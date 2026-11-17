@@ -4,6 +4,7 @@
 import type {
   AgentEvent,
   Bot,
+  LibraryEntry,
   MemoryEntry,
   PoolTask,
   SessionSnapshot,
@@ -103,8 +104,8 @@ export const api = {
   /** A URL the browser may load for an artifact id (minted per request). */
   assetUrl: (bot: string, id: string) => cmd<string>("agent_asset_url", { bot, id }),
 
-  /** Put a file into the media library; returns the library id to reference in a message. */
-  async upload(bot: string, file: File): Promise<string> {
+  /** Put a file into the media library; the entry's id is what a message references. */
+  async upload(bot: string, file: File): Promise<LibraryEntry> {
     const query = new URLSearchParams({
       bot,
       name: file.name,
@@ -114,7 +115,6 @@ export const api = {
     if (token) headers.Authorization = `Bearer ${token}`;
     const response = await fetch(`/api/upload?${query}`, { method: "POST", headers, body: file });
     if (!response.ok) throw new Error(await response.text().catch(() => response.statusText));
-    const entry = (await response.json()) as { id: string };
-    return entry.id;
+    return (await response.json()) as LibraryEntry;
   },
 };

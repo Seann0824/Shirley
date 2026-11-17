@@ -3,8 +3,8 @@ import { useEffect, useRef, useState } from "react";
 import { api } from "../api/bridge";
 import type { Bot, RenderPart, ToolCallWire } from "../api/types";
 import { BotAvatar, botTone } from "../components/BotAvatar";
-import { ComposerDock, readAsDataUrl, type Attachment } from "../components/Composer";
-import { userMessageParts } from "../components/attachments";
+import { ComposerDock, type Attachment } from "../components/Composer";
+import { uploadAll, userMessageParts } from "../components/attachments";
 import { Icon } from "../components/Icon";
 import { MarkdownBlock, splitBlocks } from "../components/Markdown";
 import { showsToolActivity, toolActivity } from "../components/toolActivity";
@@ -192,19 +192,20 @@ export function Chat({
   }, [conversation.items]);
 
   const send = async (text: string, attachments: Attachment[]) => {
-    const refs: string[] = [];
-    for (const attachment of attachments) {
-      try {
-        refs.push(
-          attachment.kind === "image"
-            ? await readAsDataUrl(attachment.file)
-            : await api.upload(bot.name, attachment.file),
-        );
-      } catch {
-        // A failed attachment is reported by the server-side turn; the text still goes.
-      }
+    // Pictures go through the same upload as files: a data URL in the JSON body is a third larger
+    // and hits the command body limit on a big screenshot.
+    const { entries, failed } = await uploadAll(attachments, (file) => api.upload(bot.name, file));
+    const sent = attachments.filter((attachment) => !failed.includes(attachment.name));
+    if (!text.trim() && !entries.length) {
+      conversation.report(`附件上传失败：${failed.join("、")}`);
+      return;
     }
-    await conversation.send(text, refs, userMessageParts(attachments));
+    await conversation.send(
+      text,
+      entries.map((entry) => entry.id),
+      userMessageParts(sent),
+    );
+    if (failed.length) conversation.report(`没有发出去的附件：${failed.join("、")}`);
   };
 
   const { items, running } = conversation;
@@ -278,6 +279,7 @@ export function Chat({
         onListeningChange={(on, transcript) => setListening({ on, transcript })}
         busy={running}
         onStop={() => void conversation.cancel()}
+        claimsPagePaste
       />
     </section>
   );

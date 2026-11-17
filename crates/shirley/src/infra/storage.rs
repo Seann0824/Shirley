@@ -50,7 +50,6 @@ impl StoragePaths {
             vec![global_mem, state_mem]
         }
     }
-
 }
 
 #[cfg(test)]

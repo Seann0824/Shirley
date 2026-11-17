@@ -46,6 +46,15 @@ export interface PoolTask {
   note?: string | null;
 }
 
+/** A media-library entry (`artifact::LibraryEntry`). */
+export interface LibraryEntry {
+  id: string;
+  name: string;
+  mime: string;
+  bytes: number;
+  addedMs: number;
+}
+
 export interface MemoryEntry {
   id: string;
   kind: string;

@@ -114,10 +114,8 @@ mod tests {
     use super::*;
 
     fn tmp(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!(
-            "shirley_create_bot_{tag}_{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("shirley_create_bot_{tag}_{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         dir
     }

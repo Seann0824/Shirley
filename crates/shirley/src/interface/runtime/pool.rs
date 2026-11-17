@@ -217,7 +217,13 @@ impl BotRuntimeManager {
             return Ok(());
         }
 
-        spawn_watch(Arc::clone(self), bot, task.id.clone(), window_start, receiver);
+        spawn_watch(
+            Arc::clone(self),
+            bot,
+            task.id.clone(),
+            window_start,
+            receiver,
+        );
         Ok(())
     }
 }

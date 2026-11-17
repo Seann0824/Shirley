@@ -37,7 +37,9 @@ describe("reduce", () => {
     items = reduce(items, { type: "tool_started", call_id: "a", name: "bash", arguments: "{}" });
     items = reduce(items, { type: "tool_started", call_id: "b", name: "grep", arguments: "{}" });
     expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({ kind: "tools", settled: undefined });
+    expect(items[0]).toMatchObject({ kind: "tools" });
+    // A live group carries no `settled` flag: its calls animate until they finish.
+    expect(items[0]).not.toHaveProperty("settled");
 
     items = reduce(items, {
       type: "tool_finished",

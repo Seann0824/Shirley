@@ -103,5 +103,10 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
 
   const cancel = useCallback(() => api.cancel(bot).catch(() => undefined), [bot]);
 
-  return { items, running, loaded, error, send, cancel };
+  /** Show a client-side problem (e.g. a failed upload) inline, like a server error. */
+  const report = useCallback((message: string) => {
+    setItems((current) => [...current, { kind: "message", role: "error", content: message, parts: [] }]);
+  }, []);
+
+  return { items, running, loaded, error, send, cancel, report };
 }

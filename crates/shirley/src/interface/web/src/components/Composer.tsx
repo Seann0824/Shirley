@@ -97,12 +97,25 @@ type Recognizer = {
   abort(): void;
 };
 
-function recognizer(): Recognizer | null {
+// The language to recognise. Deliberately not `navigator.language`: an English system with a
+// Chinese-speaking user is common, and the recogniser then transcribes Chinese as English.
+const VOICE_LANGS = [
+  { code: "zh-CN", label: "中文" },
+  { code: "en-US", label: "English" },
+] as const;
+const VOICE_LANG_KEY = "shirley.voiceLang";
+
+function loadVoiceLang(): string {
+  const saved = localStorage.getItem(VOICE_LANG_KEY);
+  return VOICE_LANGS.some((lang) => lang.code === saved) ? (saved as string) : "zh-CN";
+}
+
+function recognizer(lang: string): Recognizer | null {
   const ctor = (window as unknown as { SpeechRecognition?: new () => Recognizer; webkitSpeechRecognition?: new () => Recognizer });
   const Ctor = ctor.SpeechRecognition ?? ctor.webkitSpeechRecognition;
   if (!Ctor) return null;
   const instance = new Ctor();
-  instance.lang = navigator.language || "zh-CN";
+  instance.lang = lang;
   instance.continuous = true;
   instance.interimResults = true;
   return instance;
@@ -147,6 +160,7 @@ export function ComposerDock({
   onStop,
   placeholder = "输入消息",
   above,
+  claimsPagePaste = false,
 }: {
   onSend: (text: string, attachments: Attachment[]) => void;
   onListeningChange?: (listening: boolean, transcript: string) => void;
@@ -155,6 +169,11 @@ export function ComposerDock({
   placeholder?: string;
   /** Rendered inside the dock, above the controls (e.g. the "send to" picker). */
   above?: ReactNode;
+  /**
+   * Take pastes that land on the page rather than in a text field (in hold-to-talk mode nothing
+   * in the dock has focus). Only one dock on screen should claim them.
+   */
+  claimsPagePaste?: boolean;
 }) {
   // A keyboard is the natural input on a wide screen; hold-to-talk is the phone default.
   const prefersText = window.matchMedia("(min-width: 900px)").matches;
@@ -164,6 +183,7 @@ export function ComposerDock({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [showSheet, setShowSheet] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
+  const [voiceLang, setVoiceLang] = useState(loadVoiceLang);
   const speech = useRef<Recognizer | null>(null);
   const transcript = useRef("");
 
@@ -180,17 +200,41 @@ export function ComposerDock({
 
   // Screenshots arrive through the clipboard, not the file picker: turn them into the same
   // attachments the tray already renders, and let plain text pastes through untouched.
-  const onPaste = (event: ClipboardEvent<HTMLDivElement>) => {
+  const takePaste = (event: { clipboardData: DataTransfer | null; preventDefault(): void }) => {
     const files = pastedFiles(event.clipboardData);
-    if (!files.length) return;
+    if (!files.length) return false;
     event.preventDefault();
     setAttachments((items) => [...items, ...filesToAttachments(files)]);
     setVoiceError(null);
+    return true;
   };
+  const onPaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    takePaste(event);
+  };
+  const takePasteRef = useRef(takePaste);
+  takePasteRef.current = takePaste;
+
+  useEffect(() => {
+    if (!claimsPagePaste) return;
+    const onPagePaste = (event: globalThis.ClipboardEvent) => {
+      // Already taken by a dock, or meant for some other text field on the page.
+      if (event.defaultPrevented) return;
+      const focused = document.activeElement;
+      if (
+        focused instanceof HTMLElement &&
+        (focused.isContentEditable || focused.tagName === "INPUT" || focused.tagName === "TEXTAREA")
+      ) {
+        return;
+      }
+      if (takePasteRef.current(event)) setTextMode(true);
+    };
+    document.addEventListener("paste", onPagePaste);
+    return () => document.removeEventListener("paste", onPagePaste);
+  }, [claimsPagePaste]);
 
   const startListening = () => {
     if (speech.current) return;
-    const instance = recognizer();
+    const instance = recognizer(voiceLang);
     if (!instance) {
       setVoiceError("此浏览器不支持语音识别（可用 Chrome、Edge 或 Safari），请用文字输入");
       setTextMode(true);
@@ -261,6 +305,24 @@ export function ComposerDock({
           />
         )}
         {voiceError && <p className="composer-hint">{voiceError}</p>}
+        {!textMode && !busy && (
+          <div className="voice-lang" role="radiogroup" aria-label="语音识别语言">
+            {VOICE_LANGS.map((lang) => (
+              <button
+                key={lang.code}
+                role="radio"
+                aria-checked={voiceLang === lang.code}
+                className={voiceLang === lang.code ? "active" : ""}
+                onClick={() => {
+                  setVoiceLang(lang.code);
+                  localStorage.setItem(VOICE_LANG_KEY, lang.code);
+                }}
+              >
+                {lang.label}
+              </button>
+            ))}
+          </div>
+        )}
         <div className="composer-controls">
           {busy && onStop ? (
             <button className="composer-stop" onClick={onStop}>
@@ -334,14 +396,4 @@ export function ComposerDock({
       )}
     </>
   );
-}
-
-/** Read an image file as a `data:` URL (what the server's media library ingests). */
-export function readAsDataUrl(file: File): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => resolve(String(reader.result));
-    reader.onerror = () => reject(reader.error);
-    reader.readAsDataURL(file);
-  });
 }
