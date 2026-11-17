@@ -184,6 +184,7 @@ export function ComposerDock({
   const [showSheet, setShowSheet] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
   const [voiceLang, setVoiceLang] = useState(loadVoiceLang);
+  const [liveText, setLiveText] = useState("");
   const speech = useRef<Recognizer | null>(null);
   const transcript = useRef("");
 
@@ -248,6 +249,7 @@ export function ComposerDock({
         text += event.results[index][0]?.transcript ?? "";
       }
       transcript.current = text;
+      setLiveText(text);
       onListeningChange?.(true, text);
     };
     instance.onerror = (event) => {
@@ -258,11 +260,20 @@ export function ComposerDock({
       if (problem.fatal) setTextMode(true);
     };
     instance.onend = () => {
+      // The button and the window both see the release, so `stop` can end a session twice.
+      if (speech.current !== instance) return;
       speech.current = null;
       setListening(false);
       onListeningChange?.(false, transcript.current);
-      if (transcript.current.trim()) send(transcript.current);
-      else if (!failed) setVoiceError("没有识别到内容。按住按钮，说完再松开");
+      setLiveText("");
+      // Never send what the recogniser heard unseen: it goes into the text field to check first.
+      const heard = transcript.current.trim();
+      if (heard) {
+        setValue((current) => (current.trim() ? `${current.trim()} ${heard}` : heard));
+        setTextMode(true);
+      } else if (!failed) {
+        setVoiceError("没有识别到内容。按住按钮，说完再松开");
+      }
     };
     speech.current = instance;
     setVoiceError(null);
@@ -304,8 +315,13 @@ export function ComposerDock({
             onRemove={(id) => setAttachments((items) => items.filter((item) => item.id !== id))}
           />
         )}
+        {listening && (
+          <p className={`voice-live ${liveText ? "" : "waiting"}`} aria-live="polite">
+            {liveText || "正在听…"}
+          </p>
+        )}
         {voiceError && <p className="composer-hint">{voiceError}</p>}
-        {!textMode && !busy && (
+        {!textMode && !busy && !listening && (
           <div className="voice-lang" role="radiogroup" aria-label="语音识别语言">
             {VOICE_LANGS.map((lang) => (
               <button
@@ -379,7 +395,7 @@ export function ComposerDock({
                   <i />
                   <i />
                 </span>
-                <strong>{listening ? "松开发送" : "按住说话"}</strong>
+                <strong>{listening ? "松开结束" : "按住说话"}</strong>
               </button>
               <button className="composer-side" onClick={() => setTextMode(true)} aria-label="文字输入">
                 <Icon name="keyboard" size={20} />

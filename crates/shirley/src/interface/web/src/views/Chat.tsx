@@ -83,17 +83,25 @@ function Item({ bot, item }: { bot: Bot; item: ConversationItem }) {
   switch (item.kind) {
     case "message":
       if (item.role === "user") {
+        // Every picture or file is its own message; the text is another.
+        const media = item.parts.filter((part) => part.kind !== "text");
         return (
-          <div className="message-row user-message">
-            <div className="message-bubble multimodal-message">
-              {item.parts.some((part) => part.kind === "image") && (
-                <div className="sent-attachments">
-                  <Parts bot={bot.name} parts={item.parts.filter((part) => part.kind === "image")} />
+          <>
+            {media.map((part, index) => (
+              <div className="message-row user-message" key={`m${index}`}>
+                <div className={`message-bubble media-bubble ${part.kind}`}>
+                  <Parts bot={bot.name} parts={[part]} />
                 </div>
-              )}
-              {item.content && <p>{item.content}</p>}
-            </div>
-          </div>
+              </div>
+            ))}
+            {item.content && (
+              <div className="message-row user-message">
+                <div className="message-bubble">
+                  <p>{item.content}</p>
+                </div>
+              </div>
+            )}
+          </>
         );
       }
       if (item.role === "notice" || item.role === "error") {
@@ -131,12 +139,21 @@ function Item({ bot, item }: { bot: Bot; item: ConversationItem }) {
                 className={`message-bubble ${item.streaming && index === blocks.length - 1 ? "streaming" : ""}`}
               >
                 <MarkdownBlock text={block} />
-                {index === blocks.length - 1 && (
-                  <Parts bot={bot.name} parts={item.parts.filter((part) => part.kind !== "text")} />
-                )}
               </div>
             </div>
           ))}
+          {item.parts
+            .filter((part) => part.kind !== "text")
+            .map((part, index) => (
+              <div className="message-row bot-message continued" key={`m${index}`}>
+                <div className={`message-avatar ${botTone(bot.name)}`}>
+                  <BotAvatar name={bot.name} size={27} />
+                </div>
+                <div className={`message-bubble media-bubble ${part.kind}`}>
+                  <Parts bot={bot.name} parts={[part]} />
+                </div>
+              </div>
+            ))}
         </>
       );
     case "tools": {
@@ -176,7 +193,6 @@ export function Chat({
   onTurnFinished?: () => void;
 }) {
   const conversation = useConversation(bot.name, onTurnFinished);
-  const [listening, setListening] = useState<{ on: boolean; transcript: string }>({ on: false, transcript: "" });
   const scrollRef = useRef<HTMLDivElement>(null);
   const seeded = useRef(false);
 
@@ -213,7 +229,7 @@ export function Chat({
   const waitingForFirstToken = running && !(last?.kind === "message" && last.streaming) && last?.kind !== "tools";
 
   return (
-    <section className={`chat-view ${listening.on ? "is-listening" : ""}`}>
+    <section className="chat-view">
       <header className="chat-header">
         <button className="back-button" onClick={onBack} aria-label="返回">
           <Icon name="chevron" size={20} />
@@ -233,16 +249,7 @@ export function Chat({
       </header>
 
       <div className="conversation" ref={scrollRef}>
-        {listening.on ? (
-          <div className="listening-state">
-            <div className="voice-wave">
-              {[16, 29, 45, 26, 54, 38, 62, 34, 48, 22, 39, 17].map((height, index) => (
-                <i key={index} style={{ height }} />
-              ))}
-            </div>
-            <strong>{listening.transcript || "松开发送"}</strong>
-          </div>
-        ) : (
+        {
           <div className="message-thread">
             {conversation.error && <p className="error-note">{conversation.error}</p>}
             {conversation.loaded && items.length === 0 && (
@@ -271,12 +278,11 @@ export function Chat({
               </div>
             )}
           </div>
-        )}
+        }
       </div>
 
       <ComposerDock
         onSend={(text, attachments) => void send(text, attachments)}
-        onListeningChange={(on, transcript) => setListening({ on, transcript })}
         busy={running}
         onStop={() => void conversation.cancel()}
         claimsPagePaste

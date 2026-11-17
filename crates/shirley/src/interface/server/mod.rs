@@ -670,12 +670,16 @@ async fn dispatch(
         // Every mutation answers with the whole list, so the caller re-renders from one snapshot
         // instead of reconciling a partial update against concurrent background progress.
         "agent_pool_list" => ok_json(manager.pool_list().await?),
+        // Without `bot` the platform chooses one (`runtime::route`); the home screen never asks.
         "agent_pool_enqueue" => {
-            let bot = args.bot()?;
             let brief = args
                 .brief
                 .or(args.text)
                 .ok_or_else(|| ApiError::bad("missing brief"))?;
+            let bot = match args.bot {
+                Some(bot) => bot,
+                None => manager.route(&brief).await,
+            };
             ok_json(manager.pool_enqueue(&bot, &brief).await?)
         }
         "agent_pool_accept" => {

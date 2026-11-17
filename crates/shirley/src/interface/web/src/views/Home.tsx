@@ -96,22 +96,17 @@ export function Home({
   tasks: PoolTask[];
   onNavigate: (view: Tab) => void;
   onOpenBot: (bot: string) => void;
-  onDispatch: (bot: string, brief: string) => Promise<void>;
+  /** Queue a task; the platform picks the bot. Resolves to the bot it chose. */
+  onDispatch: (brief: string) => Promise<string | null>;
   /** The bot whose conversation is open beside the list (two-pane layout only). */
   selected?: string;
 }) {
   const visible = bots.visible;
-  const [target, setTarget] = useState<string | null>(null);
   // On a wide screen the conversation beside the list takes page-level pastes.
   const wide = useWide();
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [dispatched, setDispatched] = useState<{ bot: string; nonce: number } | null>(null);
-  // Default recipient: the open conversation's bot, else the generalist, else the first one.
-  const targetBot =
-    visible.find((bot) => bot.name === target) ??
-    visible.find((bot) => bot.name === selected) ??
-    visible.find((bot) => bot.name === "nono") ??
-    visible[0];
+  const dispatchedBot = visible.find((bot) => bot.name === dispatched?.bot);
 
   useEffect(() => {
     if (!dispatched) return;
@@ -125,14 +120,15 @@ export function Home({
   const pendingReview = tasks.some((task) => task.status === "in_review" || task.status === "blocked");
 
   const dispatch = async (text: string, attachments: Attachment[]) => {
-    if (!targetBot) return;
-    const bot = targetBot.name;
-    const { entries, failed } = await uploadAll(attachments, (file) => api.upload(bot, file));
+    // The media library is shared by every bot, so any runtime can take the upload.
+    const uploader = visible[0]?.name;
+    if (!uploader) return;
+    const { entries, failed } = await uploadAll(attachments, (file) => api.upload(uploader, file));
     setUploadError(failed.length ? `附件上传失败：${failed.join("、")}` : null);
     const brief = text || (entries.length ? "处理这些附件" : "");
     if (!brief) return;
-    await onDispatch(bot, briefWithAttachments(brief, entries));
-    setDispatched({ bot: targetBot.name, nonce: Date.now() });
+    const bot = await onDispatch(briefWithAttachments(brief, entries));
+    if (bot) setDispatched({ bot, nonce: Date.now() });
   };
 
   return (
@@ -142,8 +138,8 @@ export function Home({
       {bots.error && <p className="error-note">无法连接服务器：{bots.error}</p>}
       {uploadError && <p className="error-note">{uploadError}</p>}
 
-      {dispatched && targetBot && (
-        <section className="route-result" role="status" aria-label={`任务已发送给 ${targetBot.display_name}`}>
+      {dispatched && dispatchedBot && (
+        <section className="route-result" role="status" aria-label={`任务已交给 ${dispatchedBot.display_name}`}>
           <div className="route-symbol">
             <span>
               <Icon name="chat" size={14} />
@@ -156,7 +152,7 @@ export function Home({
             <div className={`assigned-avatar ${botTone(dispatched.bot)}`}>
               <BotAvatar name={dispatched.bot} size={18} />
             </div>
-            <strong>{visible.find((bot) => bot.name === dispatched.bot)?.display_name}</strong>
+            <strong>{dispatchedBot.display_name}</strong>
           </div>
         </section>
       )}
@@ -198,26 +194,8 @@ export function Home({
 
       <ComposerDock
         claimsPagePaste={!wide}
-        above={
-          visible.length > 1 ? (
-            <div className="bot-chips" role="radiogroup" aria-label="派发给">
-              <span>交给</span>
-              {visible.map((bot) => (
-                <button
-                  key={bot.name}
-                  role="radio"
-                  aria-checked={targetBot?.name === bot.name}
-                  className={targetBot?.name === bot.name ? "active" : ""}
-                  onClick={() => setTarget(bot.name)}
-                >
-                  {bot.display_name}
-                </button>
-              ))}
-            </div>
-          ) : undefined
-        }
         onSend={(text, attachments) => void dispatch(text, attachments)}
-        placeholder={targetBot ? `交给 ${targetBot.display_name} 去做…` : "输入任务"}
+        placeholder="交代一件事…"
       />
     </>
   );

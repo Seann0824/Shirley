@@ -129,7 +129,7 @@ Always registered regardless of the spec: `todo`, `recall`, `create_bot`, `activ
 | `agent_list_bots`, `agent_create_bot` | The bot catalog |
 | `agent_subscribe {bot}` | Snapshot of the conversation + the event cursor (`sequence`) |
 | `agent_send {bot, text, images?}`, `agent_cancel {bot}` | Drive a turn |
-| `agent_pool_list`, `agent_pool_enqueue {bot, brief}`, `agent_pool_accept/reject/retry/cancel/remove {id}` | The task pool |
+| `agent_pool_list`, `agent_pool_enqueue {brief, bot?}` (no `bot`: the platform routes), `agent_pool_accept/reject/retry/cancel/remove {id}` | The task pool |
 | `agent_memory_list {bot}` | Entries the bot sees, tagged `shared` / `bot` |
 | `agent_asset_url {bot, id}`, `POST /api/upload` | Media library out / in |
 | `agent_model_providers`, `agent_list_models`, `agent_set_model` | Model configuration (no UI yet) |
@@ -197,7 +197,7 @@ Lints: `[workspace.lints]` in the root `Cargo.toml` is the single policy; Tier-1
 2. **Windows**: paths are portable, but the `bash` tool needs a `bash` on `PATH`.
 3. **Model settings UI**: providers and models are configured through `.env` / `config.toml`; the API exists (`agent_model_providers`) but no page uses it.
 4. **Bot editing**: bots can be created (UI via NONO's `create_bot`, or by writing `spec.toml`) but not edited or deleted from the UI; hiding a bot on the home screen is a per-device preference.
-5. **Routing**: the home composer sends to the bot you pick. Nothing dispatches a task to the best-suited bot.
+5. **Routing** is one model call (`interface/runtime/route.rs`, prompt `prompts/route.md`) over each bot's persona and tools; on any failure the task goes to `nono`. It sees only the brief, not attachments.
 6. **Curation cost**: one extra model call per turn; not throttled.
 7. **Markdown**: the chat renders assistant text as plain text.
 8. **Module cycles**: `settings <-> storage`, `remote <-> memory`, `models <-> model_providers`, `bootstrap <-> subagent`. Breaking them needs type relocation.

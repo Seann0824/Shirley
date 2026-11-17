@@ -1264,6 +1264,7 @@ pub fn user_content(store: &ArtifactStore, prompt: &str, media: &[String]) -> Me
 }
 
 mod pool;
+mod route;
 
 #[cfg(test)]
 mod tests {

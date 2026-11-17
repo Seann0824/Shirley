@@ -35,7 +35,22 @@ export function useTasks(poll = true) {
     loaded,
     error,
     refresh,
-    enqueue: (bot: string, brief: string) => settle(api.poolEnqueue(bot, brief)),
+    /** Queue a task and resolve to the bot the platform gave it (`null` on failure). */
+    enqueue: async (brief: string): Promise<string | null> => {
+      try {
+        const list = await api.poolEnqueue(brief);
+        setTasks(list);
+        setError(null);
+        const newest = list.reduce<PoolTask | null>(
+          (best, task) => (!best || task.createdMs > best.createdMs ? task : best),
+          null,
+        );
+        return newest?.bot ?? null;
+      } catch (reason) {
+        setError(reason instanceof Error ? reason.message : String(reason));
+        return null;
+      }
+    },
     accept: (id: string) => settle(api.poolAccept(id)),
     reject: (id: string, note: string) => settle(api.poolReject(id, note)),
     retry: (id: string) => settle(api.poolRetry(id)),

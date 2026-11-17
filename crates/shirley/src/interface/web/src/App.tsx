@@ -50,7 +50,7 @@ export default function App() {
       tasks={tasks.tasks}
       onNavigate={setTab}
       onOpenBot={openBot}
-      onDispatch={(bot, brief) => tasks.enqueue(bot, brief)}
+      onDispatch={(brief) => tasks.enqueue(brief)}
       selected={wide ? selectedBot?.name : undefined}
     />
   );

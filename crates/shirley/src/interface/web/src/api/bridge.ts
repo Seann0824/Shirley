@@ -89,8 +89,9 @@ export const api = {
   cancel: (bot: string) => cmd<void>("agent_cancel", { bot }),
 
   poolList: () => cmd<PoolTask[]>("agent_pool_list"),
-  poolEnqueue: (bot: string, brief: string) =>
-    cmd<PoolTask[]>("agent_pool_enqueue", { bot, brief }),
+  /** Queue a task. Without `bot` the server chooses one. */
+  poolEnqueue: (brief: string, bot?: string) =>
+    cmd<PoolTask[]>("agent_pool_enqueue", { brief, bot }),
   poolAccept: (id: string) => cmd<PoolTask[]>("agent_pool_accept", { id }),
   poolReject: (id: string, note: string) => cmd<PoolTask[]>("agent_pool_reject", { id, note }),
   poolRetry: (id: string) => cmd<PoolTask[]>("agent_pool_retry", { id }),

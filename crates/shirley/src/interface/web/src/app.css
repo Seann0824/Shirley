@@ -475,3 +475,58 @@ body {
   color: var(--label);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.08);
 }
+
+/* Live transcript while holding to talk: what will go into the text field on release. */
+.voice-live {
+  align-self: stretch;
+  margin: 2px 6px 4px;
+  padding: 10px 14px;
+  border-radius: 18px;
+  background: var(--fill);
+  color: var(--label);
+  font-size: 15px;
+  line-height: 1.45;
+  max-height: 7.5em;
+  overflow-y: auto;
+}
+.voice-live.waiting {
+  color: var(--tertiary);
+}
+
+/* A long press must start talking, not select the label or open a callout. */
+.composer-voice {
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
+/* A picture or file is a message of its own. */
+.message-row .message-bubble.media-bubble {
+  padding: 0;
+  border: 0;
+  border-radius: 18px;
+  background: transparent;
+  box-shadow: none;
+  overflow: hidden;
+}
+.message-bubble.media-bubble.image img {
+  display: block;
+  max-width: min(240px, 62vw);
+  max-height: 320px;
+  border-radius: 18px;
+  object-fit: cover;
+}
+.message-bubble.media-bubble.file .sent-file,
+.message-bubble.media-bubble.link a {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 14px;
+  border-radius: 18px;
+  background: var(--fill);
+  color: var(--label);
+}
+.user-message + .user-message,
+.bot-message.continued {
+  margin-top: -6px;
+}
