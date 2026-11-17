@@ -1,8 +1,9 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 
 import { api } from "../api/bridge";
 import type { DeliveryFile, PoolTask, TaskStatus } from "../api/types";
 import type { useTasks } from "../state/useTasks";
+import { HtmlPreview, isHtml, openViewer, type ViewedFile } from "./FileViewer";
 import { Icon, type IconName } from "./Icon";
 import { MarkdownBlock, splitBlocks } from "./Markdown";
 
@@ -32,51 +33,13 @@ function fileIcon(mime: string): IconName {
   return "file";
 }
 
+/** The viewer's view of a delivered file. */
+function viewed(bot: string, file: DeliveryFile): ViewedFile {
+  return { bot, id: file.id, name: file.name, mime: file.mime };
+}
+
 function openFile(bot: string, file: DeliveryFile) {
-  api
-    .assetUrl(bot, file.id)
-    .then((url) => window.open(url, "_blank", "noopener"))
-    .catch(() => undefined);
-}
-
-function isHtml(file: DeliveryFile): boolean {
-  return file.mime.split(";")[0].trim() === "text/html";
-}
-
-/**
- * A web page the bot made, rendered in place. The page runs in a sandbox with no access to
- * Shirley (no same-origin, no top navigation); it arrives as text and goes in through `srcdoc`.
- */
-function HtmlPreview({ bot, file }: { bot: string; file: DeliveryFile }) {
-  const [html, setHtml] = useState<string | null>(null);
-  const [failed, setFailed] = useState(false);
-  const frame = useRef<HTMLIFrameElement>(null);
-  useEffect(() => {
-    let alive = true;
-    api
-      .assetText(bot, file.id)
-      .then((value) => alive && setHtml(value.text))
-      .catch(() => alive && setFailed(true));
-    return () => {
-      alive = false;
-    };
-  }, [bot, file.id]);
-  if (failed) return <FileChip bot={bot} file={file} />;
-  return (
-    <figure className="html-preview">
-      {html === null ? (
-        <div className="html-preview-loading">正在打开 {file.name}…</div>
-      ) : (
-        <iframe ref={frame} title={file.name} srcDoc={html} sandbox="allow-scripts allow-popups allow-forms" />
-      )}
-      <figcaption>
-        <span>{file.name}</span>
-        <button onClick={() => void frame.current?.requestFullscreen?.()} aria-label={`全屏查看 ${file.name}`}>
-          全屏
-        </button>
-      </figcaption>
-    </figure>
-  );
+  openViewer(viewed(bot, file));
 }
 
 /** A picture the bot made, shown in place. */
@@ -105,13 +68,13 @@ function FileChip({ bot, file }: { bot: string; file: DeliveryFile }) {
 
 /** What came back: pages and pictures shown, everything else as a file to open. */
 function Deliverables({ bot, files }: { bot: string; files: DeliveryFile[] }) {
-  const pages = files.filter(isHtml);
+  const pages = files.filter((file) => isHtml(file.mime));
   const pictures = files.filter((file) => file.mime.startsWith("image/"));
-  const others = files.filter((file) => !isHtml(file) && !file.mime.startsWith("image/"));
+  const others = files.filter((file) => !isHtml(file.mime) && !file.mime.startsWith("image/"));
   return (
     <>
       {pages.map((file) => (
-        <HtmlPreview key={file.id} bot={bot} file={file} />
+        <HtmlPreview key={file.id} file={viewed(bot, file)} />
       ))}
       {pictures.map((file) => (
         <ImagePreview key={file.id} bot={bot} file={file} />

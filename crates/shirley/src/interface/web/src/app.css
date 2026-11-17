@@ -1082,3 +1082,102 @@ body {
 .sent-file.openable {
   cursor: pointer;
 }
+
+/* Files open over the conversation, never in another tab. */
+img.openable {
+  cursor: zoom-in;
+}
+.file-viewer {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  background: #fff;
+  animation: pane-enter 0.18s ease both;
+}
+.file-viewer > header {
+  display: grid;
+  grid-template-columns: 38px 1fr 38px;
+  align-items: center;
+  gap: 8px;
+  padding: max(10px, env(safe-area-inset-top)) 14px 10px;
+  border-bottom: 0.5px solid rgba(60, 60, 67, 0.15);
+}
+.file-viewer > header button {
+  width: 38px;
+  height: 38px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--fill);
+}
+.file-viewer > header strong {
+  overflow: hidden;
+  text-align: center;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 15px;
+}
+.file-viewer-body {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  align-items: stretch;
+  justify-content: center;
+  overflow: auto;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.file-viewer-body iframe {
+  flex: 1;
+  width: 100%;
+  border: 0;
+  background: #fff;
+}
+.viewer-image {
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  object-fit: contain;
+}
+.viewer-media {
+  max-width: 100%;
+  max-height: 100%;
+  margin: auto;
+  background: #000;
+}
+.viewer-audio {
+  margin: auto;
+}
+.viewer-text {
+  flex: 1;
+  margin: 0;
+  padding: 16px;
+  overflow: auto;
+  white-space: pre-wrap;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.viewer-note {
+  margin: auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  color: var(--secondary);
+  font-size: 14px;
+}
+.viewer-download {
+  padding: 8px 16px;
+  border-radius: 999px;
+  background: var(--label);
+  color: #fff;
+  font-weight: 600;
+}
+.html-preview .viewer-note {
+  padding: 40px 0;
+}
+.file-viewer > header button svg {
+  transform: rotate(180deg);
+}

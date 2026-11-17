@@ -5,6 +5,7 @@ import type { Bot, RenderPart, ToolCallWire } from "../api/types";
 import { BotAvatar, botTone } from "../components/BotAvatar";
 import { ComposerDock, type Attachment } from "../components/Composer";
 import { uploadAll, userMessageParts } from "../components/attachments";
+import { HtmlPreview, isHtml, openViewer } from "../components/FileViewer";
 import { Icon } from "../components/Icon";
 import { MarkdownBlock, splitBlocks } from "../components/Markdown";
 import { showsToolActivity, toolActivity } from "../components/toolActivity";
@@ -23,7 +24,16 @@ function ArtifactImage({ bot, id, alt }: { bot: string; id: string; alt: string 
       cancelled = true;
     };
   }, [bot, id]);
-  return url ? <img src={url} alt={alt} /> : <span className="asset-pending">{alt}</span>;
+  return url ? (
+    <img
+      src={url}
+      alt={alt}
+      className="openable"
+      onClick={() => openViewer({ bot, id, name: alt || "图片", mime: "image/*" })}
+    />
+  ) : (
+    <span className="asset-pending">{alt}</span>
+  );
 }
 
 function Parts({ bot, parts }: { bot: string; parts: RenderPart[] }) {
@@ -38,18 +48,18 @@ function Parts({ bot, parts }: { bot: string; parts: RenderPart[] }) {
               <img key={index} src={part.source.url} alt={part.alt} />
             );
           case "file": {
-            // A file in the library opens in a new tab (an HTML page renders, sandboxed).
+            // A file in the library: a web page renders in place; anything else opens in the
+            // viewer over the conversation.
             const id = part.source?.kind === "artifact" ? part.source.id : null;
-            const open = id
-              ? () => void api.assetUrl(bot, id).then((url) => window.open(url, "_blank", "noopener")).catch(() => undefined)
-              : undefined;
+            const file = id ? { bot, id, name: part.name, mime: part.mime ?? "" } : null;
+            if (file && isHtml(file.mime)) return <HtmlPreview key={index} file={file} />;
             return (
               <div
-                className={`sent-file ${open ? "openable" : ""}`}
+                className={`sent-file ${file ? "openable" : ""}`}
                 key={index}
-                onClick={open}
-                role={open ? "button" : undefined}
-                tabIndex={open ? 0 : undefined}
+                onClick={file ? () => openViewer(file) : undefined}
+                role={file ? "button" : undefined}
+                tabIndex={file ? 0 : undefined}
               >
                 <Icon name="file" size={19} />
                 <span>

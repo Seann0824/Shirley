@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
 import { api, onAgentEvent } from "./api/bridge";
+import { FileViewer } from "./components/FileViewer";
 import type { Attachment } from "./components/Composer";
 
 import { useBots } from "./state/useBots";
@@ -149,6 +150,7 @@ export default function App() {
 
   return (
     <main className={`app-shell ${wide ? "is-wide" : ""}`}>
+      <FileViewer />
       {wide ? (
         <>
           <Pane className="pane-side home-pane" viewKey="home">
