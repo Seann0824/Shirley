@@ -91,6 +91,9 @@ pub struct AgentFactory {
     /// Where this bot's file tools work: the cwd of `bash`, the root `read` / `grep` resolve
     /// relative paths against, and the directory the system prompt names.
     workspace: PathBuf,
+    /// The bot's handle on the task pool. Set by the runtime manager; `None` in tests and for
+    /// the platform factory itself.
+    tasks: Option<crate::pool::desk::TaskDesk>,
 }
 
 impl AgentFactory {
@@ -220,6 +223,7 @@ impl AgentFactory {
             subagent_default_timeout_ms,
             bot_spec: crate::bot::BotSpec::default_bot(),
             workspace,
+            tasks: None,
         })
     }
 
@@ -263,6 +267,32 @@ impl AgentFactory {
         messages: Vec<Message>,
         tool_filter: Option<&ToolSelection>,
         max_steps: Option<usize>,
+    ) -> Result<BuiltAgent, AgentError> {
+        self.build(messages, tool_filter, max_steps, true)
+    }
+
+    /// The agent that runs a dispatched task: everything a conversation has except the task
+    /// desk, so a worker cannot dispatch workers of its own.
+    pub fn build_worker_agent(
+        self: &Arc<Self>,
+        messages: Vec<Message>,
+    ) -> Result<BuiltAgent, AgentError> {
+        self.build(messages, None, None, false)
+    }
+
+    /// Give this bot's conversations a handle on the task pool.
+    #[must_use]
+    pub fn with_tasks(mut self, desk: crate::pool::desk::TaskDesk) -> Self {
+        self.tasks = Some(desk);
+        self
+    }
+
+    fn build(
+        self: &Arc<Self>,
+        messages: Vec<Message>,
+        tool_filter: Option<&ToolSelection>,
+        max_steps: Option<usize>,
+        with_desk: bool,
     ) -> Result<BuiltAgent, AgentError> {
         // Task ledger (application-layer capability): one `TodoStore` per `Agent`, given both to the
         // `todo` tool (write) and `TodoContextProvider` (injected at the end of each round, surviving compaction).
@@ -346,13 +376,29 @@ impl AgentFactory {
 
         // The SDK `Agent` accepts only a **single** `context_provider`, but here we need to inject several
         // (task ledger + memory + skills) -- use `CompositeContextProvider` to concatenate in order.
-        let provider = CompositeContextProvider::new(vec![
+        let mut providers: Vec<Arc<dyn ContextProvider>> = vec![
             Arc::new(TodoContextProvider::new(Arc::clone(&todo_store))) as Arc<dyn ContextProvider>,
             Arc::new(MemoryContextProvider::new(Arc::clone(&memory))) as Arc<dyn ContextProvider>,
             // Skills (Tier1 catalog + Tier2 activated text): appended at the end of each round, KV-friendly.
             Arc::new(SkillContextProvider::new(Arc::clone(&skill_runtime)))
                 as Arc<dyn ContextProvider>,
-        ]);
+        ];
+        // A bot's conversation (not a worker, not a subagent) can dispatch tasks and is reminded
+        // of them every turn. Registered after `available_tools` was taken, so subagents never
+        // inherit these tools.
+        if with_desk
+            && tool_filter.is_none()
+            && let Some(desk) = &self.tasks
+        {
+            let bot = self.bot_spec.name.clone();
+            let _ = tool_manager.register(tools::DispatchTaskTool::new(desk.clone(), bot.clone()));
+            let _ = tool_manager.register(tools::TaskNoteTool::new(desk.clone(), bot.clone()));
+            providers.push(Arc::new(crate::pool::desk::TaskContextProvider::new(
+                desk.clone(),
+                bot,
+            )));
+        }
+        let provider = CompositeContextProvider::new(providers);
 
         // Subagent guidance is injected only for the top-level agent when the tool is registered:
         // a child has no `subagent` tool (structural recursion guard), so it must not be told about one.
@@ -464,6 +510,7 @@ impl AgentFactory {
             subagent_default_timeout_ms: self.subagent_default_timeout_ms,
             bot_spec: spec,
             workspace,
+            tasks: self.tasks.clone(),
         }
     }
 
@@ -838,6 +885,7 @@ pub(crate) mod test_support {
             subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
             bot_spec: crate::bot::BotSpec::default_bot(),
             workspace: root.join("workspace"),
+            tasks: None,
         }
     }
 
@@ -892,6 +940,7 @@ mod tests {
             subagent_default_timeout_ms: DEFAULT_WAIT_TIMEOUT_MS,
             bot_spec: crate::bot::BotSpec::default_bot(),
             workspace: root.join("workspace"),
+            tasks: None,
         }
     }
 
@@ -919,6 +968,28 @@ mod tests {
         assert!(factory.sessions_dir().starts_with(root.join("global")));
         let _ = AgentFactory::assemble_at(root.join("global")).unwrap();
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn a_conversation_can_dispatch_but_a_worker_cannot() {
+        let root =
+            std::env::temp_dir().join(format!("shirley-desk-factory-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let pool = Arc::new(tokio::sync::Mutex::new(crate::pool::TaskPool::open(
+            root.join("tasks.json"),
+        )));
+        let (wake, _rx) = tokio::sync::mpsc::unbounded_channel();
+        let factory = Arc::new(
+            test_support::test_factory(root.clone())
+                .with_tasks(crate::pool::desk::TaskDesk::new(pool, wake)),
+        );
+        let mut conversation = factory.build_agent(Vec::new()).unwrap().agent;
+        assert!(conversation.unregister_tool("dispatch_task").is_ok());
+        assert!(conversation.unregister_tool("task_note").is_ok());
+        let mut worker = factory.build_worker_agent(Vec::new()).unwrap().agent;
+        assert!(worker.unregister_tool("dispatch_task").is_err());
+        assert!(worker.unregister_tool("task_note").is_err());
+        let _ = std::fs::remove_dir_all(root);
     }
 
     #[test]

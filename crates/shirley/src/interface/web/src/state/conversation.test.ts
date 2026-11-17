@@ -64,4 +64,22 @@ describe("reduce", () => {
     expect(items.map((item) => item.kind)).toEqual(["message", "tools"]);
     expect(items[0]).toMatchObject({ streaming: false });
   });
+
+  it("stops a group whose finish event was lost once the reply moves on", () => {
+    let items: ConversationItem[] = [];
+    items = reduce(items, { type: "tool_started", call_id: "a", name: "bash", arguments: "{}" });
+    // No tool_finished for "a": the stream lagged.
+    items = reduce(items, { type: "content_delta", text: "好了" });
+    expect(items[0]).toMatchObject({ kind: "tools", settled: true });
+    items = reduce(items, { type: "tool_started", call_id: "b", name: "read", arguments: "{}" });
+    expect(items.map((item) => item.kind)).toEqual(["tools", "message", "tools"]);
+    expect(items[2]).not.toHaveProperty("settled");
+  });
+
+  it("stops every group when the turn ends", () => {
+    let items: ConversationItem[] = [];
+    items = reduce(items, { type: "tool_started", call_id: "a", name: "bash", arguments: "{}" });
+    items = reduce(items, { type: "finished", stop_reason: "completed" });
+    expect(items[0]).toMatchObject({ kind: "tools", settled: true });
+  });
 });

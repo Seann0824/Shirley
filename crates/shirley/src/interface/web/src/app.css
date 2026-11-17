@@ -274,14 +274,10 @@ body {
 .pane .page {
   padding: max(12px, env(safe-area-inset-top)) 17px calc(34px + env(safe-area-inset-bottom));
 }
-.home-pane .page {
-  padding-bottom: calc(168px + env(safe-area-inset-bottom));
-}
+/* Room for the floating composer: its measured height (see ComposerDock) plus its offset. */
+.home-pane .page,
 .chat-pane .page {
-  padding-bottom: calc(112px + env(safe-area-inset-bottom));
-}
-.pane:has(.composer-dock .attachment-tray) .page {
-  padding-bottom: calc(232px + env(safe-area-inset-bottom));
+  padding-bottom: calc(var(--dock-height, 72px) + 32px + env(safe-area-inset-bottom));
 }
 
 /* Views fade in. No transform here: an element with a transform animation stays the containing
@@ -529,4 +525,201 @@ body {
 .user-message + .user-message,
 .bot-message.continued {
   margin-top: -6px;
+}
+
+/* ------------------------------------------------------------------------
+   Tasks: the same card in a conversation and on the task page.
+   ------------------------------------------------------------------------ */
+.task-row {
+  align-items: flex-start;
+}
+.task-row .message-avatar {
+  visibility: hidden;
+}
+.task-card {
+  flex: 1;
+  min-width: 0;
+  max-width: 520px;
+  padding: 12px 14px;
+  border: 1px solid var(--separator);
+  border-radius: 18px;
+  background: #fff;
+}
+.task-queue .task-card {
+  max-width: none;
+  margin-bottom: 10px;
+}
+.task-card header {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.task-card h3 {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 650;
+  line-height: 1.35;
+}
+.task-state {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--secondary);
+}
+.task-card.in_review .task-state,
+.task-card.done .task-state {
+  color: var(--label);
+}
+.task-card.blocked .task-state,
+.task-error {
+  color: var(--red);
+}
+.task-spinner {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  border: 1.5px solid var(--tertiary);
+  border-top-color: var(--label);
+  animation: install-spin 0.8s linear infinite;
+}
+.task-summary {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: var(--label);
+}
+.task-summary .md + .md,
+.task-summary .md + .md-code {
+  margin-top: 6px;
+}
+.task-summary .md-code {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--fill);
+}
+.task-more {
+  margin-top: 4px;
+  padding: 0;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--secondary);
+}
+.task-error,
+.task-note {
+  margin: 8px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.task-note {
+  color: var(--secondary);
+}
+.task-files {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+.task-files button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 6px 10px;
+  border-radius: 10px;
+  background: var(--fill);
+  font-size: 12px;
+}
+.task-files span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-card .task-actions {
+  margin-top: 10px;
+}
+.task-note-form {
+  display: flex;
+  gap: 6px;
+  margin-top: 10px;
+}
+.task-note-form input {
+  flex: 1;
+  min-width: 0;
+  padding: 7px 12px;
+  border: 1px solid var(--separator);
+  border-radius: 999px;
+  font-size: 13px;
+  outline: none;
+}
+.task-note-form button {
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: var(--fill);
+  font-size: 13px;
+  font-weight: 600;
+}
+.task-note-form button.primary {
+  background: var(--label);
+  color: #fff;
+}
+.task-note-form button:disabled {
+  opacity: 0.4;
+}
+.task-line {
+  margin: 0;
+  padding: 8px 12px;
+  font-size: 13px;
+  color: var(--secondary);
+}
+
+/* A line the system says, not the bot: compaction, a note added to a task. */
+.system-line {
+  align-self: center;
+  margin: 2px auto;
+  font-size: 12px;
+  color: var(--tertiary);
+  text-align: center;
+}
+
+/* "Something is ready" above the composer. */
+.results-pill {
+  align-self: center;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin-bottom: 2px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: var(--label);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Home: while the platform picks a bot. */
+.routing-note {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  margin: 8px 0;
+  font-size: 13px;
+  color: var(--secondary);
+}
+.routing-note i {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  border: 1.5px solid var(--tertiary);
+  border-top-color: var(--label);
+  animation: install-spin 0.8s linear infinite;
+}
+.task-summary strong,
+.task-card strong {
+  font-weight: 650;
 }

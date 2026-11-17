@@ -1,9 +1,12 @@
 import { useState, type ReactNode } from "react";
 
+import { api } from "./api/bridge";
+import type { Attachment } from "./components/Composer";
+
 import { useBots } from "./state/useBots";
 import { useTasks } from "./state/useTasks";
 import { useWide } from "./state/useWide";
-import { Chat } from "./views/Chat";
+import { Chat, type Seed } from "./views/Chat";
 import { Home } from "./views/Home";
 import { Memory } from "./views/Memory";
 import { NewBot, createBotPrompt } from "./views/NewBot";
@@ -31,10 +34,10 @@ function Pane({ className, viewKey, children }: { className: string; viewKey: st
 export default function App() {
   const [tab, setTab] = useState<Tab>("home");
   const [selected, setSelected] = useState<string>(BUILDER_BOT);
-  const [seed, setSeed] = useState<string | undefined>(undefined);
+  const [seed, setSeed] = useState<Seed | undefined>(undefined);
   const wide = useWide();
   const bots = useBots();
-  const tasks = useTasks(wide || tab === "home" || tab === "tasks" || tab === "work");
+  const tasks = useTasks(true);
 
   const selectedBot = bots.bots.find((bot) => bot.name === selected) ?? bots.bots[0];
 
@@ -44,13 +47,24 @@ export default function App() {
     setTab("chat");
   };
 
+  // The home composer: the platform picks the bot, then the message goes into its conversation.
+  const ask = async (text: string, attachments: Attachment[]) => {
+    const bot = await api
+      .route(text.trim() || "处理这些附件")
+      .then((answer) => answer.bot)
+      .catch(() => BUILDER_BOT);
+    setSelected(bot);
+    setSeed({ text, attachments, nonce: Date.now() });
+    setTab("chat");
+  };
+
   const home = (
     <Home
       bots={bots}
       tasks={tasks.tasks}
       onNavigate={setTab}
       onOpenBot={openBot}
-      onDispatch={(brief) => tasks.enqueue(brief)}
+      onAsk={ask}
       selected={wide ? selectedBot?.name : undefined}
     />
   );
@@ -67,9 +81,11 @@ export default function App() {
         <Chat
           key={selectedBot.name}
           bot={selectedBot}
-          seed={seed}
+          seed={seed?.text !== undefined && selectedBot.name === selected ? seed : undefined}
+          tasks={tasks}
           onBack={() => setTab("home")}
           onMemory={() => setTab("memory")}
+          onOpenTasks={() => setTab("tasks")}
           onTurnFinished={() => void bots.refresh()}
         />
       )}
@@ -79,7 +95,7 @@ export default function App() {
           onBack={() => setTab("home")}
           onSubmit={(description) => {
             setSelected(BUILDER_BOT);
-            setSeed(createBotPrompt(description));
+            setSeed({ text: createBotPrompt(description), attachments: [], nonce: Date.now() });
             setTab("chat");
           }}
         />

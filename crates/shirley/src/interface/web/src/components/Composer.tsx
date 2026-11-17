@@ -190,6 +190,20 @@ export function ComposerDock({
 
   useEffect(() => () => speech.current?.abort(), []);
 
+  // The page keeps room for the dock below its last line; the dock grows with the tray, the
+  // live transcript and the pills above it, so the room follows its real height.
+  const dockRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const dock = dockRef.current;
+    const pane = dock?.closest<HTMLElement>(".pane");
+    if (!dock || !pane) return;
+    const observer = new ResizeObserver(() => {
+      pane.style.setProperty("--dock-height", `${dock.offsetHeight}px`);
+    });
+    observer.observe(dock);
+    return () => observer.disconnect();
+  }, []);
+
   const send = (text: string) => {
     const trimmed = text.trim();
     if (!trimmed && !attachments.length) return;
@@ -307,7 +321,7 @@ export function ComposerDock({
 
   return (
     <>
-      <div className={`composer-dock ${listening ? "is-listening" : ""}`} onPaste={onPaste}>
+      <div ref={dockRef} className={`composer-dock ${listening ? "is-listening" : ""}`} onPaste={onPaste}>
         {above}
         {attachments.length > 0 && (
           <AttachmentTray

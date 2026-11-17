@@ -50,8 +50,16 @@ function connect() {
       // A malformed frame is dropped; the next one is independent.
     }
   });
+  // The server says this client fell behind; whatever it missed is only in a fresh snapshot.
+  es.addEventListener("resync", () => {
+    listeners.forEach((listener) => listener({ type: "resync" }));
+  });
+  let opened = false;
   es.onopen = () => {
     reconnectDelay = 1000;
+    // A reconnect means a gap in the stream.
+    if (opened) listeners.forEach((listener) => listener({ type: "resync" }));
+    opened = true;
   };
   es.onerror = () => {
     es.close();
@@ -75,6 +83,8 @@ export function onAgentEvent(listener: Listener): () => void {
 
 export const api = {
   listBots: () => cmd<Bot[]>("agent_list_bots"),
+  /** Which bot should hear `text`. */
+  route: (text: string) => cmd<{ bot: string }>("agent_route", { text }),
   createBot: (spec: {
     name: string;
     displayName: string;
@@ -94,6 +104,7 @@ export const api = {
     cmd<PoolTask[]>("agent_pool_enqueue", { brief, bot }),
   poolAccept: (id: string) => cmd<PoolTask[]>("agent_pool_accept", { id }),
   poolReject: (id: string, note: string) => cmd<PoolTask[]>("agent_pool_reject", { id, note }),
+  poolNote: (id: string, note: string) => cmd<PoolTask[]>("agent_pool_note", { id, note }),
   poolRetry: (id: string) => cmd<PoolTask[]>("agent_pool_retry", { id }),
   poolCancel: (id: string) => cmd<PoolTask[]>("agent_pool_cancel", { id }),
   poolRemove: (id: string) => cmd<PoolTask[]>("agent_pool_remove", { id }),

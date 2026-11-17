@@ -80,6 +80,17 @@ impl BotRuntimeManager {
         Ok(self.pool.lock().await.ordered())
     }
 
+    /// Add to a task from its card (see [`crate::pool::TaskPool::add_note`]).
+    pub async fn pool_note(
+        self: &Arc<Self>,
+        id: &str,
+        note: &str,
+    ) -> Result<Vec<PoolTask>, String> {
+        self.pool.lock().await.add_note(id, note)?;
+        self.pool_pump().await?;
+        Ok(self.pool.lock().await.ordered())
+    }
+
     /// Run a failed task again without changing its instruction.
     pub async fn pool_retry(self: &Arc<Self>, id: &str) -> Result<Vec<PoolTask>, String> {
         self.pool.lock().await.retry(id)?;

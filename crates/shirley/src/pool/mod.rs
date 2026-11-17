@@ -30,6 +30,8 @@ use uuid::Uuid;
 
 use crate::prompt_template;
 
+pub mod desk;
+
 /// File name of the pool inside a bot's state directory.
 pub const POOL_FILE_NAME: &str = "task-pool.json";
 
@@ -198,6 +200,10 @@ pub struct PoolTask {
     /// The user's rejection note -- becomes the requirement for the next attempt.
     #[serde(default)]
     pub note: Option<String>,
+    /// Additions made while the task was queued or running. They cannot reach a turn already in
+    /// flight, so the run that finishes next goes straight back for rework with them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_notes: Vec<String>,
 }
 
 /// The pool of one bot, plus the file it is stored in.
@@ -282,14 +288,29 @@ impl TaskPool {
 
     /// Add an instruction to the end of the queue.
     pub fn enqueue(&mut self, bot: &str, brief: &str) -> Result<PoolTask, String> {
+        self.enqueue_titled(bot, None, brief)
+    }
+
+    /// Add an instruction with an explicit label (a bot dispatching work names it; a raw
+    /// instruction like "1" makes a useless title).
+    pub fn enqueue_titled(
+        &mut self,
+        bot: &str,
+        title: Option<&str>,
+        brief: &str,
+    ) -> Result<PoolTask, String> {
         let brief = brief.trim();
         if brief.is_empty() {
             return Err("a task needs an instruction".to_owned());
         }
+        let title = title
+            .map(str::trim)
+            .filter(|title| !title.is_empty())
+            .map_or_else(|| derive_title(brief), derive_title);
         let task = PoolTask {
             id: Uuid::new_v4().to_string(),
             bot: bot.to_owned(),
-            title: derive_title(brief),
+            title,
             brief: brief.to_owned(),
             // New work runs: the whole promise of the pool is that dropping an instruction in
             // does not also demand that you go press "start".
@@ -301,6 +322,7 @@ impl TaskPool {
             session: None,
             delivery: None,
             note: None,
+            pending_notes: Vec::new(),
         };
         self.tasks.push(task.clone());
         self.save()?;
@@ -362,17 +384,57 @@ impl TaskPool {
         self.save()
     }
 
-    /// Park a finished run in `In Review` with its deliverable.
+    /// Park a finished run in `In Review` with its deliverable -- or, when the user added to the
+    /// task while it ran, straight back to `To Do` with those additions as the rework note.
     pub fn complete(&mut self, id: &str, delivery: Delivery) -> Result<(), String> {
         let task = self.task_mut(id)?;
         // The user withdrew the task while the turn was in flight: their verdict wins.
         if task.status == TaskStatus::Cancelled {
             return Ok(());
         }
-        task.status = TaskStatus::InReview;
-        task.finished_ms = Some(now_ms());
         task.delivery = Some(delivery);
+        if task.pending_notes.is_empty() {
+            task.status = TaskStatus::InReview;
+            task.finished_ms = Some(now_ms());
+        } else {
+            task.note = Some(task.pending_notes.join("\n"));
+            task.pending_notes.clear();
+            task.status = TaskStatus::ToDo;
+            task.attempt += 1;
+            task.started_ms = None;
+            task.finished_ms = None;
+        }
         self.save()
+    }
+
+    /// Add to a task. Queued or running: kept for the next attempt (see [`Self::complete`]).
+    /// Delivered, blocked or accepted: the task goes back for rework with `note` right away.
+    pub fn add_note(&mut self, id: &str, note: &str) -> Result<(), String> {
+        let note = note.trim();
+        if note.is_empty() {
+            return Err("nothing to add".to_owned());
+        }
+        let status = self
+            .find(id)
+            .map(|task| task.status)
+            .ok_or_else(|| "no such task".to_owned())?;
+        match status {
+            TaskStatus::ToDo | TaskStatus::Backlog | TaskStatus::InProgress => {
+                self.task_mut(id)?.pending_notes.push(note.to_owned());
+                self.save()
+            }
+            TaskStatus::InReview => self.reject(id, note),
+            TaskStatus::Blocked | TaskStatus::Done => {
+                let task = self.task_mut(id)?;
+                task.status = TaskStatus::ToDo;
+                task.attempt += 1;
+                task.note = Some(note.to_owned());
+                task.started_ms = None;
+                task.finished_ms = None;
+                self.save()
+            }
+            TaskStatus::Cancelled => Err("this task was cancelled".to_owned()),
+        }
     }
 
     /// Mark a broken attempt as `Blocked` (model error, transport error, panic, timeout).
@@ -434,6 +496,16 @@ impl TaskPool {
             .ok_or_else(|| "no such task".to_owned())?;
         if !matches!(status, TaskStatus::Blocked | TaskStatus::Cancelled) {
             return Err("only a blocked or cancelled task can be retried".to_owned());
+        }
+        // Additions made while the failed attempt ran belong to the next one.
+        let task = self.task_mut(id)?;
+        if !task.pending_notes.is_empty() {
+            let pending = task.pending_notes.join("\n");
+            task.note = Some(match task.note.take() {
+                Some(note) if !note.trim().is_empty() => format!("{note}\n{pending}"),
+                _ => pending,
+            });
+            task.pending_notes.clear();
         }
         self.transition(id, TaskStatus::ToDo)
     }
@@ -580,6 +652,52 @@ mod tests {
         let reopened = TaskPool::open(pool.path());
         assert_eq!(reopened.ordered().len(), 1);
         assert_eq!(reopened.ordered()[0].brief, task.brief);
+    }
+
+    #[test]
+    fn a_note_on_a_running_task_sends_the_finished_run_back() {
+        let mut pool = temp_pool("note_running");
+        let task = pool
+            .enqueue_titled("bot", Some("云南路线图"), "画一张路线图")
+            .expect("enqueue");
+        assert_eq!(task.title, "云南路线图");
+        pool.claim(&task.id, "s").expect("claim");
+        pool.add_note(&task.id, "加上预算表").expect("note");
+        pool.complete(&task.id, Delivery::default())
+            .expect("complete");
+        let task = pool.find(&task.id).expect("task");
+        assert_eq!(task.status, TaskStatus::ToDo);
+        assert_eq!(task.attempt, 2);
+        assert_eq!(task.note.as_deref(), Some("加上预算表"));
+        assert!(task.pending_notes.is_empty());
+    }
+
+    #[test]
+    fn retrying_a_failed_task_carries_the_notes_added_meanwhile() {
+        let mut pool = temp_pool("note_failed");
+        let task = pool.enqueue("bot", "查天气").expect("enqueue");
+        pool.claim(&task.id, "s").expect("claim");
+        pool.add_note(&task.id, "加上穿衣建议").expect("note");
+        pool.fail(&task.id, "network").expect("fail");
+        pool.retry(&task.id).expect("retry");
+        let task = pool.find(&task.id).expect("task");
+        assert_eq!(task.status, TaskStatus::ToDo);
+        assert_eq!(task.note.as_deref(), Some("加上穿衣建议"));
+        assert!(task.pending_notes.is_empty());
+    }
+
+    #[test]
+    fn a_note_on_a_delivered_task_reworks_it() {
+        let mut pool = temp_pool("note_done");
+        let task = pool.enqueue("bot", "写周报").expect("enqueue");
+        pool.claim(&task.id, "s").expect("claim");
+        pool.complete(&task.id, Delivery::default())
+            .expect("complete");
+        pool.accept(&task.id).expect("accept");
+        pool.add_note(&task.id, "补一段风险").expect("note");
+        let task = pool.find(&task.id).expect("task");
+        assert_eq!(task.status, TaskStatus::ToDo);
+        assert_eq!(task.note.as_deref(), Some("补一段风险"));
     }
 
     #[test]

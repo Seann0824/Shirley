@@ -42,8 +42,33 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
       }
     };
 
+    const load = () =>
+      api
+        .subscribe(bot)
+        .then((snapshot) => {
+          if (cancelled) return;
+          setItems(fromSnapshot(snapshot.items, snapshot.running));
+          setRunning(snapshot.running);
+          cursor.current = snapshot.sequence;
+          setLoaded(true);
+          for (const event of buffered.current) {
+            if (event.sequence === undefined || event.sequence > snapshot.sequence) apply(event);
+          }
+          buffered.current = [];
+        })
+        .catch((reason: unknown) => {
+          if (cancelled) return;
+          setError(reason instanceof Error ? reason.message : String(reason));
+          setLoaded(true);
+        });
+
     const stop = onAgentEvent((event) => {
       if (cancelled) return;
+      if (event.type === "resync") {
+        cursor.current = null;
+        void load();
+        return;
+      }
       if (event.bot !== bot || (event.session ?? MAIN_SESSION) !== MAIN_SESSION) return;
       if (cursor.current === null) {
         buffered.current.push(event);
@@ -53,24 +78,7 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
       apply(event);
     });
 
-    void api
-      .subscribe(bot)
-      .then((snapshot) => {
-        if (cancelled) return;
-        setItems(fromSnapshot(snapshot.items, snapshot.running));
-        setRunning(snapshot.running);
-        cursor.current = snapshot.sequence;
-        setLoaded(true);
-        for (const event of buffered.current) {
-          if (event.sequence === undefined || event.sequence > snapshot.sequence) apply(event);
-        }
-        buffered.current = [];
-      })
-      .catch((reason: unknown) => {
-        if (cancelled) return;
-        setError(reason instanceof Error ? reason.message : String(reason));
-        setLoaded(true);
-      });
+    void load();
 
     return () => {
       cancelled = true;

@@ -24,13 +24,25 @@ export function fromSnapshot(items: ItemWire[], running = false): ConversationIt
   );
 }
 
-/** Close any assistant message that is still receiving deltas. */
+/**
+ * Mark every tool group finished. A group can only still be running while it is the last thing
+ * in the conversation: once anything follows it, or the turn ends, its calls are over -- even if
+ * a `tool_finished` event was lost on the way (a lagged or reconnected stream).
+ */
+function settleTools(items: ConversationItem[]): ConversationItem[] {
+  return items.some((item) => item.kind === "tools" && !item.settled)
+    ? items.map((item) => (item.kind === "tools" && !item.settled ? { ...item, settled: true } : item))
+    : items;
+}
+
+/** Close any assistant message that is still receiving deltas, and any tool group before it. */
 function sealStreaming(items: ConversationItem[]): ConversationItem[] {
   const last = items[items.length - 1];
-  if (last?.kind === "message" && last.streaming) {
-    return [...items.slice(0, -1), { ...last, streaming: false }];
-  }
-  return items;
+  const sealed =
+    last?.kind === "message" && last.streaming
+      ? [...items.slice(0, -1), { ...last, streaming: false }]
+      : items;
+  return settleTools(sealed);
 }
 
 export function reduce(items: ConversationItem[], event: AgentEvent): ConversationItem[] {
@@ -41,14 +53,19 @@ export function reduce(items: ConversationItem[], event: AgentEvent): Conversati
         return [...items.slice(0, -1), { ...last, content: last.content + event.text }];
       }
       return [
-        ...items,
+        ...settleTools(items),
         { kind: "message", role: "assistant", content: event.text, parts: [], streaming: true },
       ];
     }
     case "message_added":
       return event.role === "assistant" ? sealStreaming(items) : items;
     case "tool_started": {
-      const sealed = sealStreaming(items);
+      const last0 = items[items.length - 1];
+      // Joining the live group keeps it open; anything else starts a new group after a settled one.
+      const sealed =
+        last0?.kind === "tools" && !last0.settled
+          ? items
+          : sealStreaming(items);
       const call: ToolCallWire = {
         id: event.call_id,
         name: event.name,
@@ -58,7 +75,7 @@ export function reduce(items: ConversationItem[], event: AgentEvent): Conversati
         parts: [],
       };
       const last = sealed[sealed.length - 1];
-      if (last?.kind === "tools") {
+      if (last?.kind === "tools" && !last.settled) {
         return [...sealed.slice(0, -1), { kind: "tools", calls: [...last.calls, call] }];
       }
       return [...sealed, { kind: "tools", calls: [call] }];
@@ -67,7 +84,7 @@ export function reduce(items: ConversationItem[], event: AgentEvent): Conversati
       return items.map((item) =>
         item.kind === "tools"
           ? {
-              kind: "tools",
+              ...item,
               calls: item.calls.map((call) =>
                 call.id === event.call_id
                   ? { ...call, output: event.output, ok: event.ok, parts: event.parts ?? [] }

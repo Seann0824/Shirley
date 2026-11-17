@@ -20,7 +20,7 @@ The interface premise: the user does not watch the agent work. They see what nee
 | --- | --- | --- |
 | **Bot** | A persona (system-prompt identity block) + the capability tools it may use + the skills it may activate | `domain/bot.rs` (`BotSpec`), `~/.shirley/bots/<name>/spec.toml` |
 | **Conversation** | Each bot has exactly **one** ongoing conversation, the session named `main` | `bots/<name>/sessions/main.jsonl` |
-| **Task** | An instruction queued for a bot; runs in a background session of that bot and ends as a delivery the user accepts or returns | `pool/`, `interface/runtime/pool.rs`, `~/.shirley/tasks.json` |
+| **Task** | Work a bot hands off from its conversation (`dispatch_task`). Runs in a background session of that bot and comes back as a card in the conversation, which the user accepts or sends back | `pool/`, `interface/runtime/pool.rs`, `~/.shirley/task-pool.json` |
 | **Memory** | Markdown entries. A shared root every bot reads, plus one private root per bot | `memory/`, `~/.shirley/memory/`, `bots/<name>/memory/` |
 
 There is no workspace, no project, no session list, no desktop app, no TUI. If you find a comment that says otherwise, the comment is stale.
@@ -30,7 +30,7 @@ There is no workspace, no project, no session list, no desktop app, no TUI. If y
 ```text
 config.toml                 model + runtime settings
 memory/                     shared memory
-tasks.json                  the task queue (one for the whole platform)
+task-pool.json              the task queue (one for the whole platform)
 artifacts/                  media library (files bots produce or users attach)
 bots/<name>/spec.toml       a bot's definition (optional for built-in bots)
 bots/<name>/sessions/       main.jsonl + one log per task run
@@ -116,6 +116,10 @@ Always registered regardless of the spec: `todo`, `recall`, `create_bot`, `activ
 
 **The turn driver** (`BotRuntimeManager::spawn_turn`): take the session's `Agent`, stream `run_stream`, apply each `AgentEvent` to the session (which persists `MessageAdded` to the JSONL log) and fan it out through the sink as an `AgentEventWire` tagged with `bot` + `session`; put the `Agent` back; start curation.
 
+**Talking and doing.** The user only ever talks to a bot. Quick things the bot answers itself; longer work it hands off with `dispatch_task` (title + self-contained brief) and keeps talking. The card for that task sits where the tool call sits in the conversation and updates in place (the web UI matches the call's `task_id` against the pool). Each turn the bot is reminded of its tasks and their results (`pool::desk::TaskContextProvider`), so "add a budget to the map" becomes `task_note` on the right task. A note on a queued or running task waits in `pending_notes` and sends the finished run straight back for rework; a note on a delivered task reworks it at once. Workers are built with `build_worker_agent`, which has no desk: a worker cannot dispatch workers.
+
+The home composer asks `agent_route` which bot should hear the message, then opens that conversation and sends it there.
+
 **The task pool**: one `TaskPool` for the platform. `pool_pump` starts queued tasks (up to `pool::MAX_CONCURRENT`) each in a session of the task's bot, never `main`. A watcher waits for `Finished`, records a `Delivery` (the final message + artifacts added during the run), and pumps again. The server ticks the pump every 20 s, so the queue advances with no browser open. States: `to_do -> in_progress -> in_review -> done`, `blocked` on failure; `reject` re-queues with the user's note in the same session.
 
 ---
@@ -129,7 +133,8 @@ Always registered regardless of the spec: `todo`, `recall`, `create_bot`, `activ
 | `agent_list_bots`, `agent_create_bot` | The bot catalog |
 | `agent_subscribe {bot}` | Snapshot of the conversation + the event cursor (`sequence`) |
 | `agent_send {bot, text, images?}`, `agent_cancel {bot}` | Drive a turn |
-| `agent_pool_list`, `agent_pool_enqueue {brief, bot?}` (no `bot`: the platform routes), `agent_pool_accept/reject/retry/cancel/remove {id}` | The task pool |
+| `agent_route {text}` | Which bot should hear a message (home screen) |
+| `agent_pool_list`, `agent_pool_enqueue {brief, bot?}`, `agent_pool_note {id, note}`, `agent_pool_accept/reject/retry/cancel/remove {id}` | The task pool (tasks are normally created by a bot's `dispatch_task`) |
 | `agent_memory_list {bot}` | Entries the bot sees, tagged `shared` / `bot` |
 | `agent_asset_url {bot, id}`, `POST /api/upload` | Media library out / in |
 | `agent_model_providers`, `agent_list_models`, `agent_set_model` | Model configuration (no UI yet) |
@@ -197,7 +202,7 @@ Lints: `[workspace.lints]` in the root `Cargo.toml` is the single policy; Tier-1
 2. **Windows**: paths are portable, but the `bash` tool needs a `bash` on `PATH`.
 3. **Model settings UI**: providers and models are configured through `.env` / `config.toml`; the API exists (`agent_model_providers`) but no page uses it.
 4. **Bot editing**: bots can be created (UI via NONO's `create_bot`, or by writing `spec.toml`) but not edited or deleted from the UI; hiding a bot on the home screen is a per-device preference.
-5. **Routing** is one model call (`interface/runtime/route.rs`, prompt `prompts/route.md`) over each bot's persona and tools; on any failure the task goes to `nono`. It sees only the brief, not attachments.
+5. **Routing** is one model call (`interface/runtime/route.rs`, prompt `prompts/route.md`) over each bot's persona and tools; on any failure the message goes to `nono`. It sees only the text, not attachments.
 6. **Curation cost**: one extra model call per turn; not throttled.
 7. **Markdown**: the chat renders assistant text as plain text.
 8. **Module cycles**: `settings <-> storage`, `remote <-> memory`, `models <-> model_providers`, `bootstrap <-> subagent`. Breaking them needs type relocation.

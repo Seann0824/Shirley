@@ -8,7 +8,9 @@ import { uploadAll, userMessageParts } from "../components/attachments";
 import { Icon } from "../components/Icon";
 import { MarkdownBlock, splitBlocks } from "../components/Markdown";
 import { showsToolActivity, toolActivity } from "../components/toolActivity";
+import { TaskCard } from "../components/TaskCard";
 import { useConversation, type ConversationItem } from "../state/useConversation";
+import type { useTasks } from "../state/useTasks";
 
 /** An image stored in the media library, loaded through a minted URL. */
 function ArtifactImage({ bot, id, alt }: { bot: string; id: string; alt: string }) {
@@ -79,7 +81,49 @@ function ToolActivity({ bot, calls, settled }: { bot: string; calls: ToolCallWir
   );
 }
 
-function Item({ bot, item }: { bot: Bot; item: ConversationItem }) {
+/** A field of a tool call's JSON output or arguments, if it parses. */
+function field(json: string | null, key: string): string | null {
+  if (!json) return null;
+  try {
+    const value = (JSON.parse(json) as Record<string, unknown>)[key];
+    return typeof value === "string" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+type Tasks = ReturnType<typeof useTasks>;
+
+/** Where the bot handed work off: the task's card, kept current, in place. */
+function DispatchedTask({ bot, call, tasks }: { bot: Bot; call: ToolCallWire; tasks: Tasks }) {
+  const id = field(call.output, "task_id");
+  const task = id ? tasks.tasks.find((entry) => entry.id === id) : undefined;
+  const title = field(call.arguments, "title") ?? "任务";
+  let body;
+  if (task) {
+    body = <TaskCard task={task} actions={tasks} />;
+  } else if (call.ok === false) {
+    body = <p className="task-line">没能派出「{title}」</p>;
+  } else if (!id) {
+    body = <p className="task-line">正在派出「{title}」…</p>;
+  } else if (!tasks.loaded) {
+    return null;
+  } else {
+    body = <p className="task-line">「{title}」已从任务列表移除</p>;
+  }
+  return (
+    <div className="message-row bot-message task-row">
+      <div className={`message-avatar ${botTone(bot.name)}`}>
+        <BotAvatar name={bot.name} size={27} />
+      </div>
+      {body}
+    </div>
+  );
+}
+
+const TASK_TOOLS = new Set(["dispatch_task", "task_note"]);
+
+function Item({ bot, item, tasks }: { bot: Bot; item: ConversationItem; tasks: Tasks }) {
   switch (item.kind) {
     case "message":
       if (item.role === "user") {
@@ -157,51 +201,85 @@ function Item({ bot, item }: { bot: Bot; item: ConversationItem }) {
         </>
       );
     case "tools": {
-      if (!showsToolActivity(toolActivity(item.calls, item.settled === true))) return null;
+      const other = item.calls.filter((call) => !TASK_TOOLS.has(call.name));
+      // A call restored from the log carries no status; its JSON output is the proof it worked.
+      const noted = item.calls.filter(
+        (call) => call.name === "task_note" && call.ok !== false && field(call.output, "task_id"),
+      );
       return (
-        <div className="message-row bot-message tools-row">
-          <div className={`message-avatar ${botTone(bot.name)}`}>
-            <BotAvatar name={bot.name} size={27} />
-          </div>
-          <ToolActivity bot={bot.name} calls={item.calls} settled={item.settled === true} />
-        </div>
+        <>
+          {showsToolActivity(toolActivity(other, item.settled === true)) && (
+            <div className="message-row bot-message tools-row">
+              <div className={`message-avatar ${botTone(bot.name)}`}>
+                <BotAvatar name={bot.name} size={27} />
+              </div>
+              <ToolActivity bot={bot.name} calls={other} settled={item.settled === true} />
+            </div>
+          )}
+          {item.calls
+            .filter((call) => call.name === "dispatch_task")
+            .map((call) => (
+              <DispatchedTask key={call.id} bot={bot} call={call} tasks={tasks} />
+            ))}
+          {noted.map((call) => (
+            <div className="system-line" key={call.id}>
+              已补充到「{field(call.output, "title") ?? "任务"}」
+            </div>
+          ))}
+        </>
       );
     }
     case "compact":
-      return (
-        <div className="message-row bot-message">
-          <div className="message-bubble notice">
-            <p>（较早的对话已压缩）</p>
-          </div>
-        </div>
-      );
+      return <div className="system-line">较早的对话已整理成摘要</div>;
   }
+}
+
+/** A message to send as soon as the conversation opens (home screen, "new bot"). */
+export interface Seed {
+  text: string;
+  attachments: Attachment[];
+  nonce: number;
 }
 
 export function Chat({
   bot,
   seed,
+  tasks,
   onBack,
   onMemory,
+  onOpenTasks,
   onTurnFinished,
 }: {
   bot: Bot;
-  /** A message to send as soon as the conversation is open (the "new bot" flow). */
-  seed?: string;
+  seed?: Seed;
+  tasks: Tasks;
   onBack: () => void;
   onMemory: () => void;
+  onOpenTasks: () => void;
   onTurnFinished?: () => void;
 }) {
   const conversation = useConversation(bot.name, onTurnFinished);
   const scrollRef = useRef<HTMLDivElement>(null);
-  const seeded = useRef(false);
+  const seeded = useRef<number | null>(null);
 
   useEffect(() => {
-    if (seed && conversation.loaded && !seeded.current) {
-      seeded.current = true;
-      void conversation.send(seed);
+    if (seed && conversation.loaded && seeded.current !== seed.nonce) {
+      seeded.current = seed.nonce;
+      void send(seed.text, seed.attachments);
     }
-  }, [seed, conversation.loaded, conversation]);
+    // `send` is recreated every render; the nonce is what makes a seed fire once.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [seed, conversation.loaded]);
+
+  // Results waiting for the user's verdict, possibly scrolled out of sight.
+  const waiting = tasks.tasks.filter((task) => task.bot === bot.name && task.status === "in_review");
+  const showWaiting = () => {
+    const card = waiting
+      .map((task) => document.getElementById(`task-${task.id}`))
+      .find((element) => element !== null);
+    if (card) card.scrollIntoView({ behavior: "smooth", block: "center" });
+    else onOpenTasks();
+  };
 
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
@@ -263,7 +341,7 @@ export function Chat({
               </div>
             )}
             {items.map((item, index) => (
-              <Item key={index} bot={bot} item={item} />
+              <Item key={index} bot={bot} item={item} tasks={tasks} />
             ))}
             {waitingForFirstToken && (
               <div className="message-row bot-message">
@@ -282,6 +360,14 @@ export function Chat({
       </div>
 
       <ComposerDock
+        above={
+          waiting.length > 0 ? (
+            <button className="results-pill" onClick={showWaiting}>
+              <Icon name="check" size={13} />
+              {waiting.length === 1 ? `「${waiting[0].title}」做好了` : `${waiting.length} 个结果等你看`}
+            </button>
+          ) : undefined
+        }
         onSend={(text, attachments) => void send(text, attachments)}
         busy={running}
         onStop={() => void conversation.cancel()}

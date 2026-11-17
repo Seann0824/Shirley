@@ -1000,7 +1000,7 @@ impl SessionManager {
         // Session persistence is in the application layer: load the log first, then hand it to the factory to create the `Agent` (system regenerated and placed on top).
         let log = store.load().map_err(|error| error.to_string())?;
         let mut built = factory
-            .build_agent(log)
+            .build_worker_agent(log)
             .map_err(|error| error.to_string())?;
         if let Some(model) = selected_model {
             built.agent.set_model(model);
@@ -1052,7 +1052,7 @@ impl SessionManager {
         // The lazy session is empty now: load yields an empty working set; the file is materialized only when the first message is persisted.
         let log = store.load().map_err(|error| error.to_string())?;
         let mut built = factory
-            .build_agent(log)
+            .build_worker_agent(log)
             .map_err(|error| error.to_string())?;
         if let Some(model) = selected_model {
             built.agent.set_model(model);
@@ -1099,7 +1099,7 @@ impl SessionManager {
             .map_err(|error| error.to_string())?;
         let log = store.load().map_err(|error| error.to_string())?;
         let mut built = factory
-            .build_agent(log)
+            .build_worker_agent(log)
             .map_err(|error| error.to_string())?;
         if let Some(model) = selected_model {
             built.agent.set_model(model);

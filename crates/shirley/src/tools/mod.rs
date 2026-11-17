@@ -6,6 +6,7 @@ mod media;
 pub(crate) mod read;
 mod recall;
 mod skill;
+mod tasks;
 mod todo;
 mod web_search;
 
@@ -19,4 +20,5 @@ pub use create_bot::CreateBotTool;
 pub use media::MediaTool;
 pub use recall::RecallTool;
 pub use skill::{ActivateSkillTool, ReadSkillFileTool};
+pub use tasks::{DispatchTaskTool, TaskNoteTool};
 pub use todo::TodoTool;

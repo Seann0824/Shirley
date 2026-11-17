@@ -138,6 +138,15 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
             }
         });
     }
+    // A bot dispatching work should not wait for the next tick.
+    if let Some(mut wake) = state.manager.take_pool_wake() {
+        let manager = Arc::clone(&state.manager);
+        tokio::spawn(async move {
+            while wake.recv().await.is_some() {
+                manager.pool_tick().await;
+            }
+        });
+    }
 
     // Serve the web UI bundle. `build.rs` produces it; `SHIRLEY_WEB_DIST` points at another one.
     let dist = std::env::var_os("SHIRLEY_WEB_DIST").map_or_else(
@@ -670,6 +679,11 @@ async fn dispatch(
         // Every mutation answers with the whole list, so the caller re-renders from one snapshot
         // instead of reconciling a partial update against concurrent background progress.
         "agent_pool_list" => ok_json(manager.pool_list().await?),
+        // Which bot should hear this? The home screen asks, then opens that conversation.
+        "agent_route" => {
+            let text = args.text.ok_or_else(|| ApiError::bad("missing text"))?;
+            ok_json(serde_json::json!({ "bot": manager.route(&text).await }))
+        }
         // Without `bot` the platform chooses one (`runtime::route`); the home screen never asks.
         "agent_pool_enqueue" => {
             let brief = args
@@ -690,6 +704,11 @@ async fn dispatch(
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
             let note = args.note.unwrap_or_default();
             ok_json(manager.pool_reject(&id, &note).await?)
+        }
+        "agent_pool_note" => {
+            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
+            let note = args.note.ok_or_else(|| ApiError::bad("missing note"))?;
+            ok_json(manager.pool_note(&id, &note).await?)
         }
         "agent_pool_retry" => {
             let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;

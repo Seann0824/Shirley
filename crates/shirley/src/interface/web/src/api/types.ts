@@ -44,6 +44,7 @@ export interface PoolTask {
   session?: string | null;
   delivery?: Delivery | null;
   note?: string | null;
+  pendingNotes?: string[];
 }
 
 /** A media-library entry (`artifact::LibraryEntry`). */
@@ -133,4 +134,6 @@ export type AgentEvent = Routed &
     | { type: "notice"; text: string }
     | { type: "finished"; stop_reason: string }
     | { type: "error"; message: string }
+    /** Client-side: events may have been missed (lagged or reconnected stream); reload. */
+    | { type: "resync" }
   );

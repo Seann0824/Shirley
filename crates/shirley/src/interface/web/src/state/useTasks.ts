@@ -53,6 +53,7 @@ export function useTasks(poll = true) {
     },
     accept: (id: string) => settle(api.poolAccept(id)),
     reject: (id: string, note: string) => settle(api.poolReject(id, note)),
+    note: (id: string, note: string) => settle(api.poolNote(id, note)),
     retry: (id: string) => settle(api.poolRetry(id)),
     cancel: (id: string) => settle(api.poolCancel(id)),
     remove: (id: string) => settle(api.poolRemove(id)),

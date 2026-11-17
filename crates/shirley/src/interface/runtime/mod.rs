@@ -76,6 +76,10 @@ pub struct BotRuntimeManager {
     assets: Arc<std::sync::Mutex<HashMap<String, AssetEntry>>>,
     /// The platform's single task pool (`tasks.json`); each task names the bot that runs it.
     pool: Arc<Mutex<crate::pool::TaskPool>>,
+    /// What bots dispatch through; writing to it wakes the scheduler.
+    desk: crate::pool::desk::TaskDesk,
+    /// The scheduler's wake-up channel, taken once by the transport (`take_pool_wake`).
+    pool_wake: std::sync::Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<()>>>,
 }
 
 /// One minted asset handle. Deliberately holds the *resolved* jail file, not an id to re-resolve:
@@ -111,6 +115,8 @@ pub fn route_key(bot: &str, session: &str) -> String {
 
 impl BotRuntimeManager {
     pub fn new(factory: Arc<AgentFactory>, sink: EventSink) -> Self {
+        let pool = Arc::new(Mutex::new(crate::pool::TaskPool::open(pool::pool_path())));
+        let (wake, pool_wake) = tokio::sync::mpsc::unbounded_channel();
         Self {
             factory,
             runtimes: Arc::new(Mutex::new(HashMap::new())),
@@ -118,8 +124,18 @@ impl BotRuntimeManager {
             sink,
             status_sink: Arc::new(|_| {}),
             assets: Arc::new(std::sync::Mutex::new(HashMap::new())),
-            pool: Arc::new(Mutex::new(crate::pool::TaskPool::open(pool::pool_path()))),
+            desk: crate::pool::desk::TaskDesk::new(Arc::clone(&pool), wake),
+            pool,
+            pool_wake: std::sync::Mutex::new(Some(pool_wake)),
         }
+    }
+
+    /// The signal a dispatch sends; the transport runs the scheduler on each one.
+    pub fn take_pool_wake(&self) -> Option<tokio::sync::mpsc::UnboundedReceiver<()>> {
+        self.pool_wake
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
     }
 
     /// Install the content-free status sink (server fans out `/api/status`).
@@ -137,7 +153,7 @@ impl BotRuntimeManager {
         // per-bot factory so each bot gets its own tool table and prompt configuration.
         let bots_root = crate::storage::bots_root();
         let spec = crate::bot::BotSpec::load_or_default(bot, &bots_root);
-        let factory = Arc::new(self.factory.for_bot(spec));
+        let factory = Arc::new(self.factory.for_bot(spec).with_tasks(self.desk.clone()));
         let runtime = tokio::task::spawn_blocking(move || runtime_from_factory(factory))
             .await
             .map_err(|e| e.to_string())??;
