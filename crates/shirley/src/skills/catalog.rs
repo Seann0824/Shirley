@@ -40,6 +40,9 @@ pub struct SkillCatalog {
     /// catalog never re-scans and behaves exactly as the old read-only snapshot.
     roots: Vec<PathBuf>,
     skills: Mutex<Vec<SkillMeta>>,
+    /// A bot's catalog ([`SkillCatalog::for_bot`]): `roots` is the bot's own skill directory,
+    /// and these platform skills are listed after its own (which win a name clash).
+    shared: Option<Vec<SkillMeta>>,
 }
 
 impl Default for SkillCatalog {
@@ -53,6 +56,7 @@ impl Clone for SkillCatalog {
         Self {
             roots: self.roots.clone(),
             skills: Mutex::new(self.lock().clone()),
+            shared: self.shared.clone(),
         }
     }
 }
@@ -63,6 +67,7 @@ impl SkillCatalog {
         Self {
             roots: Vec::new(),
             skills: Mutex::new(skills),
+            shared: None,
         }
     }
 
@@ -74,6 +79,18 @@ impl SkillCatalog {
         Self {
             skills: Mutex::new(discovery::scan_roots(&roots).skills),
             roots,
+            shared: None,
+        }
+    }
+
+    /// A bot's catalog: its own skills (`own_root`, re-scanned when it changes, where the bot
+    /// saves skills it writes) first, then the platform skills it may use.
+    pub fn for_bot(own_root: PathBuf, shared: Vec<SkillMeta>) -> Self {
+        let skills = merge(discovery::scan_roots(std::slice::from_ref(&own_root)).skills, &shared);
+        Self {
+            roots: vec![own_root],
+            skills: Mutex::new(skills),
+            shared: Some(shared),
         }
     }
 
@@ -94,6 +111,9 @@ impl SkillCatalog {
     /// Returns `(default_install_root, project_override_root)`; both `None` for a catalog built from
     /// [`SkillCatalog::new`] (no discovery roots: nothing can be installed into).
     pub fn install_roots(&self) -> (Option<PathBuf>, Option<PathBuf>) {
+        if self.shared.is_some() {
+            return (self.roots.first().cloned(), None);
+        }
         let project = self.roots.first().cloned();
         let user = user_root(&self.roots);
         match user {
@@ -113,13 +133,21 @@ impl SkillCatalog {
         if self.roots.is_empty() {
             return false;
         }
-        let found = discovery::scan_roots(&self.roots).skills;
+        let mut found = discovery::scan_roots(&self.roots).skills;
+        if let Some(shared) = &self.shared {
+            found = merge(found, shared);
+        }
         let mut guard = self.lock();
         if fingerprint(&guard) == fingerprint(&found) {
             return false;
         }
         *guard = found;
         true
+    }
+
+    /// Whether this is one bot's catalog (it has a directory of its own skills).
+    pub fn is_bot_catalog(&self) -> bool {
+        self.shared.is_some()
     }
 
     /// Copy of the discovered skills, in discovery order.
@@ -206,7 +234,9 @@ impl SkillCatalog {
         }
         // No roots at all (built via `new`: tests / fixtures) -> nothing to install into either,
         // so keep the old "nothing to inject" behaviour instead of pointing at an imaginary path.
-        if let Some(root) = install_root {
+        if self.shared.is_some() {
+            body.push_str(OWN_SKILLS_GUIDE);
+        } else if let Some(root) = install_root {
             let guide = INSTALL_GUIDE
                 .replace("{{install_root}}", &escape(&root))
                 .replace(
@@ -234,6 +264,19 @@ impl SkillCatalog {
 /// only the conventional roots are scanned. `{{install_root}}` is substituted with the
 /// top-priority root ([`SkillCatalog::install_root`]).
 pub const INSTALL_GUIDE: &str = include_str!("../../prompts/skills_install.md");
+
+/// The same for a bot: it keeps its own skills with `save_skill`, which knows where they go.
+pub const OWN_SKILLS_GUIDE: &str = include_str!("../../prompts/skills_own.md");
+
+/// A bot's own skills, then the shared ones it does not override.
+fn merge(own: Vec<SkillMeta>, shared: &[SkillMeta]) -> Vec<SkillMeta> {
+    let extra: Vec<SkillMeta> = shared
+        .iter()
+        .filter(|skill| !own.iter().any(|mine| mine.name == skill.name))
+        .cloned()
+        .collect();
+    own.into_iter().chain(extra).collect()
+}
 
 /// The user-level root among `roots` (`~/.agents/skills`, else `~/.claude/skills`).
 ///

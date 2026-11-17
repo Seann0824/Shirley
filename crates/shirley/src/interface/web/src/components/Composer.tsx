@@ -1,9 +1,17 @@
 import { useEffect, useRef, useState, type ClipboardEvent, type ReactNode } from "react";
 
 import { api } from "../api/bridge";
+import { askNotificationPermission } from "../state/notify";
 import { filesToAttachments, pastedFiles, toAttachments, type Attachment } from "./attachments";
 import { Icon } from "./Icon";
-import { microphoneError, previewInterval, startRecording, type Recording } from "./recorder";
+import {
+  PERMISSION_HINT,
+  microphoneError,
+  microphoneWillAsk,
+  previewInterval,
+  startRecording,
+  type Recording,
+} from "./recorder";
 
 export type { Attachment } from "./attachments";
 
@@ -233,6 +241,8 @@ export function ComposerDock({
   const send = (text: string) => {
     const trimmed = text.trim();
     if (!trimmed && !attachments.length) return;
+    // The first message is the natural moment to ask: "tell me when the reply is ready".
+    askNotificationPermission();
     onSend(trimmed, attachments);
     setValue("");
     setAttachments([]);
@@ -303,6 +313,7 @@ export function ComposerDock({
     setVoiceError(null);
     setLiveText("");
     setListening(true);
+    if (await microphoneWillAsk()) setLiveText(PERMISSION_HINT);
     let rec: Recording;
     try {
       rec = await startRecording();
@@ -318,6 +329,7 @@ export function ComposerDock({
       return;
     }
     recording.current = rec;
+    setLiveText((text) => (text === PERMISSION_HINT ? "" : text));
     let inFlight = false;
     let lastSent = performance.now();
     previewTimer.current = window.setInterval(() => {

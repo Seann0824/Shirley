@@ -5,8 +5,14 @@ A bot is a persona plus skills. The market is where a bot gets skills it did not
 ## What it lists
 
 `crates/shirley/market/skills.json`, compiled into the binary: a curated list of skills from
-public repositories (currently `anthropics/skills`, Apache-2.0), with Chinese titles and
-summaries. `[market] index_url` (or `SHIRLEY_MARKET_INDEX`) lists another index of the same
+public repositories, with Chinese titles and summaries:
+
+| Source | Licence | Skills |
+| --- | --- | --- |
+| `anthropics/skills` | Apache-2.0 | documents (pdf, docx, xlsx, pptx), design, MCP, skill writing |
+| `obra/superpowers` | MIT | working methods: brainstorming, plans, debugging, TDD, verification |
+| `openai/skills` (`.curated`) | Apache-2.0 per skill | Jupyter, Playwright, security reviews, GitHub CI and PR comments, CLIs |
+| `huggingface/skills` | Apache-2.0 | papers, datasets, running models locally | `[market] index_url` (or `SHIRLEY_MARKET_INDEX`) lists another index of the same
 shape instead; when it cannot be fetched, the built-in list is used.
 
 ```json
@@ -25,9 +31,24 @@ Only that bot sees it. A skill a bot writes for itself goes in the same director
 marker; it is listed on the bot's skills page but never offered to the market (bot-written
 skills are not stable enough to share).
 
-Sessions snapshot the skill catalog when they are built, so an install or removal marks the bot
-stale (`BotRuntimeManager::reload_bot`); its runtime is rebuilt on the next request once no
-turn of that bot is running. Conversations reload from their logs; nothing is lost.
+Sessions snapshot the skill catalog when they are built, so a change to the directory (an
+install, a removal, a skill the bot saved) makes the runtime stale; it is rebuilt on the next
+request once no turn of that bot is running. Conversations reload from their logs; nothing is
+lost.
+
+## Skills a bot writes itself
+
+A bot saves a procedure it will need again with the `save_skill` tool (name, one-line
+description, Markdown instructions, optional files under `scripts/`, `references/`,
+`assets/`). It lands in the same `bots/<bot>/skills/` directory without a market marker, so it
+shows on the skills page as "Bot 自己写的" and is never offered to the market. Saving under the
+same name replaces it; a market skill's name is refused (the next install would overwrite it).
+The bot is told when to do this in `prompts/skills_own.md`, part of its skill listing.
+
+The skill can be activated in the same turn (activation re-scans on an unknown name). The
+runtime manager fingerprints each bot's skill directory on every request and rebuilds an idle
+runtime when it changed, so it is listed from the next message on -- the same path picks up
+market installs and skills edited by hand.
 
 ## How it is fetched
 

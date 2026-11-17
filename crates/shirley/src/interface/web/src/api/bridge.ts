@@ -14,7 +14,17 @@ import type {
   SkillMarket,
 } from "./types";
 
-const token = new URLSearchParams(window.location.search).get("token") ?? undefined;
+// The token arrives once in the link (`?token=`) and is kept: the installed app starts at `/`.
+const TOKEN_KEY = "shirley.token";
+const token = (() => {
+  const fromLink = new URLSearchParams(window.location.search).get("token");
+  try {
+    if (fromLink) localStorage.setItem(TOKEN_KEY, fromLink);
+    return fromLink ?? localStorage.getItem(TOKEN_KEY) ?? undefined;
+  } catch {
+    return fromLink ?? undefined;
+  }
+})();
 
 async function cmd<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };

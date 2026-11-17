@@ -330,6 +330,14 @@ impl AgentFactory {
         let _ = tool_manager.register(tools::RecallTool::new(Arc::clone(&memory)));
         // Platform administration: any bot can define a new bot.
         let _ = tool_manager.register(tools::CreateBotTool::new(self.global_root().join("bots")));
+        // A bot keeps procedures it will need again as its own skills.
+        if let (None, Some(root), true) = (
+            tool_filter,
+            self.skill_catalog.install_roots().0,
+            self.skill_catalog.is_bot_catalog(),
+        ) {
+            let _ = tool_manager.register(tools::SaveSkillTool::new(root));
+        }
 
         // Computer use: drive other apps' windows through the accessibility API. Registered on
         // every platform -- the non-macOS build answers "unsupported" honestly instead of hiding
@@ -486,14 +494,13 @@ impl AgentFactory {
         let workspace = bot_root.join("workspace");
         // The bot's own skills (installed from the market, or written by the bot) come first and
         // win a name clash; then the platform's user-level skills `spec.skills` allows.
-        let own = skills::discovery::scan_roots(&[skills::market::installed_root(&bot_root)]).skills;
         let shared = self
             .skill_catalog
             .skills()
             .into_iter()
             .filter(|skill| spec.skills.is_empty() || spec.skills.contains(&skill.name))
-            .filter(|skill| !own.iter().any(|mine| mine.name == skill.name));
-        let skill_catalog = SkillCatalog::new(own.iter().cloned().chain(shared).collect());
+            .collect();
+        let skill_catalog = SkillCatalog::for_bot(skills::market::installed_root(&bot_root), shared);
         let system_prompt = prompt::build(
             workspace.clone(),
             prompt::Role::Worker {

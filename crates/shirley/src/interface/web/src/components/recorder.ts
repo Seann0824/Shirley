@@ -39,6 +39,22 @@ export function microphoneError(cause: unknown): string {
   return "麦克风打不开，请再试一次";
 }
 
+/** The text shown while the browser's microphone prompt is open. */
+export const PERMISSION_HINT = "请在浏览器弹窗里选「访问此网站时允许」，以后就不会再问了";
+
+/**
+ * Whether the browser will ask before opening the microphone. Chrome remembers "allow" per site
+ * (scheme + host + port): asked again only after "allow this time", or at a different address.
+ */
+export async function microphoneWillAsk(): Promise<boolean> {
+  try {
+    const status = await navigator.permissions?.query({ name: "microphone" as PermissionName });
+    return status?.state === "prompt";
+  } catch {
+    return false; // Firefox and older Safari cannot query it: say nothing.
+  }
+}
+
 export async function startRecording(): Promise<Recording> {
   if (!navigator.mediaDevices?.getUserMedia) {
     throw new DOMException("no media devices", "SecurityError");

@@ -1,6 +1,7 @@
 mod bash;
 mod computer;
 mod create_bot;
+mod save_skill;
 mod grep;
 mod media;
 pub(crate) mod read;
@@ -17,6 +18,7 @@ pub use read::read as read_tool;
 pub use web_search::web_search as web_search_tool;
 
 pub use create_bot::CreateBotTool;
+pub use save_skill::SaveSkillTool;
 pub use media::MediaTool;
 pub use recall::RecallTool;
 pub use skill::{ActivateSkillTool, ReadSkillFileTool};

@@ -1,9 +1,10 @@
-import { useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 
-import { api } from "./api/bridge";
+import { api, onAgentEvent } from "./api/bridge";
 import type { Attachment } from "./components/Composer";
 
 import { useBots } from "./state/useBots";
+import { ReplyWatcher, registerServiceWorker, setBadge, show } from "./state/notify";
 import { useTasks } from "./state/useTasks";
 import { useWide } from "./state/useWide";
 import { Chat, type Seed } from "./views/Chat";
@@ -49,6 +50,50 @@ export default function App() {
     setSeed(undefined);
     setTab("chat");
   };
+
+  // Reply notifications: a bot finished answering while you were somewhere else.
+  const looking = useRef({ bot: "", inChat: false });
+  looking.current = { bot: selectedBot?.name ?? "", inChat: wide || tab === "chat" };
+  const names = useRef(new Map<string, string>());
+  names.current = new Map(bots.bots.map((bot) => [bot.name, bot.display_name]));
+  const openRef = useRef(openBot);
+  openRef.current = openBot;
+  useEffect(() => {
+    void registerServiceWorker();
+    // Opened from a notification while the app was closed.
+    const fromLink = new URLSearchParams(window.location.search).get("bot");
+    if (fromLink) openRef.current(fromLink);
+
+    const watcher = new ReplyWatcher();
+    let unread = 0;
+    const seen = (bot: string) =>
+      document.visibilityState === "visible" &&
+      document.hasFocus() &&
+      looking.current.inChat &&
+      looking.current.bot === bot;
+    const stop = onAgentEvent((event) => {
+      const reply = watcher.take(event, seen);
+      if (!reply) return;
+      void show(reply.bot, names.current.get(reply.bot) ?? reply.bot, reply.body);
+      if (document.visibilityState !== "visible") setBadge((unread += 1));
+    });
+    const onVisible = () => {
+      if (document.visibilityState === "visible") setBadge((unread = 0));
+    };
+    const onWorker = (event: MessageEvent<{ type?: string; bot?: string }>) => {
+      if (event.data?.type === "open-bot" && event.data.bot) openRef.current(event.data.bot);
+    };
+    const onPage = (event: Event) => openRef.current((event as CustomEvent<string>).detail);
+    document.addEventListener("visibilitychange", onVisible);
+    navigator.serviceWorker?.addEventListener("message", onWorker);
+    window.addEventListener("shirley:open-bot", onPage);
+    return () => {
+      stop();
+      document.removeEventListener("visibilitychange", onVisible);
+      navigator.serviceWorker?.removeEventListener("message", onWorker);
+      window.removeEventListener("shirley:open-bot", onPage);
+    };
+  }, []);
 
   // The home composer: the platform picks the bot, then the message goes into its conversation.
   const ask = async (text: string, attachments: Attachment[]) => {

@@ -348,15 +348,14 @@ async fn transcribe_local(
                 let detected = detected_language(&String::from_utf8_lossy(&output.stderr));
                 let used = constrain_language(detected.clone(), &config.languages);
                 // Heard as a language the user does not speak: transcribe again as one they do.
-                if used != detected && !retried {
-                    if let Some(code) = used {
-                        language = code;
-                        retried = true;
-                        tokio::fs::write(&audio_path, wav)
-                            .await
-                            .map_err(|_error| GENERIC_FAILURE.to_owned())?;
-                        continue;
-                    }
+                let retry_as = used.clone().filter(|_| used != detected && !retried);
+                if let Some(code) = retry_as {
+                    language = code;
+                    retried = true;
+                    tokio::fs::write(&audio_path, wav)
+                        .await
+                        .map_err(|_error| GENERIC_FAILURE.to_owned())?;
+                    continue;
                 }
                 return Ok((clean_transcript(&written, prompt), used));
             }
@@ -574,15 +573,19 @@ fn strip_prompt_clauses(text: &str, prompt: &str) -> String {
     loop {
         let before = out.clone();
         for clause in &clauses {
+            // `rest` is a prefix of `out`: keep that much.
             if let Some(rest) = out.strip_suffix(PUNCTUATION).unwrap_or(&out).strip_suffix(clause) {
-                out = rest.trim_end_matches(PUNCTUATION).to_owned();
+                let keep = rest.trim_end_matches(PUNCTUATION).len();
+                out.truncate(keep);
                 // Keep the sentence's own full stop if the echo replaced it.
                 if !out.is_empty() && text.trim_end().ends_with('。') {
                     out.push('。');
                 }
             }
+            // `rest` is a suffix of `out`: drop what comes before it.
             if let Some(rest) = out.strip_prefix(clause) {
-                out = rest.trim_start_matches(PUNCTUATION).to_owned();
+                let cut = out.len() - rest.trim_start_matches(PUNCTUATION).len();
+                out.drain(..cut);
             }
         }
         if out == before {

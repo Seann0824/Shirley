@@ -68,6 +68,9 @@ pub struct BotRuntimeManager {
     runtimes: Arc<Mutex<HashMap<String, Arc<Mutex<BotRuntime>>>>>,
     /// Bots whose spec or skills changed: their runtime is rebuilt the next time it is idle.
     stale: Arc<Mutex<std::collections::HashSet<String>>>,
+    /// Fingerprint of each bot's skill directory when its runtime was built: a change (market
+    /// install, a skill the bot saved, a manual edit) makes the runtime stale.
+    skill_marks: Arc<Mutex<HashMap<String, u64>>>,
     cancels: Arc<Mutex<HashMap<String, oneshot::Sender<()>>>>,
     sink: EventSink,
     /// MessageContent-free runtime-status fan-out (separate channel; no-op by default).
@@ -111,6 +114,31 @@ pub struct AssetText {
 const MAX_ASSET_HANDLES: usize = 512;
 
 /// Event pump / cancel key: unique across bots.
+/// A cheap fingerprint of a skill directory: each skill's name and `SKILL.md` modification time.
+fn skills_mark(root: &std::path::Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut entries: Vec<(String, Option<std::time::SystemTime>)> = std::fs::read_dir(root)
+        .map(|dir| {
+            dir.flatten()
+                .filter_map(|entry| {
+                    let name = entry.file_name().to_str()?.to_owned();
+                    if name.starts_with('.') {
+                        return None;
+                    }
+                    let modified = std::fs::metadata(entry.path().join("SKILL.md"))
+                        .and_then(|meta| meta.modified())
+                        .ok();
+                    Some((name, modified))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    entries.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    entries.hash(&mut hasher);
+    hasher.finish()
+}
+
 pub fn route_key(bot: &str, session: &str) -> String {
     format!("{bot}::{session}")
 }
@@ -123,6 +151,7 @@ impl BotRuntimeManager {
             factory,
             runtimes: Arc::new(Mutex::new(HashMap::new())),
             stale: Arc::new(Mutex::new(std::collections::HashSet::new())),
+            skill_marks: Arc::new(Mutex::new(HashMap::new())),
             cancels: Arc::new(Mutex::new(HashMap::new())),
             sink,
             status_sink: Arc::new(|_| {}),
@@ -150,9 +179,13 @@ impl BotRuntimeManager {
     /// Get (lazily creating if needed) the runtime for a given bot id.
     pub async fn ensure_runtime(&self, bot: &str) -> Result<Arc<Mutex<BotRuntime>>, String> {
         // Bound first: an `if let` scrutinee's lock guard would live through the body below.
+        let bots_root = crate::storage::bots_root();
+        let mark = skills_mark(&crate::skills::market::installed_root(&bots_root.join(bot)));
         let cached = self.runtimes.lock().await.get(bot).cloned();
         if let Some(rt) = cached {
-            if !self.stale.lock().await.contains(bot) || self.is_busy(bot).await {
+            let skills_changed = self.skill_marks.lock().await.get(bot) != Some(&mark);
+            let stale = skills_changed || self.stale.lock().await.contains(bot);
+            if !stale || self.is_busy(bot).await {
                 return Ok(rt);
             }
             // Changed and idle: drop it; the sessions reload from their logs below.
@@ -161,7 +194,7 @@ impl BotRuntimeManager {
         }
         // Load the bot's spec from disk (or fall back to a platform default) and derive a
         // per-bot factory so each bot gets its own tool table and prompt configuration.
-        let bots_root = crate::storage::bots_root();
+        self.skill_marks.lock().await.insert(bot.to_owned(), mark);
         let spec = crate::bot::BotSpec::load_or_default(bot, &bots_root);
         let factory = Arc::new(self.factory.for_bot(spec).with_tasks(self.desk.clone()));
         let runtime = tokio::task::spawn_blocking(move || runtime_from_factory(factory))
@@ -449,10 +482,8 @@ impl BotRuntimeManager {
                             {
                                 garbled_logged = true;
                                 eprintln!(
-                                    "[model] {}: the reply from {} contains U+FFFD (garbled characters); \
-                                     the model service sent them broken",
-                                    bot_owned,
-                                    model_name
+                                    "[model] {bot_owned}: the reply from {model_name} contains U+FFFD \
+                                     (garbled characters); the model service sent them broken"
                                 );
                             }
                             let is_todo = matches!(&event, AgentEvent::ToolFinished { name, .. } if name == "todo");

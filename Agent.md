@@ -108,7 +108,7 @@ Layout: one full-viewport column on phones; from 900px, the bot list on the left
 | Memory roots | `[~/.shirley/memory, bots/<name>/memory]` |
 | Workspace | `bots/<name>/workspace`: `bash` cwd, base for relative paths in `read` / `grep`, named in the system prompt. `read` also accepts absolute paths (secret-file refusal still applies) |
 
-Always registered regardless of the spec: `todo`, `recall`, `create_bot`, `activate_skill`, `read_skill_file`, `computer_*`, and `subagent` (top-level agents only).
+Always registered regardless of the spec: `todo`, `recall`, `create_bot`, `activate_skill`, `read_skill_file`, `save_skill` (a bot's own skills; top level only), `computer_*`, and `subagent` (top-level agents only).
 
 `BotRuntimeManager::ensure_runtime(bot)` loads the spec (`spec.toml`, else a built-in default: `nono` generalist, `patch` code, `scout` research, else a generic bot of that name), derives the factory, opens `main`, and caches the runtime.
 

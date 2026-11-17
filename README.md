@@ -61,6 +61,15 @@ button creates a bot from a description: one model call designs it and picks mar
 then its conversation opens. Each bot's skills page (✦ in the chat header) installs skills
 from the market into that bot; see [docs/skill-market.md](docs/skill-market.md).
 
+### Install as an app
+
+Over HTTPS (or `localhost`) Chrome offers "Install Shirley" in the address bar or menu, on
+Android as a banner. The installed app keeps the `?token=` it was first opened with. When a bot
+finishes a reply you are not looking at, a notification shows its first line (Chrome asks for
+permission the first time you send a message); clicking it opens that conversation. The
+microphone is asked for once per address: pick "allow on every visit", and keep using the same
+domain, since `https://host`, an IP and a different port are separate sites to the browser.
+
 ## Voice input
 
 Hold the button and speak; the text appears as you talk and lands in the input field for you to

@@ -119,6 +119,176 @@
       "ref": "main",
       "path": "skills/skill-creator",
       "license": "Apache-2.0"
+    },
+    {
+      "id": "brainstorming",
+      "title": "头脑风暴",
+      "summary": "动手之前先把想法问清楚、摊开选项，再定方案。",
+      "category": "工作方法",
+      "repo": "obra/superpowers",
+      "ref": "main",
+      "path": "skills/brainstorming",
+      "license": "MIT"
+    },
+    {
+      "id": "writing-plans",
+      "title": "写执行计划",
+      "summary": "拿到需求后先写分步计划，再开始做。",
+      "category": "工作方法",
+      "repo": "obra/superpowers",
+      "ref": "main",
+      "path": "skills/writing-plans",
+      "license": "MIT"
+    },
+    {
+      "id": "executing-plans",
+      "title": "按计划执行",
+      "summary": "按写好的计划逐步实施，每一步都检查。",
+      "category": "工作方法",
+      "repo": "obra/superpowers",
+      "ref": "main",
+      "path": "skills/executing-plans",
+      "license": "MIT"
+    },
+    {
+      "id": "verification-before-completion",
+      "title": "完成前验证",
+      "summary": "说「做完了」之前，先运行检查、拿到证据。",
+      "category": "工作方法",
+      "repo": "obra/superpowers",
+      "ref": "main",
+      "path": "skills/verification-before-completion",
+      "license": "MIT"
+    },
+    {
+      "id": "systematic-debugging",
+      "title": "系统化排错",
+      "summary": "遇到 bug 或测试失败，先找到根因再修。",
+      "category": "开发",
+      "repo": "obra/superpowers",
+      "ref": "main",
+      "path": "skills/systematic-debugging",
+      "license": "MIT"
+    },
+    {
+      "id": "test-driven-development",
+      "title": "测试驱动开发",
+      "summary": "先写测试，再写实现。",
+      "category": "开发",
+      "repo": "obra/superpowers",
+      "ref": "main",
+      "path": "skills/test-driven-development",
+      "license": "MIT"
+    },
+    {
+      "id": "requesting-code-review",
+      "title": "代码审查",
+      "summary": "功能完成后、合并前，按要求自查代码。",
+      "category": "开发",
+      "repo": "obra/superpowers",
+      "ref": "main",
+      "path": "skills/requesting-code-review",
+      "license": "MIT"
+    },
+    {
+      "id": "jupyter-notebook",
+      "title": "Jupyter 笔记本",
+      "summary": "创建和编辑 .ipynb，用于实验、探索和教程。",
+      "category": "数据",
+      "repo": "openai/skills",
+      "ref": "main",
+      "path": "skills/.curated/jupyter-notebook",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "playwright",
+      "title": "浏览器自动化",
+      "summary": "在终端里驱动真实浏览器：打开网页、填表、截图、抓取数据。",
+      "category": "开发",
+      "repo": "openai/skills",
+      "ref": "main",
+      "path": "skills/.curated/playwright",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "security-best-practices",
+      "title": "安全审查",
+      "summary": "按语言和框架的安全最佳实践审查代码，给出改进建议。",
+      "category": "开发",
+      "repo": "openai/skills",
+      "ref": "main",
+      "path": "skills/.curated/security-best-practices",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "security-threat-model",
+      "title": "威胁建模",
+      "summary": "基于代码仓库梳理信任边界、攻击路径和缓解措施。",
+      "category": "开发",
+      "repo": "openai/skills",
+      "ref": "main",
+      "path": "skills/.curated/security-threat-model",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "gh-fix-ci",
+      "title": "修复 CI",
+      "summary": "用 gh 查看失败的 GitHub Actions 检查，定位原因并修复。",
+      "category": "开发",
+      "repo": "openai/skills",
+      "ref": "main",
+      "path": "skills/.curated/gh-fix-ci",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "gh-address-comments",
+      "title": "处理 PR 评论",
+      "summary": "逐条处理当前分支 PR 上的审查意见。",
+      "category": "开发",
+      "repo": "openai/skills",
+      "ref": "main",
+      "path": "skills/.curated/gh-address-comments",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "cli-creator",
+      "title": "命令行工具",
+      "summary": "根据 API 文档、OpenAPI 或脚本，做一个可复用的命令行工具。",
+      "category": "开发",
+      "repo": "openai/skills",
+      "ref": "main",
+      "path": "skills/.curated/cli-creator",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "huggingface-papers",
+      "title": "论文查阅",
+      "summary": "查阅 Hugging Face 论文页：作者、关联的模型、数据集和代码。",
+      "category": "数据",
+      "repo": "huggingface/skills",
+      "ref": "main",
+      "path": "skills/huggingface-papers",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "huggingface-datasets",
+      "title": "数据集浏览",
+      "summary": "浏览 Hugging Face 数据集：子集、分页、搜索、筛选和统计。",
+      "category": "数据",
+      "repo": "huggingface/skills",
+      "ref": "main",
+      "path": "skills/huggingface-datasets",
+      "license": "Apache-2.0"
+    },
+    {
+      "id": "huggingface-local-models",
+      "title": "本地跑模型",
+      "summary": "挑选 GGUF 模型并用 llama.cpp 在本机部署成 OpenAI 兼容服务。",
+      "category": "数据",
+      "repo": "huggingface/skills",
+      "ref": "main",
+      "path": "skills/huggingface-local-models",
+      "license": "Apache-2.0"
     }
   ]
 }
