@@ -406,6 +406,7 @@ where
     Box::pin(async_stream::try_stream! {
         futures::pin_mut!(byte_stream);
         let mut buffer = String::new();
+        let mut utf8 = crate::adapter::sse::Utf8Decoder::default();
         // Real-time rendering relies on delta increments; but **the terminal state must not trust
         // `response.completed` alone**: some servers (in practice the DeepSeek compatibility
         // layer) **drop the reasoning item** in the streaming completed.output, keeping only the
@@ -414,7 +415,7 @@ where
         let mut reasoning_content = String::new();
         while let Some(chunk) = byte_stream.next().await {
             let chunk = chunk.map_err(AdapterError::Transport)?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.push_str(&utf8.push(&chunk));
 
             for section in sse::drain_sections(&mut buffer) {
                 let Some(data) = sse::data_payload(&section) else {

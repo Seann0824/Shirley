@@ -5,6 +5,51 @@
 //! are written per protocol — the two protocols' payloads are completely different, and forcing a
 //! single generic decoder on them would only be more convoluted.
 
+/// Turns a byte stream into text without breaking characters at chunk boundaries.
+///
+/// A network chunk can end in the middle of a multi-byte character (a CJK character is three
+/// bytes). Decoding each chunk on its own turns both halves into U+FFFD, which is how replies
+/// showed `分���` in the middle of Chinese text. The incomplete tail is held back until the next
+/// chunk completes it; genuinely invalid bytes are still replaced, as before.
+#[derive(Debug, Default)]
+pub struct Utf8Decoder {
+    pending: Vec<u8>,
+}
+
+impl Utf8Decoder {
+    /// Decode `chunk`, returning every complete character it finishes.
+    pub fn push(&mut self, chunk: &[u8]) -> String {
+        self.pending.extend_from_slice(chunk);
+        let mut out = String::new();
+        loop {
+            match std::str::from_utf8(&self.pending) {
+                Ok(text) => {
+                    out.push_str(text);
+                    self.pending.clear();
+                    return out;
+                }
+                Err(error) => {
+                    let valid = error.valid_up_to();
+                    // SAFETY-free: `valid_up_to` marks a prefix that is valid UTF-8.
+                    out.push_str(&String::from_utf8_lossy(&self.pending[..valid]));
+                    match error.error_len() {
+                        // An incomplete sequence at the end: wait for the next chunk.
+                        None => {
+                            self.pending.drain(..valid);
+                            return out;
+                        }
+                        // Bytes that can never become a character: replace and continue.
+                        Some(bad) => {
+                            out.push(char::REPLACEMENT_CHARACTER);
+                            self.pending.drain(..valid + bad);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Cut all complete event sections out of the buffer and remove them from it.
 ///
 /// SSE separates events by blank lines; here we split on `\n\n`. An unfinished, incomplete
@@ -35,6 +80,28 @@ pub fn data_payload(section: &str) -> Option<String> {
         }
     }
     found.then(|| data.trim().to_string())
+}
+
+#[cfg(test)]
+mod utf8_tests {
+    use super::Utf8Decoder;
+
+    #[test]
+    fn a_character_split_across_chunks_survives() {
+        let bytes = "分项里程".as_bytes();
+        let mut decoder = Utf8Decoder::default();
+        // Cut inside the first character, and again inside the third.
+        let mut text = decoder.push(&bytes[..1]);
+        text.push_str(&decoder.push(&bytes[1..7]));
+        text.push_str(&decoder.push(&bytes[7..]));
+        assert_eq!(text, "分项里程");
+    }
+
+    #[test]
+    fn invalid_bytes_are_still_replaced() {
+        let mut decoder = Utf8Decoder::default();
+        assert_eq!(decoder.push(b"a\xffb"), "a\u{fffd}b");
+    }
 }
 
 #[cfg(test)]

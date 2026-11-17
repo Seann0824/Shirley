@@ -320,6 +320,7 @@ where
     Box::pin(async_stream::try_stream! {
         futures::pin_mut!(byte_stream);
         let mut buffer = String::new();
+        let mut utf8 = crate::adapter::sse::Utf8Decoder::default();
 
         // In-stream aggregation state.
         let mut text = String::new();
@@ -333,7 +334,7 @@ where
 
         while let Some(chunk) = byte_stream.next().await {
             let chunk = chunk.map_err(AdapterError::Transport)?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
+            buffer.push_str(&utf8.push(&chunk));
 
             for section in sse::drain_sections(&mut buffer) {
                 let Some(data) = sse::data_payload(&section) else {

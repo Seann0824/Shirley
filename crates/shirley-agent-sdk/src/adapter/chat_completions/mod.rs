@@ -329,6 +329,7 @@ pub fn decode_stream_response(
     Box::pin(async_stream::try_stream! {
         let mut byte_stream = response.bytes_stream();
         let mut buffer = String::new();
+        let mut utf8 = crate::adapter::sse::Utf8Decoder::default();
         let mut content = String::new();
         let mut reasoning_content = String::new();
         let mut tool_calls = BTreeMap::new();
@@ -338,8 +339,7 @@ pub fn decode_stream_response(
             // A read interruption must not be unwrapped: it's a network error and should go
             // through the Transport classification so the upper layer decides on retry.
             let chunk = chunk.map_err(AdapterError::Transport)?;
-            let text = String::from_utf8_lossy(&chunk);
-            buffer.push_str(&text);
+            buffer.push_str(&utf8.push(&chunk));
 
             while let Some(pos) = buffer.find("\n\n") {
                 // I think this json structure should be the same, right?
