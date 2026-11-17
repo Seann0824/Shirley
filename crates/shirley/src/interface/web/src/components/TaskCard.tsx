@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { api } from "../api/bridge";
 import type { DeliveryFile, PoolTask, TaskStatus } from "../api/types";
@@ -37,6 +37,94 @@ function openFile(bot: string, file: DeliveryFile) {
     .assetUrl(bot, file.id)
     .then((url) => window.open(url, "_blank", "noopener"))
     .catch(() => undefined);
+}
+
+function isHtml(file: DeliveryFile): boolean {
+  return file.mime.split(";")[0].trim() === "text/html";
+}
+
+/**
+ * A web page the bot made, rendered in place. The page runs in a sandbox with no access to
+ * Shirley (no same-origin, no top navigation); it arrives as text and goes in through `srcdoc`.
+ */
+function HtmlPreview({ bot, file }: { bot: string; file: DeliveryFile }) {
+  const [html, setHtml] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+  const frame = useRef<HTMLIFrameElement>(null);
+  useEffect(() => {
+    let alive = true;
+    api
+      .assetText(bot, file.id)
+      .then((value) => alive && setHtml(value.text))
+      .catch(() => alive && setFailed(true));
+    return () => {
+      alive = false;
+    };
+  }, [bot, file.id]);
+  if (failed) return <FileChip bot={bot} file={file} />;
+  return (
+    <figure className="html-preview">
+      {html === null ? (
+        <div className="html-preview-loading">正在打开 {file.name}…</div>
+      ) : (
+        <iframe ref={frame} title={file.name} srcDoc={html} sandbox="allow-scripts allow-popups allow-forms" />
+      )}
+      <figcaption>
+        <span>{file.name}</span>
+        <button onClick={() => void frame.current?.requestFullscreen?.()} aria-label={`全屏查看 ${file.name}`}>
+          全屏
+        </button>
+      </figcaption>
+    </figure>
+  );
+}
+
+/** A picture the bot made, shown in place. */
+function ImagePreview({ bot, file }: { bot: string; file: DeliveryFile }) {
+  const [url, setUrl] = useState<string | null>(null);
+  useEffect(() => {
+    let alive = true;
+    api.assetUrl(bot, file.id).then((value) => alive && setUrl(value)).catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, [bot, file.id]);
+  return url ? (
+    <img className="image-preview" src={url} alt={file.name} onClick={() => openFile(bot, file)} />
+  ) : null;
+}
+
+function FileChip({ bot, file }: { bot: string; file: DeliveryFile }) {
+  return (
+    <button className="file-chip" onClick={() => openFile(bot, file)}>
+      <Icon name={fileIcon(file.mime)} size={16} />
+      <span>{file.name}</span>
+    </button>
+  );
+}
+
+/** What came back: pages and pictures shown, everything else as a file to open. */
+function Deliverables({ bot, files }: { bot: string; files: DeliveryFile[] }) {
+  const pages = files.filter(isHtml);
+  const pictures = files.filter((file) => file.mime.startsWith("image/"));
+  const others = files.filter((file) => !isHtml(file) && !file.mime.startsWith("image/"));
+  return (
+    <>
+      {pages.map((file) => (
+        <HtmlPreview key={file.id} bot={bot} file={file} />
+      ))}
+      {pictures.map((file) => (
+        <ImagePreview key={file.id} bot={bot} file={file} />
+      ))}
+      {others.length > 0 && (
+        <div className="task-files">
+          {others.map((file) => (
+            <FileChip key={file.id} bot={bot} file={file} />
+          ))}
+        </div>
+      )}
+    </>
+  );
 }
 
 /** A collapsed delivery note: the first paragraph, the rest on demand. */
@@ -114,16 +202,7 @@ export function TaskCard({
         </p>
       )}
 
-      {files.length > 0 && (
-        <div className="task-files">
-          {files.map((file) => (
-            <button key={file.id} onClick={() => openFile(task.bot, file)}>
-              <Icon name={fileIcon(file.mime)} size={16} />
-              <span>{file.name}</span>
-            </button>
-          ))}
-        </div>
-      )}
+      {files.length > 0 && <Deliverables bot={task.bot} files={files} />}
 
       {noting ? (
         <form

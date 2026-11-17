@@ -60,6 +60,7 @@ pub(crate) mod interface;
     )
 )]
 pub(crate) mod computer;
+pub(crate) mod connectors;
 pub(crate) mod memory;
 // The task pool belongs to the personal-agent main line, not to the desktop ornament: the queue
 // has to keep running on the cloud host while nobody is looking at a window, so every interface

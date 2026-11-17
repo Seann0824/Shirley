@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 
 import { api } from "../api/bridge";
 import type { Bot, RenderPart, ToolCallWire } from "../api/types";
@@ -9,6 +9,7 @@ import { Icon } from "../components/Icon";
 import { MarkdownBlock, splitBlocks } from "../components/Markdown";
 import { showsToolActivity, toolActivity } from "../components/toolActivity";
 import { TaskCard } from "../components/TaskCard";
+import { cardsByTurnEnd } from "../state/conversation";
 import { useConversation, type ConversationItem } from "../state/useConversation";
 import type { useTasks } from "../state/useTasks";
 
@@ -234,11 +235,6 @@ function Item({ bot, item, tasks, recall }: { bot: Bot; item: ConversationItem; 
               <ToolActivity bot={bot.name} calls={other} settled={item.settled === true} />
             </div>
           )}
-          {item.calls
-            .filter((call) => call.name === "dispatch_task")
-            .map((call) => (
-              <DispatchedTask key={call.id} bot={bot} call={call} tasks={tasks} />
-            ))}
           {noted.map((call) => (
             <div className="system-line" key={call.id}>
               已补充到「{field(call.output, "title") ?? "任务"}」
@@ -344,6 +340,7 @@ export function Chat({
   };
 
   const { items, running } = conversation;
+  const cards = cardsByTurnEnd(items);
   // Only the latest message can be taken back, like a chat app's 撤回.
   let lastUser = -1;
   items.forEach((item, index) => {
@@ -399,8 +396,8 @@ export function Chat({
               </div>
             )}
             {items.map((item, index) => (
+              <Fragment key={index}>
               <Item
-                key={index}
                 bot={bot}
                 item={item}
                 tasks={tasks}
@@ -414,6 +411,10 @@ export function Chat({
                     : undefined
                 }
               />
+              {cards.get(index)?.map((call) => (
+                <DispatchedTask key={call.id} bot={bot} call={call} tasks={tasks} />
+              ))}
+              </Fragment>
             ))}
             {waitingForFirstToken && (
               <div className="message-row bot-message">

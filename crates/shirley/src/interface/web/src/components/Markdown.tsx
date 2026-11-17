@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import DOMPurify from "dompurify";
+import { Marked } from "marked";
 
 /**
  * Split a reply into the pieces shown as separate bubbles: paragraphs (blank-line separated),
@@ -31,49 +32,28 @@ export function splitBlocks(text: string): string[] {
   return blocks;
 }
 
-const INLINE = /(\*\*[^*\n]+\*\*|`[^`\n]+`|\[[^\]\n]+\]\((?:https?:\/\/)[^)\s]+\))/g;
+// GitHub-flavoured (tables, task lists, strikethrough), and a single newline is a line break,
+// as people write in chat.
+const markdown = new Marked({ gfm: true, breaks: true, async: false });
 
-function inline(text: string): ReactNode[] {
-  return text.split(INLINE).map((piece, index) => {
-    if (piece.startsWith("**") && piece.endsWith("**") && piece.length > 4) {
-      return <strong key={index}>{piece.slice(2, -2)}</strong>;
-    }
-    if (piece.startsWith("`") && piece.endsWith("`") && piece.length > 2) {
-      return <code key={index}>{piece.slice(1, -1)}</code>;
-    }
-    const link = /^\[([^\]]+)\]\(([^)]+)\)$/.exec(piece);
-    if (link) {
-      return (
-        <a key={index} href={link[2]} target="_blank" rel="noreferrer">
-          {link[1]}
-        </a>
-      );
-    }
-    return piece;
+/** Markdown to safe HTML: model output is untrusted, so no scripts, no event handlers. */
+export function renderMarkdown(text: string): string {
+  const html = markdown.parse(text) as string;
+  return DOMPurify.sanitize(html, {
+    FORBID_TAGS: ["style", "form", "input", "button", "iframe"],
+    FORBID_ATTR: ["style"],
   });
 }
 
-/** One block of chat markdown: a code fence, or lines with headings / bullets / inline marks. */
-export function MarkdownBlock({ text }: { text: string }) {
-  if (text.trimStart().startsWith("```")) {
-    const body = text.replace(/^\s*```[^\n]*\n?/, "").replace(/\n?```\s*$/, "");
-    return (
-      <pre className="md-code">
-        <code>{body}</code>
-      </pre>
-    );
+// Links open beside the app, never in place of it.
+DOMPurify.addHook("afterSanitizeAttributes", (node) => {
+  if (node.tagName === "A") {
+    node.setAttribute("target", "_blank");
+    node.setAttribute("rel", "noreferrer noopener");
   }
-  return (
-    <p className="md">
-      {text.split("\n").map((line, index) => {
-        const heading = /^#{1,6}\s+(.*)$/.exec(line);
-        const bullet = /^\s*[-*]\s+(.*)$/.exec(line);
-        return (
-          <span className="md-line" key={index}>
-            {heading ? <strong>{inline(heading[1])}</strong> : bullet ? <>• {inline(bullet[1])}</> : inline(line)}
-          </span>
-        );
-      })}
-    </p>
-  );
+});
+
+/** One block of chat markdown, rendered. */
+export function MarkdownBlock({ text }: { text: string }) {
+  return <div className="md" dangerouslySetInnerHTML={{ __html: renderMarkdown(text) }} />;
 }

@@ -1413,6 +1413,7 @@ pub fn user_content(store: &ArtifactStore, prompt: &str, media: &[String]) -> Me
 }
 
 mod design;
+pub mod events;
 mod pool;
 mod route;
 

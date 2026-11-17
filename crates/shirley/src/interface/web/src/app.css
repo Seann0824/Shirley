@@ -354,8 +354,111 @@ body {
 .tools-row .message-avatar {
   visibility: hidden;
 }
-.md-line {
+/* Rendered markdown (components/Markdown.tsx): compact, as chat. */
+.md {
+  font-size: 14px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.md > :first-child {
+  margin-top: 0;
+}
+.md > :last-child {
+  margin-bottom: 0;
+}
+.md p,
+.md ul,
+.md ol,
+.md blockquote,
+.md table,
+.md pre {
+  margin: 0 0 6px;
+}
+.md ul,
+.md ol {
+  padding-left: 1.3em;
+}
+.md ul {
+  list-style: disc;
+}
+.md ol {
+  list-style: decimal;
+}
+.md li + li {
+  margin-top: 2px;
+}
+.md h1,
+.md h2,
+.md h3,
+.md h4,
+.md h5,
+.md h6 {
+  margin: 4px 0;
+  font-size: 1em;
+  font-weight: 650;
+}
+.md blockquote {
+  padding-left: 10px;
+  border-left: 3px solid rgba(60, 60, 67, 0.25);
+  color: var(--secondary);
+}
+.md hr {
+  margin: 8px 0;
+  border: 0;
+  border-top: 0.5px solid rgba(60, 60, 67, 0.2);
+}
+.md a {
+  color: var(--blue);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.md em {
+  font-style: italic;
+}
+.md del {
+  text-decoration: line-through;
+}
+.md table {
   display: block;
+  max-width: 100%;
+  overflow-x: auto;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.md th,
+.md td {
+  padding: 4px 8px;
+  border: 0.5px solid rgba(60, 60, 67, 0.2);
+  text-align: left;
+  white-space: nowrap;
+}
+.md th {
+  background: rgba(0, 0, 0, 0.04);
+  font-weight: 650;
+}
+.md pre {
+  max-width: 100%;
+  padding: 8px 10px;
+  overflow-x: auto;
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.06);
+  white-space: pre;
+  font-size: 12px;
+  line-height: 1.5;
+}
+.md pre code {
+  padding: 0;
+  background: none;
+}
+.md code {
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.06);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.9em;
+}
+.md input[type="checkbox"] {
+  margin-right: 4px;
 }
 .message-bubble code {
   padding: 1px 5px;
@@ -379,7 +482,7 @@ body {
 .message-bubble.streaming p::after {
   content: none;
 }
-.message-bubble.streaming .md-line:last-child::after {
+.message-bubble.streaming .md > :last-child::after {
   content: "▍";
   opacity: 0.5;
 }
@@ -462,17 +565,15 @@ body {
 .task-row {
   align-items: flex-start;
 }
-.task-row .message-avatar {
-  visibility: hidden;
-}
+/* A task is the bot's message: its avatar, its bubble. */
 .task-card {
   flex: 1;
   min-width: 0;
-  max-width: 520px;
+  max-width: min(620px, 82%);
   padding: 12px 14px;
-  border: 1px solid var(--separator);
-  border-radius: 18px;
-  background: #fff;
+  border: 0.5px solid rgba(60, 60, 67, 0.12);
+  border-radius: 18px 18px 18px 5px;
+  background: #f2f2f7;
 }
 .task-queue .task-card {
   max-width: none;
@@ -518,8 +619,7 @@ body {
   line-height: 1.55;
   color: var(--label);
 }
-.task-summary .md + .md,
-.task-summary .md + .md-code {
+.task-summary .md + .md {
   margin-top: 6px;
 }
 .task-summary .md-code {
@@ -549,7 +649,8 @@ body {
   gap: 6px;
   margin-top: 10px;
 }
-.task-files button {
+.task-files button,
+.file-chip {
   display: inline-flex;
   align-items: center;
   gap: 6px;
@@ -763,4 +864,217 @@ body {
   color: var(--label);
   font-size: 12px;
   font-weight: 600;
+}
+
+/* Connections: services that hand bots work. */
+.connections-page {
+  padding: 0 4px 32px;
+}
+.connections-intro {
+  margin: 6px 4px 14px;
+  color: var(--secondary);
+  font-size: 13px;
+  line-height: 1.5;
+}
+.connection-row {
+  margin-bottom: 10px;
+  padding: 14px;
+  border-radius: 18px;
+  background: var(--glass-strong);
+}
+.connection-row > header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.connection-row > header > div {
+  flex: 1;
+  min-width: 0;
+}
+.connection-row strong {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 15px;
+}
+.connection-row p {
+  margin-top: 3px;
+  color: var(--secondary);
+  font-size: 13px;
+  line-height: 1.45;
+}
+.connection-row small {
+  display: block;
+  margin-top: 4px;
+  color: var(--tertiary);
+  font-size: 12px;
+}
+.connection-row small.connection-error {
+  color: var(--red);
+  overflow-wrap: anywhere;
+}
+.connection-icon {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  border-radius: 12px;
+  background: var(--fill);
+}
+.connection-row.on .connection-icon {
+  background: var(--label);
+  color: #fff;
+}
+.connection-state {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: var(--fill);
+  color: var(--secondary);
+  font-size: 11px;
+  font-style: normal;
+  font-weight: 600;
+}
+.connection-state.connected {
+  background: rgba(52, 199, 89, 0.12);
+  color: #248a3d;
+}
+.connection-state.error {
+  background: rgba(255, 59, 48, 0.1);
+  color: var(--red);
+}
+.connection-action {
+  flex: 0 0 auto;
+  padding: 7px 16px;
+  border-radius: 999px;
+  background: var(--label);
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+}
+.connection-action.quiet {
+  background: var(--fill);
+  color: var(--label);
+}
+.connection-action:disabled {
+  opacity: 0.55;
+}
+.connect-form {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 0.5px solid rgba(60, 60, 67, 0.15);
+}
+.connect-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.connect-form label > span {
+  font-size: 13px;
+  font-weight: 600;
+}
+.connect-form input,
+.connect-form select {
+  height: 40px;
+  padding: 0 12px;
+  border: 0.5px solid rgba(60, 60, 67, 0.2);
+  border-radius: 12px;
+  background: #fff;
+  font-size: 14px;
+}
+.connect-form label small {
+  margin: 0;
+  line-height: 1.4;
+}
+.webhook-url {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--secondary);
+}
+.webhook-url code {
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--fill);
+  color: var(--label);
+  overflow-wrap: anywhere;
+}
+.webhook-url button {
+  align-self: flex-start;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--fill);
+  font-weight: 600;
+}
+.connect-ok {
+  color: #248a3d;
+  font-size: 13px;
+}
+.connect-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* What a task made, shown in the card: a web page rendered, a picture inline. */
+.html-preview {
+  margin: 10px 0 0;
+  border: 0.5px solid rgba(60, 60, 67, 0.18);
+  border-radius: 14px;
+  overflow: hidden;
+  background: #fff;
+}
+.html-preview iframe {
+  display: block;
+  width: 100%;
+  height: min(520px, 60vh);
+  border: 0;
+  background: #fff;
+}
+.html-preview-loading {
+  display: grid;
+  place-items: center;
+  height: 120px;
+  color: var(--secondary);
+  font-size: 13px;
+}
+.html-preview figcaption {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 7px 10px;
+  border-top: 0.5px solid rgba(60, 60, 67, 0.12);
+  font-size: 12px;
+  color: var(--secondary);
+}
+.html-preview figcaption span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.html-preview figcaption button {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: var(--fill);
+  color: var(--label);
+  font-weight: 600;
+}
+.image-preview {
+  display: block;
+  max-width: 100%;
+  max-height: 360px;
+  margin-top: 10px;
+  border-radius: 12px;
+  cursor: zoom-in;
+}
+.file-chip {
+  margin-top: 10px;
+}
+.task-files .file-chip {
+  margin-top: 0;
 }

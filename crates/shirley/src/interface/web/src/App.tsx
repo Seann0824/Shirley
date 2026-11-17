@@ -11,8 +11,9 @@ import { Chat, type Seed } from "./views/Chat";
 import { Home } from "./views/Home";
 import { NewBot } from "./views/NewBot";
 import { Skills } from "./views/Skills";
+import { Connections } from "./views/Connections";
 
-type Tab = "home" | "chat" | "new" | "skills";
+type Tab = "home" | "chat" | "new" | "skills" | "connections";
 
 /** The generalist: open first, and where unroutable messages go. */
 const DEFAULT_BOT = "nono";
@@ -133,6 +134,7 @@ export default function App() {
         />
       )}
       {view === "skills" && selectedBot && <Skills bot={selectedBot} onBack={() => setTab("chat")} />}
+      {view === "connections" && <Connections bots={bots.bots} onBack={() => setTab("home")} />}
       {view === "new" && (
         <NewBot
           onBack={() => setTab("home")}

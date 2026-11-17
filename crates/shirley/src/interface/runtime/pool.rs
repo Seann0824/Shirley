@@ -327,7 +327,54 @@ async fn artifact_files(
         return Vec::new();
     };
     let guard = runtime.lock().await;
-    files_since(&guard.factory, since_ms)
+    let factory = &guard.factory;
+    // Files the run wrote into the workspace are what it made: put them in the library so the
+    // delivery can show them (an HTML page rendered, a picture inline) instead of a bare path.
+    for path in workspace_files_since(factory.workspace(), since_ms) {
+        if let Err(error) = factory.artifacts.put_file_named(&path) {
+            eprintln!("[pool] could not attach {}: {error}", path.display());
+        }
+    }
+    files_since(factory, since_ms)
+}
+
+/// At most this many workspace files are attached to one delivery (the newest).
+const MAX_ATTACHED: usize = 12;
+const MAX_ATTACHED_BYTES: u64 = 20 * 1024 * 1024;
+
+/// Files under `root` modified at or after `since_ms`, newest first, skipping hidden folders and
+/// dependency / build trees.
+fn workspace_files_since(root: &std::path::Path, since_ms: u64) -> Vec<std::path::PathBuf> {
+    const SKIP: [&str; 6] = ["node_modules", "target", "__pycache__", "venv", "dist", "build"];
+    let since = std::time::UNIX_EPOCH + std::time::Duration::from_millis(since_ms);
+    let mut found = Vec::new();
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
+    while let Some((dir, depth)) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') {
+                continue;
+            }
+            let Ok(meta) = entry.metadata() else { continue };
+            if meta.is_dir() {
+                if depth < 4 && !SKIP.contains(&name.as_ref()) {
+                    stack.push((entry.path(), depth + 1));
+                }
+            } else if meta.is_file()
+                && meta.len() <= MAX_ATTACHED_BYTES
+                && let Ok(modified) = meta.modified()
+                && modified >= since
+            {
+                found.push((modified, entry.path()));
+            }
+        }
+    }
+    found.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
+    found.into_iter().take(MAX_ATTACHED).map(|(_, path)| path).collect()
 }
 
 /// Artifact-store entries added since `since_ms`, shaped for the pool.
@@ -344,4 +391,32 @@ fn files_since(factory: &crate::bootstrap::AgentFactory, since_ms: u64) -> Vec<D
             bytes: entry.bytes,
         })
         .collect()
+}
+
+#[cfg(test)]
+mod workspace_file_tests {
+    use super::*;
+
+    #[test]
+    fn only_files_from_this_run_are_picked_and_noise_is_skipped() {
+        let root = std::env::temp_dir().join(format!("shirley_ws_files_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("node_modules/x")).unwrap();
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        std::fs::create_dir_all(root.join("out")).unwrap();
+        std::fs::write(root.join("old.txt"), "old").unwrap();
+        let since = crate::pool::now_ms() + 5;
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        std::fs::write(root.join("plan.html"), "<h1>plan</h1>").unwrap();
+        std::fs::write(root.join("out/map.png"), "png").unwrap();
+        std::fs::write(root.join("node_modules/x/a.js"), "x").unwrap();
+        std::fs::write(root.join(".git/HEAD"), "x").unwrap();
+        let mut names: Vec<String> = workspace_files_since(&root, since)
+            .iter()
+            .map(|path| path.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names, ["map.png", "plan.html"]);
+        let _ = std::fs::remove_dir_all(&root);
+    }
 }

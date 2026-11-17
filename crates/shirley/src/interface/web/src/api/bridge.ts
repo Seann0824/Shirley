@@ -12,6 +12,7 @@ import type {
   SessionSnapshot,
   TaskStatus,
   SkillMarket,
+  Connector,
 } from "./types";
 
 // The token arrives once in the link (`?token=`) and is kept: the installed app starts at `/`.
@@ -106,6 +107,10 @@ export const api = {
     skills?: string[];
   }) => cmd<void>("agent_create_bot", spec),
 
+  connectors: () => cmd<Connector[]>("agent_connectors"),
+  connect: (kind: string, bot: string, settings: Record<string, string>) =>
+    cmd<{ account: string }>("agent_connect", { name: kind, bot, settings }),
+  disconnect: (kind: string) => cmd<void>("agent_disconnect", { name: kind }),
   /** Describe a bot; the platform designs, saves and equips it. */
   designBot: (brief: string) => cmd<{ bot: string; display_name: string }>("agent_design_bot", { brief }),
   skillMarket: (bot: string) => cmd<SkillMarket>("agent_skill_market", { bot }),
@@ -134,6 +139,9 @@ export const api = {
   memoryList: (bot: string) => cmd<MemoryEntry[]>("agent_memory_list", { bot }),
 
   /** A URL the browser may load for an artifact id (minted per request). */
+  /** A text document from the library (an HTML page to render with `srcdoc`). */
+  assetText: (bot: string, id: string) =>
+    cmd<{ text: string; mime: string; truncated: boolean }>("agent_asset_text", { bot, id }),
   assetUrl: (bot: string, id: string) => cmd<string>("agent_asset_url", { bot, id }),
 
   /** Whether the server can transcribe speech. Asked once per page load. */

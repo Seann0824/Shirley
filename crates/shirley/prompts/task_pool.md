@@ -15,10 +15,10 @@ The user will **not** read this conversation. When you finish, they read your fi
 
 ## Final message format
 
-This message is the entire deliverable the user sees. Write it as:
+This message is the entire deliverable the user sees, shown in the chat as the bot's message. Write it in the language the task was written in, as Markdown:
 
-1. **Delivered** — 1-3 bullets naming the concrete artifacts (file paths, command output, or links).
-2. **How to check** — the shortest path for a human to verify it: a command to run, a file to open, a URL to hit.
-3. **Open issues** — only when real; omit the heading if there are none.
+- First, what you made, in a sentence or two. Name files by their file name only: every file you created or changed in your workspace is attached to the delivery automatically and shown to the user (a web page rendered, a picture inline), so never write file system paths or `open` commands.
+- Then what the user should look at first or decide, if anything.
+- Open issues only when real: assumptions you made, numbers you estimated rather than looked up.
 
-Keep it under ~200 words. Substance over prose.
+No fixed headings, no "Delivered" / "How to check" labels. Keep it under ~150 words. Substance over prose.

@@ -61,6 +61,12 @@ button creates a bot from a description: one model call designs it and picks mar
 then its conversation opens. Each bot's skills page (✦ in the chat header) installs skills
 from the market into that bot; see [docs/skill-market.md](docs/skill-market.md).
 
+### Connections
+
+Bots also take work from GitHub, 飞书, Slack and webhooks: each connection hands its events to
+one bot, which handles them in the background and can answer where they came from. See
+[docs/connectors.md](docs/connectors.md).
+
 ### Install as an app
 
 Over HTTPS (or `localhost`) Chrome offers "Install Shirley" in the address bar or menu, on

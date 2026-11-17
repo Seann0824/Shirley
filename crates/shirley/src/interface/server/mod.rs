@@ -68,6 +68,8 @@ struct ServerState {
     token: Option<String>,
     memory_root: PathBuf,
     sequence: Arc<AtomicU64>,
+    /// Connected services and their receivers (`crate::connectors`).
+    connectors: Arc<crate::connectors::Hub>,
 }
 
 // ---------------------------------------------------------------------------
@@ -112,7 +114,13 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
     let token = std::env::var("SHIRLEY_SERVER_TOKEN")
         .ok()
         .filter(|s| !s.trim().is_empty());
+    let connectors = crate::connectors::Hub::new(
+        crate::storage::global_root().to_path_buf(),
+        Arc::new(crate::interface::runtime::events::PoolDispatch(Arc::clone(&manager))),
+    );
+    connectors.start_all().await;
     let state = Arc::new(ServerState {
+        connectors,
         manager,
         events,
         status_events,
@@ -199,6 +207,12 @@ pub async fn run(factory: AgentFactory) -> std::io::Result<()> {
         // header, so the unguessable handle is the capability. It is only mintable through the
         // authorized `agent_asset_url` command.
         .route("/api/asset/{handle}", get(asset_handler))
+        // Also after `route_layer`: a webhook caller has no page token; the key in the URL is
+        // the credential (`connectors::webhook`).
+        .route(
+            "/api/hooks/webhook/{key}",
+            post(webhook_handler).layer(DefaultBodyLimit::max(1024 * 1024)),
+        )
         .layer(DefaultBodyLimit::max(16 * 1024 * 1024));
     let app = if has_ui {
         app.fallback_service(static_files)
@@ -392,6 +406,8 @@ struct CmdArgs {
     #[serde(rename = "displayName")]
     display_name: Option<String>,
     persona: Option<String>,
+    /// Connector form values (`agent_connect`).
+    settings: Option<std::collections::HashMap<String, String>>,
     tools: Option<Vec<String>>,
     skills: Option<Vec<String>>,
 }
@@ -768,6 +784,86 @@ async fn dispatch(
             no_content()
         }
 
+        // -- connectors ---------------------------------------------------------------
+        "agent_connectors" => {
+            let hub = &state.connectors;
+            let saved = crate::connectors::load(hub.global());
+            let mut list = Vec::new();
+            for kind in crate::connectors::Kind::ALL {
+                let connection = saved.iter().find(|c| c.kind == kind);
+                list.push(serde_json::json!({
+                    "kind": kind.id(),
+                    "label": crate::connectors::label(kind),
+                    "fields": kind.fields(),
+                    "replies": kind.replies(),
+                    "connected": connection.is_some(),
+                    "bot": connection.map(|c| c.bot.clone()),
+                    // Non-secret values only, to pre-fill the form.
+                    "values": connection.map(|c| {
+                        kind.fields()
+                            .iter()
+                            .filter(|field| !field.secret)
+                            .filter_map(|field| c.settings.get(field.key).map(|v| (field.key, v.clone())))
+                            .collect::<std::collections::HashMap<_, _>>()
+                    }),
+                    "webhook_path": connection
+                        .filter(|_| kind == crate::connectors::Kind::Webhook)
+                        .and_then(|c| c.settings.get("key"))
+                        .map(|key| format!("/api/hooks/webhook/{key}")),
+                    "status": hub.status(kind).await,
+                }));
+            }
+            ok_json(serde_json::Value::Array(list))
+        }
+        // Check the credentials, save them, and start receiving. Blank secret fields keep the
+        // saved ones (the page never sees them).
+        "agent_connect" => {
+            let kind = args
+                .name
+                .as_deref()
+                .and_then(crate::connectors::Kind::parse)
+                .ok_or_else(|| ApiError::bad("unknown connector"))?;
+            let bot = args.bot()?;
+            let hub = &state.connectors;
+            let previous = crate::connectors::find(hub.global(), kind);
+            let mut settings = previous.as_ref().map(|c| c.settings.clone()).unwrap_or_default();
+            for field in kind.fields() {
+                if let Some(value) = args
+                    .settings
+                    .as_ref()
+                    .and_then(|given| given.get(field.key))
+                    .filter(|value| !value.trim().is_empty())
+                {
+                    settings.insert(field.key.to_owned(), value.trim().to_owned());
+                }
+            }
+            if kind == crate::connectors::Kind::Webhook && !settings.contains_key("key") {
+                settings.insert("key".to_owned(), crate::connectors::webhook::new_key());
+            }
+            let connection = crate::connectors::Connection {
+                kind,
+                bot,
+                settings,
+                created_ms: previous.map_or_else(crate::pool::now_ms, |c| c.created_ms),
+            };
+            let who = crate::connectors::verify(&connection).await?;
+            crate::connectors::upsert(hub.global(), connection)?;
+            hub.restart(kind).await;
+            manager.reload_all().await;
+            ok_json(serde_json::json!({ "account": who }))
+        }
+        "agent_disconnect" => {
+            let kind = args
+                .name
+                .as_deref()
+                .and_then(crate::connectors::Kind::parse)
+                .ok_or_else(|| ApiError::bad("unknown connector"))?;
+            crate::connectors::remove(state.connectors.global(), kind)?;
+            state.connectors.stop(kind).await;
+            manager.reload_all().await;
+            no_content()
+        }
+
         // -- bot design + skill market -------------------------------------------------
         // The user says what they need; the platform designs, saves and equips the bot.
         "agent_design_bot" => {
@@ -820,6 +916,27 @@ async fn dispatch(
 /// Served as a **stream with Range support**, not one `read` into memory: a 64MiB clip would
 /// otherwise be fully buffered per request, and `<video>` cannot seek at all without `206`
 /// responses (browsers open media with a byte-range request and give up on a plain `200`).
+/// A webhook call: the key in the URL must match the saved connection's.
+async fn webhook_handler(
+    State(state): State<Arc<ServerState>>,
+    Path(key): Path<String>,
+    body: axum::body::Bytes,
+) -> Response {
+    let kind = crate::connectors::Kind::Webhook;
+    let expected = crate::connectors::find(state.connectors.global(), kind)
+        .and_then(|connection| connection.settings.get("key").cloned());
+    match expected {
+        Some(expected) if crate::connectors::webhook::key_matches(&expected, &key) => {
+            state
+                .connectors
+                .handle(crate::connectors::webhook::event_for(&body))
+                .await;
+            StatusCode::ACCEPTED.into_response()
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
 async fn asset_handler(
     State(state): State<Arc<ServerState>>,
     Path(handle): Path<String>,
@@ -1056,7 +1173,12 @@ mod tests {
         let manager = Arc::new(BotRuntimeManager::new(factory, Arc::new(|_| {})));
         let (events, _) = broadcast::channel(8);
         let (status_events, _) = broadcast::channel(8);
+        let connectors = crate::connectors::Hub::new(
+            dir.clone(),
+            Arc::new(crate::interface::runtime::events::PoolDispatch(Arc::clone(&manager))),
+        );
         let state = Arc::new(ServerState {
+            connectors,
             manager,
             events,
             status_events,

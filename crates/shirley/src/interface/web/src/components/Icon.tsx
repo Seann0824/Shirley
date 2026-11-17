@@ -28,7 +28,8 @@ export type IconName =
   | "chat"
   | "camera"
   | "stop"
-  | "tool";
+  | "tool"
+  | "plug";
 
 const paths: Record<IconName, ReactNode> = {
   home: (
@@ -140,6 +141,13 @@ const paths: Record<IconName, ReactNode> = {
   ),
   stop: <rect x="6" y="6" width="12" height="12" rx="2" />,
   tool: <path d="m14.5 4.5 5 5-9.5 9.5H5v-5l9.5-9.5ZM12 7l5 5" />,
+  plug: (
+    <>
+      <path d="M9 3v4M15 3v4" />
+      <path d="M6.5 7h11v3.5a5.5 5.5 0 0 1-11 0V7Z" />
+      <path d="M12 16v5" />
+    </>
+  ),
 };
 
 export function Icon({ name, size = 22 }: { name: IconName; size?: number }) {

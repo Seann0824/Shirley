@@ -330,6 +330,14 @@ impl AgentFactory {
         let _ = tool_manager.register(tools::RecallTool::new(Arc::clone(&memory)));
         // Platform administration: any bot can define a new bot.
         let _ = tool_manager.register(tools::CreateBotTool::new(self.global_root().join("bots")));
+        // Answering events from connected services, where any is connected.
+        if tool_filter.is_none()
+            && crate::connectors::load(self.global_root())
+                .iter()
+                .any(|connection| connection.kind.replies())
+        {
+            let _ = tool_manager.register(tools::ReplyToEventTool::new(self.global_root().to_path_buf()));
+        }
         // A bot keeps procedures it will need again as its own skills.
         if let (None, Some(root), true) = (
             tool_filter,
@@ -530,6 +538,11 @@ impl AgentFactory {
             workspace,
             tasks: self.tasks.clone(),
         }
+    }
+
+    /// Where the bot works (`bots/<name>/workspace`).
+    pub fn workspace(&self) -> &std::path::Path {
+        &self.workspace
     }
 
     /// The application root (`~/.shirley`): the parent of the shared memory root.

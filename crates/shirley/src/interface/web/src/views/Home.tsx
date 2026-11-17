@@ -8,7 +8,7 @@ import { Icon, type IconName } from "../components/Icon";
 import type { useBots } from "../state/useBots";
 import { useWide } from "../state/useWide";
 
-type Tab = "home" | "chat" | "new" | "skills";
+type Tab = "home" | "chat" | "new" | "skills" | "connections";
 
 const TOOL_ICONS: Record<string, IconName> = {
   bash: "code",
@@ -30,6 +30,9 @@ function HomeHeader({ onNavigate }: { onNavigate: (view: Tab) => void }) {
       </span>
       <strong>Shirley</strong>
       <div className="header-actions">
+        <button onClick={() => onNavigate("connections")} aria-label="连接">
+          <Icon name="plug" size={20} />
+        </button>
         <button onClick={() => onNavigate("new")} aria-label="创建 Bot">
           <Icon name="plus" size={20} />
         </button>

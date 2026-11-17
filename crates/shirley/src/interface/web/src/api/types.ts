@@ -174,3 +174,32 @@ export interface SkillMarket {
   market: MarketSkill[];
   installed: InstalledSkill[];
 }
+
+/** One input of a connector's connect form. */
+export interface ConnectorField {
+  key: string;
+  label: string;
+  help: string;
+  secret: boolean;
+}
+
+export interface ConnectorStatus {
+  /** `connecting`, `connected`, `error` or `idle`. */
+  state: string;
+  detail: string | null;
+  events: number;
+  last_event_ms: number | null;
+}
+
+/** A service bots can take work from (and answer in). */
+export interface Connector {
+  kind: string;
+  label: string;
+  fields: ConnectorField[];
+  replies: boolean;
+  connected: boolean;
+  bot: string | null;
+  values: Record<string, string> | null;
+  webhook_path: string | null;
+  status: ConnectorStatus;
+}

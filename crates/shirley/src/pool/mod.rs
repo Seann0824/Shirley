@@ -204,6 +204,10 @@ pub struct PoolTask {
     /// flight, so the run that finishes next goes straight back for rework with them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pending_notes: Vec<String>,
+    /// The connector an event task came from (`slack`, `github`, ...); `None` for the user's own
+    /// work. Event tasks finish without review: nobody asked for them in the conversation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source: Option<String>,
 }
 
 /// The pool of one bot, plus the file it is stored in.
@@ -323,8 +327,20 @@ impl TaskPool {
             delivery: None,
             note: None,
             pending_notes: Vec::new(),
+            source: None,
         };
         self.tasks.push(task.clone());
+        self.save()?;
+        Ok(task)
+    }
+
+    /// Queue an event from a connector for `bot`: it runs like any task and finishes on its own.
+    pub fn enqueue_event(&mut self, bot: &str, title: &str, brief: &str, source: &str) -> Result<PoolTask, String> {
+        let mut task = self.enqueue_titled(bot, Some(title), brief)?;
+        task.source = Some(source.to_owned());
+        if let Some(stored) = self.tasks.iter_mut().find(|stored| stored.id == task.id) {
+            stored.source = Some(source.to_owned());
+        }
         self.save()?;
         Ok(task)
     }
@@ -393,7 +409,11 @@ impl TaskPool {
             return Ok(());
         }
         task.delivery = Some(delivery);
-        if task.pending_notes.is_empty() {
+        if task.source.is_some() {
+            // An event was handled: nobody is waiting to review it.
+            task.status = TaskStatus::Done;
+            task.finished_ms = Some(now_ms());
+        } else if task.pending_notes.is_empty() {
             task.status = TaskStatus::InReview;
             task.finished_ms = Some(now_ms());
         } else {

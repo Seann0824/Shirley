@@ -129,3 +129,22 @@ export function reduce(items: ConversationItem[], event: AgentEvent): Conversati
       return items;
   }
 }
+
+/**
+ * Where each turn's task cards go: after the turn's last item. The bot hands work off and then
+ * says so ("好，我安排去做了"); the card -- later the result -- reads after that, not above it.
+ */
+export function cardsByTurnEnd(items: ConversationItem[]): Map<number, ToolCallWire[]> {
+  const placed = new Map<number, ToolCallWire[]>();
+  let pending: ToolCallWire[] = [];
+  const settle = (index: number) => {
+    if (pending.length && index >= 0) placed.set(index, [...(placed.get(index) ?? []), ...pending]);
+    pending = [];
+  };
+  items.forEach((item, index) => {
+    if (item.kind === "message" && item.role === "user") settle(index - 1);
+    if (item.kind === "tools") pending.push(...item.calls.filter((call) => call.name === "dispatch_task"));
+  });
+  settle(items.length - 1);
+  return placed;
+}
