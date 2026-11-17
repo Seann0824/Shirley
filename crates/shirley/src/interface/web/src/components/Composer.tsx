@@ -97,25 +97,18 @@ type Recognizer = {
   abort(): void;
 };
 
-// The language to recognise. Deliberately not `navigator.language`: an English system with a
-// Chinese-speaking user is common, and the recogniser then transcribes Chinese as English.
-const VOICE_LANGS = [
-  { code: "zh-CN", label: "中文" },
-  { code: "en-US", label: "English" },
-] as const;
-const VOICE_LANG_KEY = "shirley.voiceLang";
+// The browser recogniser cannot detect the language; it must be told one. Chinese, not
+// `navigator.language`: the UI is Chinese, and an English system with a Chinese-speaking user
+// would otherwise transcribe Chinese as English. English words inside Chinese speech still come
+// through. Real detection needs server-side transcription.
+const VOICE_LANG = "zh-CN";
 
-function loadVoiceLang(): string {
-  const saved = localStorage.getItem(VOICE_LANG_KEY);
-  return VOICE_LANGS.some((lang) => lang.code === saved) ? (saved as string) : "zh-CN";
-}
-
-function recognizer(lang: string): Recognizer | null {
+function recognizer(): Recognizer | null {
   const ctor = (window as unknown as { SpeechRecognition?: new () => Recognizer; webkitSpeechRecognition?: new () => Recognizer });
   const Ctor = ctor.SpeechRecognition ?? ctor.webkitSpeechRecognition;
   if (!Ctor) return null;
   const instance = new Ctor();
-  instance.lang = lang;
+  instance.lang = VOICE_LANG;
   instance.continuous = true;
   instance.interimResults = true;
   return instance;
@@ -183,7 +176,6 @@ export function ComposerDock({
   const [attachments, setAttachments] = useState<Attachment[]>([]);
   const [showSheet, setShowSheet] = useState(false);
   const [voiceError, setVoiceError] = useState<string | null>(null);
-  const [voiceLang, setVoiceLang] = useState(loadVoiceLang);
   const [liveText, setLiveText] = useState("");
   const speech = useRef<Recognizer | null>(null);
   const transcript = useRef("");
@@ -249,7 +241,7 @@ export function ComposerDock({
 
   const startListening = () => {
     if (speech.current) return;
-    const instance = recognizer(voiceLang);
+    const instance = recognizer();
     if (!instance) {
       setVoiceError("此浏览器不支持语音识别（可用 Chrome、Edge 或 Safari），请用文字输入");
       setTextMode(true);
@@ -335,24 +327,6 @@ export function ComposerDock({
           </p>
         )}
         {voiceError && <p className="composer-hint">{voiceError}</p>}
-        {!textMode && !busy && !listening && (
-          <div className="voice-lang" role="radiogroup" aria-label="语音识别语言">
-            {VOICE_LANGS.map((lang) => (
-              <button
-                key={lang.code}
-                role="radio"
-                aria-checked={voiceLang === lang.code}
-                className={voiceLang === lang.code ? "active" : ""}
-                onClick={() => {
-                  setVoiceLang(lang.code);
-                  localStorage.setItem(VOICE_LANG_KEY, lang.code);
-                }}
-              >
-                {lang.label}
-              </button>
-            ))}
-          </div>
-        )}
         <div className="composer-controls">
           {busy && onStop ? (
             <button className="composer-stop" onClick={onStop}>
