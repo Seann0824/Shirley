@@ -2,7 +2,7 @@
 //!
 //! An HTTP/SSE server that runs bots on the server side, serving a React web UI
 //! to any browser. Built on top of [`shirley_agent_sdk`]. The SDK owns
-//! business-agnostic agent fundamentals (messages, tools, the ReAct runtime,
+//! business-agnostic agent fundamentals (messages, tools, the `ReAct` runtime,
 //! sandbox); this crate owns everything that is a *product* decision: how
 //! sessions are stored, what the task ledger records, how memory is curated,
 //! how bots and their tool sets are assembled.

@@ -454,8 +454,7 @@ impl Session {
         let items = self
             .agent
             .as_ref()
-            .map(|agent| Self::items_from_messages(agent.messages()))
-            .unwrap_or_default();
+            .map_or_default(|agent| Self::items_from_messages(agent.messages()));
         self.items = items;
         self.streaming_delta_start = None;
         // Re-seed the fork snapshot source (e.g. after restoring a session from disk).
@@ -512,10 +511,7 @@ impl Session {
                     &mut items,
                     tool_call_id,
                     None,
-                    content
-                        .as_ref()
-                        .map(MessageContent::as_text)
-                        .unwrap_or_default(),
+                    content.as_ref().map_or_default(MessageContent::as_text),
                     Vec::new(),
                 ),
                 Message::System { .. } => {}
@@ -607,10 +603,7 @@ impl Session {
                 self.finish_tool_call(
                     &tool_call_id,
                     None,
-                    content
-                        .as_ref()
-                        .map(MessageContent::as_text)
-                        .unwrap_or_default(),
+                    content.as_ref().map_or_default(MessageContent::as_text),
                     Vec::new(),
                 );
             }
@@ -918,10 +911,6 @@ impl SessionManager {
     }
 
     /// Insert a session with an existing `Agent`, returning its key (does not change the foreground pointer).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
-    )]
     #[expect(
         clippy::too_many_arguments,
         reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
@@ -1294,8 +1283,7 @@ impl SessionManager {
         let messages: Vec<Message> = session
             .agent
             .as_ref()
-            .map(|a| a.messages().to_vec())
-            .unwrap_or_default();
+            .map_or_default(|a| a.messages().to_vec());
         if messages.is_empty() {
             return None;
         }

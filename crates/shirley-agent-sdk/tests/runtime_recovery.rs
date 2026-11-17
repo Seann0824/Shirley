@@ -1024,7 +1024,7 @@ async fn over_budget_scratchpad_is_removed_before_tool_evidence() {
 /// A turn stopped **during thinking** streams reasoning but no text. Recording that as an
 /// assistant message produces the wire form `{"role": "assistant", "content": null}` (reasoning is
 /// metadata, not content), which every provider rejects with "Invalid assistant message: content
-/// or tool_calls must be set" -- so the following turn died with a 400.
+/// or `tool_calls` must be set" -- so the following turn died with a 400.
 #[tokio::test]
 async fn a_turn_stopped_while_thinking_leaves_no_unsendable_assistant() {
     let thinking = sse(json!({"reasoning_content": "deliberating"}), false);

@@ -600,8 +600,7 @@ impl AgentFactory {
         }
         self.memory_store()
             .list_entries()
-            .map(|entries| entries.len() >= self.consolidate_after_entries)
-            .unwrap_or(false)
+            .is_ok_and(|entries| entries.len() >= self.consolidate_after_entries)
     }
 
     /// Build the **minimal `Agent`** used by the curator: only borrows the model config, without tools / system prompt / memory injection.
@@ -779,7 +778,7 @@ impl ContextProvider for CompositeContextProvider {
 ///
 /// Infrastructure tools (todo / recall / computer_* / skill) are registered separately in
 /// `build_agent_with` because they require per-session state (Arc<TodoStore> etc.).
-/// Here we register the stateless "capability tools" that a BotSpec may restrict.
+/// Here we register the stateless "capability tools" that a `BotSpec` may restrict.
 fn assemble_tools(artifacts: &ArtifactStore, spec: &crate::bot::BotSpec) -> ToolManager {
     use crate::bot::platform_tools as pt;
     let mut tool_manager = ToolManager::new();
@@ -800,10 +799,10 @@ fn assemble_tools(artifacts: &ArtifactStore, spec: &crate::bot::BotSpec) -> Tool
     if want(pt::MEDIA) {
         let _ = tool_manager.register(tools::MediaTool::new(artifacts.clone()));
     }
-    if want(pt::WEB_SEARCH) {
-        if let Err(error) = tool_manager.register(tools::web_search_tool::tool()) {
-            eprintln!("[web_search] not enabled: {error}");
-        }
+    if want(pt::WEB_SEARCH)
+        && let Err(error) = tool_manager.register(tools::web_search_tool::tool())
+    {
+        eprintln!("[web_search] not enabled: {error}");
     }
     tool_manager
 }

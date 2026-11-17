@@ -62,8 +62,7 @@ pub fn scan_roots(roots: &[PathBuf]) -> Discovery {
                     .skills
                     .iter()
                     .find(|s| s.name == meta.name)
-                    .map(|s| s.root.clone())
-                    .unwrap_or_default();
+                    .map_or_default(|s| s.root.clone());
                 discovery.conflicts.push((meta.name, kept, meta.root));
                 continue;
             }

@@ -137,7 +137,7 @@ pub(crate) struct Locator {
 /// An action the agent can request on a ref.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Action {
-    /// Activate the element (AXPress, falling back to confirm/show-menu style actions).
+    /// Activate the element (`AXPress`, falling back to confirm/show-menu style actions).
     Press,
     /// Replace the element's value (text fields, sliders, checkboxes).
     SetValue,

@@ -295,8 +295,7 @@ impl MemoryStore {
             }
         }
         path.file_name()
-            .map(|name| name.to_string_lossy().to_string())
-            .unwrap_or_default()
+            .map_or_default(|name| name.to_string_lossy().to_string())
     }
 
     /// Delete one entry (find by `id` across all roots, delete on find). Returns whether anything was deleted.

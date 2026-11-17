@@ -360,8 +360,7 @@ impl fmt::Display for Message {
                     tool_call_id,
                     content
                         .as_ref()
-                        .map(std::string::ToString::to_string)
-                        .unwrap_or_default()
+                        .map_or_default(std::string::ToString::to_string)
                 );
                 Ok(())
             }

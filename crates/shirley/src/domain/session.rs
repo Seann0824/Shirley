@@ -475,8 +475,7 @@ impl FileSessionCatalog {
         // A per-call unique suffix avoids concurrent writers clobbering each other's temp file.
         let unique = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_nanos())
-            .unwrap_or(0);
+            .map_or(0, |d| d.as_nanos());
         let tmp = self
             .dir
             .join(format!("index.json.{}.{}.tmp", std::process::id(), unique));
@@ -578,7 +577,7 @@ impl SessionCatalog for FileSessionCatalog {
         }
 
         // Most recently modified first.
-        entries.sort_by(|a, b| b.0.cmp(&a.0));
+        entries.sort_by_key(|entry| std::cmp::Reverse(entry.0));
         Ok(entries.into_iter().map(|(_, e)| e).collect())
     }
 

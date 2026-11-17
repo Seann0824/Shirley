@@ -54,7 +54,7 @@ async fn exact_capture_limit_does_not_report_truncation() {
     let out = sandbox.run(&spec).await.unwrap();
     assert!(out.success());
     assert_eq!(out.stdout, "x".repeat(32 * 1024));
-    assert!(out.stderr.is_empty());
+    assert_eq!(out.stderr, "");
 }
 
 #[tokio::test]

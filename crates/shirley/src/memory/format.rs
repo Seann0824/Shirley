@@ -341,8 +341,7 @@ impl Entry {
         self.body
             .lines()
             .find(|line| !line.trim().is_empty())
-            .map(|line| line.trim().trim_start_matches('#').trim().to_string())
-            .unwrap_or_default()
+            .map_or_default(|line| line.trim().trim_start_matches('#').trim().to_string())
     }
 
     /// Timeline display date: `valid_from` preferred, falling back to `created_at`.

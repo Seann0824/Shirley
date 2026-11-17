@@ -124,7 +124,7 @@ fn collect_new_products(root: &Path, since: SystemTime) -> Vec<(PathBuf, &'stati
         }
     }
 
-    found.sort_by(|a, b| b.0.cmp(&a.0));
+    found.sort_by_key(|entry| std::cmp::Reverse(entry.0));
     found.truncate(MAX_ATTACHED_PRODUCTS);
     found
         .into_iter()

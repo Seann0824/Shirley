@@ -522,8 +522,7 @@ impl BotRuntimeManager {
         Ok(guard
             .sessions
             .active_model_name()
-            .map(str::to_owned)
-            .unwrap_or_default())
+            .map_or_default(str::to_owned))
     }
 
     pub async fn list_models(&self, bot: &str) -> Result<Vec<ModelEntryWire>, String> {
@@ -832,8 +831,7 @@ impl BotRuntimeManager {
             .active()
             .skills
             .as_ref()
-            .map(|skills| skills.entries())
-            .unwrap_or_default();
+            .map_or_default(|skills| skills.entries());
         Ok(skills
             .into_iter()
             .map(|(name, description)| SkillEntryWire { name, description })

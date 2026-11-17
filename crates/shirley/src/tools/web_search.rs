@@ -391,8 +391,7 @@ fn map_response(payload: &Value, max_results: usize) -> Result<WebSearchResult, 
 /// Accept only http(s) URLs with a host, blocking `javascript:` / `data:` and the like.
 fn is_safe_result_url(value: &str) -> bool {
     url::Url::parse(value)
-        .ok()
-        .is_some_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
+        .is_ok_and(|url| matches!(url.scheme(), "http" | "https") && url.host_str().is_some())
 }
 
 fn provider_shape_error(detail: &str) -> ToolError {

@@ -403,6 +403,16 @@ impl CmdArgs {
 // Command dispatch
 // ---------------------------------------------------------------------------
 
+/// One bot as the client lists it (`agent_list_bots`).
+#[derive(Serialize)]
+struct BotWire {
+    name: String,
+    display_name: String,
+    tools: Vec<String>,
+    skills: Vec<String>,
+    persona: Option<String>,
+}
+
 /// Single command endpoint: `POST /api/cmd/{name}` with a JSON args body. `name` is one
 /// of the `AgentBridge` methods (see `web/src/lib/bridge.ts`); the response mirrors the
 /// Tauri command's return type. This keeps the frontend's transport a thin, uniform
@@ -423,14 +433,6 @@ async fn dispatch(
         "agent_list_bots" => {
             let bots_root = crate::storage::bots_root();
             let bots = crate::bot::BotSpec::list_all(&bots_root);
-            #[derive(serde::Serialize)]
-            struct BotWire {
-                name: String,
-                display_name: String,
-                tools: Vec<String>,
-                skills: Vec<String>,
-                persona: Option<String>,
-            }
             let wire: Vec<BotWire> = bots
                 .into_iter()
                 .map(|s| BotWire {

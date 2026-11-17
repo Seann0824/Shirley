@@ -211,7 +211,7 @@ impl SkillCatalog {
                 .replace("{{install_root}}", &escape(&root))
                 .replace(
                     "{{override_root}}",
-                    &override_root.as_deref().map(escape).unwrap_or_default(),
+                    &override_root.as_deref().map_or_default(escape),
                 );
             body.push_str(&guide);
         } else if skills.is_empty() {
@@ -278,12 +278,7 @@ fn list_resources(root: &Path) -> Vec<String> {
         };
         let mut names: Vec<String> = entries
             .flatten()
-            .filter(|entry| {
-                entry
-                    .file_type()
-                    .map(|kind| kind.is_file())
-                    .unwrap_or(false)
-            })
+            .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_file()))
             .filter_map(|entry| {
                 entry
                     .file_name()

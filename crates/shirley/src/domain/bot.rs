@@ -87,10 +87,10 @@ impl BotSpec {
     /// bot name matches one of the built-in bots, or finally return the generic default bot.
     pub fn load_or_default(name: &str, bots_root: &Path) -> Self {
         let spec_path = bots_root.join(name).join("spec.toml");
-        if let Ok(text) = std::fs::read_to_string(&spec_path) {
-            if let Ok(spec) = toml::from_str::<Self>(&text) {
-                return spec;
-            }
+        if let Ok(text) = std::fs::read_to_string(&spec_path)
+            && let Ok(spec) = toml::from_str::<Self>(&text)
+        {
+            return spec;
         }
         // Fall back to a named platform default.
         Self::platform_defaults()
@@ -113,11 +113,11 @@ impl BotSpec {
         if let Ok(entries) = std::fs::read_dir(bots_root) {
             for entry in entries.flatten() {
                 let spec_path = entry.path().join("spec.toml");
-                if let Ok(text) = std::fs::read_to_string(&spec_path) {
-                    if let Ok(spec) = toml::from_str::<Self>(&text) {
-                        seen_names.insert(spec.name.clone());
-                        specs.push(spec);
-                    }
+                if let Ok(text) = std::fs::read_to_string(&spec_path)
+                    && let Ok(spec) = toml::from_str::<Self>(&text)
+                {
+                    seen_names.insert(spec.name.clone());
+                    specs.push(spec);
                 }
             }
         }

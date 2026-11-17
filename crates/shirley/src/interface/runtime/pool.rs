@@ -29,7 +29,7 @@ use crate::pool::{self, Delivery, DeliveryFile, PoolTask};
 
 /// A task whose turn has not finished by now is treated as lost (a wedged provider, an endless
 /// tool loop). It fails the task rather than holding an execution slot forever.
-const TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60 * 60);
+const TASK_TIMEOUT: std::time::Duration = std::time::Duration::from_hours(1);
 
 /// `tasks.json` under the application root.
 pub(super) fn pool_path() -> std::path::PathBuf {

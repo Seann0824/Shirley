@@ -112,8 +112,7 @@ fn encode_messages(
                         "tool_use_id": tool_call_id,
                         "content": other
                             .as_ref()
-                            .map(super::super::message::MessageContent::as_text)
-                            .unwrap_or_default(),
+                            .map_or_default(super::super::message::MessageContent::as_text),
                     }),
                 };
                 encoded.push(serde_json::json!({

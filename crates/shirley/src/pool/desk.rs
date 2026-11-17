@@ -79,7 +79,7 @@ impl TaskDesk {
             })
             .filter(|task| task.status != TaskStatus::Cancelled)
             .collect();
-        tasks.sort_by(|left, right| right.created_ms.cmp(&left.created_ms));
+        tasks.sort_by_key(|task| std::cmp::Reverse(task.created_ms));
         tasks.truncate(MAX_LISTED);
         Some(tasks)
     }
