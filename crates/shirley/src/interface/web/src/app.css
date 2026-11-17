@@ -1078,3 +1078,7 @@ body {
 .task-files .file-chip {
   margin-top: 0;
 }
+
+.sent-file.openable {
+  cursor: pointer;
+}

@@ -959,20 +959,28 @@ async fn asset_handler(
     // `no-store` kept: content is user data, and an opaque handle is not a cache key we want
     // shared between users of the same origin.
     //
-    // An HTML artifact is never *navigated* to: the chat renders it through `asset_text` into a
-    // `srcdoc` iframe without `allow-same-origin`. Serving it here as `text/html` would instead
-    // hand the browser a same-origin script host keyed by an opaque handle -- the exact injection
-    // surface this channel refuses to open -- so it goes out as inert text.
-    let content_type = if crate::artifact::is_interactive_html(mime) {
-        "text/plain; charset=utf-8"
+    // An HTML page a bot made is opened as a page -- but never as Shirley. The `sandbox` policy
+    // (without `allow-same-origin`) gives the document an opaque origin even when navigated to
+    // directly: its scripts run, yet it cannot read the page token in Shirley's storage, call
+    // the API with the user's credentials, or script the app. The chat renders the same
+    // document through `asset_text` into a sandboxed `srcdoc` frame.
+    let html = crate::artifact::is_interactive_html(mime);
+    let content_type = if html { "text/html; charset=utf-8" } else { mime };
+    // SVG can carry scripts too: sandboxed without them. Other types get no policy (a sandboxed
+    // PDF would not open in the browser's viewer).
+    let policy = if html {
+        "sandbox allow-scripts allow-popups allow-forms allow-modals allow-downloads"
+    } else if mime.starts_with("image/svg") {
+        "sandbox"
     } else {
-        mime
+        "frame-ancestors 'self'"
     };
     let common = [
         ("content-type", content_type),
         ("cache-control", "no-store"),
         ("accept-ranges", "bytes"),
         ("x-content-type-options", "nosniff"),
+        ("content-security-policy", policy),
     ];
     match range {
         Some((start, end)) => {

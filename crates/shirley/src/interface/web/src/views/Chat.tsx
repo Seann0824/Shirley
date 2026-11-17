@@ -37,9 +37,20 @@ function Parts({ bot, parts }: { bot: string; parts: RenderPart[] }) {
             ) : (
               <img key={index} src={part.source.url} alt={part.alt} />
             );
-          case "file":
+          case "file": {
+            // A file in the library opens in a new tab (an HTML page renders, sandboxed).
+            const id = part.source?.kind === "artifact" ? part.source.id : null;
+            const open = id
+              ? () => void api.assetUrl(bot, id).then((url) => window.open(url, "_blank", "noopener")).catch(() => undefined)
+              : undefined;
             return (
-              <div className="sent-file" key={index}>
+              <div
+                className={`sent-file ${open ? "openable" : ""}`}
+                key={index}
+                onClick={open}
+                role={open ? "button" : undefined}
+                tabIndex={open ? 0 : undefined}
+              >
                 <Icon name="file" size={19} />
                 <span>
                   <strong>{part.name}</strong>
@@ -47,6 +58,7 @@ function Parts({ bot, parts }: { bot: string; parts: RenderPart[] }) {
                 </span>
               </div>
             );
+          }
           case "link":
             return (
               <a key={index} href={part.url} target="_blank" rel="noreferrer">
