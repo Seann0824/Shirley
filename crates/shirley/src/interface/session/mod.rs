@@ -454,7 +454,8 @@ impl Session {
         let items = self
             .agent
             .as_ref()
-            .map_or_default(|agent| Self::items_from_messages(agent.messages()));
+            .map(|agent| Self::items_from_messages(agent.messages()))
+            .unwrap_or_default();
         self.items = items;
         self.streaming_delta_start = None;
         // Re-seed the fork snapshot source (e.g. after restoring a session from disk).
@@ -511,7 +512,10 @@ impl Session {
                     &mut items,
                     tool_call_id,
                     None,
-                    content.as_ref().map_or_default(MessageContent::as_text),
+                    content
+                        .as_ref()
+                        .map(MessageContent::as_text)
+                        .unwrap_or_default(),
                     Vec::new(),
                 ),
                 Message::System { .. } => {}
@@ -603,7 +607,10 @@ impl Session {
                 self.finish_tool_call(
                     &tool_call_id,
                     None,
-                    content.as_ref().map_or_default(MessageContent::as_text),
+                    content
+                        .as_ref()
+                        .map(MessageContent::as_text)
+                        .unwrap_or_default(),
                     Vec::new(),
                 );
             }
@@ -1283,7 +1290,8 @@ impl SessionManager {
         let messages: Vec<Message> = session
             .agent
             .as_ref()
-            .map_or_default(|a| a.messages().to_vec());
+            .map(|a| a.messages().to_vec())
+            .unwrap_or_default();
         if messages.is_empty() {
             return None;
         }

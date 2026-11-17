@@ -224,16 +224,20 @@ pub fn decode_response(body: serde_json::Value) -> Result<ModelResponse, Adapter
     let content = &msg.content;
     let reasoning_content = msg.reasoning_content.clone();
     // Here I need to check: if empty, return [], otherwise process into Message::Tool
-    let tool_calls = msg.tool_calls.as_ref().map_or_default(|calls| {
-        calls
-            .iter()
-            .map(|call| message::ToolCall {
-                id: call.id.clone(),
-                name: call.function.name.clone(),
-                arguments: call.function.arguments.clone(),
-            })
-            .collect::<Vec<_>>()
-    });
+    let tool_calls = msg
+        .tool_calls
+        .as_ref()
+        .map(|calls| {
+            calls
+                .iter()
+                .map(|call| message::ToolCall {
+                    id: call.id.clone(),
+                    name: call.function.name.clone(),
+                    arguments: call.function.arguments.clone(),
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
 
     let finish_reason = choice.finish_reason.as_ref().map_or(
         ModelFinishReason::Other("unknown".to_owned()),

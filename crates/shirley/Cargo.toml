@@ -2,6 +2,7 @@
 name = "Shirley"
 version = "0.0.5"
 edition = "2024"
+rust-version = "1.89"
 description = "A bot-first agent platform: HTTP/SSE server + React web UI over the shirley-agent-sdk"
 license = "MIT OR Apache-2.0"
 readme = "../../README.md"

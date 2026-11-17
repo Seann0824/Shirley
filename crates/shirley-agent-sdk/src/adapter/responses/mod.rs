@@ -121,7 +121,7 @@ fn encode_input(messages: &[message::Message]) -> Vec<Value> {
                     // output allows a string or an array of content blocks; a string is most direct for plain text.
                     "output": content
                         .as_ref()
-                        .map_or_default(super::super::message::MessageContent::as_text),
+                        .map(super::super::message::MessageContent::as_text).unwrap_or_default(),
                 }));
                 if let Some(images) = content.as_ref().and_then(super::content::images_only) {
                     pending_images.push(serde_json::json!({

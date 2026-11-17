@@ -211,7 +211,7 @@ impl SkillCatalog {
                 .replace("{{install_root}}", &escape(&root))
                 .replace(
                     "{{override_root}}",
-                    &override_root.as_deref().map_or_default(escape),
+                    &override_root.as_deref().map(escape).unwrap_or_default(),
                 );
             body.push_str(&guide);
         } else if skills.is_empty() {

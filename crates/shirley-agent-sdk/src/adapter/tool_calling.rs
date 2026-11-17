@@ -430,7 +430,8 @@ fn render_object_schema(node: &Value, level: usize) -> Vec<String> {
     let required: std::collections::HashSet<&str> = node
         .get("required")
         .and_then(|value| value.as_array())
-        .map_or_default(|items| items.iter().filter_map(|item| item.as_str()).collect());
+        .map(|items| items.iter().filter_map(|item| item.as_str()).collect())
+        .unwrap_or_default();
 
     if let Some(properties) = node.get("properties").and_then(|value| value.as_object()) {
         for (key, child) in properties {
@@ -442,7 +443,8 @@ fn render_object_schema(node: &Value, level: usize) -> Vec<String> {
             let comment = child
                 .get("description")
                 .and_then(|value| value.as_str())
-                .map_or_default(|text| format!("  // {}", text.replace('\n', " ")));
+                .map(|text| format!("  // {}", text.replace('\n', " ")))
+                .unwrap_or_default();
 
             if is_object_schema(child) {
                 out.push(format!(
@@ -548,7 +550,8 @@ fn type_label(node: &Value) -> String {
             let min_items = node
                 .get("minItems")
                 .and_then(serde_json::Value::as_u64)
-                .map_or_default(|count| format!(", >={count} items"));
+                .map(|count| format!(", >={count} items"))
+                .unwrap_or_default();
             format!("{item}[]{min_items}")
         }
         "object" => "object".to_string(),
@@ -702,7 +705,8 @@ pub(crate) fn encode_messages_for_content(
                     };
                     let output = content
                         .as_ref()
-                        .map_or_default(super::super::message::MessageContent::as_text);
+                        .map(super::super::message::MessageContent::as_text)
+                        .unwrap_or_default();
                     let rendered = protocol.render_result(&call, &output);
                     // The built-in protocol feeds back user text; non-text rendering (a custom
                     // protocol) degrades to passing each entry through individually.
@@ -1166,7 +1170,11 @@ impl TagParser {
                 .last()
                 .is_some_and(|tag| tag.name == self.cfg.params)
         {
-            let buffer = self.stack.last().map_or_default(|tag| tag.buf.clone());
+            let buffer = self
+                .stack
+                .last()
+                .map(|tag| tag.buf.clone())
+                .unwrap_or_default();
             if serde_json::from_str::<serde_json::Value>(buffer.trim()).is_err() {
                 self.push_noise(&format!("<{raw}>"));
                 return;

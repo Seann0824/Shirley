@@ -2,6 +2,7 @@
 name = "shirley-agent-sdk"
 version = "0.0.4"
 edition = "2024"
+rust-version = "1.89"
 description = "Agent SDK for building LLM agents: messages, tools, protocol adapters, ReAct runtime, sandbox and workspace"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/Seann0824/Shirley"
