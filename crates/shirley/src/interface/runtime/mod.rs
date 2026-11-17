@@ -413,8 +413,10 @@ impl BotRuntimeManager {
             emit_status(&status_sink, &bot_owned, &session_name, &status);
             let terminal = guard_turn(async {
                 let mut cancel_rx = cancel_rx;
+                let model_name = agent.model_config().model.clone();
                 let mut stream = agent.run_stream_content(user_content);
                 let mut hb = tokio::time::interval(std::time::Duration::from_secs(1));
+                let mut garbled_logged = false;
                 if let Some(memory) = memory.as_ref() {
                     tokio::select! {
                         biased;
@@ -438,6 +440,20 @@ impl BotRuntimeManager {
                                 .map_err(|error| error.to_string())?;
                             if matches!(&event, AgentEvent::Finished(_)) {
                                 return Ok(event);
+                            }
+                            // Shirley decodes split characters correctly (`sse::Utf8Decoder`), so a
+                            // U+FFFD here was already broken in what the model service sent.
+                            // Say so once per turn: it is the only way to tell the two apart.
+                            if !garbled_logged
+                                && matches!(&event, AgentEvent::ContentDelta(text) if text.contains('\u{FFFD}'))
+                            {
+                                garbled_logged = true;
+                                eprintln!(
+                                    "[model] {}: the reply from {} contains U+FFFD (garbled characters); \
+                                     the model service sent them broken",
+                                    bot_owned,
+                                    model_name
+                                );
                             }
                             let is_todo = matches!(&event, AgentEvent::ToolFinished { name, .. } if name == "todo");
                             {
