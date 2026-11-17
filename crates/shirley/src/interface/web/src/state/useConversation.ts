@@ -1,100 +1,16 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, onAgentEvent } from "../api/bridge";
-import type { AgentEvent, ItemWire, RenderPart, ToolCallWire } from "../api/types";
+import type { AgentEvent, RenderPart } from "../api/types";
+import {
+  fromSnapshot,
+  reduce,
+  type ConversationItem,
+} from "./conversation";
 
-/** A view item: the server's `ItemWire` plus a client-only streaming flag on messages. */
-export type ConversationItem =
-  | { kind: "message"; role: string; content: string; parts: RenderPart[]; streaming?: boolean }
-  | { kind: "compact"; content: string }
-  | { kind: "tools"; calls: ToolCallWire[] };
+export type { ConversationItem };
 
 const MAIN_SESSION = "main";
-
-function fromSnapshot(items: ItemWire[]): ConversationItem[] {
-  return items.map((item) => ({ ...item }));
-}
-
-/** Close any assistant message that is still receiving deltas. */
-function sealStreaming(items: ConversationItem[]): ConversationItem[] {
-  const last = items[items.length - 1];
-  if (last?.kind === "message" && last.streaming) {
-    return [...items.slice(0, -1), { ...last, streaming: false }];
-  }
-  return items;
-}
-
-function reduce(items: ConversationItem[], event: AgentEvent): ConversationItem[] {
-  switch (event.type) {
-    case "content_delta": {
-      const last = items[items.length - 1];
-      if (last?.kind === "message" && last.streaming) {
-        return [...items.slice(0, -1), { ...last, content: last.content + event.text }];
-      }
-      return [
-        ...items,
-        { kind: "message", role: "assistant", content: event.text, parts: [], streaming: true },
-      ];
-    }
-    case "message_added":
-      return event.role === "assistant" ? sealStreaming(items) : items;
-    case "tool_started": {
-      const sealed = sealStreaming(items);
-      const call: ToolCallWire = {
-        id: event.call_id,
-        name: event.name,
-        arguments: event.arguments,
-        output: null,
-        ok: null,
-        parts: [],
-      };
-      const last = sealed[sealed.length - 1];
-      if (last?.kind === "tools") {
-        return [...sealed.slice(0, -1), { kind: "tools", calls: [...last.calls, call] }];
-      }
-      return [...sealed, { kind: "tools", calls: [call] }];
-    }
-    case "tool_finished":
-      return items.map((item) =>
-        item.kind === "tools"
-          ? {
-              kind: "tools",
-              calls: item.calls.map((call) =>
-                call.id === event.call_id
-                  ? { ...call, output: event.output, ok: event.ok, parts: event.parts ?? [] }
-                  : call,
-              ),
-            }
-          : item,
-      );
-    case "compact":
-      return [...sealStreaming(items), { kind: "compact", content: event.content }];
-    case "notice":
-      return [
-        ...sealStreaming(items),
-        { kind: "message", role: "notice", content: event.text, parts: [] },
-      ];
-    case "retrying":
-      return [
-        ...sealStreaming(items),
-        {
-          kind: "message",
-          role: "notice",
-          content: `第 ${event.attempt} 次重试：${event.reason}`,
-          parts: [],
-        },
-      ];
-    case "error":
-      return [
-        ...sealStreaming(items),
-        { kind: "message", role: "error", content: event.message, parts: [] },
-      ];
-    case "finished":
-      return sealStreaming(items);
-    default:
-      return items;
-  }
-}
 
 /**
  * The bot's one conversation: snapshot on open, then live events layered on top. Events older
@@ -141,7 +57,7 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
       .subscribe(bot)
       .then((snapshot) => {
         if (cancelled) return;
-        setItems(fromSnapshot(snapshot.items));
+        setItems(fromSnapshot(snapshot.items, snapshot.running));
         setRunning(snapshot.running);
         cursor.current = snapshot.sequence;
         setLoaded(true);
@@ -163,14 +79,12 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
   }, [bot]);
 
   const send = useCallback(
-    async (text: string, images: string[] = []) => {
-      setItems((current) => [
-        ...current,
-        { kind: "message", role: "user", content: text, parts: [] },
-      ]);
+    async (text: string, images: string[] = [], parts: RenderPart[] = []) => {
+      setItems((current) => [...current, { kind: "message", role: "user", content: text, parts }]);
       setRunning(true);
       try {
-        await api.send(bot, text, images);
+        // The bubble matched what was typed; the wire still needs something to answer.
+        await api.send(bot, text.trim() || (images.length ? "请处理这些附件" : ""), images);
       } catch (reason) {
         setRunning(false);
         setItems((current) => [

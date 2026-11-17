@@ -1,34 +1,9 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ClipboardEvent, type ReactNode } from "react";
 
+import { filesToAttachments, pastedFiles, toAttachments, type Attachment } from "./attachments";
 import { Icon } from "./Icon";
 
-export interface Attachment {
-  id: string;
-  file: File;
-  name: string;
-  kind: "image" | "pdf" | "file";
-  url: string;
-  size: string;
-}
-
-function toAttachments(files: FileList | null): Attachment[] {
-  if (!files) return [];
-  return Array.from(files).map((file) => ({
-    id: `${file.name}-${file.lastModified}-${Math.random()}`,
-    file,
-    name: file.name,
-    kind: file.type.startsWith("image/")
-      ? "image"
-      : file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")
-        ? "pdf"
-        : "file",
-    url: URL.createObjectURL(file),
-    size:
-      file.size < 1024 * 1024
-        ? `${Math.ceil(file.size / 1024)} KB`
-        : `${(file.size / 1024 / 1024).toFixed(1)} MB`,
-  }));
-}
+export type { Attachment } from "./attachments";
 
 function AttachmentTray({
   attachments,
@@ -203,6 +178,16 @@ export function ComposerDock({
     setTextMode(prefersText);
   };
 
+  // Screenshots arrive through the clipboard, not the file picker: turn them into the same
+  // attachments the tray already renders, and let plain text pastes through untouched.
+  const onPaste = (event: ClipboardEvent<HTMLDivElement>) => {
+    const files = pastedFiles(event.clipboardData);
+    if (!files.length) return;
+    event.preventDefault();
+    setAttachments((items) => [...items, ...filesToAttachments(files)]);
+    setVoiceError(null);
+  };
+
   const startListening = () => {
     if (speech.current) return;
     const instance = recognizer();
@@ -267,7 +252,7 @@ export function ComposerDock({
 
   return (
     <>
-      <div className={`composer-dock ${listening ? "is-listening" : ""}`}>
+      <div className={`composer-dock ${listening ? "is-listening" : ""}`} onPaste={onPaste}>
         {above}
         {attachments.length > 0 && (
           <AttachmentTray

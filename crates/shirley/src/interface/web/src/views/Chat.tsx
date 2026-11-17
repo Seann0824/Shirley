@@ -4,23 +4,11 @@ import { api } from "../api/bridge";
 import type { Bot, RenderPart, ToolCallWire } from "../api/types";
 import { BotAvatar, botTone } from "../components/BotAvatar";
 import { ComposerDock, readAsDataUrl, type Attachment } from "../components/Composer";
+import { userMessageParts } from "../components/attachments";
 import { Icon } from "../components/Icon";
 import { MarkdownBlock, splitBlocks } from "../components/Markdown";
+import { showsToolActivity, toolActivity } from "../components/toolActivity";
 import { useConversation, type ConversationItem } from "../state/useConversation";
-
-const TOOL_LABELS: Record<string, string> = {
-  bash: "运行命令",
-  grep: "搜索内容",
-  read: "读取文件",
-  media: "查看附件",
-  web_search: "搜索网页",
-  todo: "整理步骤",
-  recall: "回忆",
-  activate_skill: "启用技能",
-  read_skill_file: "读取技能",
-  subagent: "派出子任务",
-  create_bot: "创建 Bot",
-};
 
 /** An image stored in the media library, loaded through a minted URL. */
 function ArtifactImage({ bot, id, alt }: { bot: string; id: string; alt: string }) {
@@ -70,22 +58,23 @@ function Parts({ bot, parts }: { bot: string; parts: RenderPart[] }) {
   );
 }
 
-function ToolLines({ bot, calls }: { bot: string; calls: ToolCallWire[] }) {
+/** Tools are background noise: a live turn shows a pulse, a finished one leaves no trace. */
+function ToolActivity({ bot, calls, settled }: { bot: string; calls: ToolCallWire[]; settled: boolean }) {
+  const activity = toolActivity(calls, settled);
   return (
-    <div className="tool-lines">
-      {calls.map((call) => (
-        <div className={`tool-line ${call.ok === null ? "running" : call.ok ? "ok" : "failed"}`} key={call.id}>
-          <span className="tool-state">
-            {call.ok === null ? <i /> : <Icon name={call.ok ? "check" : "stop"} size={12} />}
-          </span>
-          <span>{TOOL_LABELS[call.name] ?? call.name}</span>
-          {call.parts.length > 0 && (
-            <div className="tool-parts">
-              <Parts bot={bot} parts={call.parts.filter((part) => part.kind !== "text")} />
-            </div>
-          )}
+    <div className="tool-activity">
+      {activity.running && (
+        <span className="tool-running" role="status" aria-label="正在运行">
+          <i />
+          <i />
+          <i />
+        </span>
+      )}
+      {activity.parts.length > 0 && (
+        <div className="tool-parts">
+          <Parts bot={bot} parts={activity.parts} />
         </div>
-      ))}
+      )}
     </div>
   );
 }
@@ -150,15 +139,17 @@ function Item({ bot, item }: { bot: Bot; item: ConversationItem }) {
           ))}
         </>
       );
-    case "tools":
+    case "tools": {
+      if (!showsToolActivity(toolActivity(item.calls, item.settled === true))) return null;
       return (
         <div className="message-row bot-message tools-row">
           <div className={`message-avatar ${botTone(bot.name)}`}>
             <BotAvatar name={bot.name} size={27} />
           </div>
-          <ToolLines bot={bot.name} calls={item.calls} />
+          <ToolActivity bot={bot.name} calls={item.calls} settled={item.settled === true} />
         </div>
       );
+    }
     case "compact":
       return (
         <div className="message-row bot-message">
@@ -213,7 +204,7 @@ export function Chat({
         // A failed attachment is reported by the server-side turn; the text still goes.
       }
     }
-    await conversation.send(text || (refs.length ? "请处理这些附件" : ""), refs);
+    await conversation.send(text, refs, userMessageParts(attachments));
   };
 
   const { items, running } = conversation;
