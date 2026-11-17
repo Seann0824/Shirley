@@ -114,6 +114,8 @@ export const api = {
   subscribe: (bot: string) => cmd<SessionSnapshot>("agent_subscribe", { bot }),
   send: (bot: string, text: string, images: string[] = []) =>
     cmd<void>("agent_send", { bot, text, images }),
+  /** Take back the latest message; returns its text to edit. */
+  recall: (bot: string) => cmd<{ text: string }>("agent_recall", { bot }),
   cancel: (bot: string) => cmd<void>("agent_cancel", { bot }),
 
   poolList: () => cmd<PoolTask[]>("agent_pool_list"),

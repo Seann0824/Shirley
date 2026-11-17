@@ -26,6 +26,7 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const cursor = useRef<number | null>(null);
+  const reload = useRef<() => Promise<void>>(async () => undefined);
   const buffered = useRef<AgentEvent[]>([]);
   const finishedCallback = useRef(onTurnFinished);
   finishedCallback.current = onTurnFinished;
@@ -82,6 +83,7 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
       apply(event);
     });
 
+    reload.current = load;
     void load();
 
     return () => {
@@ -115,10 +117,18 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
 
   const cancel = useCallback(() => api.cancel(bot).catch(() => undefined), [bot]);
 
+  /** Take back the latest message (stopping its reply); resolves to its text, to edit. */
+  const recall = useCallback(async () => {
+    const { text } = await api.recall(bot);
+    cursor.current = null;
+    await reload.current();
+    return text;
+  }, [bot]);
+
   /** Show a client-side problem (e.g. a failed upload) inline, like a server error. */
   const report = useCallback((message: string) => {
     setItems((current) => [...current, { kind: "message", role: "error", content: message, parts: [] }]);
   }, []);
 
-  return { items, running, loaded, error, send, cancel, report };
+  return { items, running, loaded, error, send, cancel, recall, report };
 }

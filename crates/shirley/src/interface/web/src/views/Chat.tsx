@@ -128,26 +128,39 @@ function mediaClass(part: RenderPart): string {
 
 const TASK_TOOLS = new Set(["dispatch_task", "task_note"]);
 
-function Item({ bot, item, tasks }: { bot: Bot; item: ConversationItem; tasks: Tasks }) {
+/** The user's latest message can be taken back: tap it, then 撤回. */
+interface Recall {
+  open: boolean;
+  onToggle: () => void;
+  onRecall: () => void;
+}
+
+function Item({ bot, item, tasks, recall }: { bot: Bot; item: ConversationItem; tasks: Tasks; recall?: Recall }) {
   switch (item.kind) {
     case "message":
       if (item.role === "user") {
         // Every picture or file is its own message; the text is another.
         const media = item.parts.filter((part) => part.kind !== "text");
+        const tap = recall ? { onClick: recall.onToggle, role: "button", tabIndex: 0 } : {};
         return (
           <>
             {media.map((part, index) => (
               <div className="message-row user-message" key={`m${index}`}>
-                <div className={mediaClass(part)}>
+                <div className={`${mediaClass(part)} ${recall ? "recallable" : ""}`} {...tap}>
                   <Parts bot={bot.name} parts={[part]} />
                 </div>
               </div>
             ))}
             {item.content && (
               <div className="message-row user-message">
-                <div className="message-bubble">
+                <div className={`message-bubble ${recall ? "recallable" : ""}`} {...tap}>
                   <p>{item.content}</p>
                 </div>
+              </div>
+            )}
+            {recall?.open && (
+              <div className="recall-row">
+                <button onClick={recall.onRecall}>撤回并编辑</button>
               </div>
             )}
           </>
@@ -331,6 +344,23 @@ export function Chat({
   };
 
   const { items, running } = conversation;
+  // Only the latest message can be taken back, like a chat app's 撤回.
+  let lastUser = -1;
+  items.forEach((item, index) => {
+    if (item.kind === "message" && item.role === "user") lastUser = index;
+  });
+  const [recallOpen, setRecallOpen] = useState(false);
+  const [draft, setDraft] = useState<{ text: string; nonce: number } | undefined>(undefined);
+  useEffect(() => setRecallOpen(false), [lastUser]);
+  const takeBack = async () => {
+    setRecallOpen(false);
+    try {
+      const text = await conversation.recall();
+      setDraft({ text, nonce: Date.now() });
+    } catch (reason) {
+      conversation.report(reason instanceof Error ? reason.message : String(reason));
+    }
+  };
   const last = items[items.length - 1];
   const waitingForFirstToken = running && !(last?.kind === "message" && last.streaming) && last?.kind !== "tools";
 
@@ -369,7 +399,21 @@ export function Chat({
               </div>
             )}
             {items.map((item, index) => (
-              <Item key={index} bot={bot} item={item} tasks={tasks} />
+              <Item
+                key={index}
+                bot={bot}
+                item={item}
+                tasks={tasks}
+                recall={
+                  index === lastUser
+                    ? {
+                        open: recallOpen,
+                        onToggle: () => setRecallOpen((open) => !open),
+                        onRecall: () => void takeBack(),
+                      }
+                    : undefined
+                }
+              />
             ))}
             {waitingForFirstToken && (
               <div className="message-row bot-message">
@@ -397,6 +441,7 @@ export function Chat({
           ) : undefined
         }
         onSend={(text, attachments) => void send(text, attachments)}
+        draft={draft}
         busy={running}
         onStop={() => void conversation.cancel()}
         claimsPagePaste

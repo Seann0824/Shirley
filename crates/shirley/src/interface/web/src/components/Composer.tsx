@@ -165,6 +165,7 @@ export function ComposerDock({
   onStop,
   placeholder = "输入消息",
   above,
+  draft,
   claimsPagePaste = false,
 }: {
   onSend: (text: string, attachments: Attachment[]) => void;
@@ -174,6 +175,8 @@ export function ComposerDock({
   placeholder?: string;
   /** Rendered inside the dock, above the controls (e.g. the "send to" picker). */
   above?: ReactNode;
+  /** Text to put back in the field (a recalled message); a new `nonce` puts it again. */
+  draft?: { text: string; nonce: number };
   /**
    * Take pastes that land on the page rather than in a text field (in hold-to-talk mode nothing
    * in the dock has focus). Only one dock on screen should claim them.
@@ -248,6 +251,13 @@ export function ComposerDock({
     setAttachments([]);
     setTextMode(prefersText);
   };
+  // A recalled message comes back here to be edited.
+  useEffect(() => {
+    if (!draft) return;
+    setValue(draft.text);
+    setTextMode(true);
+  }, [draft]);
+
   // The transcript lands after an await; these see the latest field and attachments.
   const sendRef = useRef(send);
   sendRef.current = send;

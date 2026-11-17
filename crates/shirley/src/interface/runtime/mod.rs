@@ -356,6 +356,25 @@ impl BotRuntimeManager {
         self.spawn_turn(bot, Some(session), text, user_content).await
     }
 
+    /// Take back the user's last message ("撤回"), stopping the reply first if it is still
+    /// running. The message, its reply and any task the reply dispatched are gone; the text comes
+    /// back to be edited and sent again.
+    pub async fn recall(self: &Arc<Self>, bot: &str, session: &str) -> Result<String, String> {
+        let runtime = self.ensure_runtime(bot).await?;
+        self.interrupt(bot, &runtime, session).await?;
+        let recalled = runtime
+            .lock()
+            .await
+            .sessions
+            .recall_last_turn(session)
+            .ok_or_else(|| "没有可以撤回的消息".to_owned())?;
+        for task in &recalled.dispatched {
+            // Already finished or removed: nothing to stop.
+            let _ = self.pool_cancel(task).await;
+        }
+        Ok(recalled.text)
+    }
+
     /// Rewind the last turn, then send the edited text as a new turn.
     pub async fn resend(
         &self,

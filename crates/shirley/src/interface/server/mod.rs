@@ -497,6 +497,13 @@ async fn dispatch(
                 .await?;
             Ok(StatusCode::ACCEPTED.into_response())
         }
+        // Take back the latest message to edit it: returns the text as typed.
+        "agent_recall" => {
+            let bot = args.bot()?;
+            let session = args.session();
+            let text = manager.recall(&bot, &session).await?;
+            ok_json(serde_json::json!({ "text": text }))
+        }
         "agent_cancel" => {
             let bot = args.bot()?;
             let session = args.session();

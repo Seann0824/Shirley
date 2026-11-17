@@ -746,3 +746,21 @@ body {
   color: var(--tertiary);
   font-size: 12px;
 }
+
+/* 撤回: the latest message, tapped, offers to take it back. */
+.recallable {
+  cursor: pointer;
+}
+.recall-row {
+  display: flex;
+  justify-content: flex-end;
+  margin: -4px 0 8px;
+}
+.recall-row button {
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: var(--fill);
+  color: var(--label);
+  font-size: 12px;
+  font-weight: 600;
+}

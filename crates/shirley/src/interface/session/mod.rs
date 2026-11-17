@@ -655,6 +655,13 @@ impl Session {
     /// [`Agent::truncate_messages`] (tail truncation + invariant maintenance). The log does not contain system,
     /// so the top one is subtracted when converting the length.
     pub fn rewind_last_user_turn(&mut self) -> Option<String> {
+        self.take_last_user_turn()
+            .map(|(content, _removed)| content.as_text())
+    }
+
+    /// [`Self::rewind_last_user_turn`], returning the user message as sent and every message the
+    /// rewind removed (the reply, its tool calls and their results).
+    pub fn take_last_user_turn(&mut self) -> Option<(MessageContent, Vec<Message>)> {
         let agent = self.agent.as_mut()?;
         let index = agent
             .messages()
@@ -664,6 +671,7 @@ impl Session {
             Message::User { content } => content.clone(),
             _ => unreachable!("rposition guarantees a User message"),
         };
+        let removed = agent.messages()[index + 1..].to_vec();
         // Truncate to before that user message (dropping this turn's user and the assistant / tool chain after it).
         let new_len = agent.truncate_messages(index);
         let has_system = matches!(agent.messages().first(), Some(Message::System { .. }));
@@ -674,7 +682,7 @@ impl Session {
         {
             self.add_error(format!("failed to truncate session log: {error}"));
         }
-        Some(content.as_text())
+        Some((content, removed))
     }
 
     fn record_usage(&mut self, usage: Usage) {
@@ -1250,6 +1258,31 @@ impl SessionManager {
         Some(content)
     }
 
+    /// Take back the last user message of the session named `name` ("撤回"): the message and the
+    /// reply to it are gone from the conversation, the model's context and the log. Returns the
+    /// text as the user typed it, to edit, and the ids of tasks that turn dispatched.
+    ///
+    /// `None` when the session does not exist, is running, or has no user message.
+    pub fn recall_last_turn(&mut self, name: &str) -> Option<Recalled> {
+        let session = self.session_mut(name)?;
+        if session.status.is_active() {
+            return None;
+        }
+        let (content, removed) = session.take_last_user_turn()?;
+        if let Some(index) = session
+            .items
+            .iter()
+            .rposition(|item| matches!(item, Item::Message(message) if message.role == Role::User))
+        {
+            session.items.truncate(index);
+        }
+        session.streaming_delta_start = None;
+        Some(Recalled {
+            text: crate::interface::view::user_display_text(&content),
+            dispatched: dispatched_tasks(&removed),
+        })
+    }
+
     /// Accumulate one event into the session named `name`, and fan it out to its subscribers.
     ///
     /// Called during a run by the task driving `run_stream` (`SessionManager` acts as the task executor).
@@ -1619,5 +1652,76 @@ mod tests {
             manager.delete_session("never-opened").is_ok(),
             "an unloaded session should be allowed through, left to the caller's disk-deletion decision"
         );
+    }
+}
+
+/// What [`SessionManager::recall_last_turn`] took back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Recalled {
+    /// The message as the user typed it (no attachment markers).
+    pub text: String,
+    /// Tasks the reply dispatched (`dispatch_task` results).
+    pub dispatched: Vec<String>,
+}
+
+/// The task ids in the results of `dispatch_task` calls among `messages`.
+fn dispatched_tasks(messages: &[Message]) -> Vec<String> {
+    let calls: Vec<&str> = messages
+        .iter()
+        .flat_map(|message| match message {
+            Message::Assistant { tool_calls, .. } => tool_calls
+                .iter()
+                .filter(|call| call.name == "dispatch_task")
+                .map(|call| call.id.as_str())
+                .collect(),
+            _ => Vec::new(),
+        })
+        .collect();
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            Message::Tool {
+                tool_call_id,
+                content: Some(content),
+            } if calls.contains(&tool_call_id.as_str()) => {
+                serde_json::from_str::<serde_json::Value>(&content.as_text())
+                    .ok()?
+                    .get("task_id")?
+                    .as_str()
+                    .map(str::to_owned)
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod recall_tests {
+    use super::*;
+    use shirley_agent_sdk::ToolCall;
+
+    #[test]
+    fn tasks_dispatched_by_the_reply_are_found() {
+        let call = |id: &str, name: &str| ToolCall {
+            id: id.into(),
+            name: name.into(),
+            arguments: "{}".into(),
+        };
+        let result = |id: &str, json: &str| Message::Tool {
+            tool_call_id: id.into(),
+            content: Some(MessageContent::text(json)),
+        };
+        let removed = vec![
+            Message::Assistant {
+                content: Some("好的，我来安排".into()),
+                reasoning_content: None,
+                tool_calls: vec![call("c1", "dispatch_task"), call("c2", "read"), call("c3", "dispatch_task")],
+            },
+            result("c1", r#"{"task_id":"t-1","title":"写周报"}"#),
+            result("c2", r#"{"task_id":"not-a-dispatch"}"#),
+            result("c3", "dispatch failed: no such bot"),
+        ];
+        assert_eq!(dispatched_tasks(&removed), ["t-1"]);
+        assert!(dispatched_tasks(&[]).is_empty());
     }
 }
