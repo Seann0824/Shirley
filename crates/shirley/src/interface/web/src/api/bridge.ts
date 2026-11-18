@@ -172,14 +172,14 @@ export const api = {
   })(),
 
   /** Transcribe a WAV recording on the server. `partial` = live preview, skipped when busy. */
-  async transcribe(wav: Blob, options: { partial?: boolean; language?: string | null } = {}): Promise<Transcript> {
+  async transcribe(wav: Blob, options: { partial?: boolean; language?: string | null; signal?: AbortSignal } = {}): Promise<Transcript> {
     const query = new URLSearchParams();
     if (options.partial) query.set("partial", "1");
     if (options.language) query.set("language", options.language);
     const headers: Record<string, string> = { "Content-Type": "audio/wav" };
     const token = currentToken();
     if (token) headers.Authorization = `Bearer ${token}`;
-    const response = await fetch(`/api/transcribe?${query}`, { method: "POST", headers, body: wav });
+    const response = await fetch(`/api/transcribe?${query}`, { method: "POST", headers, body: wav, signal: options.signal });
     if (!response.ok) fail(response.status, await response.text().catch(() => ""), "语音转写失败");
     return (await response.json()) as Transcript;
   },

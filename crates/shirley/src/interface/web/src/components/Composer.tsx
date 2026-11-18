@@ -202,6 +202,11 @@ export function ComposerDock({
   const [serverAsr, setServerAsr] = useState(false);
   const recording = useRef<Recording | null>(null);
   const pressed = useRef(false);
+  const pendingFinals = useRef(0);
+  // The live preview request in flight: cancelled on release so its whisper process is freed.
+  const previewAbort = useRef<AbortController | null>(null);
+  // The last preview and how much audio it covered: when release adds almost nothing, it is the answer.
+  const lastPreview = useRef<{ seconds: number; text: string } | null>(null);
   const utterance = useRef(0);
   const language = useRef<string | null>(null);
   const previewTimer = useRef<number | null>(null);
@@ -299,10 +304,7 @@ export function ComposerDock({
   }, [claimsPagePaste]);
 
   // Released in place, heard text is sent; slid up first, it goes into the field to be checked.
-  const placeHeard = (heard: string) => {
-    const edit = slideEdit.current;
-    slideEdit.current = false;
-    setSliding(false);
+  const placeHeard = (heard: string, edit: boolean) => {
     const text = heard.trim();
     if (!text) return false;
     const typed = valueRef.current.trim();
@@ -317,10 +319,12 @@ export function ComposerDock({
   };
 
   const startServerListening = async () => {
-    if (recording.current || transcribing) return;
+    // A previous recording may still be transcribing: that must not block the next one.
+    if (recording.current) return;
     const id = (utterance.current += 1);
     pressed.current = true;
     language.current = null;
+    lastPreview.current = null;
     setVoiceError(null);
     setLiveText("");
     setListening(true);
@@ -348,12 +352,18 @@ export function ComposerDock({
       if (inFlight || seconds < 0.8 || performance.now() - lastSent < previewInterval(seconds)) return;
       inFlight = true;
       lastSent = performance.now();
+      const covered = seconds;
+      const abort = new AbortController();
+      previewAbort.current = abort;
       api
-        .transcribe(rec.snapshot(), { partial: true, language: language.current })
+        .transcribe(rec.snapshot(), { partial: true, language: language.current, signal: abort.signal })
         .then((result) => {
           if (utterance.current !== id || recording.current !== rec) return;
           if (result.language) language.current = result.language;
-          if (result.text !== null) setLiveText(result.text);
+          if (result.text !== null) {
+            setLiveText(result.text);
+            lastPreview.current = { seconds: covered, text: result.text };
+          }
         })
         .catch(() => undefined)
         .finally(() => {
@@ -369,8 +379,16 @@ export function ComposerDock({
     recording.current = null;
     if (previewTimer.current !== null) window.clearInterval(previewTimer.current);
     previewTimer.current = null;
+    // A preview still running would hold a whisper slot while the next sentence starts.
+    previewAbort.current?.abort();
+    previewAbort.current = null;
     const id = utterance.current;
-    const tooShort = rec.seconds() < 0.3;
+    const edit = slideEdit.current;
+    slideEdit.current = false;
+    setSliding(false);
+    const total = rec.seconds();
+    const preview = lastPreview.current;
+    const tooShort = total < 0.3;
     const wav = rec.stop();
     setListening(false);
     if (tooShort) {
@@ -378,20 +396,24 @@ export function ComposerDock({
       setVoiceError("按住按钮，说完再松开");
       return;
     }
+    // The preview already heard (nearly) everything: use it instead of transcribing again.
+    if (preview && preview.text.trim() && total - preview.seconds < 0.6) {
+      setLiveText("");
+      if (!placeHeard(preview.text, edit)) setVoiceError("没有识别到内容，请再说一次");
+      return;
+    }
+    pendingFinals.current += 1;
     setTranscribing(true);
     try {
       const result = await api.transcribe(wav, { language: language.current });
-      if (utterance.current !== id) return;
-      if (!placeHeard(result.text ?? "")) setVoiceError("没有识别到内容，请再说一次");
+      // Placed even if a newer recording has started: the user already said it.
+      if (!placeHeard(result.text ?? "", edit)) setVoiceError("没有识别到内容，请再说一次");
     } catch (cause) {
-      if (utterance.current === id) {
-        setVoiceError(cause instanceof Error ? cause.message : "语音转写失败，请再试一次");
-      }
+      setVoiceError(cause instanceof Error ? cause.message : "语音转写失败，请再试一次");
     } finally {
-      if (utterance.current === id) {
-        setTranscribing(false);
-        setLiveText("");
-      }
+      pendingFinals.current -= 1;
+      if (pendingFinals.current === 0) setTranscribing(false);
+      if (utterance.current === id) setLiveText("");
     }
   };
 
@@ -432,7 +454,10 @@ export function ComposerDock({
       setListening(false);
       onListeningChange?.(false, transcript.current);
       setLiveText("");
-      if (!placeHeard(transcript.current) && !failed) {
+      const edit = slideEdit.current;
+      slideEdit.current = false;
+      setSliding(false);
+      if (!placeHeard(transcript.current, edit) && !failed) {
         setVoiceError("没有识别到内容。按住按钮，说完再松开");
       }
     };

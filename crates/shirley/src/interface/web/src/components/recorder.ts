@@ -55,10 +55,49 @@ export async function microphoneWillAsk(): Promise<boolean> {
   }
 }
 
-export async function startRecording(): Promise<Recording> {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    throw new DOMException("no media devices", "SecurityError");
+/**
+ * The microphone stays open for a while after a recording ends. Mobile Chrome is slow (sometimes
+ * unable) to hand the microphone out again right after it was released, which made a quick
+ * second sentence fail; reusing the open stream makes the next press instant.
+ */
+const KEEP_OPEN_MS = 30_000;
+
+interface Session {
+  stream: MediaStream;
+  context: AudioContext;
+  source: MediaStreamAudioSourceNode;
+  processor: ScriptProcessorNode;
+  /** Receives every audio block while a recording is active. */
+  sink: ((block: Float32Array) => void) | null;
+  idle: number | null;
+}
+
+let session: Session | null = null;
+
+function sessionAlive(current: Session): boolean {
+  return (
+    current.context.state !== "closed" && current.stream.getAudioTracks().some((track) => track.readyState === "live")
+  );
+}
+
+function closeSession(target: Session) {
+  if (target.idle !== null) window.clearTimeout(target.idle);
+  target.processor.onaudioprocess = null;
+  target.source.disconnect();
+  target.processor.disconnect();
+  target.stream.getTracks().forEach((track) => track.stop());
+  void target.context.close().catch(() => undefined);
+  if (session === target) session = null;
+}
+
+async function openSession(): Promise<Session> {
+  if (session && sessionAlive(session)) {
+    if (session.idle !== null) window.clearTimeout(session.idle);
+    session.idle = null;
+    if (session.context.state === "suspended") await session.context.resume().catch(() => undefined);
+    return session;
   }
+  if (session) closeSession(session);
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
   });
@@ -68,27 +107,37 @@ export async function startRecording(): Promise<Recording> {
   const source = context.createMediaStreamSource(stream);
   // ScriptProcessorNode is deprecated but works everywhere without serving a worklet file.
   const processor = context.createScriptProcessor(4096, 1, 1);
-  const chunks: Float32Array[] = [];
-  let length = 0;
+  const opened: Session = { stream, context, source, processor, sink: null, idle: null };
   processor.onaudioprocess = (event) => {
-    const input = event.inputBuffer.getChannelData(0);
-    chunks.push(new Float32Array(input));
-    length += input.length;
+    opened.sink?.(event.inputBuffer.getChannelData(0));
   };
   source.connect(processor);
   // The processor only runs while connected to an output; it writes nothing, so this is silent.
   processor.connect(context.destination);
-  const rate = context.sampleRate;
+  session = opened;
+  return opened;
+}
+
+export async function startRecording(): Promise<Recording> {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new DOMException("no media devices", "SecurityError");
+  }
+  const open = await openSession();
+  const chunks: Float32Array[] = [];
+  let length = 0;
+  open.sink = (input) => {
+    chunks.push(new Float32Array(input));
+    length += input.length;
+  };
+  const rate = open.context.sampleRate;
   let closed = false;
 
   const release = () => {
     if (closed) return;
     closed = true;
-    processor.onaudioprocess = null;
-    source.disconnect();
-    processor.disconnect();
-    stream.getTracks().forEach((track) => track.stop());
-    void context.close().catch(() => undefined);
+    if (open.sink) open.sink = null;
+    if (open.idle !== null) window.clearTimeout(open.idle);
+    open.idle = window.setTimeout(() => closeSession(open), KEEP_OPEN_MS);
   };
 
   return {
