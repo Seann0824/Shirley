@@ -373,9 +373,11 @@ health_check() {
   if [[ -n "$missing" ]]; then warn "referenced assets missing on disk:${missing}"; return 1; fi
   ok "asset references resolve ($(printf '%s' "$refs" | tr '\n' ' '))"
 
-  # 3) auth still enforced: an unauthenticated command must be rejected
+  # 3) auth still enforced: an unauthenticated command must be rejected. The command has to be one
+  #    this build actually serves -- `agent_list_projects` was renamed to `agent_list_bots`, and a
+  #    probe on a missing command fails the health check with a misleading 404.
   base="${HEALTH_URL%/}"
-  code="$(ssh_run "curl -s --max-time 8 -o /dev/null -w '%{http_code}' -X POST '${base}/api/cmd/agent_list_projects'" | tr -d '\r')"
+  code="$(ssh_run "curl -s --max-time 8 -o /dev/null -w '%{http_code}' -X POST '${base}/api/cmd/agent_list_bots'" | tr -d '\r')"
   case "$code" in
     401|403) ok "unauthenticated API call -> ${code} (auth enforced)" ;;
     200)     warn "unauthenticated API call -> 200: the server is exposed without a token!"; return 1 ;;
@@ -389,7 +391,7 @@ health_check() {
     HEALTH_TOKEN="$(ssh_run "for f in '${REMOTE_ROOT}/cloud.env' '/etc/${SERVICE}/cloud.env'; do [ -r \"\$f\" ] && sed -n 's/^SHIRLEY_SERVER_TOKEN=//p' \"\$f\" | head -n1 && break; done" | tr -d '\r' | head -n1 || true)"
   fi
   if [[ -n "$HEALTH_TOKEN" ]]; then
-    code="$(ssh_run "curl -s --max-time 8 -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer ${HEALTH_TOKEN}' '${base}/api/cmd/agent_list_projects'" | tr -d '\r')"
+    code="$(ssh_run "curl -s --max-time 8 -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer ${HEALTH_TOKEN}' '${base}/api/cmd/agent_list_bots'" | tr -d '\r')"
     [[ "$code" == "200" ]] && ok "authenticated API call -> 200" || { warn "authenticated API call -> ${code}"; return 1; }
   else
     warn "no SHIRLEY_SERVER_TOKEN found -- skipping the authenticated probe"
