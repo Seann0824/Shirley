@@ -17,6 +17,10 @@ import { Skills } from "./views/Skills";
 import { Connections } from "./views/Connections";
 
 type Tab = "home" | "chat" | "new" | "skills" | "connections";
+interface NavState {
+  tab: Tab;
+  bot: string;
+}
 
 /** The generalist: open first, and where unroutable messages go. */
 const DEFAULT_BOT = "nono";
@@ -51,10 +55,43 @@ export default function App() {
 
   const selectedBot = bots.bots.find((bot) => bot.name === selected) ?? bots.bots[0];
 
+  // Every screen change is a history entry, so the phone's back gesture (and the browser's back
+  // button) steps out of a screen instead of leaving the app.
+  const tabRef = useRef<Tab>(tab);
+  tabRef.current = tab;
+  const selectedRef = useRef(selected);
+  selectedRef.current = selected;
+  const go = (next: Tab, bot: string = selectedRef.current, replace = false) => {
+    if (next === tabRef.current && bot === selectedRef.current) return;
+    const state: NavState = { tab: next, bot };
+    if (replace) window.history.replaceState(state, "");
+    else window.history.pushState(state, "");
+    setSelected(bot);
+    setTab(next);
+  };
+  const goRef = useRef(go);
+  goRef.current = go;
+  /** A back button: undo the last step when there is one, else go to `fallback`. */
+  const back = (fallback: Tab) => {
+    if ((window.history.state as NavState | null)?.tab) window.history.back();
+    else goRef.current(fallback, undefined, true);
+  };
+  useEffect(() => {
+    window.history.replaceState({ tab: "home", bot: selectedRef.current } satisfies NavState, "");
+    const onPop = (event: PopStateEvent) => {
+      const state = event.state as NavState | null;
+      setSeed(undefined);
+      if (state?.bot) setSelected(state.bot);
+      setTab(state?.tab ?? "home");
+    };
+    window.addEventListener("popstate", onPop);
+    return () => window.removeEventListener("popstate", onPop);
+  }, []);
+
   const openBot = (name: string) => {
-    setSelected(name);
     setSeed(undefined);
-    setTab("chat");
+    // Opening the new bot replaces the "new bot" screen, so back does not return to the form.
+    goRef.current("chat", name, tabRef.current === "new");
   };
 
   // Reply notifications: a bot finished answering while you were somewhere else.
@@ -107,16 +144,15 @@ export default function App() {
       .route(text.trim() || "处理这些附件")
       .then((answer) => answer.bot)
       .catch(() => DEFAULT_BOT);
-    setSelected(bot);
     setSeed({ text, attachments, nonce: Date.now() });
-    setTab("chat");
+    goRef.current("chat", bot);
   };
 
   const home = (
     <Home
       bots={bots}
       tasks={tasks.tasks}
-      onNavigate={setTab}
+      onNavigate={(next) => goRef.current(next)}
       onOpenBot={openBot}
       onAsk={ask}
       selected={wide ? selectedBot?.name : undefined}
@@ -134,16 +170,16 @@ export default function App() {
           bot={selectedBot}
           seed={seed?.text !== undefined && selectedBot.name === selected ? seed : undefined}
           tasks={tasks}
-          onBack={() => setTab("home")}
-          onSkills={() => setTab("skills")}
+          onBack={() => back("home")}
+          onSkills={() => go("skills")}
           onTurnFinished={() => void bots.refresh()}
         />
       )}
-      {view === "skills" && selectedBot && <Skills bot={selectedBot} onBack={() => setTab("chat")} />}
-      {view === "connections" && <Connections bots={bots.bots} onBack={() => setTab("home")} />}
+      {view === "skills" && selectedBot && <Skills bot={selectedBot} onBack={() => back("chat")} />}
+      {view === "connections" && <Connections bots={bots.bots} onBack={() => back("home")} />}
       {view === "new" && (
         <NewBot
-          onBack={() => setTab("home")}
+          onBack={() => back("home")}
           onCreated={async (bot) => {
             await bots.refresh();
             openBot(bot);
