@@ -1181,3 +1181,136 @@ img.openable {
 .file-viewer > header button svg {
   transform: rotate(180deg);
 }
+
+/* The token gate: a first visit (or a refused token) has nothing behind it, so this
+   covers the whole window and stays until the server accepts a token. */
+.token-gate {
+  --gate-card: rgba(255, 255, 255, 0.9);
+  --gate-border: rgba(255, 255, 255, 0.92);
+  --gate-field: #fff;
+  --gate-field-border: rgba(60, 60, 67, 0.2);
+  --gate-text: var(--label);
+  --gate-muted: var(--secondary);
+  position: fixed;
+  inset: 0;
+  z-index: 200;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  padding: max(20px, env(safe-area-inset-top)) 20px max(20px, env(safe-area-inset-bottom));
+}
+.token-gate-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.22);
+  backdrop-filter: blur(6px) saturate(160%);
+  animation: sheet-fade 0.2s ease both;
+}
+.token-gate-card {
+  position: relative;
+  width: min(360px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 20px;
+  border: 0.5px solid var(--gate-border);
+  border-radius: 22px;
+  background: var(--gate-card);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.18);
+  backdrop-filter: blur(30px) saturate(180%);
+  animation: token-gate-in 0.24s cubic-bezier(0.22, 0.74, 0.2, 1) both;
+}
+.token-gate-card h2 {
+  margin: 0;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--gate-text);
+}
+.token-gate-hint {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--gate-muted);
+  overflow-wrap: anywhere;
+}
+.token-gate-hint code {
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--fill);
+  color: var(--gate-text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+.token-gate-input {
+  height: 44px;
+  padding: 0 12px;
+  border: 0.5px solid var(--gate-field-border);
+  border-radius: 12px;
+  background: var(--gate-field);
+  color: var(--gate-text);
+  /* 16px stops iOS from zooming the whole page when the field gets focus. */
+  font-size: 16px;
+}
+.token-gate-input::placeholder {
+  color: var(--tertiary);
+}
+.token-gate-input:focus {
+  outline: none;
+  border-color: var(--gate-text);
+  box-shadow: 0 0 0 3px var(--fill);
+}
+.token-gate-input[aria-invalid="true"] {
+  border-color: var(--red);
+}
+.token-gate-error {
+  margin: -4px 0 0;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--red);
+}
+.token-gate-submit {
+  height: 46px;
+  border-radius: 14px;
+  background: var(--label);
+  color: #fff;
+  font-size: 15px;
+  font-weight: 600;
+}
+.token-gate-submit:disabled {
+  opacity: 0.55;
+}
+@keyframes token-gate-in {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.98);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+/* The sheet is light by default; follow the system when it asks for dark. */
+@media (prefers-color-scheme: dark) {
+  .token-gate {
+    --gate-card: rgba(28, 28, 30, 0.9);
+    --gate-border: rgba(255, 255, 255, 0.12);
+    --gate-field: rgba(118, 118, 128, 0.24);
+    --gate-field-border: rgba(255, 255, 255, 0.18);
+    --gate-text: #f5f5f7;
+    --gate-muted: #a1a1a6;
+  }
+  .token-gate-backdrop {
+    background: rgba(0, 0, 0, 0.5);
+  }
+  .token-gate-card {
+    box-shadow: 0 18px 48px rgba(0, 0, 0, 0.5);
+  }
+  .token-gate-submit {
+    background: #f5f5f7;
+    color: #1c1c1e;
+  }
+}

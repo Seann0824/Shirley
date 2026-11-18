@@ -85,6 +85,7 @@ export function Home({
   onOpenBot,
   onAsk,
   selected,
+  blocked,
 }: {
   bots: ReturnType<typeof useBots>;
   tasks: PoolTask[];
@@ -94,6 +95,8 @@ export function Home({
   onAsk: (text: string, attachments: Attachment[]) => Promise<void>;
   /** The bot whose conversation is open beside the list (two-pane layout only). */
   selected?: string;
+  /** The token gate is up: the list is empty because nothing could load, not because it is empty. */
+  blocked?: boolean;
 }) {
   const visible = bots.visible;
   // On a wide screen the conversation beside the list takes page-level pastes.
@@ -122,7 +125,7 @@ export function Home({
     <>
       <HomeHeader onNavigate={onNavigate} />
 
-      {bots.error && <p className="error-note">无法连接服务器：{bots.error}</p>}
+      {bots.error && !blocked && <p className="error-note">无法连接服务器：{bots.error}</p>}
       {asking && (
         <p className="routing-note" role="status">
           <i />
@@ -163,7 +166,7 @@ export function Home({
             </SwipeBotRow>
           );
         })}
-        {visible.length === 0 && !bots.error && <p className="empty-note">没有可用的 Bot</p>}
+        {visible.length === 0 && !bots.error && !blocked && <p className="empty-note">没有可用的 Bot</p>}
       </section>
 
       <ComposerDock

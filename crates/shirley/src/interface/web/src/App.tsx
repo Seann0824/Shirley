@@ -3,7 +3,9 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { api, onAgentEvent } from "./api/bridge";
 import { FileViewer } from "./components/FileViewer";
 import type { Attachment } from "./components/Composer";
+import { TokenGate } from "./components/TokenGate";
 
+import { useAccessToken } from "./state/useAccessToken";
 import { useBots } from "./state/useBots";
 import { ReplyWatcher, registerServiceWorker, setBadge, show } from "./state/notify";
 import { useTasks } from "./state/useTasks";
@@ -44,6 +46,8 @@ export default function App() {
   const wide = useWide();
   const bots = useBots();
   const tasks = useTasks(true);
+  // No token (or a refused one) means nothing can load: ask before showing an empty page.
+  const access = useAccessToken();
 
   const selectedBot = bots.bots.find((bot) => bot.name === selected) ?? bots.bots[0];
 
@@ -116,6 +120,7 @@ export default function App() {
       onOpenBot={openBot}
       onAsk={ask}
       selected={wide ? selectedBot?.name : undefined}
+      blocked={access.needed}
     />
   );
 
@@ -151,6 +156,9 @@ export default function App() {
   return (
     <main className={`app-shell ${wide ? "is-wide" : ""}`}>
       <FileViewer />
+      {access.needed && (
+        <TokenGate busy={access.busy} error={access.error} onSubmit={(token) => void access.submit(token)} />
+      )}
       {wide ? (
         <>
           <Pane className="pane-side home-pane" viewKey="home">

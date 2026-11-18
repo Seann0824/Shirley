@@ -14,30 +14,41 @@ import type {
   SkillMarket,
   Connector,
 } from "./types";
-
 // The token arrives once in the link (`?token=`) and is kept: the installed app starts at `/`.
-const TOKEN_KEY = "shirley.token";
-const token = (() => {
-  const fromLink = new URLSearchParams(window.location.search).get("token");
-  try {
-    if (fromLink) localStorage.setItem(TOKEN_KEY, fromLink);
-    return fromLink ?? localStorage.getItem(TOKEN_KEY) ?? undefined;
-  } catch {
-    return fromLink ?? undefined;
+// It is read through `token.ts` on every request, so the gate can replace it at runtime.
+import { currentToken, reportUnauthorized } from "./token";
+
+/** A failed command, with the status kept: 401/403 means "ask for a token", not "server is down". */
+export class ApiError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiError";
+    this.status = status;
   }
-})();
+}
+
+/** The token was refused: whatever had it is stale, so the interface asks again. */
+function refused(status: number): boolean {
+  return status === 401 || status === 403;
+}
+
+function fail(status: number, body: string, fallback = ""): never {
+  if (refused(status)) reportUnauthorized();
+  throw new ApiError(body || fallback || `HTTP ${status}`, status);
+}
 
 async function cmd<T>(name: string, args: Record<string, unknown> = {}): Promise<T> {
   const headers: Record<string, string> = { "Content-Type": "application/json" };
+  const token = currentToken();
   if (token) headers.Authorization = `Bearer ${token}`;
   const response = await fetch(`/api/cmd/${name}`, {
     method: "POST",
     headers,
     body: JSON.stringify(args),
   });
-  if (!response.ok) {
-    throw new Error((await response.text().catch(() => "")) || response.statusText);
-  }
+  if (!response.ok) fail(response.status, await response.text().catch(() => ""), response.statusText);
   if (response.status === 204 || response.status === 202) return undefined as T;
   return (await response.json()) as T;
 }
@@ -53,6 +64,7 @@ let reconnectDelay = 1000;
 
 function connect() {
   if (source) return;
+  const token = currentToken();
   const url = token ? `/api/events?token=${encodeURIComponent(token)}` : "/api/events";
   const es = new EventSource(url);
   source = es;
@@ -163,9 +175,10 @@ export const api = {
     if (options.partial) query.set("partial", "1");
     if (options.language) query.set("language", options.language);
     const headers: Record<string, string> = { "Content-Type": "audio/wav" };
+    const token = currentToken();
     if (token) headers.Authorization = `Bearer ${token}`;
     const response = await fetch(`/api/transcribe?${query}`, { method: "POST", headers, body: wav });
-    if (!response.ok) throw new Error((await response.text().catch(() => "")) || "语音转写失败");
+    if (!response.ok) fail(response.status, await response.text().catch(() => ""), "语音转写失败");
     return (await response.json()) as Transcript;
   },
 
@@ -177,9 +190,10 @@ export const api = {
       mime: file.type || "application/octet-stream",
     });
     const headers: Record<string, string> = {};
+    const token = currentToken();
     if (token) headers.Authorization = `Bearer ${token}`;
     const response = await fetch(`/api/upload?${query}`, { method: "POST", headers, body: file });
-    if (!response.ok) throw new Error(await response.text().catch(() => response.statusText));
+    if (!response.ok) fail(response.status, await response.text().catch(() => ""), response.statusText);
     return (await response.json()) as LibraryEntry;
   },
 };
