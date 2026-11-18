@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useLayoutEffect, useRef, useState } from "react";
 
-import { api } from "../api/bridge";
+import { api, onAgentEvent, onConnection } from "../api/bridge";
 import type { Bot, RenderPart, ToolCallWire } from "../api/types";
 import { BotAvatar, botTone } from "../components/BotAvatar";
 import { ComposerDock, type Attachment } from "../components/Composer";
@@ -100,6 +100,72 @@ function ToolActivity({ bot, calls, settled }: { bot: string; calls: ToolCallWir
           <Parts bot={bot} parts={activity.parts} />
         </div>
       )}
+    </div>
+  );
+}
+
+/** Silence longer than this is worth saying out loud; longer still, the turn may be stuck. */
+const QUIET_SECONDS = 20;
+const STUCK_SECONDS = 120;
+
+function clock(seconds: number): string {
+  return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+/**
+ * While a turn runs: how long it has run, what it is doing, and how long since anything
+ * happened -- so "working on a slow tool" and "stuck or disconnected" look different.
+ */
+function RunStatus({ bot, name }: { bot: string; name: string }) {
+  const [now, setNow] = useState(() => Date.now());
+  const started = useRef(Date.now());
+  const lastEvent = useRef(Date.now());
+  const [tool, setTool] = useState<string | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  const [online, setOnline] = useState(true);
+
+  useEffect(() => {
+    const stop = onAgentEvent((event) => {
+      if (event.bot && event.bot !== bot) return;
+      lastEvent.current = Date.now();
+      if (event.type === "tool_started") setTool(event.name);
+      else if (event.type === "tool_finished") setTool(null);
+      else if (event.type === "retrying") setNote(`出错了，正在重试（第 ${event.attempt} 次）`);
+      else if (event.type === "compaction_started") setNote("正在整理上下文");
+      else if (event.type === "compaction_finished" || event.type === "content_delta") setNote(null);
+    });
+    const unwatch = onConnection(setOnline);
+    const tick = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => {
+      stop();
+      unwatch();
+      window.clearInterval(tick);
+    };
+  }, [bot]);
+
+  const elapsed = Math.floor((now - started.current) / 1000);
+  const quiet = Math.floor((now - lastEvent.current) / 1000);
+  let level = "";
+  let text = note ?? (tool ? `正在使用 ${tool}` : `${name} 正在思考`);
+  if (!online) {
+    level = "warn";
+    text = "与服务器的连接断开了，正在重连…";
+  } else if (quiet >= STUCK_SECONDS) {
+    level = "warn";
+    text = `已 ${clock(quiet)} 没有任何动静，可能卡住了，可以点停止再试`;
+  } else if (quiet >= QUIET_SECONDS) {
+    text = `${text} · ${quiet} 秒没有新进展，仍在运行`;
+  }
+  return (
+    <div className="message-row bot-message run-row">
+      <div className={`message-avatar ${botTone(bot)}`}>
+        <BotAvatar name={bot} size={27} />
+      </div>
+      <p className={`run-status ${level}`} role="status">
+        <span className="run-dot" aria-hidden="true" />
+        <span className="run-text">{text}</span>
+        <time>{clock(elapsed)}</time>
+      </p>
     </div>
   );
 }
@@ -380,8 +446,8 @@ export function Chat({
       conversation.report(reason instanceof Error ? reason.message : String(reason));
     }
   };
-  const last = items[items.length - 1];
-  const waitingForFirstToken = running && !(last?.kind === "message" && last.streaming) && last?.kind !== "tools";
+  // A new turn restarts the clock: the key changes when the last thing the user said does.
+  const statusKey = lastUser;
 
   return (
     <section className="chat-view">
@@ -438,18 +504,7 @@ export function Chat({
               ))}
               </Fragment>
             ))}
-            {waitingForFirstToken && (
-              <div className="message-row bot-message">
-                <div className={`message-avatar ${botTone(bot.name)}`}>
-                  <BotAvatar name={bot.name} size={27} />
-                </div>
-                <div className="message-bubble typing-bubble" aria-label={`${bot.display_name} 正在输入`}>
-                  <i />
-                  <i />
-                  <i />
-                </div>
-              </div>
-            )}
+            {running && <RunStatus key={statusKey} bot={bot.name} name={bot.display_name} />}
           </div>
         }
       </div>

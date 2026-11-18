@@ -82,16 +82,36 @@ function connect() {
   });
   let opened = false;
   es.onopen = () => {
+    setOnline(true);
     reconnectDelay = 1000;
     // A reconnect means a gap in the stream.
     if (opened) listeners.forEach((listener) => listener({ type: "resync" }));
     opened = true;
   };
   es.onerror = () => {
+    setOnline(false);
     es.close();
     source = null;
     window.setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 2, 30_000);
+  };
+}
+
+/** Whether the event stream is connected: a dropped one is the usual reason a turn looks dead. */
+type ConnectionListener = (online: boolean) => void;
+const connectionListeners = new Set<ConnectionListener>();
+let online = true;
+function setOnline(next: boolean) {
+  if (online === next) return;
+  online = next;
+  connectionListeners.forEach((listener) => listener(next));
+}
+
+export function onConnection(listener: ConnectionListener): () => void {
+  connectionListeners.add(listener);
+  listener(online);
+  return () => {
+    connectionListeners.delete(listener);
   };
 }
 
