@@ -595,6 +595,24 @@ impl BotRuntimeManager {
         }
     }
 
+    /// Before a bot's folder goes: stop all its turns, drop its tasks and its loaded runtime.
+    pub async fn forget_bot(&self, bot: &str) -> Result<(), String> {
+        let prefix = route_key(bot, "");
+        let running: Vec<oneshot::Sender<()>> = {
+            let mut cancels = self.cancels.lock().await;
+            let keys: Vec<String> = cancels.keys().filter(|key| key.starts_with(&prefix)).cloned().collect();
+            keys.iter().filter_map(|key| cancels.remove(key)).collect()
+        };
+        for tx in running {
+            let _ = tx.send(());
+        }
+        self.pool.lock().await.forget_bot(bot)?;
+        self.runtimes.lock().await.remove(bot);
+        self.stale.lock().await.remove(bot);
+        self.skill_marks.lock().await.remove(bot);
+        Ok(())
+    }
+
     pub async fn cancel(&self, bot: &str, session: &str) {
         let key = route_key(bot, session);
         if let Some(tx) = self.cancels.lock().await.remove(&key) {

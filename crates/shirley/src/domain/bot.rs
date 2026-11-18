@@ -127,9 +127,10 @@ impl BotSpec {
             }
         }
 
-        // Then platform defaults not already covered.
+        // Then platform defaults not already covered, nor deleted by the user.
+        let removed = removed_defaults(bots_root);
         for default in Self::platform_defaults() {
-            if !seen_names.contains(&default.name) {
+            if !seen_names.contains(&default.name) && !removed.contains(&default.name) {
                 specs.push(default);
             }
         }
@@ -162,8 +163,70 @@ impl BotSpec {
         let dir = bots_root.join(&self.name);
         std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
         let text = toml::to_string_pretty(self).map_err(|e| e.to_string())?;
-        std::fs::write(dir.join("spec.toml"), text).map_err(|e| e.to_string())
+        std::fs::write(dir.join("spec.toml"), text).map_err(|e| e.to_string())?;
+        // A deleted built-in made again is wanted again.
+        let mut removed = removed_defaults(bots_root);
+        if removed.remove(&self.name) {
+            write_removed_defaults(bots_root, &removed)?;
+        }
+        Ok(())
     }
+
+    /// Delete a bot: its folder (spec, conversations, memory, workspace, skills) moves to
+    /// `<trash_root>/<name>-<ms>/`, recoverable by hand, and it leaves the list. A built-in bot
+    /// is also recorded as removed, or the platform defaults would bring it back.
+    pub fn delete(bots_root: &Path, trash_root: &Path, name: &str) -> Result<(), String> {
+        let dir = bots_root.join(name);
+        let builtin = Self::platform_defaults().iter().any(|spec| spec.name == name);
+        if !Self::is_valid_name(name) || !(dir.is_dir() || builtin) {
+            return Err(format!("no bot named `{name}`"));
+        }
+        if dir.is_dir() {
+            std::fs::create_dir_all(trash_root).map_err(|e| e.to_string())?;
+            let stamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |elapsed| elapsed.as_millis());
+            std::fs::rename(&dir, trash_root.join(format!("{name}-{stamp}")))
+                .map_err(|e| format!("could not move `{name}` to the trash: {e}"))?;
+        }
+        if builtin {
+            let mut removed = removed_defaults(bots_root);
+            if removed.insert(name.to_owned()) {
+                write_removed_defaults(bots_root, &removed)?;
+            }
+        }
+        Ok(())
+    }
+}
+
+/// Built-in bots the user deleted: one name per line in `<bots_root>/.removed`.
+const REMOVED_FILE: &str = ".removed";
+
+fn removed_defaults(bots_root: &Path) -> std::collections::BTreeSet<String> {
+    std::fs::read_to_string(bots_root.join(REMOVED_FILE))
+        .unwrap_or_default()
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+fn write_removed_defaults(
+    bots_root: &Path,
+    removed: &std::collections::BTreeSet<String>,
+) -> Result<(), String> {
+    let path = bots_root.join(REMOVED_FILE);
+    if removed.is_empty() {
+        return match std::fs::remove_file(&path) {
+            Err(error) if error.kind() != std::io::ErrorKind::NotFound => Err(error.to_string()),
+            _ => Ok(()),
+        };
+    }
+    std::fs::create_dir_all(bots_root).map_err(|e| e.to_string())?;
+    let mut text = removed.iter().map(String::as_str).collect::<Vec<_>>().join("\n");
+    text.push('\n');
+    std::fs::write(path, text).map_err(|e| e.to_string())
 }
 
 impl Default for BotSpec {
@@ -197,4 +260,63 @@ pub mod platform_tools {
 
     /// The default capability set every bot receives unless it overrides `tools`.
     pub const DEFAULT_SET: &[&str] = &[BASH, GREP, READ, MEDIA, WEB_SEARCH];
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Temp(std::path::PathBuf);
+    impl Temp {
+        fn new(tag: &str) -> Self {
+            let dir = std::env::temp_dir().join(format!("shirley-bot-{tag}-{}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            Self(dir)
+        }
+    }
+    impl Drop for Temp {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn names(bots_root: &Path) -> Vec<String> {
+        let mut names: Vec<String> = BotSpec::list_all(bots_root).into_iter().map(|s| s.name).collect();
+        names.sort();
+        names
+    }
+
+    #[test]
+    fn delete_moves_a_bot_and_its_data_to_the_trash() {
+        let temp = Temp::new("delete");
+        let (bots, trash) = (temp.0.join("bots"), temp.0.join("trash"));
+        let spec = BotSpec { name: "clerk".into(), display_name: "Clerk".into(), ..BotSpec::default() };
+        spec.save(&bots).unwrap();
+        std::fs::create_dir_all(bots.join("clerk/sessions")).unwrap();
+        std::fs::write(bots.join("clerk/sessions/main.jsonl"), "{}").unwrap();
+
+        BotSpec::delete(&bots, &trash, "clerk").unwrap();
+
+        assert!(!bots.join("clerk").exists());
+        assert!(!names(&bots).contains(&"clerk".to_owned()));
+        let moved = std::fs::read_dir(&trash).unwrap().next().unwrap().unwrap().path();
+        assert!(moved.join("sessions/main.jsonl").is_file());
+        assert!(BotSpec::delete(&bots, &trash, "clerk").is_err());
+    }
+
+    #[test]
+    fn a_deleted_builtin_stays_gone_until_made_again() {
+        let temp = Temp::new("builtin");
+        let (bots, trash) = (temp.0.join("bots"), temp.0.join("trash"));
+        // Used once: the folder exists without a spec file.
+        std::fs::create_dir_all(bots.join("patch/sessions")).unwrap();
+
+        BotSpec::delete(&bots, &trash, "patch").unwrap();
+        BotSpec::delete(&bots, &trash, "scout").unwrap();
+        assert_eq!(names(&bots), vec!["nono".to_owned()]);
+        assert!(!bots.join("patch").exists());
+
+        BotSpec::load_or_default("patch", &bots).save(&bots).unwrap();
+        assert_eq!(names(&bots), vec!["nono".to_owned(), "patch".to_owned()]);
+    }
 }

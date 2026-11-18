@@ -3,11 +3,10 @@ import { useCallback, useEffect, useState } from "react";
 import { api } from "../api/bridge";
 import type { Bot } from "../api/types";
 
-/** Per-device bot list preferences (pin / mute / hide). Not server state on purpose. */
+/** Per-device bot list preferences (pin / mute). Not server state on purpose. */
 interface BotPrefs {
   pinned: string[];
   muted: string[];
-  hidden: string[];
 }
 
 const PREFS_KEY = "shirley.botPrefs";
@@ -15,11 +14,16 @@ const PREFS_KEY = "shirley.botPrefs";
 function loadPrefs(): BotPrefs {
   try {
     const raw = localStorage.getItem(PREFS_KEY);
-    if (raw) return { pinned: [], muted: [], hidden: [], ...(JSON.parse(raw) as Partial<BotPrefs>) };
+    if (raw) {
+      // `hidden` (the old "remove", which only hid a bot on this device) is dropped: those bots
+      // show again and can now be deleted for real.
+      const saved = JSON.parse(raw) as Partial<BotPrefs>;
+      return { pinned: saved.pinned ?? [], muted: saved.muted ?? [] };
+    }
   } catch {
     // Corrupt prefs are not worth a broken home screen.
   }
-  return { pinned: [], muted: [], hidden: [] };
+  return { pinned: [], muted: [] };
 }
 
 function toggle(list: string[], name: string): string[] {
@@ -48,9 +52,7 @@ export function useBots() {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
   }, [prefs]);
 
-  const visible = bots
-    .filter((bot) => !prefs.hidden.includes(bot.name))
-    .sort((left, right) => {
+  const visible = [...bots].sort((left, right) => {
       const pin = Number(prefs.pinned.includes(right.name)) - Number(prefs.pinned.includes(left.name));
       return pin !== 0 ? pin : 0;
     });
@@ -63,7 +65,14 @@ export function useBots() {
     prefs,
     togglePin: (name: string) => setPrefs((p) => ({ ...p, pinned: toggle(p.pinned, name) })),
     toggleMute: (name: string) => setPrefs((p) => ({ ...p, muted: toggle(p.muted, name) })),
-    hide: (name: string) =>
-      setPrefs((p) => ({ ...p, hidden: [...p.hidden, name], pinned: p.pinned.filter((n) => n !== name) })),
+    /** Delete the bot on the server, then forget it here too. */
+    remove: async (name: string) => {
+      await api.deleteBot(name);
+      setPrefs((p) => ({
+        pinned: p.pinned.filter((n) => n !== name),
+        muted: p.muted.filter((n) => n !== name),
+      }));
+      await refresh();
+    },
   };
 }

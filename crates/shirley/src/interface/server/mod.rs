@@ -783,6 +783,26 @@ async fn dispatch(
             spec.save(&crate::storage::bots_root())?;
             no_content()
         }
+        // Delete for real (into `~/.shirley/trash/bots/`): connectors handled by the bot are
+        // disconnected, its turns stopped and its tasks dropped first.
+        "agent_delete_bot" => {
+            let bot = args.bot()?;
+            let hub = &state.connectors;
+            for connection in crate::connectors::load(hub.global()) {
+                if connection.bot == bot {
+                    crate::connectors::remove(hub.global(), connection.kind)?;
+                    hub.stop(connection.kind).await;
+                }
+            }
+            manager.forget_bot(&bot).await?;
+            crate::bot::BotSpec::delete(
+                &crate::storage::bots_root(),
+                &crate::storage::global_root().join("trash").join("bots"),
+                &bot,
+            )?;
+            manager.reload_all().await;
+            no_content()
+        }
 
         // -- connectors ---------------------------------------------------------------
         "agent_connectors" => {

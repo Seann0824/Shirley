@@ -69,7 +69,7 @@ export function SwipeBotRow({
           }}
         >
           <Icon name="trash" size={18} />
-          <span>移除</span>
+          <span>删除</span>
         </button>
       </div>
       <button

@@ -551,6 +551,16 @@ impl TaskPool {
         self.save()
     }
 
+    /// Drop every task of a deleted bot (their sessions went with the bot's folder).
+    pub fn forget_bot(&mut self, bot: &str) -> Result<(), String> {
+        let before = self.tasks.len();
+        self.tasks.retain(|task| task.bot != bot);
+        if self.tasks.len() == before {
+            return Ok(());
+        }
+        self.save()
+    }
+
     fn task_mut(&mut self, id: &str) -> Result<&mut PoolTask, String> {
         self.tasks
             .iter_mut()

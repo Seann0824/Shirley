@@ -118,6 +118,8 @@ export const api = {
     tools?: string[];
     skills?: string[];
   }) => cmd<void>("agent_create_bot", spec),
+  /** Delete a bot for real: its folder goes to the server's trash, its connectors and tasks with it. */
+  deleteBot: (bot: string) => cmd<void>("agent_delete_bot", { bot }),
 
   connectors: () => cmd<Connector[]>("agent_connectors"),
   connect: (kind: string, bot: string, settings: Record<string, string>) =>

@@ -78,6 +78,48 @@ function CapabilityStrip({ bot }: { bot: Bot }) {
   }
 }
 
+/** Deleting is for real (the server keeps a copy in its trash folder), so it is confirmed. */
+function DeleteBotSheet({
+  bot,
+  onDelete,
+  onClose,
+}: {
+  bot: Bot;
+  onDelete: () => Promise<void>;
+  onClose: () => void;
+}) {
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const confirm = async () => {
+    setWorking(true);
+    setError(null);
+    try {
+      await onDelete();
+      onClose();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+      setWorking(false);
+    }
+  };
+  return (
+    <div className="attachment-sheet-layer" role="alertdialog" aria-modal="true" aria-label={`删除 ${bot.display_name}`}>
+      <button className="sheet-backdrop" onClick={working ? undefined : onClose} aria-label="关闭" />
+      <div className="attachment-sheet delete-bot-sheet">
+        <div className="sheet-handle" />
+        <strong>删除「{bot.display_name}」？</strong>
+        <p>它的对话、记忆、工作区和技能会一起删除，绑定它的连接器会断开，未完成的任务会取消。</p>
+        {error && <p className="error-note">{error}</p>}
+        <button className="sheet-destructive" onClick={() => void confirm()} disabled={working}>
+          {working ? "正在删除…" : "删除"}
+        </button>
+        <button className="sheet-cancel" onClick={onClose} disabled={working}>
+          取消
+        </button>
+      </div>
+    </div>
+  );
+}
+
 export function Home({
   bots,
   tasks,
@@ -102,6 +144,7 @@ export function Home({
   // On a wide screen the conversation beside the list takes page-level pastes.
   const wide = useWide();
   const [asking, setAsking] = useState(false);
+  const [deleting, setDeleting] = useState<Bot | null>(null);
 
   const busyBots = new Set(
     tasks.filter((task) => task.status === "in_progress" || task.status === "to_do").map((task) => task.bot),
@@ -146,7 +189,7 @@ export function Home({
               onOpen={() => onOpenBot(bot.name)}
               onTogglePin={() => bots.togglePin(bot.name)}
               onToggleMute={() => bots.toggleMute(bot.name)}
-              onDelete={() => bots.hide(bot.name)}
+              onDelete={() => setDeleting(bot)}
             >
               <div className={`home-bot-avatar ${tone === "custom-bot" ? "custom-avatar" : ""}`}>
                 <BotAvatar name={bot.name} />
@@ -168,6 +211,10 @@ export function Home({
         })}
         {visible.length === 0 && !bots.error && !blocked && <p className="empty-note">没有可用的 Bot</p>}
       </section>
+
+      {deleting && (
+        <DeleteBotSheet bot={deleting} onDelete={() => bots.remove(deleting.name)} onClose={() => setDeleting(null)} />
+      )}
 
       <ComposerDock
         claimsPagePaste={!wide}

@@ -1332,3 +1332,35 @@ img.openable {
     color: #1c1c1e;
   }
 }
+
+/* Confirming a bot's deletion. */
+.delete-bot-sheet > strong {
+  display: block;
+  padding: 0 8px;
+  font-size: 16px;
+  font-weight: 650;
+  text-align: center;
+}
+.delete-bot-sheet > p {
+  margin: 8px 8px 0;
+  color: var(--secondary);
+  font-size: 13px;
+  line-height: 1.45;
+  text-align: center;
+}
+.sheet-destructive {
+  width: 100%;
+  height: 46px;
+  margin-top: 16px;
+  border-radius: 16px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #fff;
+  background: var(--red);
+}
+.sheet-destructive:disabled {
+  opacity: 0.6;
+}
+.delete-bot-sheet .sheet-cancel {
+  margin-top: 8px;
+}
