@@ -1,7 +1,7 @@
 # Voice input
 
-Hold the button and speak; text appears while you talk. On release the final transcript goes
-into the text field to check, and you send it yourself.
+Hold the button and speak; text appears while you talk. On release the final transcript is
+sent; slide up before releasing to put it in the text field and edit it first.
 
 ## How it works
 
@@ -12,21 +12,29 @@ transcribes it with the `whisper.cpp` CLI (`crates/shirley/src/infra/asr.rs`).
   `POST /api/transcribe?partial=1` and shows the result. The interval grows with the recording
   (each preview re-transcribes everything said so far). A preview is skipped, not queued, when
   the server is busy (at most two whisper processes at once).
-- **On release**: one final `POST /api/transcribe`, with beam search for accuracy.
-- **Language**: detected by whisper once there are 1.5 s of speech, then sent back with every
-  later request for that utterance (detection costs an extra second and a half). Detection is
-  kept to `[asr] languages` (default `zh`, `en`): short Chinese clips are often heard as Japanese,
-  and such a result is transcribed again as the first listed language. `[asr] local_language`
-  pins one language instead.
+- **On release**: one final `POST /api/transcribe`, decoded the same way as the previews
+  (greedy), so it only adds what was said after the last preview instead of re-deciding words
+  the user already saw. (Beam search changed earlier words and bought nothing measurable.)
+- **Language**: the first of `[asr] languages` (default `zh`, then `en`) is the user's own.
+  Whisper detects the language, but anything else wins only when it is allowed and whisper is
+  sure (probability ≥ 0.8); otherwise the audio is transcribed as the user's own language. Its
+  guess from a second or two of speech is unreliable -- short Chinese came back as English or
+  Japanese, and a wrong language kept for the utterance turned every later preview into
+  nonsense in that language, which looked like correct text suddenly changing. The result is
+  kept for the utterance once there are 1.5 s of speech. `[asr] local_language` pins one
+  language instead.
 - **Prompt echo**: whisper sometimes repeats a clause of its prompt ("使用简体中文。") at the start
   or end of a transcript; those are stripped.
-- **Gesture**: release in place and the text goes into the field to check; slide up before
-  releasing and it is sent.
+- **Gesture**: release in place and the text is sent; slide up before releasing and it goes
+  into the text field to check and edit.
 - **No whisper.cpp on the server**: the page falls back to the browser's own recogniser, fixed to
   Chinese (browsers cannot detect the language).
 
-Measured on a 4-core x86 server with `ggml-base-q5_1`: first text after about 2.5 s of speech,
-then a preview every second or so (about 0.5 s each), final text about 1 s after release.
+**Model**: `ggml-small-q5_1` (190 MB), downloaded at server start; an older `base` model keeps
+serving until it has arrived. On Chinese, `base` gets whole words wrong and changes them from
+pass to pass; `small` is far closer and steadier, at about twice the work. Measured on a 4-core
+x86 server: a preview or the final pass of a 3 s utterance takes 1.5-2 s with `small` (about
+0.6 s with `base`). On a slow server set `[asr] local_model` to a `ggml-base-q5_1.bin`.
 
 ## Deploying on CentOS 7
 
@@ -84,8 +92,8 @@ Shirley finds `/opt/whisper.cpp/build/bin/whisper-cli` on its own. Elsewhere, se
 
 ### 3. The model
 
-Downloaded automatically at server start (57 MB, `hf-mirror.com` first, then Hugging Face) into
-`~/.shirley/asr/models/`. Without internet access, copy `ggml-base-q5_1.bin` there by hand or
+Downloaded automatically at server start (190 MB, `hf-mirror.com` first, then Hugging Face) into
+`~/.shirley/asr/models/`. Without internet access, copy `ggml-small-q5_1.bin` there by hand or
 set `[asr] local_model`.
 
 ### 4. Check
@@ -103,10 +111,10 @@ The last failed whisper invocation (command line and output) is kept in
 ```toml
 [asr]
 local_binary   = "/opt/whisper.cpp/build/bin/whisper-cli"   # default: auto-detected
-local_model    = "/data/models/ggml-base-q5_1.bin"          # default: managed download
-model_url      = "https://example.com/ggml-base-q5_1.bin"   # where to download it from
+local_model    = "/data/models/ggml-small-q5_1.bin"         # default: managed download
+model_url      = "https://example.com/ggml-small-q5_1.bin"  # where to download it from
 local_language = "zh"        # pin the language; default: detect per utterance
-languages      = ["zh", "en"] # what detection may pick; anything else becomes the first
+languages      = ["zh", "en"] # yours first; another wins only when whisper is sure (p >= 0.8)
 local_threads  = 4           # default: cores, at most 8
 prompt         = ""          # default nudges Chinese to simplified characters; "" sends none
 ```

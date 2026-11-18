@@ -58,7 +58,11 @@ const MODEL_DIRS: [&str; 3] = [
 /// The model Shirley manages: `base` quantised to q5_1 is 57 MiB and multilingual. Smaller
 /// (`tiny`) is too weak for Chinese; larger (`small`, 466 MiB) is too slow on a CPU server for
 /// text that appears while you speak.
-const DEFAULT_MODEL_FILE: &str = "ggml-base-q5_1.bin";
+///
+/// `small` rather than `base`: on Chinese, `base` gets whole words wrong and changes its mind
+/// from one pass to the next, which the user sees as the live text flipping; `small` is about
+/// twice the work and far closer (measured on the same recordings).
+const DEFAULT_MODEL_FILE: &str = "ggml-small-q5_1.bin";
 /// Where to fetch the managed model, tried in order. The mirror first: the Hugging Face host is
 /// unreachable from mainland China.
 const DEFAULT_MODEL_URLS: [&str; 2] = [
@@ -161,14 +165,23 @@ fn allowed_languages(configured: Option<Vec<String>>) -> Vec<String> {
     }
 }
 
-/// What detection settled on, or the first allowed language when it heard something else.
-/// `None` (nothing detected) is left alone.
-fn constrain_language(detected: Option<String>, allowed: &[String]) -> Option<String> {
-    let detected = detected?;
-    if allowed.contains(&detected) {
-        Some(detected)
+/// How sure whisper must be before a language other than the user's own (the first of
+/// `[asr] languages`) wins. Its guess from a second or two of speech is often wrong -- short
+/// Chinese came back as English or Japanese -- and a wrong language, once kept for the
+/// utterance, turns everything after it into nonsense in that language.
+const SWITCH_CONFIDENCE: f64 = 0.8;
+
+/// The language to transcribe in: the detected one when it is allowed and either the user's own
+/// or detected with confidence; otherwise the user's own. `None` (nothing detected) stays.
+fn constrain_language(detected: Option<(String, f64)>, allowed: &[String]) -> Option<String> {
+    let (code, probability) = detected?;
+    let primary = allowed.first().cloned();
+    if primary.as_deref() == Some(code.as_str())
+        || (allowed.contains(&code) && probability >= SWITCH_CONFIDENCE)
+    {
+        Some(code)
     } else {
-        allowed.first().cloned()
+        primary
     }
 }
 
@@ -206,16 +219,27 @@ pub fn status(global: &Path) -> AsrStatus {
 /// the first press of the button does not wait for a download.
 pub fn prepare(global: PathBuf) {
     let config = AsrConfig::load(&global);
-    if resolve_local_binary(&config, &global).is_none()
-        || resolve_local_model(&global, config.local_model.as_deref()).is_some()
-    {
+    if resolve_local_binary(&config, &global).is_none() {
+        return;
+    }
+    let configured = config
+        .local_model
+        .as_deref()
+        .is_some_and(|path| Path::new(path).is_file());
+    // Also when an older default (`base`) is already here: it keeps serving until this lands.
+    if configured || managed_model(&global).is_file() {
         return;
     }
     tokio::spawn(async move {
-        if let Err(error) = ensure_model(&global, &config).await {
+        if let Err(error) = download_model(&global, &config).await {
             eprintln!("[asr] {error}");
         }
     });
+}
+
+/// Where Shirley keeps its own copy of the default model.
+fn managed_model(global: &Path) -> PathBuf {
+    global.join("asr").join("models").join(DEFAULT_MODEL_FILE)
 }
 
 /// Transcribe a WAV recording.
@@ -256,7 +280,9 @@ pub async fn transcribe(
         .or(language)
         .map_or_else(|| "auto".to_owned(), |tag| whisper_language(Some(tag)));
     let detecting = language == "auto";
-    let (text, mut language) = transcribe_local(&config, global, wav, language, partial)
+    // Previews and the final pass decode the same way (greedy). With beam search on release the
+    // last word could differ from what the user just watched appear; and here it bought nothing.
+    let (text, mut language) = transcribe_local(&config, global, wav, language, true)
         .await
         .map_err(AsrError::Failed)?;
     // A guess from the first second of speech is not worth keeping for the whole utterance:
@@ -347,6 +373,7 @@ async fn transcribe_local(
                 }
                 let detected = detected_language(&String::from_utf8_lossy(&output.stderr));
                 let used = constrain_language(detected.clone(), &config.languages);
+                let detected = detected.map(|(code, _)| code);
                 // Heard as a language the user does not speak: transcribe again as one they do.
                 let retry_as = used.clone().filter(|_| used != detected && !retried);
                 if let Some(code) = retry_as {
@@ -415,10 +442,21 @@ fn whisper_language(tag: Option<&str>) -> String {
 }
 
 /// The language whisper reports having detected (`auto-detected language: zh (p = 0.76)`).
-fn detected_language(log: &str) -> Option<String> {
+/// `auto-detected language: zh (p = 0.762857)` -> `("zh", 0.76)`. A log without the
+/// probability counts as unsure.
+fn detected_language(log: &str) -> Option<(String, f64)> {
     let rest = log.split("auto-detected language:").nth(1)?;
     let code = rest.split_whitespace().next()?;
-    (code.len() <= 3 && code.chars().all(|c| c.is_ascii_lowercase())).then(|| code.to_owned())
+    if !(code.len() <= 3 && code.chars().all(|c| c.is_ascii_lowercase())) {
+        return None;
+    }
+    let probability = rest
+        .split("p =")
+        .nth(1)
+        .and_then(|tail| tail.trim_start().split(|c: char| c == ')' || c.is_whitespace()).next())
+        .and_then(|number| number.parse::<f64>().ok())
+        .unwrap_or(0.0);
+    Some((code.to_owned(), probability))
 }
 
 /// Seconds of audio in a 16-bit PCM WAV, from its header.
@@ -651,9 +689,14 @@ fn resolve_local_model(global: &Path, configured: Option<&str>) -> Option<PathBu
             .filter(|path| is_ggml_model(path))
             .collect();
         // An English-only model (`ggml-*.en.bin`) ignores `-l`; prefer a multilingual one.
+        // The default model first (an older one may still sit beside it), then by name.
+        let not_default = |path: &PathBuf| {
+            path.file_name().and_then(|name| name.to_str()) != Some(DEFAULT_MODEL_FILE)
+        };
         models.sort_by(|a, b| {
             is_english_only(a)
                 .cmp(&is_english_only(b))
+                .then_with(|| not_default(a).cmp(&not_default(b)))
                 .then_with(|| a.cmp(b))
         });
         if let Some(model) = models.into_iter().next() {
@@ -682,16 +725,21 @@ async fn ensure_model(global: &Path, config: &AsrConfig) -> Result<PathBuf, Stri
     if let Some(path) = resolve_local_model(global, config.local_model.as_deref()) {
         return Ok(path);
     }
+    download_model(global, config).await
+}
+
+/// Fetch the default model into Shirley's model folder.
+async fn download_model(global: &Path, config: &AsrConfig) -> Result<PathBuf, String> {
     let _guard = download_lock().lock().await;
     // Another request may have finished the download while this one waited.
-    if let Some(path) = resolve_local_model(global, config.local_model.as_deref()) {
-        return Ok(path);
+    let target = managed_model(global);
+    if target.is_file() {
+        return Ok(target);
     }
     let dir = global.join("asr").join("models");
     tokio::fs::create_dir_all(&dir)
         .await
         .map_err(|_error| "无法创建语音模型目录。".to_owned())?;
-    let target = dir.join(DEFAULT_MODEL_FILE);
     let urls: Vec<String> = match config.model_url.as_deref() {
         Some(url) => vec![url.to_owned()],
         None => DEFAULT_MODEL_URLS
@@ -773,8 +821,12 @@ mod tests {
     fn detection_stays_within_the_languages_the_user_speaks() {
         let allowed = allowed_languages(None);
         assert_eq!(allowed, ["zh", "en"]);
-        assert_eq!(constrain_language(Some("ja".into()), &allowed).as_deref(), Some("zh"));
-        assert_eq!(constrain_language(Some("en".into()), &allowed).as_deref(), Some("en"));
+        let heard = |code: &str, p: f64| Some((code.to_owned(), p));
+        assert_eq!(constrain_language(heard("ja", 0.99), &allowed).as_deref(), Some("zh"));
+        // Another allowed language wins only when whisper is sure.
+        assert_eq!(constrain_language(heard("en", 0.92), &allowed).as_deref(), Some("en"));
+        assert_eq!(constrain_language(heard("en", 0.53), &allowed).as_deref(), Some("zh"));
+        assert_eq!(constrain_language(heard("zh", 0.30), &allowed).as_deref(), Some("zh"));
         assert_eq!(constrain_language(None, &allowed), None);
         assert_eq!(allowed_languages(Some(vec!["en-US".into(), "bad;x".into()])), ["en"]);
         assert_eq!(allowed_languages(Some(vec![])), ["zh", "en"]);
@@ -823,8 +875,11 @@ mod tests {
     #[test]
     fn the_detected_language_is_read_from_the_log() {
         let log = "whisper_full_with_state: auto-detected language: zh (p = 0.762857)\n";
-        assert_eq!(detected_language(log).as_deref(), Some("zh"));
+        let (code, p) = detected_language(log).unwrap();
+        assert_eq!(code, "zh");
+        assert!((p - 0.762_857).abs() < 1e-6);
         assert_eq!(detected_language("nothing here"), None);
+        assert_eq!(detected_language("auto-detected language: en"), Some(("en".to_owned(), 0.0)));
     }
 
     #[test]

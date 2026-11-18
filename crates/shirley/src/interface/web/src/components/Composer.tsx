@@ -151,8 +151,8 @@ function describeSpeechError(code: string | undefined): { text: string; fatal: b
   }
 }
 
-/** How far (px) to slide up from the hold-to-talk button to send on release. */
-const SLIDE_TO_SEND = 60;
+/** How far (px) to slide up from the hold-to-talk button to edit on release instead of sending. */
+const SLIDE_TO_EDIT = 60;
 
 /**
  * The input dock: hold-to-talk by default, a text field on demand, attachments via a sheet.
@@ -205,9 +205,9 @@ export function ComposerDock({
   const utterance = useRef(0);
   const language = useRef<string | null>(null);
   const previewTimer = useRef<number | null>(null);
-  // Hold-to-talk gesture: slide up past the threshold to send on release instead of editing.
+  // Hold-to-talk gesture: released in place it sends; slid up past the threshold it edits.
   const pressY = useRef(0);
-  const slideSend = useRef(false);
+  const slideEdit = useRef(false);
   const [sliding, setSliding] = useState(false);
 
   useEffect(() => {
@@ -298,20 +298,21 @@ export function ComposerDock({
     return () => document.removeEventListener("paste", onPagePaste);
   }, [claimsPagePaste]);
 
-  // Released in place, heard text goes into the field to be checked; slid up first, it is sent.
+  // Released in place, heard text is sent; slid up first, it goes into the field to be checked.
   const placeHeard = (heard: string) => {
+    const edit = slideEdit.current;
+    slideEdit.current = false;
+    setSliding(false);
     const text = heard.trim();
     if (!text) return false;
     const typed = valueRef.current.trim();
     const combined = typed ? `${typed} ${text}` : text;
-    if (slideSend.current) {
-      slideSend.current = false;
-      setSliding(false);
-      sendRef.current(combined);
+    if (edit) {
+      setValue(combined);
+      setTextMode(true);
       return true;
     }
-    setValue(combined);
-    setTextMode(true);
+    sendRef.current(combined);
     return true;
   };
 
@@ -537,15 +538,15 @@ export function ComposerDock({
                   // Keep receiving the release even if the pointer drifts off the button.
                   event.currentTarget.setPointerCapture(event.pointerId);
                   pressY.current = event.clientY;
-                  slideSend.current = false;
+                  slideEdit.current = false;
                   setSliding(false);
                   startListening();
                 }}
                 onPointerMove={(event) => {
                   if (!listening) return;
-                  const up = pressY.current - event.clientY > SLIDE_TO_SEND;
-                  if (up !== slideSend.current) {
-                    slideSend.current = up;
+                  const up = pressY.current - event.clientY > SLIDE_TO_EDIT;
+                  if (up !== slideEdit.current) {
+                    slideEdit.current = up;
                     setSliding(up);
                   }
                 }}
@@ -562,7 +563,7 @@ export function ComposerDock({
                   <i />
                 </span>
                 <strong>
-                  {listening ? (sliding ? "松开发送" : "松开编辑 · 上滑发送") : transcribing ? "整理中…" : "按住说话"}
+                  {listening ? (sliding ? "松开编辑" : "松开发送 · 上滑编辑") : transcribing ? "整理中…" : "按住说话"}
                 </strong>
               </button>
               <button className="composer-side" onClick={() => setTextMode(true)} aria-label="文字输入">
