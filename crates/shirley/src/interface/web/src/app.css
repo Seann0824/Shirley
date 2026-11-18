@@ -184,14 +184,32 @@
    bot list + content side by side on wide screens.
    ------------------------------------------------------------------------ */
 
+/* The app is exactly the window: the document itself never scrolls, bounces or zooms; only the
+   panes' own lists scroll. */
 html,
 body,
 #root {
   height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+html {
+  /* No pinch or double-tap zoom (Safari ignores user-scalable=no in the viewport tag). */
+  touch-action: pan-x pan-y;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
 }
 body {
+  position: fixed;
+  inset: 0;
+  min-height: 0;
   background: #fff;
-  overscroll-behavior: none;
+}
+/* iOS zooms into any field under 16px when it takes focus. */
+input,
+textarea,
+select {
+  font-size: max(16px, 1em) !important;
 }
 
 .app-shell {
@@ -772,7 +790,7 @@ body {
   overflow-wrap: anywhere;
 }
 
-/* Slid up: releasing now sends the words instead of putting them in the field. */
+/* Slid up: releasing now puts the words in the field to edit instead of sending them. */
 .composer-dock.is-sliding .composer-voice {
   background: var(--blue);
 }
