@@ -28,7 +28,6 @@ use crate::interface::view::{
 };
 use crate::memory::MemoryRuntime;
 use crate::session::{SessionCatalog, SessionStore};
-use crate::skills::SkillRuntime;
 use crate::status::StateKeeper;
 use crate::subagent::{SubagentManager, SubagentStore};
 use crate::todo::{TaskView, TodoStore};
@@ -139,12 +138,6 @@ pub struct Session {
     /// The driver calls `set_query` before starting a turn (relevant retrieval based on this turn's user input); when the session ends
     /// it is handed to the curator.
     pub memory: Option<Arc<MemoryRuntime>>,
-    /// This session's skill runtime (`None` = no skills, for tests / no-catalog scenarios).
-    ///
-    /// One per session (symmetric with `memory`): the activated set is isolated per session. The TUI's
-    /// `/<skill-name>` slash entry activates directly through this handle (`docs/skills.md` 5.6),
-    /// reusing the P1 `SkillContextProvider` injection seam -- no new injection path is added.
-    pub skills: Option<Arc<SkillRuntime>>,
     /// This session's task ledger (`None` = no ledger, for tests / no-config scenarios).
     ///
     /// **Shares the same `Arc`** with the `todo` tool / `TodoContextProvider` (created and returned by `build_agent`),
@@ -164,17 +157,12 @@ impl Session {
     ///
     /// `store` is this session's persistent store (`None` = no persistence); persistence goes through
     /// [`Session::apply_event`]'s event-driven path.
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
-    )]
     pub fn new(
         mut agent: Agent,
         name: Option<String>,
         request_session_id: Option<String>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
-        skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
         subagents: Option<Arc<SubagentManager>>,
     ) -> Self {
@@ -203,7 +191,6 @@ impl Session {
             events: broadcast::channel(EVENT_CHANNEL_CAPACITY).0,
             store,
             memory,
-            skills,
             todo,
             subagents,
         }
@@ -648,17 +635,6 @@ impl Session {
         }
     }
 
-    /// Rewind the last user message: roll back both memory (`Agent`) and the disk log together.
-    ///
-    /// "Rewind the last turn" is a **session / UI business semantic** (who defines "a turn", whether the assistant / tool chain after it is
-    /// dropped along with it), so the decision lives in the application layer; the SDK only provides the atomic capability
-    /// [`Agent::truncate_messages`] (tail truncation + invariant maintenance). The log does not contain system,
-    /// so the top one is subtracted when converting the length.
-    pub fn rewind_last_user_turn(&mut self) -> Option<String> {
-        self.take_last_user_turn()
-            .map(|(content, _removed)| content.as_text())
-    }
-
     /// [`Self::rewind_last_user_turn`], returning the user message as sent and every message the
     /// rewind removed (the reply, its tool calls and their results).
     pub fn take_last_user_turn(&mut self) -> Option<(MessageContent, Vec<Message>)> {
@@ -798,17 +774,12 @@ pub struct SessionManager {
 impl SessionManager {
     /// Start a manager containing only a single session with an existing `Agent` (no factory, cannot create/switch).
     #[cfg(test)]
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
-    )]
     pub fn single(
         agent: Agent,
         name: Option<String>,
         catalog: Arc<dyn SessionCatalog>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
-        skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
         subagents: Option<Arc<SubagentManager>>,
     ) -> Self {
@@ -824,7 +795,7 @@ impl SessionManager {
         }
         sessions.insert(
             0,
-            Session::new(agent, name, None, store, memory, skills, todo, subagents),
+            Session::new(agent, name, None, store, memory, todo, subagents),
         );
         Self {
             sessions,
@@ -847,7 +818,6 @@ impl SessionManager {
         factory: Arc<AgentFactory>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
-        skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
         subagents: Option<Arc<SubagentManager>>,
     ) -> Self {
@@ -869,7 +839,6 @@ impl SessionManager {
                 request_session_id,
                 store,
                 memory,
-                skills,
                 todo,
                 subagents,
             ),
@@ -926,17 +895,12 @@ impl SessionManager {
     }
 
     /// Insert a session with an existing `Agent`, returning its key (does not change the foreground pointer).
-    #[expect(
-        clippy::too_many_arguments,
-        reason = "signature mirrors a public API; grouping would obscure the model-facing shape"
-    )]
     fn insert(
         &mut self,
         agent: Agent,
         name: Option<String>,
         store: Option<Arc<dyn SessionStore>>,
         memory: Option<Arc<MemoryRuntime>>,
-        skills: Option<Arc<SkillRuntime>>,
         todo: Option<Arc<TodoStore>>,
         subagents: Option<Arc<SubagentManager>>,
     ) -> u64 {
@@ -955,7 +919,6 @@ impl SessionManager {
                 request_session_id,
                 store,
                 memory,
-                skills,
                 todo,
                 subagents,
             ),
@@ -967,114 +930,6 @@ impl SessionManager {
                 .attach_model_profile(factory.model_providers_root(), self.catalog.storage_dir());
         }
         id
-    }
-
-    /// Switch to the specified session (decision 4 / decision 9).
-    ///
-    /// Already loaded -> **only move the foreground pointer** (do not rebuild the `Agent`, preserving background context); not loaded ->
-    /// `open` the log from the catalog, restore the working set via the factory's `build_agent`, then insert and switch to the foreground.
-    /// Returns the session name.
-    pub fn switch_to(&mut self, name: &str) -> Result<String, String> {
-        // Leaving the foreground counts as this session's "turn ended" -- switching away triggers one incremental curation
-        // (`docs/memory.md` section 5.1; the old session stays in memory and its `Agent` messages remain readable).
-        let previous = self.active().name.clone();
-        // Use the session-level query (live Agent first, mirror fallback) -- if the departing session is running, its `Agent`
-        // has already been `take`n away, so reading `agent` directly would not get the model.
-        let use_profile_default = self.factory.as_ref().is_some_and(|f| {
-            crate::model_providers::default_config(f.model_providers_root())
-                .ok()
-                .flatten()
-                .is_some()
-        });
-        let selected_model = (!use_profile_default)
-            .then(|| self.active().model_name().map(str::to_owned))
-            .flatten();
-        if let Some(id) = self.id_of_name(name) {
-            self.active = id;
-            if let Some(previous) = previous.filter(|p| p != name) {
-                self.spawn_curation(&previous);
-            }
-            return Ok(name.to_owned());
-        }
-        let factory = self
-            .factory
-            .as_ref()
-            .ok_or_else(|| "the current session catalog does not support switching".to_owned())?;
-        let store = self.catalog.open(name).map_err(|error| error.to_string())?;
-        // Session persistence is in the application layer: load the log first, then hand it to the factory to create the `Agent` (system regenerated and placed on top).
-        let log = store.load().map_err(|error| error.to_string())?;
-        let mut built = factory
-            .build_worker_agent(log)
-            .map_err(|error| error.to_string())?;
-        if let Some(model) = selected_model {
-            built.agent.set_model(model);
-        }
-        let id = self.insert(
-            built.agent,
-            Some(name.to_owned()),
-            Some(store),
-            Some(built.memory),
-            Some(built.skills),
-            Some(built.todo),
-            built.subagents,
-        );
-        // A session restored from disk: rebuild view items from its history so the snapshot / render has content.
-        if let Some(session) = self.sessions.get_mut(&id) {
-            session.rebuild_items_from_agent();
-        }
-        self.active = id;
-        if let Some(previous) = previous.filter(|p| p != name) {
-            self.spawn_curation(&previous);
-        }
-        Ok(name.to_owned())
-    }
-
-    /// Create a (lazy) new session and switch to it, returning the new session name. An empty `title` = anonymous.
-    ///
-    /// Lazy: only names it now, does not persist; the file is actually created on the first message (`create_lazy`).
-    pub fn create_new(&mut self, title: Option<&str>) -> Result<String, String> {
-        // Same as `switch_to`: creating and switching away = the old session's turn ended, triggering one curation.
-        let previous = self.active().name.clone();
-        // Same as `switch_to`: session-level query, so the model is available even during a run.
-        let use_profile_default = self.factory.as_ref().is_some_and(|f| {
-            crate::model_providers::default_config(f.model_providers_root())
-                .ok()
-                .flatten()
-                .is_some()
-        });
-        let selected_model = (!use_profile_default)
-            .then(|| self.active().model_name().map(str::to_owned))
-            .flatten();
-        let factory = self
-            .factory
-            .as_ref()
-            .ok_or_else(|| "the current session catalog does not support creating".to_owned())?;
-        let (entry, store) = self
-            .catalog
-            .create_lazy(title)
-            .map_err(|error| error.to_string())?;
-        // The lazy session is empty now: load yields an empty working set; the file is materialized only when the first message is persisted.
-        let log = store.load().map_err(|error| error.to_string())?;
-        let mut built = factory
-            .build_worker_agent(log)
-            .map_err(|error| error.to_string())?;
-        if let Some(model) = selected_model {
-            built.agent.set_model(model);
-        }
-        let id = self.insert(
-            built.agent,
-            Some(entry.name.clone()),
-            Some(store),
-            Some(built.memory),
-            Some(built.skills),
-            Some(built.todo),
-            built.subagents,
-        );
-        self.active = id;
-        if let Some(previous) = previous.filter(|p| p != entry.name.as_str()) {
-            self.spawn_curation(&previous);
-        }
-        Ok(entry.name)
     }
 
     /// Create a background session **without touching the foreground pointer**.
@@ -1113,59 +968,10 @@ impl SessionManager {
             Some(entry.name.clone()),
             Some(store),
             Some(built.memory),
-            Some(built.skills),
             Some(built.todo),
             built.subagents,
         );
         Ok(entry.name)
-    }
-
-    /// Delete a session (in-memory side). Refused while running (to avoid deleting a log being written).
-    ///
-    /// **Disk deletion is the caller's responsibility** (`SessionCatalog::delete`) -- this method only handles in-memory orchestration:
-    /// remove the session from `sessions`; if the one deleted is exactly the foreground session, **create a lazy empty session and switch to it**
-    /// (same UX as at startup: only names it now, does not persist; the file is created on the first message). This way, after deleting the current session
-    /// the foreground pointer is not left dangling, and `active_name()` no longer returns the deleted name.
-    ///
-    /// **An unloaded session is allowed through directly**: the sidebar / list shows **all** sessions scanned from the catalog, but only those
-    /// that have been opened are in memory. There is no in-memory orchestration to do for an unloaded session, and disk deletion is the caller's responsibility -- if
-    /// this still reported "session does not exist", it would manifest as "you must open (select) it before deleting". Whether the name actually
-    /// exists on disk is decided by the caller's `SessionCatalog::delete`.
-    pub fn delete_session(&mut self, name: &str) -> Result<(), String> {
-        // Refused while running (to avoid deleting a log being written) -- `forget_session` includes this check.
-        self.forget_session(name)
-    }
-
-    /// Make the manager **forget** the session named `name` (memory only, does not touch disk).
-    ///
-    /// Used for "delete session" (disk deletion is the caller's responsibility via [`SessionCatalog::delete`]) and
-    /// "move session to another project" (disk migration is the caller's responsibility via [`SessionCatalog::move_to`]):
-    /// both first remove the session from memory. Refused while running (to avoid removing a session being written).
-    ///
-    /// If the one removed is the **foreground session**, first create a lazy empty session and switch to it (same UX as at startup: only
-    /// names it now, does not persist), so the foreground pointer is not dangling and `active_name()` no longer returns the removed name.
-    /// **An unloaded session is allowed through directly** -- the list shows all sessions scanned from the catalog, and only those opened are
-    /// in memory; there is no in-memory orchestration to do for an unloaded session.
-    pub fn forget_session(&mut self, name: &str) -> Result<(), String> {
-        let Some(id) = self.id_of_name(name) else {
-            return Ok(());
-        };
-        if self
-            .sessions
-            .get(&id)
-            .is_some_and(|session| session.status.is_active())
-        {
-            return Err("agent is currently running".to_owned());
-        }
-        let was_active = id == self.active;
-        if was_active {
-            // The one removed is the foreground session: **first** add an empty session and switch to it (`create_new` moves `active`
-            // to the new session), then remove the old one -- if the order were reversed, once `create_new` failed it would
-            // leave a dangling `active` (a later `active()` would panic directly).
-            self.create_new(None)?;
-        }
-        self.sessions.remove(&id);
-        Ok(())
     }
 
     // ---- Runtime access by session name (driven by desktop's Tauri commands; the TUI uses Deref to access active) ----
@@ -1227,35 +1033,6 @@ impl SessionManager {
             session.remember_model();
             session.finish_turn();
         }
-    }
-
-    /// Rewind the last user turn of the session named `name`: drop the last user message
-    /// **and every assistant / tool message after it** from both the in-memory `Agent` and
-    /// the disk log, then remove the corresponding view items (the edited user item and
-    /// everything after it). Returns the original user text so the UI can pre-fill an editor.
-    ///
-    /// This is the shared entry for the TUI (`/rewind` re-submit) and the desktop
-    /// (`agent_resend`): "rewind the last turn" is a session / UI business semantic, so the
-    /// orchestration lives here; the SDK only offers the atomic `Agent::truncate_messages`.
-    ///
-    /// Returns `None` when the session does not exist, is running, or has no user message.
-    pub fn rewind_last_turn(&mut self, name: &str) -> Option<String> {
-        let session = self.session_mut(name)?;
-        // Do not rewind while a turn is in flight (its `Agent` is out in a background task).
-        if session.status.is_active() {
-            return None;
-        }
-        let content = session.rewind_last_user_turn()?;
-        // Drop the edited user item and every item after it (the old reply's view).
-        if let Some(index) = session
-            .items
-            .iter()
-            .rposition(|item| matches!(item, Item::Message(message) if message.role == Role::User))
-        {
-            session.items.truncate(index);
-        }
-        session.streaming_delta_start = None;
-        Some(content)
     }
 
     /// Take back the last user message of the session named `name` ("撤回"): the message and the
@@ -1421,11 +1198,6 @@ impl SessionManager {
             .is_some_and(|session| session.status.is_active())
     }
 
-    /// The foreground session's `Agent` (read-only). Returns `None` while running (moved into a background task).
-    pub fn active_agent(&self) -> Option<&Agent> {
-        self.active().agent.as_ref()
-    }
-
     /// The foreground session's current model name. **Also usable during a run** -- via [`Session::model_name`]'s mirror fallback,
     /// it does not depend on whether the `Agent` is present (the foreground session may be running when desktop switches away and back).
     pub fn active_model_name(&self) -> Option<&str> {
@@ -1555,7 +1327,6 @@ mod tests {
             None,
             None,
             None,
-            None,
         )
     }
 
@@ -1639,20 +1410,6 @@ mod tests {
         assert_eq!(manager.active_model_name(), Some("other"));
     }
 
-    /// Regression: deleting an **unloaded** session (one that only exists on disk and was never opened) must be allowed through.
-    ///
-    /// The sidebar / list shows all sessions scanned from the catalog, and only those opened are in memory. Previously
-    /// `delete_session` reported "session does not exist" directly for an unloaded session, so it had to be opened (selected)
-    /// before it could be deleted -- this is exactly the root cause of "desktop must select before deleting". Whether it actually exists on disk is decided by the caller's
-    /// `SessionCatalog::delete`; the in-memory side should not block it.
-    #[test]
-    fn delete_session_allows_unloaded_name() {
-        let mut manager = manager();
-        assert!(
-            manager.delete_session("never-opened").is_ok(),
-            "an unloaded session should be allowed through, left to the caller's disk-deletion decision"
-        );
-    }
 }
 
 /// What [`SessionManager::recall_last_turn`] took back.

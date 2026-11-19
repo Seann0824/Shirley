@@ -612,13 +612,6 @@ impl SubagentManager {
         infos
     }
 
-    /// Read a subagent's persisted transcript (empty when there is no store / no file yet).
-    pub fn load_transcript(&self, id: &str) -> Vec<Message> {
-        self.store()
-            .and_then(|store| store.load_transcript(id).ok())
-            .unwrap_or_default()
-    }
-
     /// Cancel a running subagent (`AbortHandle::abort`). Transitions to `Cancelled`, records it and
     /// notifies subscribers. Cancelling an already-finished subagent is a no-op (keeps its status).
     pub fn cancel(&self, id: &str) -> Result<(), SubagentError> {

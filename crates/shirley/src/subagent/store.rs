@@ -153,15 +153,6 @@ impl SubagentStore {
         Ok(())
     }
 
-    /// Read a child transcript back (a missing file = empty; used by the preview / desktop).
-    pub fn load_transcript(&self, id: &str) -> Result<Vec<Message>, SessionError> {
-        let path = self.transcript_path(id);
-        if !path.exists() {
-            return Ok(Vec::new());
-        }
-        JsonlSessionStore::open(path)?.load()
-    }
-
     /// All subagent ids that have a transcript on disk (excluding the index).
     #[expect(
         dead_code,

@@ -28,7 +28,7 @@ mod tool;
 
 pub use manager::{
     DEFAULT_MAX_CONCURRENT, DEFAULT_MAX_DEPTH, DEFAULT_PER_TASK_MAX_STEPS, DEFAULT_WAIT_TIMEOUT_MS,
-    SubagentInfo, SubagentLimits, SubagentManager, ToolSelection,
+    SubagentLimits, SubagentManager, ToolSelection,
 };
 // `SubagentKind` / `SubagentStatus` are only referenced by tests today; re-export them under
 // `cfg(test)` so the non-test build stays free of dead-code warnings.

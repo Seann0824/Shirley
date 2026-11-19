@@ -151,12 +151,8 @@ impl AgentFactory {
         // Compression strategy: if config does not specify it, follow the SDK default (`CompactionConfig::default`).
         let compaction_config = settings.compression.to_sdk();
 
-        // All runtime data lives globally; canonical project identity isolates sessions.
-        let file_catalog = session::FileSessionCatalog::new(&paths.state);
-        file_catalog
-            .adopt_legacy()
-            .map_err(|error| AgentError::Other(Box::new(error)))?;
-        let session_catalog: Arc<dyn SessionCatalog> = Arc::new(file_catalog);
+        let session_catalog: Arc<dyn SessionCatalog> =
+            Arc::new(session::FileSessionCatalog::new(&paths.state));
 
         // The curator's separate model (V2-C): only if `[memory]` configures curator_* do we build a separate config,
         // otherwise `None` (falls back to the main model). Defaults inherit the main config's stream / thinking fields.
@@ -459,7 +455,6 @@ impl AgentFactory {
             agent,
             todo: todo_store,
             memory,
-            skills: skill_runtime,
             subagents,
         })
     }
@@ -765,9 +760,6 @@ pub struct BuiltAgent {
     pub todo: Arc<TodoStore>,
     /// Memory runtime (one per session): the driver `set_query`s before starting a round, and hands it to the curator at session end.
     pub memory: Arc<MemoryRuntime>,
-    /// Skill runtime (one per session): the TUI's `/<skill-name>` slash entry activates directly via this handle
-    /// (`docs/skills.md` 5.6). Shares the same `Arc` as `SkillContextProvider`.
-    pub skills: Arc<SkillRuntime>,
     /// Subagent manager (one per session, **top level only**; `None` for a child `Agent`).
     ///
     /// Shares the same `Arc` as the `subagent` tool, so the interface can read subagent status
@@ -927,19 +919,9 @@ pub(crate) mod test_support {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::interface::session::SessionManager;
     use crate::models::StaticCatalog;
     use crate::session::FileSessionCatalog;
     use shirley_agent_sdk::ModelProtocol;
-
-    fn test_agent() -> Agent {
-        let config = ModelConfig::builder()
-            .protocol(ModelProtocol::ChatCompletions)
-            .base_url("http://localhost")
-            .model("test")
-            .build();
-        Agent::builder().model_config(config).build().unwrap()
-    }
 
     #[expect(
         clippy::needless_pass_by_value,
@@ -972,32 +954,6 @@ mod tests {
             workspace: root.join("workspace"),
             tasks: None,
         }
-    }
-
-    #[test]
-    fn global_storage_restores_legacy_sessions_and_project_memory() {
-        let root =
-            std::env::temp_dir().join(format!("shirley-global-migration-{}", std::process::id()));
-        let workspace = root.join("repo");
-        let legacy = workspace.join(".shirley");
-        std::fs::create_dir_all(legacy.join("sessions")).unwrap();
-        std::fs::create_dir_all(legacy.join("memory/facts")).unwrap();
-        let message = Message::User {
-            content: "existing conversation".into(),
-        };
-        std::fs::write(
-            legacy.join("sessions/existing.jsonl"),
-            format!("{}\n", serde_json::to_string(&message).unwrap()),
-        )
-        .unwrap();
-        std::fs::write(legacy.join("sessions/existing.title"), "Existing title").unwrap();
-        std::fs::write(legacy.join("memory/facts/project.md"), "---\nid: fact-project\ntype: fact\ndomain: project\nsubject: project\ncreated_at: 2026-10-16\nstatus: active\nconfidence: high\nsource:\n  - session: existing.jsonl#turn:1\n---\n\nExisting project fact.\n").unwrap();
-        let factory = AgentFactory::assemble_at(root.join("global")).unwrap();
-        // The workspace legacy migration is no longer triggered by assemble_at (bot-first mode has no workspace).
-        // The legacy .shirley dir in the workspace is not auto-migrated; this test now just verifies the factory builds.
-        assert!(factory.sessions_dir().starts_with(root.join("global")));
-        let _ = AgentFactory::assemble_at(root.join("global")).unwrap();
-        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[tokio::test]
@@ -1107,47 +1063,6 @@ mod tests {
 
     fn tmp_root(tag: &str) -> PathBuf {
         std::env::temp_dir().join(format!("shirley_bootstrap_{tag}_{}", std::process::id()))
-    }
-
-    /// Regression: after deleting the **current** session, the foreground pointer must land on a fresh empty session, not dangle on the deleted one.
-    ///
-    /// Previously `agent_delete_session` only deleted from disk without touching `SessionManager`, so `active` still pointed at the deleted
-    /// session, `agent_current_session` kept returning the old name, and the frontend opened it again -- the interface got stuck on the deleted session.
-    #[test]
-    fn deleting_active_session_switches_to_fresh_empty_session() {
-        let root = tmp_root("del_active");
-        let catalog: Arc<dyn SessionCatalog> = Arc::new(FileSessionCatalog::new(&root));
-        let mut manager = SessionManager::with_factory(
-            test_agent(),
-            Some("s".into()),
-            catalog,
-            Arc::new(factory(root.clone())),
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert_eq!(manager.active_name(), Some("s"));
-
-        manager.delete_session("s").unwrap();
-
-        let active = manager.active_name().map(str::to_owned);
-        assert_ne!(
-            active.as_deref(),
-            Some("s"),
-            "the foreground should no longer sit on the deleted session"
-        );
-        assert!(
-            active.is_some(),
-            "after deleting the foreground session a fresh empty one should be supplied"
-        );
-        assert!(
-            manager.active_agent().is_some(),
-            "the new empty session should be ready"
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// Live smoke: assemble from the **real workspace config** and run one round, verifying the endpoint / protocol / key work.
@@ -1309,40 +1224,6 @@ mod tests {
         );
     }
 
-    /// A running session must not be deleted (avoid deleting a log being written).
-    #[test]
-    fn deleting_running_session_is_rejected() {
-        let root = tmp_root("del_running");
-        let catalog: Arc<dyn SessionCatalog> = Arc::new(FileSessionCatalog::new(&root));
-        let mut manager = SessionManager::with_factory(
-            test_agent(),
-            Some("s".into()),
-            catalog,
-            Arc::new(factory(root.clone())),
-            None,
-            None,
-            None,
-            None,
-            None,
-        );
-        assert!(
-            manager
-                .begin_turn("s", "hello".into(), Vec::new())
-                .is_some()
-        );
-
-        assert!(
-            manager.delete_session("s").is_err(),
-            "a running session should refuse deletion"
-        );
-        assert_eq!(
-            manager.active_name(),
-            Some("s"),
-            "the foreground should not change after a refusal"
-        );
-
-        let _ = std::fs::remove_dir_all(&root);
-    }
     #[test]
     fn memory_curator_follows_session_provider_and_does_not_reuse_key_for_another_host() {
         let root = std::env::temp_dir().join(format!(

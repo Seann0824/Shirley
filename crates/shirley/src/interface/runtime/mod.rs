@@ -23,7 +23,7 @@ use std::sync::Arc;
 use futures::{FutureExt, StreamExt};
 use serde::Serialize;
 use shirley_agent_sdk::{
-    Agent, AgentEvent, ContentPart, ImagePart, ImageSource, Message, MessageContent, RunResult,
+    Agent, AgentEvent, ContentPart, ImagePart, ImageSource, MessageContent, RunResult,
     StopReason, Usage,
 };
 
@@ -34,9 +34,9 @@ use super::wire::{AgentEventWire, SessionSnapshotWire, StateSnapshotWire, TaskVi
 use crate::bootstrap::AgentFactory;
 use crate::interface::session::SessionManager;
 use crate::session::{
-    SessionCatalog, SessionEntry, first_user_message, sanitize_title, title_prompt,
+    SessionCatalog, first_user_message, sanitize_title, title_prompt,
 };
-use crate::subagent::{SubagentInfo, SubagentManager};
+
 use crate::todo::TaskView;
 
 /// Runtime for a single bot: one assembled factory + its multi-session orchestrator.
@@ -227,101 +227,6 @@ impl BotRuntimeManager {
     // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
-    // Session commands
-    // -----------------------------------------------------------------------
-
-    pub async fn list_sessions(&self, bot: &str) -> Result<Vec<SessionEntryWire>, String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
-        let entries = tokio::task::spawn_blocking(move || catalog.list())
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())?;
-        let guard = runtime.lock().await;
-        Ok(entries
-            .into_iter()
-            .map(|entry| {
-                let running = guard.sessions.is_running(&entry.name);
-                SessionEntryWire::from_entry(entry, running)
-            })
-            .collect())
-    }
-
-    pub async fn current_session(&self, bot: &str) -> Result<String, String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let guard = runtime.lock().await;
-        guard
-            .sessions
-            .active_name()
-            .map(str::to_owned)
-            .ok_or_else(|| "no active session".to_owned())
-    }
-
-    pub async fn new_session(&self, bot: &str, title: Option<String>) -> Result<String, String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let mut guard = runtime.lock().await;
-        guard.sessions.create_new(title.as_deref())
-    }
-
-    pub async fn switch_session(&self, bot: &str, name: &str) -> Result<String, String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let mut guard = runtime.lock().await;
-        guard.sessions.switch_to(name)
-    }
-
-    pub async fn rename_session(&self, bot: &str, name: &str, title: &str) -> Result<(), String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
-        let name = name.to_owned();
-        let title = title.to_owned();
-        tokio::task::spawn_blocking(move || catalog.rename(&name, &title))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
-    }
-
-    pub async fn delete_session(&self, bot: &str, name: &str) -> Result<(), String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        runtime.lock().await.sessions.delete_session(name)?;
-        let catalog = Arc::clone(&runtime.lock().await.factory.session_catalog);
-        let name = name.to_owned();
-        tokio::task::spawn_blocking(move || catalog.delete(&name))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
-    }
-
-    pub async fn move_session(
-        &self,
-        bot: &str,
-        name: &str,
-        target_bot: &str,
-    ) -> Result<(), String> {
-        if bot == target_bot {
-            return Err("source and target bots are the same".to_owned());
-        }
-        let source = self.ensure_runtime(bot).await?;
-        let target = self.ensure_runtime(target_bot).await?;
-        {
-            let mut guard = source.lock().await;
-            guard.sessions.forget_session(name)?;
-        }
-        let dest_dir = target
-            .lock()
-            .await
-            .factory
-            .session_catalog
-            .storage_dir()
-            .ok_or_else(|| "the target bot does not support a session directory".to_owned())?;
-        let catalog = Arc::clone(&source.lock().await.factory.session_catalog);
-        let name = name.to_owned();
-        tokio::task::spawn_blocking(move || catalog.move_to(&name, &dest_dir))
-            .await
-            .map_err(|e| e.to_string())?
-            .map_err(|e| e.to_string())
-    }
-
-    // -----------------------------------------------------------------------
     // Turn driver
     // -----------------------------------------------------------------------
 
@@ -373,36 +278,6 @@ impl BotRuntimeManager {
             let _ = self.pool_cancel(task).await;
         }
         Ok(recalled.text)
-    }
-
-    /// Rewind the last turn, then send the edited text as a new turn.
-    pub async fn resend(
-        &self,
-        bot: &str,
-        session: Option<String>,
-        text: String,
-        references: Vec<String>,
-        images: Vec<String>,
-    ) -> Result<(), String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let store = {
-            let mut guard = runtime.lock().await;
-            let session_name = match session.clone() {
-                Some(name) => name,
-                None => guard
-                    .sessions
-                    .active_name()
-                    .map(str::to_owned)
-                    .ok_or_else(|| "current session is not yet persisted".to_owned())?,
-            };
-            if guard.sessions.rewind_last_turn(&session_name).is_none() {
-                return Err("no message to edit".to_owned());
-            }
-            Arc::clone(&guard.factory.artifacts)
-        };
-        let prompt = compose_prompt(&text, &references);
-        let user_content = user_content(&store, &prompt, &images);
-        self.spawn_turn(bot, session, text, user_content).await
     }
 
     /// Take the session's `Agent`, register the cancel handle, and spawn the run task.
@@ -871,41 +746,6 @@ impl BotRuntimeManager {
         })
     }
 
-    /// Take **local file paths** into the library: the desktop door into the jail.
-    ///
-    /// The desktop runs on the same machine as the workspace, so the honest way to hand us a
-    /// 400MB video is a path, not base64 through the webview or the IPC bridge. This copies
-    /// file-by-file (`put_file_named`), so nothing large is ever held in memory, and it keeps
-    /// the original file name as the library entry's display name.
-    ///
-    /// Per-path failures do not abort the batch: the caller gets the entries that made it plus
-    /// one message per rejected path, because "I dragged five files and one was a `.svg`" should
-    /// not throw the other four away.
-    ///
-    /// # Errors
-    /// Unknown bot. Every other failure is reported per path in the returned tuple.
-    pub async fn ingest_paths(
-        &self,
-        bot: &str,
-        paths: Vec<String>,
-    ) -> Result<(Vec<LibraryEntry>, Vec<String>), String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let store = {
-            let guard = runtime.lock().await;
-            Arc::clone(&guard.factory.artifacts)
-        };
-        let mut entries = Vec::new();
-        let mut errors = Vec::new();
-        for raw in paths {
-            let path = PathBuf::from(&raw);
-            match store.put_file_named(&path) {
-                Ok(entry) => entries.push(entry),
-                Err(error) => errors.push(format!("{raw}: {error}")),
-            }
-        }
-        Ok((entries, errors))
-    }
-
     /// Take **raw bytes** into the library: the cloud door into the jail.
     ///
     /// A browser cannot hand us a path, and a `data:` URL means the whole file is base64 in a
@@ -931,24 +771,6 @@ impl BotRuntimeManager {
             .map_err(|error| error.to_string())
     }
 
-    /// What is in this bot's media library, newest first.
-    ///
-    /// The library is an inventory, not a conversation: it survives session switches and shows
-    /// everything the user has ever handed us (pasted, dropped, uploaded, or produced), so the
-    /// "which file was that again?" question has an answer that is not "scroll the transcript".
-    /// The store owns the ordering (`added_ms` descending); this only adds the bot jail.
-    ///
-    /// # Errors
-    /// Unknown bot.
-    pub async fn library_list(&self, bot: &str) -> Result<Vec<LibraryEntry>, String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let store = {
-            let guard = runtime.lock().await;
-            Arc::clone(&guard.factory.artifacts)
-        };
-        Ok(store.list())
-    }
-
     /// Memory entries `bot` can see: the shared root merged with the bot's private root.
     pub async fn memory_list(&self, bot: &str) -> Result<Vec<MemoryEntryWire>, String> {
         let runtime = self.ensure_runtime(bot).await?;
@@ -965,109 +787,13 @@ impl BotRuntimeManager {
 
     /// Resolve a minted handle back to a jail file and its mime.
     ///
-    /// Synchronous on purpose: Tauri's scheme handler is a synchronous function, and the lookup
-    /// is a map hit -- no bot lock, no runtime assembly.
+    /// Synchronous: the lookup is a map hit -- no bot lock, no runtime assembly.
     #[must_use]
     pub fn asset_by_handle(&self, handle: &str) -> Option<(PathBuf, &'static str)> {
         let assets = self.assets.lock().ok()?;
         assets
             .get(handle)
             .map(|entry| (entry.path.clone(), entry.mime))
-    }
-
-    pub async fn list_skills(&self, bot: &str) -> Result<Vec<SkillEntryWire>, String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let guard = runtime.lock().await;
-        let skills = guard
-            .sessions
-            .active()
-            .skills
-            .as_ref()
-            .map(|skills| skills.entries())
-            .unwrap_or_default();
-        Ok(skills
-            .into_iter()
-            .map(|(name, description)| SkillEntryWire { name, description })
-            .collect())
-    }
-
-    pub async fn activate_skill(&self, bot: &str, session: &str, name: &str) -> Result<(), String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let guard = runtime.lock().await;
-        let session_ref = guard
-            .sessions
-            .session(session)
-            .ok_or_else(|| format!("session not found: {session}"))?;
-        let skills = session_ref
-            .skills
-            .as_ref()
-            .ok_or_else(|| "the current session does not support skills".to_owned())?;
-        skills
-            .activate(name)
-            .map(|_| ())
-            .map_err(|error| match error {
-                crate::skills::runtime::ActivateError::UnknownSkill(name) => {
-                    format!("unknown skill: {name}")
-                }
-                crate::skills::runtime::ActivateError::ReadFailed(reason) => reason,
-            })
-    }
-
-    // -----------------------------------------------------------------------
-    // History / subagents
-    // -----------------------------------------------------------------------
-
-    pub async fn load_history(&self, bot: &str) -> Result<Vec<HistoryMessageWire>, String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let guard = runtime.lock().await;
-        let agent = guard
-            .sessions
-            .active_agent()
-            .ok_or_else(|| "agent is currently running".to_owned())?;
-        Ok(history_from_messages(agent.messages()))
-    }
-
-    async fn subagent_manager(
-        &self,
-        bot: &str,
-        session: &str,
-    ) -> Result<Arc<SubagentManager>, String> {
-        let runtime = self.ensure_runtime(bot).await?;
-        let guard = runtime.lock().await;
-        guard
-            .sessions
-            .session(session)
-            .and_then(|s| s.subagents.clone())
-            .ok_or_else(|| format!("session has no subagents: {session}"))
-    }
-
-    pub async fn list_subagents(
-        &self,
-        bot: &str,
-        session: &str,
-    ) -> Result<Vec<SubagentSummaryWire>, String> {
-        let manager = self.subagent_manager(bot, session).await?;
-        Ok(manager
-            .list()
-            .iter()
-            .map(SubagentSummaryWire::from_info)
-            .collect())
-    }
-
-    pub async fn load_subagent(
-        &self,
-        bot: &str,
-        session: &str,
-        id: &str,
-    ) -> Result<Vec<HistoryMessageWire>, String> {
-        let manager = self.subagent_manager(bot, session).await?;
-        Ok(history_from_messages(&manager.load_transcript(id)))
-    }
-
-    pub async fn cancel_subagent(&self, bot: &str, session: &str, id: &str) -> Result<(), String> {
-        let manager = self.subagent_manager(bot, session).await?;
-        let _ = manager.cancel(id);
-        Ok(())
     }
 }
 
@@ -1090,7 +816,6 @@ pub fn runtime_from_factory(factory: Arc<AgentFactory>) -> Result<BotRuntime, St
         Arc::clone(&factory),
         Some(store),
         Some(built.memory),
-        Some(built.skills),
         Some(built.todo),
         built.subagents,
     );
@@ -1201,29 +926,6 @@ async fn auto_title_session(
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize)]
-pub struct SessionEntryWire {
-    pub name: String,
-    pub label: String,
-    pub preview: String,
-    pub modified_ms: u64,
-    pub turns: usize,
-    pub running: bool,
-}
-
-impl SessionEntryWire {
-    pub fn from_entry(entry: SessionEntry, running: bool) -> Self {
-        Self {
-            name: entry.name,
-            label: entry.label,
-            preview: entry.preview,
-            modified_ms: entry.modified_ms,
-            turns: entry.turns,
-            running,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize)]
 pub struct ModelEntryWire {
     pub label: String,
     pub value: String,
@@ -1262,12 +964,6 @@ fn reasoning_efforts(entry: &crate::models::ModelEntry) -> (Vec<String>, Option<
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct SkillEntryWire {
-    pub name: String,
-    pub description: String,
-}
-
 /// One memory entry as the memory page shows it.
 #[derive(Debug, Clone, Serialize)]
 pub struct MemoryEntryWire {
@@ -1300,68 +996,9 @@ impl MemoryEntryWire {
     }
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct HistoryMessageWire {
-    pub role: &'static str,
-    pub content: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct SubagentSummaryWire {
-    pub id: String,
-    pub kind: &'static str,
-    pub task: String,
-    pub status: &'static str,
-    pub started_ms: u64,
-    pub finished_ms: Option<u64>,
-    pub elapsed_ms: u64,
-    pub summary: String,
-    pub stop_reason: String,
-}
-
-impl SubagentSummaryWire {
-    pub fn from_info(info: &SubagentInfo) -> Self {
-        let (summary, stop_reason) = match &info.result {
-            Some(result) => (result.summary.clone(), result.stop_reason.clone()),
-            None => (String::new(), String::new()),
-        };
-        Self {
-            id: info.id.clone(),
-            kind: info.kind.as_str(),
-            task: info.task.clone(),
-            status: info.status.as_str(),
-            started_ms: info.started_ms,
-            finished_ms: info.finished_ms,
-            elapsed_ms: info.elapsed_ms(),
-            summary,
-            stop_reason,
-        }
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Prompt / history helpers
 // ---------------------------------------------------------------------------
-
-pub fn history_from_messages(messages: &[Message]) -> Vec<HistoryMessageWire> {
-    messages
-        .iter()
-        .filter_map(|message| match message {
-            Message::User { content } => Some(HistoryMessageWire {
-                role: "user",
-                content: content.as_text(),
-            }),
-            Message::Assistant { content, .. } => content
-                .as_ref()
-                .filter(|text| !text.trim().is_empty())
-                .map(|text| HistoryMessageWire {
-                    role: "assistant",
-                    content: text.clone(),
-                }),
-            _ => None,
-        })
-        .collect()
-}
 
 pub fn compose_prompt(text: &str, references: &[String]) -> String {
     if references.is_empty() {
@@ -1437,6 +1074,7 @@ mod route;
 
 #[cfg(test)]
 mod tests {
+
     use super::*;
 
     fn fixture(tag: &str) -> (std::path::PathBuf, ArtifactStore) {

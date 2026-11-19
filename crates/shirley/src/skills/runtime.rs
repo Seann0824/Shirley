@@ -59,18 +59,6 @@ impl SkillRuntime {
         self.catalog.skill_names()
     }
 
-    /// The `(name, description)` list in the directory (for the desktop `/` suggestion popover).
-    ///
-    /// Same source as [`SkillRuntime::skill_names`], just carrying an extra description --
-    /// the frontend suggestions need it for the subtitle.
-    pub fn entries(&self) -> Vec<(String, String)> {
-        self.catalog
-            .skills()
-            .iter()
-            .map(|skill| (skill.name.clone(), skill.description.clone()))
-            .collect()
-    }
-
     /// Whether the skill is already activated (for diagnostics / tests).
     #[cfg(test)]
     pub fn is_active(&self, name: &str) -> bool {

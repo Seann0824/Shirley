@@ -938,7 +938,6 @@ mod tests {
             Arc::clone(&factory),
             None,
             Some(restored_agent.memory),
-            Some(restored_agent.skills),
             Some(restored_agent.todo),
             restored_agent.subagents,
         );
@@ -1037,7 +1036,6 @@ mod tests {
             None,
             None,
             None,
-            None,
             built.subagents,
         );
         let selected = ModelConfig::builder()
@@ -1070,32 +1068,6 @@ mod tests {
         assert_eq!(captured.lock().unwrap()[0]["model"], "selected-model");
         task.abort();
     }
-    #[test]
-    fn conversation_model_binding_moves_and_deletes_with_its_log() {
-        use crate::session::{FileSessionCatalog, SessionCatalog};
-        let dir = Temp::new();
-        let source = FileSessionCatalog::new(dir.0.join("source"));
-        let target = FileSessionCatalog::new(dir.0.join("target"));
-        let (entry, _) = source.create().unwrap();
-        let source_dir = source.storage_dir().unwrap();
-        let target_dir = target.storage_dir().unwrap();
-        let binding_name = format!("{}.model.json", entry.name);
-        let key = selection("a", "same-model");
-        std::fs::write(
-            source_dir.join(&binding_name),
-            serde_json::to_vec(&key).unwrap(),
-        )
-        .unwrap();
-        source.move_to(&entry.name, &target_dir).unwrap();
-        assert!(!source_dir.join(&binding_name).exists());
-        assert_eq!(
-            std::fs::read_to_string(target_dir.join(&binding_name)).unwrap(),
-            serde_json::to_string(&key).unwrap()
-        );
-        target.delete(&entry.name).unwrap();
-        assert!(!target_dir.join(&binding_name).exists());
-    }
-
     #[tokio::test]
     async fn unauthenticated_anthropic_catalog_still_sends_version_header() {
         use axum::{Json, Router, http::HeaderMap, routing::get};

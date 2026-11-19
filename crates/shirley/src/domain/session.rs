@@ -309,30 +309,12 @@ pub trait SessionCatalog: Send + Sync {
         ))
     }
 
-    /// Delete a session (along with its log and title). The default implementation errors.
-    fn delete(&self, _name: &str) -> Result<(), SessionError> {
-        Err(SessionError::Backend(
-            "this session catalog does not support deletion".into(),
-        ))
-    }
-
     /// The directory holding the session logs (for cross-directory moves). The default returns `None` -- backends without
     /// directory semantics (e.g. [`EmptySessionCatalog`]) need not implement it.
     fn storage_dir(&self) -> Option<PathBuf> {
         None
     }
 
-    /// Move a session (along with its title) from the current directory to `dest_dir`.
-    ///
-    /// Used for "move a session to another project" -- each project has its own
-    /// `~/.shirley/workspaces/<workspace-id>/sessions` directory, so a move is copying `<name>.jsonl` and
-    /// `<name>.title` into the target directory. If the target already has a same-named session it **errors**
-    /// (no silent overwrite, to avoid data loss). The default implementation errors.
-    fn move_to(&self, _name: &str, _dest_dir: &Path) -> Result<(), SessionError> {
-        Err(SessionError::Backend(
-            "this session catalog does not support moving".into(),
-        ))
-    }
 }
 
 /// A session catalog under a globally stored workspace state directory.
@@ -488,26 +470,6 @@ impl FileSessionCatalog {
         }
     }
 
-    /// Adopt the old single-file log: if `<state>/session.jsonl` exists and there is currently
-    /// no session yet, adopt it as the first session. Called only once at startup.
-    ///
-    /// This way upgrading to the multi-session layout does not lose the user's existing conversation (the old version had only one log).
-    pub fn adopt_legacy(&self) -> Result<(), SessionError> {
-        let legacy = self.dir.parent().map(|p| p.join("session.jsonl"));
-        let Some(legacy) = legacy else {
-            return Ok(());
-        };
-        if !legacy.exists() {
-            return Ok(());
-        }
-        // If there are already sessions, do not migrate again, to avoid duplicates.
-        if !self.list()?.is_empty() {
-            return Ok(());
-        }
-        std::fs::create_dir_all(&self.dir)?;
-        std::fs::rename(&legacy, self.path_for("legacy"))?;
-        Ok(())
-    }
 }
 
 impl SessionCatalog for FileSessionCatalog {
@@ -641,62 +603,10 @@ impl SessionCatalog for FileSessionCatalog {
         self.write_title(name, title)
     }
 
-    fn delete(&self, name: &str) -> Result<(), SessionError> {
-        let log = self.path_for(name);
-        if !log.exists() {
-            return Err(SessionError::Backend(format!(
-                "session does not exist: {name}"
-            )));
-        }
-        std::fs::remove_file(&log)?;
-        let _ = std::fs::remove_file(self.dir.join(format!("{name}.model.json")));
-        // The title sidecar is subordinate to the log: without the log it is meaningless, so delete it too (best-effort).
-        let _ = std::fs::remove_file(self.title_path_for(name));
-        Ok(())
-    }
-
     fn storage_dir(&self) -> Option<PathBuf> {
         Some(self.dir.clone())
     }
 
-    fn move_to(&self, name: &str, dest_dir: &Path) -> Result<(), SessionError> {
-        let log = self.path_for(name);
-        if !log.exists() {
-            return Err(SessionError::Backend(format!(
-                "session does not exist: {name}"
-            )));
-        }
-        let dest_log = dest_dir.join(format!("{name}.jsonl"));
-        if dest_log.exists() {
-            return Err(SessionError::Backend(format!(
-                "the target project already has a session with this name: {name}"
-            )));
-        }
-        std::fs::create_dir_all(dest_dir)?;
-        // Move the log first (source of truth), then the title sidecar (subordinate; missing is not an error).
-        let model = self.dir.join(format!("{name}.model.json"));
-        let dest_model = dest_dir.join(format!("{name}.model.json"));
-        let has_model = model.exists();
-        if has_model {
-            if dest_model.exists() {
-                return Err(SessionError::Backend(
-                    "target already has model selection metadata".into(),
-                ));
-            }
-            std::fs::rename(&model, &dest_model)?;
-        }
-        if let Err(error) = std::fs::rename(&log, &dest_log) {
-            if has_model {
-                let _ = std::fs::rename(&dest_model, &model);
-            }
-            return Err(error.into());
-        }
-        let title = self.title_path_for(name);
-        if title.exists() {
-            let _ = std::fs::rename(&title, dest_dir.join(format!("{name}.title")));
-        }
-        Ok(())
-    }
 }
 
 /// Whether the reconciled cache differs from the previously loaded one, so `list()` only writes
@@ -972,31 +882,6 @@ mod tests {
     }
 
     #[test]
-    fn catalog_adopts_legacy_single_file() {
-        let dir = tmp_dir("legacy");
-        let shirley = dir.clone();
-        std::fs::create_dir_all(&shirley).unwrap();
-        let legacy = shirley.join("session.jsonl");
-        std::fs::write(
-            &legacy,
-            format!(
-                "{}\n",
-                serde_json::to_string(&user("old conversation")).unwrap()
-            ),
-        )
-        .unwrap();
-        let catalog = FileSessionCatalog::new(&dir);
-        catalog.adopt_legacy().unwrap();
-        // The old file is moved into the sessions directory and can still be read back.
-        assert!(!legacy.exists());
-        let listed = catalog.list().unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].name, "legacy");
-        assert_eq!(listed[0].preview, "old conversation");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
     fn catalog_create_named_sets_title_and_counts_turns() {
         let dir = tmp_dir("named");
         let catalog = FileSessionCatalog::new(&dir);
@@ -1036,20 +921,6 @@ mod tests {
         assert_eq!(listed[0].preview, "content");
         // Reopening still reads the same log.
         assert_eq!(catalog.open(&entry.name).unwrap().load().unwrap().len(), 1);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn catalog_delete_removes_log_and_title() {
-        let dir = tmp_dir("delete");
-        let catalog = FileSessionCatalog::new(&dir);
-        let (entry, store) = catalog.create_named(Some("to delete")).unwrap();
-        store.append(&user("x")).unwrap();
-        assert_eq!(catalog.list().unwrap().len(), 1);
-        catalog.delete(&entry.name).unwrap();
-        assert!(catalog.list().unwrap().is_empty());
-        // Deleting again errors (already gone).
-        assert!(catalog.delete(&entry.name).is_err());
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1123,8 +994,8 @@ mod tests {
         // preview still points at the first user message.
         assert_eq!(after_append[0].preview, "first message");
 
-        // Deleting the file removes the entry from the next list (reconcile drops it).
-        catalog.delete(&entry.name).unwrap();
+        // Removing the log removes the entry from the next list (reconcile drops it).
+        std::fs::remove_file(&log).unwrap();
         assert!(catalog.list().unwrap().is_empty());
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -1192,10 +1063,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_catalog_rejects_rename_and_delete() {
+    fn empty_catalog_rejects_rename() {
         let catalog = EmptySessionCatalog;
         assert!(catalog.rename("a", "b").is_err());
-        assert!(catalog.delete("a").is_err());
     }
 
     #[test]

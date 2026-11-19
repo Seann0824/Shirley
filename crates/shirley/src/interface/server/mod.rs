@@ -47,7 +47,7 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
 
-use super::runtime::{BotRuntimeManager, EventSink, SessionEntryWire, StatusSink};
+use super::runtime::{BotRuntimeManager, EventSink, StatusSink};
 use super::wire::{AgentEventWire, StateSnapshotWire};
 use crate::bootstrap::AgentFactory;
 
@@ -388,10 +388,6 @@ struct CmdArgs {
     references: Option<Vec<String>>,
     images: Option<Vec<String>>,
     id: Option<String>,
-    /// Local paths for `agent_ingest_paths` (desktop-parity inbound channel).
-    paths: Option<Vec<String>>,
-    /// Content type for `agent_ingest_bytes`.
-    mime: Option<String>,
     archived: Option<bool>,
     #[serde(rename = "targetBot")]
     target_bot: Option<String>,
@@ -499,20 +495,6 @@ async fn dispatch(
                 .await?;
             Ok(StatusCode::ACCEPTED.into_response())
         }
-        "agent_resend" => {
-            let bot = args.bot()?;
-            let text = args.text.ok_or_else(|| ApiError::bad("missing text"))?;
-            manager
-                .resend(
-                    &bot,
-                    args.session,
-                    text,
-                    args.references.unwrap_or_default(),
-                    args.images.unwrap_or_default(),
-                )
-                .await?;
-            Ok(StatusCode::ACCEPTED.into_response())
-        }
         // Take back the latest message to edit it: returns the text as typed.
         "agent_recall" => {
             let bot = args.bot()?;
@@ -541,8 +523,6 @@ async fn dispatch(
             value["sequence"] = cursor.into();
             ok_json(value)
         }
-        "agent_unsubscribe" => no_content(),
-
         // -- model -------------------------------------------------------------------
         "agent_model_name" => {
             let bot = args.bot()?;
@@ -588,128 +568,6 @@ async fn dispatch(
             // returns *source code* that the page then runs in a sandboxed frame.
             ok_json(manager.asset_text(&bot, &id).await?)
         }
-        // Inbound media (`docs/render-parts.md` inbound channels). Two doors into the same
-        // library: local paths (the server usually runs on the user's machine too) and raw
-        // bytes (the browser cannot hand us a path). Both reuse the jail, allow-list and size
-        // cap of the artifact store -- there is no second storage layer for user uploads.
-        "agent_ingest_paths" => {
-            let bot = args.bot()?;
-            let paths = args.paths.unwrap_or_default();
-            let (entries, errors) = manager.ingest_paths(&bot, paths).await?;
-            ok_json(serde_json::json!({ "entries": entries, "errors": errors }))
-        }
-        "agent_ingest_bytes" => {
-            let bot = args.bot()?;
-            let mime = args
-                .mime
-                .ok_or_else(|| ApiError::bad("missing mime".to_owned()))?;
-            let name = args.name.unwrap_or_else(|| "upload".to_owned());
-            let data_url = args
-                .text
-                .ok_or_else(|| ApiError::bad("missing data".to_owned()))?;
-            let (_, bytes) = crate::artifact::decode_data_url(&data_url)
-                .map_err(|e| ApiError::bad(e.to_string()))?;
-            ok_json(manager.ingest_bytes(&bot, &name, &mime, &bytes).await?)
-        }
-        // The library is an inventory, not a conversation: it outlives any one session, so the
-        // page can answer "which file did I send you last week?" without scrolling a transcript.
-        "agent_library_list" => {
-            let bot = args.bot()?;
-            ok_json(manager.library_list(&bot).await?)
-        }
-        "agent_list_skills" => {
-            let bot = args.bot()?;
-            ok_json(manager.list_skills(&bot).await?)
-        }
-        "agent_activate_skill" => {
-            let bot = args.bot()?;
-            let session = args.session();
-            let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
-            manager.activate_skill(&bot, &session, &name).await?;
-            no_content()
-        }
-
-        // -- sessions -----------------------------------------------------------------
-        "agent_list_sessions" => {
-            let bot = args.bot()?;
-            ok_json(manager.list_sessions(&bot).await?)
-        }
-        "agent_current_session" => {
-            let bot = args.bot()?;
-            match manager.current_session(&bot).await {
-                Ok(name) => ok_json(Some(name)),
-                Err(_) => ok_json(Option::<String>::None),
-            }
-        }
-        "agent_new_session" => {
-            let bot = args.bot()?;
-            let name = manager.new_session(&bot, args.title).await?;
-            ok_json(SessionEntryWire {
-                label: name.clone(),
-                name,
-                preview: String::new(),
-                modified_ms: 0,
-                turns: 0,
-                running: false,
-            })
-        }
-        "agent_switch_session" => {
-            let bot = args.bot()?;
-            let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
-            manager.switch_session(&bot, &name).await?;
-            no_content()
-        }
-        "agent_rename_session" => {
-            let bot = args.bot()?;
-            let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
-            let title = args.title.ok_or_else(|| ApiError::bad("missing title"))?;
-            manager.rename_session(&bot, &name, &title).await?;
-            no_content()
-        }
-        "agent_delete_session" => {
-            let bot = args.bot()?;
-            let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
-            manager.delete_session(&bot, &name).await?;
-            no_content()
-        }
-        "agent_move_session" => {
-            let bot = args.bot()?;
-            let name = args.name.ok_or_else(|| ApiError::bad("missing name"))?;
-            let target = args
-                .target_bot
-                .ok_or_else(|| ApiError::bad("missing targetBot"))?;
-            manager.move_session(&bot, &name, &target).await?;
-            no_content()
-        }
-        // No dictation route on purpose: transcription happens on the user's own device
-        // (browser recogniser, or this computer's whisper.cpp in the desktop app). A phone
-        // that opens a cloud bot dictates with the phone's own ASR, so no audio ever
-        // reaches this server..
-        "agent_load_history" => {
-            let bot = args.bot()?;
-            ok_json(manager.load_history(&bot).await?)
-        }
-
-        // -- subagents ----------------------------------------------------------------
-        "agent_list_subagents" => {
-            let bot = args.bot()?;
-            let session = args.session();
-            ok_json(manager.list_subagents(&bot, &session).await?)
-        }
-        "agent_load_subagent" => {
-            let bot = args.bot()?;
-            let session = args.session();
-            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            ok_json(manager.load_subagent(&bot, &session, &id).await?)
-        }
-        "agent_cancel_subagent" => {
-            let bot = args.bot()?;
-            let session = args.session();
-            let id = args.id.ok_or_else(|| ApiError::bad("missing id"))?;
-            manager.cancel_subagent(&bot, &session, &id).await?;
-            no_content()
-        }
-
         // -- task pool ----------------------------------------------------------------
         // "Drop work and walk away": the one verb a phone needs that `agent_send` cannot express.
         // Every mutation answers with the whole list, so the caller re-renders from one snapshot
@@ -1100,8 +958,7 @@ const MAX_UPLOAD_BYTES: usize = 64 * 1024 * 1024;
 
 /// `POST /api/upload?bot=<id>&name=<file>&mime=<type>` with the file as the **raw body**.
 ///
-/// This is the cloud twin of the desktop's `agent_ingest_paths`: a browser cannot hand us a
-/// path, so it hands us the bytes. The declared `mime` is advisory -- the jail re-derives and
+/// The browser hands us the bytes. The declared `mime` is advisory -- the jail re-derives and
 /// validates it against its own allow-list, and a body that name does not match is refused
 /// there, not trusted here.
 async fn upload_handler(
