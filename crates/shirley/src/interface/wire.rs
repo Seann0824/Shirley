@@ -524,6 +524,9 @@ fn role_wire(role: crate::interface::view::Role) -> &'static str {
 pub struct SessionSnapshotWire {
     pub session: String,
     pub items: Vec<ItemWire>,
+    /// Index of `items[0]` in the whole conversation: older items exist when it is above 0, and
+    /// `agent_history { before: start }` fetches them.
+    pub start: usize,
     /// Whether this session is currently running a turn (the frontend gates busy on this).
     pub running: bool,
     /// The session's current task-ledger snapshot (`None` = empty / no ledger).
@@ -534,15 +537,33 @@ impl SessionSnapshotWire {
     /// Constructed from core-layer items (session name + item sequence + task-ledger snapshot).
     pub fn new(
         session: String,
-        items: Vec<CoreItemWire>,
+        (items, start): (Vec<CoreItemWire>, usize),
         running: bool,
         todo: Option<TaskView>,
     ) -> Self {
         Self {
             session,
             items: items.into_iter().map(ItemWire::from).collect(),
+            start,
             running,
             todo: todo.map(TaskViewWire::from),
+        }
+    }
+}
+
+/// An older page of a conversation (`agent_history`), oldest first.
+#[derive(Debug, Clone, Serialize)]
+pub struct HistoryPageWire {
+    pub items: Vec<ItemWire>,
+    /// Index of `items[0]` in the whole conversation; 0 means this is the beginning.
+    pub start: usize,
+}
+
+impl HistoryPageWire {
+    pub fn new((items, start): (Vec<CoreItemWire>, usize)) -> Self {
+        Self {
+            items: items.into_iter().map(ItemWire::from).collect(),
+            start,
         }
     }
 }

@@ -12,10 +12,13 @@ import {
 export type { ConversationItem };
 
 const MAIN_SESSION = "main";
+/** Items fetched on open and per scroll-up: enough to fill a phone screen a few times over. */
+export const PAGE_SIZE = 40;
 
 /**
- * The bot's one conversation: snapshot on open, then live events layered on top. Events older
- * than the snapshot's cursor are already in it and are skipped.
+ * The bot's one conversation: the newest page on open, then live events layered on top. Events
+ * older than the snapshot's cursor are already in it and are skipped. Older pages are fetched on
+ * demand (`loadOlder`) as the user scrolls up.
  */
 export function useConversation(bot: string, onTurnFinished?: () => void) {
   const [items, setItems] = useState<ConversationItem[]>([]);
@@ -25,6 +28,12 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
   const running = outstanding > 0;
   const [loaded, setLoaded] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // Index of `items[0]` in the whole conversation: above 0, older items wait on the server.
+  const [start, setStart] = useState(0);
+  const [loadingOlder, setLoadingOlder] = useState(false);
+  // Bumped on every (re)load, so a page that arrives after a reload is dropped, not prepended.
+  const generation = useRef(0);
+  const olderInFlight = useRef(false);
   const cursor = useRef<number | null>(null);
   const reload = useRef<() => Promise<void>>(async () => undefined);
   const buffered = useRef<AgentEvent[]>([]);
@@ -36,6 +45,7 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
     cursor.current = null;
     buffered.current = [];
     setItems([]);
+    setStart(0);
     setLoaded(false);
     setError(null);
 
@@ -47,12 +57,16 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
       }
     };
 
-    const load = () =>
-      api
-        .subscribe(bot)
+    const load = () => {
+      generation.current += 1;
+      olderInFlight.current = false;
+      setLoadingOlder(false);
+      return api
+        .subscribe(bot, PAGE_SIZE)
         .then((snapshot) => {
           if (cancelled) return;
           setItems(fromSnapshot(snapshot.items, snapshot.running));
+          setStart(snapshot.start);
           setOutstanding(snapshot.running ? 1 : 0);
           cursor.current = snapshot.sequence;
           setLoaded(true);
@@ -66,6 +80,7 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
           setError(reason instanceof Error ? reason.message : String(reason));
           setLoaded(true);
         });
+    };
 
     const stop = onAgentEvent((event) => {
       if (cancelled) return;
@@ -115,6 +130,27 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
     [bot],
   );
 
+  /** Fetch the page before the oldest item shown and put it on top. */
+  const loadOlder = useCallback(async () => {
+    if (start <= 0 || olderInFlight.current) return;
+    olderInFlight.current = true;
+    setLoadingOlder(true);
+    const asked = generation.current;
+    try {
+      const page = await api.history(bot, start, PAGE_SIZE);
+      if (asked !== generation.current) return;
+      setItems((current) => [...fromSnapshot(page.items), ...current]);
+      setStart(page.start);
+    } catch {
+      // Leave `start` as it is: the next scroll to the top asks again.
+    } finally {
+      if (asked === generation.current) {
+        olderInFlight.current = false;
+        setLoadingOlder(false);
+      }
+    }
+  }, [bot, start]);
+
   const cancel = useCallback(() => api.cancel(bot).catch(() => undefined), [bot]);
 
   /** Take back the latest message (stopping its reply); resolves to its text, to edit. */
@@ -130,5 +166,18 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
     setItems((current) => [...current, { kind: "message", role: "error", content: message, parts: [] }]);
   }, []);
 
-  return { items, running, loaded, error, send, cancel, recall, report };
+  return {
+    items,
+    running,
+    loaded,
+    error,
+    send,
+    cancel,
+    recall,
+    report,
+    start,
+    hasOlder: start > 0,
+    loadingOlder,
+    loadOlder,
+  };
 }

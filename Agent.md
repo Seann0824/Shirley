@@ -133,8 +133,9 @@ The home composer asks `agent_route` which bot should hear the message, then ope
 | Command | Purpose |
 | --- | --- |
 | `agent_list_bots`, `agent_create_bot` | The bot catalog |
-| `agent_subscribe {bot}` | Snapshot of the conversation + the event cursor (`sequence`) |
-| `agent_send {bot, text, images?}`, `agent_cancel {bot}` | Drive a turn |
+| `agent_subscribe {bot, limit?}` | The newest `limit` items of the conversation (all when omitted), their index `start`, and the event cursor (`sequence`) |
+| `agent_history {bot, before, limit?}` | Older items, for scrolling up: up to `limit` (default 40) before index `before` |
+| `agent_send {bot, text, images?, sentAt?, tzOffset?}`, `agent_cancel {bot}` | Drive a turn; the model sees a `[sent …]` line in the sender's timezone, the chat does not |
 | `agent_route {text}` | Which bot should hear a message (home screen) |
 | `agent_pool_list`, `agent_pool_enqueue {brief, bot?}`, `agent_pool_note {id, note}`, `agent_pool_accept/reject/retry/cancel/remove {id}` | The task pool (tasks are normally created by a bot's `dispatch_task`) |
 | `agent_memory_list {bot}` | Entries the bot sees, tagged `shared` / `bot` |

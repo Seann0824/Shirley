@@ -128,7 +128,8 @@ pub fn parts_from_tool_value(value: Option<&serde_json::Value>) -> Vec<RenderPar
 ///
 /// A turn with attachments carries one `[name · mime · size · id=…]` line per attachment after
 /// the typed text (`runtime::user_content`). Those lines are for the model, which needs the id;
-/// the person already sees the attachment as a card, so they are dropped here.
+/// the person already sees the attachment as a card, so they are dropped here, as is the
+/// `[sent …]` timestamp line (`runtime::sent_line`).
 #[must_use]
 pub fn user_display_text(content: &MessageContent) -> String {
     let text = content.as_text();
@@ -136,7 +137,9 @@ pub fn user_display_text(content: &MessageContent) -> String {
         .lines()
         .filter(|line| {
             let line = line.trim();
-            !(line.starts_with('[') && line.ends_with(']') && line.contains(" · id="))
+            let attachment = line.starts_with('[') && line.ends_with(']') && line.contains(" · id=");
+            let stamp = line.starts_with(super::runtime::SENT_PREFIX) && line.ends_with(']');
+            !(attachment || stamp)
         })
         .collect();
     kept.join("\n").trim_end().to_owned()
@@ -267,6 +270,13 @@ mod tests {
         // Ordinary bracketed text the person typed is kept.
         let typed = MessageContent::text("[TODO] 明天 · 记得发周报");
         assert_eq!(user_display_text(&typed), "[TODO] 明天 · 记得发周报");
+    }
+
+    #[test]
+    fn the_sent_timestamp_is_for_the_model_not_the_bubble() {
+        let content =
+            MessageContent::text("今天几号？\n\n[sent 2026-11-19 11:21 Thu UTC+08:00]\n[a.png · image/png · 1 KB · id=x.png]");
+        assert_eq!(user_display_text(&content), "今天几号？");
     }
 
     #[test]

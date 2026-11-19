@@ -52,6 +52,9 @@ use super::wire::{AgentEventWire, StateSnapshotWire};
 use crate::bootstrap::AgentFactory;
 
 const EVENT_CHANNEL_CAPACITY: usize = 256;
+/// Default and largest page `agent_history` returns.
+const HISTORY_PAGE: usize = 40;
+const MAX_HISTORY_PAGE: usize = 200;
 
 // ---------------------------------------------------------------------------
 // State
@@ -394,6 +397,16 @@ struct CmdArgs {
     /// Task-pool instruction (`agent_pool_enqueue`). `text` is accepted as an alias, so the chat
     /// box can drop work into the queue without knowing two field names.
     brief: Option<String>,
+    /// `agent_subscribe` / `agent_history`: how many view items to return (the newest ones).
+    limit: Option<usize>,
+    /// `agent_history`: return items before this index (the `start` the client already has).
+    before: Option<usize>,
+    /// `agent_send`: when the message was sent (ms since the epoch) and the sender's UTC offset in
+    /// minutes, so the timestamp the bot sees is in the user's own time.
+    #[serde(rename = "sentAt")]
+    sent_at: Option<i64>,
+    #[serde(rename = "tzOffset")]
+    tz_offset: Option<i32>,
     /// Rejection note (`agent_pool_reject`).
     note: Option<String>,
     /// Target workflow state (`agent_pool_transition`).
@@ -484,6 +497,7 @@ async fn dispatch(
         "agent_send" => {
             let bot = args.bot()?;
             let text = args.text.ok_or_else(|| ApiError::bad("missing text"))?;
+            let sent = super::runtime::sent_time(args.sent_at, args.tz_offset);
             manager
                 .send(
                     &bot,
@@ -491,6 +505,7 @@ async fn dispatch(
                     text,
                     args.references.unwrap_or_default(),
                     args.images.unwrap_or_default(),
+                    sent,
                 )
                 .await?;
             Ok(StatusCode::ACCEPTED.into_response())
@@ -516,13 +531,25 @@ async fn dispatch(
             // snapshot lands, so a snapshot under the session lock is enough. We drop the
             // per-session receiver — SSE does not need the desktop pump channel.
             let (_rx, snapshot, cursor) = manager
-                .subscribe_with_cursor(&bot, &session, || state.sequence.load(Ordering::SeqCst))
+                .subscribe_with_cursor(&bot, &session, args.limit, || {
+                    state.sequence.load(Ordering::SeqCst)
+                })
                 .await?;
             let mut value =
                 serde_json::to_value(snapshot).map_err(|e| ApiError::internal(e.to_string()))?;
             value["sequence"] = cursor.into();
             ok_json(value)
         }
+        // Older items of a conversation, for scrolling up: `before` is the `start` the client
+        // already has.
+        "agent_history" => {
+            let bot = args.bot()?;
+            let session = args.session();
+            let before = args.before.ok_or_else(|| ApiError::bad("missing before"))?;
+            let limit = args.limit.unwrap_or(HISTORY_PAGE).min(MAX_HISTORY_PAGE);
+            ok_json(manager.history(&bot, &session, before, limit).await?)
+        }
+
         // -- model -------------------------------------------------------------------
         "agent_model_name" => {
             let bot = args.bot()?;

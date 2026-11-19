@@ -9,6 +9,7 @@ import type {
   LibraryEntry,
   MemoryEntry,
   PoolTask,
+  HistoryPage,
   SessionSnapshot,
   TaskStatus,
   SkillMarket,
@@ -150,9 +151,20 @@ export const api = {
   skillMarket: (bot: string) => cmd<SkillMarket>("agent_skill_market", { bot }),
   installSkill: (bot: string, id: string) => cmd<void>("agent_skill_install", { bot, id }),
   uninstallSkill: (bot: string, id: string) => cmd<void>("agent_skill_uninstall", { bot, id }),
-  subscribe: (bot: string) => cmd<SessionSnapshot>("agent_subscribe", { bot }),
+  /** The conversation's newest `limit` items plus the event cursor. */
+  subscribe: (bot: string, limit?: number) => cmd<SessionSnapshot>("agent_subscribe", { bot, limit }),
+  /** Up to `limit` items before index `before`, for scrolling up. */
+  history: (bot: string, before: number, limit?: number) =>
+    cmd<HistoryPage>("agent_history", { bot, before, limit }),
+  /** Carries the phone's clock and timezone, so the bot knows when (in the user's time) it was said. */
   send: (bot: string, text: string, images: string[] = []) =>
-    cmd<void>("agent_send", { bot, text, images }),
+    cmd<void>("agent_send", {
+      bot,
+      text,
+      images,
+      sentAt: Date.now(),
+      tzOffset: -new Date().getTimezoneOffset(),
+    }),
   /** Take back the latest message; returns its text to edit. */
   recall: (bot: string) => cmd<{ text: string }>("agent_recall", { bot }),
   cancel: (bot: string) => cmd<void>("agent_cancel", { bot }),

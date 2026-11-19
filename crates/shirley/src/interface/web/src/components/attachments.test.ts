@@ -162,4 +162,15 @@ describe("uploadAll", () => {
     expect(entries.map((item) => item.id)).toEqual(["id-a"]);
     expect(failed).toEqual(["b.png"]);
   });
+
+  it("uploads what the prepare step hands back", async () => {
+    const [photo] = filesToAttachments([file("photo.jpg", "image/jpeg")]);
+    const smaller = file("photo.webp", "image/webp", 100);
+    const { entries } = await uploadAll(
+      [photo],
+      async (picked) => ({ id: "id", name: picked.name, mime: picked.type, bytes: picked.size, addedMs: 0 }),
+      async () => smaller,
+    );
+    expect(entries[0]).toMatchObject({ name: "photo.webp", mime: "image/webp", bytes: 100 });
+  });
 });

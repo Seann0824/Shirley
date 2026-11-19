@@ -425,12 +425,15 @@ impl Session {
         self.status.end_turn();
     }
 
-    /// Current view snapshot: exports rebuildable plain data in UI item order (`Item` -> [`ItemWire`]).
+    /// View snapshot as rebuildable plain data in UI item order (`Item` -> [`ItemWire`]): the UI
+    /// takes one on open, then overlays subsequent events.
     ///
-    /// When the UI subscribes to a session that is **already running / has accumulated history**, it first takes a snapshot to rebuild the view, then overlays
-    /// subsequent events -- avoiding "switching back shows a blank with only the increment".
-    pub fn snapshot(&self) -> Vec<ItemWire> {
-        self.items.iter().map(ItemWire::from_item).collect()
+    /// Up to `limit` view items ending just before index `before` (the newest when `None`), and
+    /// the index of the first one returned -- one page of the conversation, oldest first.
+    pub fn page(&self, before: Option<usize>, limit: usize) -> (Vec<ItemWire>, usize) {
+        let end = before.unwrap_or(self.items.len()).min(self.items.len());
+        let start = end.saturating_sub(limit);
+        (self.items[start..end].iter().map(ItemWire::from_item).collect(), start)
     }
 
     /// Rebuild view items from the current `Agent`'s message list (called after a session is loaded from disk).
@@ -995,9 +998,9 @@ impl SessionManager {
         self.session(name).map(Session::subscribe)
     }
 
-    /// View snapshot of the session named `name` (returns `None` if the session does not exist).
-    pub fn snapshot(&self, name: &str) -> Option<Vec<ItemWire>> {
-        self.session(name).map(Session::snapshot)
+    /// One page of the session named `name` ([`Session::page`]); `None` if it does not exist.
+    pub fn page(&self, name: &str, before: Option<usize>, limit: usize) -> Option<(Vec<ItemWire>, usize)> {
+        self.session(name).map(|session| session.page(before, limit))
     }
 
     /// Start a turn: move out the `Agent` of the session named `name`, and optimistically record the **user message** into that session's
@@ -1337,6 +1340,35 @@ mod tests {
     /// `begin_turn` is exactly for this. Previously desktop's `agent_send` did not record it, the snapshot had no
     /// user message, and it "disappeared" on switch-back.
     #[test]
+    fn pages_walk_back_from_the_newest_items() {
+        let mut manager = manager();
+        let session = manager.session_mut("s").unwrap();
+        for index in 0..5 {
+            session.items.push(Item::Message(ChatMessage {
+                role: Role::User,
+                content: format!("m{index}"),
+                parts: Vec::new(),
+            }));
+        }
+        let text = |items: &[ItemWire]| -> Vec<String> {
+            items
+                .iter()
+                .map(|item| match item {
+                    ItemWire::Message { content, .. } => content.clone(),
+                    other => panic!("unexpected {other:?}"),
+                })
+                .collect()
+        };
+        let (newest, start) = manager.page("s", None, 2).unwrap();
+        assert_eq!((text(&newest), start), (vec!["m3".to_owned(), "m4".to_owned()], 3));
+        let (older, start) = manager.page("s", Some(start), 2).unwrap();
+        assert_eq!((text(&older), start), (vec!["m1".to_owned(), "m2".to_owned()], 1));
+        let (first, start) = manager.page("s", Some(start), 2).unwrap();
+        assert_eq!((text(&first), start), (vec!["m0".to_owned()], 0));
+        assert!(manager.page("s", Some(0), 2).unwrap().0.is_empty());
+    }
+
+    #[test]
     fn begin_turn_records_user_message_into_snapshot() {
         let mut manager = manager();
         let agent = manager.begin_turn("s", "hello".into(), Vec::new());
@@ -1349,7 +1381,8 @@ mod tests {
             "the session should be marked running after the Agent is taken"
         );
 
-        let snapshot = manager.snapshot("s").unwrap();
+        let (snapshot, start) = manager.page("s", None, usize::MAX).unwrap();
+        assert_eq!(start, 0);
         assert_eq!(
             snapshot.len(),
             1,

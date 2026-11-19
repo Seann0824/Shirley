@@ -1,4 +1,5 @@
 import type { LibraryEntry, RenderPart } from "../api/types";
+import { compressImage } from "./compress";
 
 /** Attachment model shared by the composer, the preview tray and the chat view. */
 export interface Attachment {
@@ -104,16 +105,20 @@ export function userMessageParts(attachments: Attachment[]): RenderPart[] {
   );
 }
 
-/** Upload every attachment to `bot`'s media library. Failures are returned by name, not thrown. */
+/**
+ * Upload every attachment to `bot`'s media library, pictures shrunk to WebP first (`prepare`).
+ * Failures are returned by name, not thrown.
+ */
 export async function uploadAll(
   attachments: Attachment[],
   upload: (file: File) => Promise<LibraryEntry>,
+  prepare: (file: File) => Promise<File> = compressImage,
 ): Promise<{ entries: LibraryEntry[]; failed: string[] }> {
   const entries: LibraryEntry[] = [];
   const failed: string[] = [];
   for (const attachment of attachments) {
     try {
-      entries.push(await upload(attachment.file));
+      entries.push(await upload(await prepare(attachment.file)));
     } catch {
       failed.push(attachment.name);
     }

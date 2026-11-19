@@ -111,9 +111,19 @@ export type ItemWire =
 
 export interface SessionSnapshot {
   session: string;
+  /** The newest items, oldest first. */
   items: ItemWire[];
+  /** Index of `items[0]` in the whole conversation; above 0 means older items can be fetched. */
+  start: number;
   running: boolean;
   sequence: number;
+}
+
+/** An older page of a conversation (`agent_history`), oldest first. */
+export interface HistoryPage {
+  items: ItemWire[];
+  /** Index of `items[0]`; 0 means the conversation's beginning has been reached. */
+  start: number;
 }
 
 interface Routed {

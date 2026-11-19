@@ -104,6 +104,9 @@ function ToolActivity({ bot, calls, settled }: { bot: string; calls: ToolCallWir
   );
 }
 
+/** Within this many pixels of the top, the page before the oldest message is fetched. */
+const OLDER_THRESHOLD = 240;
+
 /** Silence longer than this is worth saying out loud; longer still, the turn may be stuck. */
 const QUIET_SECONDS = 20;
 const STUCK_SECONDS = 120;
@@ -383,19 +386,43 @@ export function Chat({
   // The conversation opens at its latest message and stays pinned there while it grows (new
   // tokens, images and cards loading), unless the user has scrolled up to read.
   const pinned = useRef(true);
+  // Distance from the bottom, saved just before older items are put on top, so the message the
+  // user was reading stays where it was instead of jumping down by a page.
+  const anchor = useRef<number | null>(null);
   const toBottom = () => {
     const el = scrollRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   };
+  // Scrolling near the top asks for the page before the oldest item shown.
+  const olderRef = useRef(conversation.loadOlder);
+  olderRef.current = conversation.loadOlder;
+  const canLoadOlder = conversation.loaded && conversation.hasOlder && !conversation.loadingOlder;
+  const canLoadOlderRef = useRef(canLoadOlder);
+  canLoadOlderRef.current = canLoadOlder;
+  const maybeLoadOlder = () => {
+    const el = scrollRef.current;
+    if (!el || !canLoadOlderRef.current || el.scrollTop > OLDER_THRESHOLD) return;
+    anchor.current = el.scrollHeight - el.scrollTop;
+    void olderRef.current();
+  };
   useLayoutEffect(() => {
-    if (pinned.current) toBottom();
-  }, [conversation.items, conversation.loaded]);
+    const el = scrollRef.current;
+    if (el && anchor.current !== null && !conversation.loadingOlder) {
+      el.scrollTop = el.scrollHeight - anchor.current;
+      anchor.current = null;
+    } else if (pinned.current) {
+      toBottom();
+    }
+    // A first page shorter than the screen cannot be scrolled; fetch more until it can.
+    if (el && canLoadOlder && el.scrollHeight <= el.clientHeight) maybeLoadOlder();
+  }, [conversation.items, conversation.loaded, conversation.loadingOlder]);
   useEffect(() => {
     const el = scrollRef.current;
     const content = el?.firstElementChild;
     if (!el || !content) return;
     const onScroll = () => {
       pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80;
+      maybeLoadOlder();
     };
     const observer = new ResizeObserver(() => {
       if (pinned.current) toBottom();
@@ -472,6 +499,7 @@ export function Chat({
       <div className="conversation" ref={scrollRef}>
         {
           <div className="message-thread">
+            {conversation.loadingOlder && <div className="system-line older-loading">加载更早的消息…</div>}
             {conversation.error && <p className="error-note">{conversation.error}</p>}
             {conversation.loaded && items.length === 0 && (
               <div className="message-row bot-message">
@@ -484,7 +512,8 @@ export function Chat({
               </div>
             )}
             {items.map((item, index) => (
-              <Fragment key={index}>
+              // Keyed by position in the whole conversation, so a page put on top remounts nothing.
+              <Fragment key={conversation.start + index}>
               <Item
                 bot={bot}
                 item={item}

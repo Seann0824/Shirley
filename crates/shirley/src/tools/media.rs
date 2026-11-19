@@ -5,6 +5,9 @@
 //! at -- and a message carries only a handle. This tool is how the model **decides** what to do
 //! with a resource: see what is there, ask what one is, or read it.
 //!
+//! Every entry here is already in the conversation (the user sent it, or a tool produced it), so
+//! results carry no `parts`: reading a picture must not draw it into the chat a second time.
+//!
 //! "Read" means something different per medium, and the tool says so honestly instead of
 //! pretending:
 //!
@@ -22,9 +25,7 @@ use std::io::Read as _;
 
 use shirley_agent_sdk::{Tool, ToolContext, ToolDefinition, ToolError, ToolFuture};
 
-use crate::artifact::{
-    Artifact, ArtifactStore, LibraryEntry, human_bytes, is_inline_image, is_textual, part_for,
-};
+use crate::artifact::{ArtifactStore, human_bytes, is_inline_image, is_textual};
 
 /// Default number of library entries listed.
 const DEFAULT_LIMIT: usize = 20;
@@ -125,7 +126,6 @@ impl MediaTool {
     fn info(&self, id: &str) -> Result<serde_json::Value, ToolError> {
         let entry = self.lookup(id)?;
         Ok(serde_json::json!({
-            "parts": [part_for_entry(&entry)],
             "content": format!(
                 "{}\nid: {}\nmime: {}\nsize: {} ({} bytes)\nadded: {}\nreadable: {}",
                 entry.name,
@@ -159,18 +159,14 @@ impl MediaTool {
                 entry.mime,
                 human_bytes(entry.bytes)
             );
-            // Two audiences, one value: `content` is what the model reads (it becomes an image
-            // part in the tool message, and the SDK resolves the library id to a `data:` URL when
-            // the request is assembled -- so no base64 reaches the session log), while `parts` is
-            // what the UI draws (the same card the user saw when they sent it). Keeping both in
-            // the envelope is what lets a tool result be *shown* instead of only described.
+            // `content` becomes an image part in the tool message; the SDK resolves the library
+            // id to a `data:` URL when the request is assembled, so no base64 reaches the log.
             return Ok(serde_json::json!({
                 "content": [
                     { "type": "text", "text": label },
                     { "type": "image", "source": { "kind": "file_id", "file_id": entry.id } }
                 ],
-                "parts": [part_for_entry(&entry)],
-            }));
+                }));
         }
 
         if is_textual(entry.mime) {
@@ -195,12 +191,10 @@ impl MediaTool {
             }
             return Ok(serde_json::json!({
                 "content": content,
-                "parts": [part_for_entry(&entry)],
-            }));
+                }));
         }
 
         Ok(serde_json::json!({
-            "parts": [part_for_entry(&entry)],
             "content": format!(
                 "{} is {} ({}). It is stored and the user can open it, but you cannot read its \
                  contents here: only text-like files and images can be read. If you need what is \
@@ -228,22 +222,6 @@ impl MediaTool {
             Action::Read => self.read(&required_id(args.id)?),
         }
     }
-}
-
-/// The `RenderPart` for one library entry.
-///
-/// Reuses [`part_for`] -- the single place that decides "image card vs file card" -- so a media
-/// tool result and a tool-produced artifact never render differently for the same medium.
-fn part_for_entry(entry: &LibraryEntry) -> serde_json::Value {
-    part_for(
-        &Artifact {
-            id: entry.id.clone(),
-            mime: entry.mime,
-            bytes: entry.bytes,
-        },
-        &entry.name,
-        entry.bytes,
-    )
 }
 
 fn required_id(id: Option<String>) -> Result<String, ToolError> {
@@ -344,11 +322,8 @@ mod tests {
         assert_eq!(content[1]["type"], "image");
         assert_eq!(content[1]["source"]["kind"], "file_id");
         assert_eq!(content[1]["source"]["file_id"], entry.id.as_str());
-        // `parts` is the UI-facing payload: the same card the user saw when sending it.
-        let parts = value["parts"].as_array().expect("array of render parts");
-        assert_eq!(parts[0]["kind"], "image");
-        assert_eq!(parts[0]["source"]["kind"], "artifact");
-        assert_eq!(parts[0]["source"]["id"], entry.id.as_str());
+        // The picture is already in the chat: reading it draws nothing new.
+        assert!(value.get("parts").is_none(), "got {value}");
         assert!(!value.to_string().contains("base64"));
         let _ = fs::remove_dir_all(dir);
     }

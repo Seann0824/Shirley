@@ -30,7 +30,7 @@ use shirley_agent_sdk::{
 use crate::artifact::{ArtifactStore, LibraryEntry, human_bytes};
 use tokio::sync::{Mutex, broadcast, oneshot};
 
-use super::wire::{AgentEventWire, SessionSnapshotWire, StateSnapshotWire, TaskViewWire};
+use super::wire::{AgentEventWire, HistoryPageWire, SessionSnapshotWire, StateSnapshotWire, TaskViewWire};
 use crate::bootstrap::AgentFactory;
 use crate::interface::session::SessionManager;
 use crate::session::{
@@ -238,6 +238,7 @@ impl BotRuntimeManager {
         text: String,
         references: Vec<String>,
         images: Vec<String>,
+        sent: chrono::DateTime<chrono::FixedOffset>,
     ) -> Result<(), String> {
         let runtime = self.ensure_runtime(bot).await?;
         let (store, session) = {
@@ -256,7 +257,7 @@ impl BotRuntimeManager {
         // cuts in: what was said so far stays in the conversation, then the new message is
         // answered.
         self.interrupt(bot, &runtime, &session).await?;
-        let prompt = compose_prompt(&text, &references);
+        let prompt = format!("{}\n\n{}", compose_prompt(&text, &references), sent_line(sent));
         let user_content = user_content(&store, &prompt, &images);
         self.spawn_turn(bot, Some(session), text, user_content).await
     }
@@ -507,6 +508,7 @@ impl BotRuntimeManager {
         &self,
         bot: &str,
         session: &str,
+        limit: Option<usize>,
         cursor: impl FnOnce() -> u64,
     ) -> Result<
         (
@@ -522,17 +524,34 @@ impl BotRuntimeManager {
             .sessions
             .subscribe(session)
             .ok_or_else(|| format!("session not found: {session}"))?;
-        let items = guard
+        let page = guard
             .sessions
-            .snapshot(session)
+            .page(session, None, limit.unwrap_or(usize::MAX))
             .ok_or_else(|| format!("session not found: {session}"))?;
         let running = guard.sessions.is_running(session);
         let todo = guard
             .sessions
             .session(session)
             .and_then(super::session::Session::todo_view);
-        let snapshot = SessionSnapshotWire::new(session.to_owned(), items, running, todo);
+        let snapshot = SessionSnapshotWire::new(session.to_owned(), page, running, todo);
         Ok((rx, snapshot, cursor()))
+    }
+
+    /// Up to `limit` view items before index `before`: scrolling up through a conversation.
+    pub async fn history(
+        &self,
+        bot: &str,
+        session: &str,
+        before: usize,
+        limit: usize,
+    ) -> Result<HistoryPageWire, String> {
+        let runtime = self.ensure_runtime(bot).await?;
+        let guard = runtime.lock().await;
+        guard
+            .sessions
+            .page(session, Some(before), limit)
+            .map(HistoryPageWire::new)
+            .ok_or_else(|| format!("session not found: {session}"))
     }
 
     // -----------------------------------------------------------------------
@@ -1000,6 +1019,34 @@ impl MemoryEntryWire {
 // Prompt / history helpers
 // ---------------------------------------------------------------------------
 
+/// When a message was sent, in the sender's timezone: the client's clock and UTC offset when it
+/// gave them (and they are sane), else this server's clock and timezone.
+#[must_use]
+pub fn sent_time(sent_at_ms: Option<i64>, tz_offset_minutes: Option<i32>) -> chrono::DateTime<chrono::FixedOffset> {
+    let offset = tz_offset_minutes
+        .and_then(|minutes| chrono::FixedOffset::east_opt(minutes.checked_mul(60)?));
+    let at = sent_at_ms.and_then(chrono::DateTime::from_timestamp_millis);
+    match (at, offset) {
+        (Some(at), Some(offset)) => at.with_timezone(&offset),
+        (at, _) => {
+            let local = chrono::Local::now();
+            at.map_or_else(|| local.fixed_offset(), |at| at.with_timezone(local.offset()))
+        }
+    }
+}
+
+/// The line that tells the model when a message was sent, e.g. `[sent 2026-11-19 11:21 Thu UTC+08:00]`.
+///
+/// It goes after the text (the human's words come first) and is dropped from what the chat shows
+/// (`view::user_display_text`).
+#[must_use]
+pub fn sent_line(sent: chrono::DateTime<chrono::FixedOffset>) -> String {
+    format!("{SENT_PREFIX}{}]", sent.format("%Y-%m-%d %H:%M %a UTC%:z"))
+}
+
+/// Start of the [`sent_line`]; the view recognises the line by it.
+pub const SENT_PREFIX: &str = "[sent ";
+
 pub fn compose_prompt(text: &str, references: &[String]) -> String {
     if references.is_empty() {
         return text.to_owned();
@@ -1075,6 +1122,21 @@ mod route;
 #[cfg(test)]
 mod tests {
 
+    #[test]
+    fn a_message_is_stamped_in_the_senders_timezone() {
+        // 2026-11-19 03:21:00 UTC, sent from UTC+08:00.
+        let sent = sent_time(Some(1_795_058_460_000), Some(480));
+        assert_eq!(sent_line(sent), "[sent 2026-11-19 11:21 Thu UTC+08:00]");
+    }
+
+    #[test]
+    fn a_missing_or_absurd_client_clock_falls_back_to_the_server() {
+        let before = chrono::Utc::now().timestamp();
+        assert!(sent_time(None, None).timestamp() >= before);
+        // An offset beyond ±24h is not a timezone; the instant is kept, in the server's zone.
+        let sent = sent_time(Some(1_795_058_460_000), Some(100_000));
+        assert_eq!(sent.timestamp(), 1_795_058_460);
+    }
     use super::*;
 
     fn fixture(tag: &str) -> (std::path::PathBuf, ArtifactStore) {
