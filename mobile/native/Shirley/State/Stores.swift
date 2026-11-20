@@ -32,6 +32,7 @@ final class BotsStore {
     func refresh() async {
         do {
             bots = try await API.listBots()
+            Replying.shared.fromList(bots)
             error = nil
         } catch {
             self.error = error.localizedDescription
@@ -64,6 +65,44 @@ final class BotsStore {
     private func save() {
         if let data = try? JSONEncoder().encode(Prefs(pinned: pinned, muted: muted)) {
             UserDefaults.standard.set(data, forKey: Self.prefsKey)
+        }
+    }
+}
+
+/// Which bots are answering in their conversation right now (`state/replying.ts`): the server's
+/// bot list says so when it loads, the event stream keeps it current in between.
+@MainActor
+@Observable
+final class Replying {
+    static let shared = Replying()
+
+    private(set) var bots: Set<String> = []
+
+    /// Events that only happen while a turn runs.
+    private static let live: Set<String> = [
+        "message_added", "content_delta", "tool_started", "tool_finished", "retrying", "compaction_started",
+    ]
+
+    func fromList(_ list: [Bot]) {
+        bots = Set(list.filter(\.running).map(\.name))
+    }
+
+    /// A message just went out: the reply has started, even before its first word arrives.
+    func mark(_ bot: String) {
+        bots.insert(bot)
+    }
+
+    /// The server says the bot is not answering (its `finished` may never have arrived here).
+    func idle(_ bot: String) {
+        bots.remove(bot)
+    }
+
+    func note(_ event: AgentEvent) {
+        guard let bot = event.bot, (event.session ?? "main") == "main" else { return }
+        if event.type == "finished" || event.type == "error" {
+            idle(bot)
+        } else if Self.live.contains(event.type) {
+            mark(bot)
         }
     }
 }

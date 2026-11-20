@@ -125,6 +125,11 @@ enum Conversation {
 final class ConversationStore {
     static let pageSize = 40
     private static let mainSession = "main"
+    /// While a reply runs and nothing has arrived for this long, ask the server where things
+    /// stand: a stream a proxy held back, or that dropped an event, still ends right.
+    static let quietCheck: TimeInterval = 15
+    /// What each conversation last showed, so reopening it is instant while it refreshes.
+    private static var shown: [String: (items: [ConversationItem], start: Int)] = [:]
 
     let bot: String
     private(set) var items: [ConversationItem] = []
@@ -143,10 +148,16 @@ final class ConversationStore {
     @ObservationIgnored private var cursor: Int?
     @ObservationIgnored private var buffered: [AgentEvent] = []
     @ObservationIgnored private var generation = 0
+    @ObservationIgnored private var lastEvent = Date()
     @ObservationIgnored var onTurnFinished: (() -> Void)?
 
     init(bot: String) {
         self.bot = bot
+        // The last copy, until the fresh one lands: no blank page when switching back.
+        if let cached = Self.shown[bot] {
+            items = cached.items
+            start = cached.start
+        }
     }
 
     /// Listen and load; runs until the view goes away (the calling task is cancelled).
@@ -154,12 +165,20 @@ final class ConversationStore {
         let listener = EventHub.shared.add { [weak self] event in self?.receive(event) }
         await load()
         while !Task.isCancelled {
-            try? await Task.sleep(nanoseconds: 3_600_000_000_000)
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+            // A reply that has gone quiet: check with the server instead of guessing.
+            if running && Date().timeIntervalSince(lastEvent) >= Self.quietCheck {
+                lastEvent = Date()
+                cursor = nil
+                await load()
+            }
+            if loaded { Self.shown[bot] = (items, start) }
         }
         EventHub.shared.remove(listener)
     }
 
     private func apply(_ event: AgentEvent) {
+        lastEvent = Date()
         items = Conversation.reduce(items, event)
         if event.type == "finished" || event.type == "error" {
             outstanding = max(0, outstanding - 1)
@@ -190,6 +209,8 @@ final class ConversationStore {
             items = Conversation.fromSnapshot(snapshot.items, running: snapshot.running)
             start = snapshot.start
             outstanding = snapshot.running ? 1 : 0
+            if !snapshot.running { Replying.shared.idle(bot) }
+            lastEvent = Date()
             cursor = snapshot.sequence
             loaded = true
             error = nil
@@ -207,6 +228,8 @@ final class ConversationStore {
     func send(_ text: String, images: [String], parts: [RenderPart]) async {
         items = Conversation.appendUser(items, content: text, parts: parts)
         outstanding += 1
+        lastEvent = Date()
+        Replying.shared.mark(bot)
         do {
             // The bubble matches what was typed; the wire still needs something to answer.
             let wire = text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !images.isEmpty ? "请处理这些附件" : text

@@ -7,6 +7,8 @@ export interface Bot {
   tools: string[];
   skills: string[];
   persona: string | null;
+  /** Answering in its conversation right now (absent from older servers). */
+  running?: boolean;
 }
 
 export type TaskStatus =

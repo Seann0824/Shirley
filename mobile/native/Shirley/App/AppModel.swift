@@ -127,6 +127,11 @@ final class AppModel {
     }
 
     private func watch(_ event: AgentEvent) {
+        if event.type == "resync" {
+            Task { await bots.refresh() }
+        } else {
+            Replying.shared.note(event)
+        }
         let looking: (String) -> Bool = { [weak self] bot in
             guard let self else { return false }
             return self.active && self.currentChat == bot

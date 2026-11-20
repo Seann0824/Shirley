@@ -36,13 +36,12 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::body::Bytes;
 use axum::extract::{DefaultBodyLimit, Path, Request, State};
-use axum::http::StatusCode;
+use axum::http::{StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::stream::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::broadcast;
 use tower_http::services::{ServeDir, ServeFile};
@@ -445,6 +444,8 @@ struct BotWire {
     tools: Vec<String>,
     skills: Vec<String>,
     persona: Option<String>,
+    /// Answering in its conversation right now, so the list can say so without opening it.
+    running: bool,
 }
 
 /// Single command endpoint: `POST /api/cmd/{name}` with a JSON args body. `name` is one
@@ -461,22 +462,41 @@ async fn dispatch(
     } else {
         serde_json::from_slice(&body).map_err(|e| ApiError::bad(format!("bad args: {e}")))?
     };
+    let bot = args.bot.clone().unwrap_or_default();
+    let started = std::time::Instant::now();
+    let result = run_command(&state, &cmd, args).await;
+    // Reads the screen waits on should take milliseconds; a slow one is worth a line in the log.
+    let elapsed = started.elapsed();
+    if elapsed >= SLOW_COMMAND && !SLOW_BY_NATURE.contains(&cmd.as_str()) {
+        eprintln!("[server] slow command {cmd} (bot `{bot}`): {} ms", elapsed.as_millis());
+    }
+    result
+}
+
+/// Above this a command the UI waits on is reported as slow.
+const SLOW_COMMAND: std::time::Duration = std::time::Duration::from_millis(800);
+
+/// Commands that call a model or another service: seconds are normal for them.
+const SLOW_BY_NATURE: [&str; 4] = ["agent_route", "agent_design_bot", "agent_connect", "agent_skill_install"];
+
+async fn run_command(state: &Arc<ServerState>, cmd: &str, args: CmdArgs) -> Result<Response, ApiError> {
     let manager = &state.manager;
-    match cmd.as_str() {
+    match cmd {
         // -- bot management ----------------------------------------------------------
         "agent_list_bots" => {
             let bots_root = crate::storage::bots_root();
             let bots = crate::bot::BotSpec::list_all(&bots_root);
-            let wire: Vec<BotWire> = bots
-                .into_iter()
-                .map(|s| BotWire {
+            let mut wire: Vec<BotWire> = Vec::with_capacity(bots.len());
+            for s in bots {
+                wire.push(BotWire {
+                    running: manager.is_replying(&s.name).await,
                     tools: s.effective_tools(),
                     name: s.name,
                     display_name: s.display_name,
                     skills: s.skills,
                     persona: s.system_prompt_extra,
-                })
-                .collect();
+                });
+            }
             ok_json(wire)
         }
         // -- voice input -------------------------------------------------------------
@@ -1026,9 +1046,23 @@ async fn transcribe_handler(
     }
 }
 
+/// An event stream must reach the browser as it is written. A reverse proxy in front (nginx by
+/// default) buffers responses: events then arrive in late bursts -- a reply that does not stream,
+/// a turn that looks stuck, a conversation that only catches up when reopened. These headers turn
+/// that off whatever the proxy's own configuration says.
+fn streaming(sse: impl IntoResponse) -> impl IntoResponse {
+    (
+        [
+            (header::CACHE_CONTROL, "no-cache, no-transform"),
+            (header::HeaderName::from_static("x-accel-buffering"), "no"),
+        ],
+        sse,
+    )
+}
+
 async fn events_handler(
     State(state): State<Arc<ServerState>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> impl IntoResponse {
     let rx = state.events.subscribe();
     let stream = futures::stream::unfold(rx, |mut rx| async move {
         // Every branch returns, so a `loop` here would never actually loop (clippy::never_loop).
@@ -1043,7 +1077,7 @@ async fn events_handler(
             Err(broadcast::error::RecvError::Closed) => None,
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    streaming(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 /// Content-free runtime-status SSE stream (`/api/status`). Same shape as `events_handler`
@@ -1051,7 +1085,7 @@ async fn events_handler(
 /// client can subscribe to liveness/health without receiving any conversation content.
 async fn status_handler(
     State(state): State<Arc<ServerState>>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+) -> impl IntoResponse {
     let rx = state.status_events.subscribe();
     let stream = futures::stream::unfold(rx, |mut rx| async move {
         // A `Lagged` status receiver simply skips the missed snapshots: a status snapshot is a
@@ -1067,7 +1101,7 @@ async fn status_handler(
             }
         }
     });
-    Sse::new(stream).keep_alive(KeepAlive::default())
+    streaming(Sse::new(stream).keep_alive(KeepAlive::default()))
 }
 
 #[cfg(test)]

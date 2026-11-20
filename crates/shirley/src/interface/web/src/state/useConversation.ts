@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 
 import { api, onAgentEvent } from "../api/bridge";
 import type { AgentEvent, RenderPart } from "../api/types";
+import { markIdle, markReplying } from "./replying";
 import {
   appendUser,
   fromSnapshot,
@@ -14,6 +15,16 @@ export type { ConversationItem };
 const MAIN_SESSION = "main";
 /** Items fetched on open and per scroll-up: enough to fill a phone screen a few times over. */
 export const PAGE_SIZE = 40;
+
+/**
+ * While a reply runs and nothing has arrived for this long, the conversation asks the server
+ * where things stand. An event stream that a proxy holds back, or that dropped an event, then
+ * still ends with the right messages and a turn that is really over.
+ */
+export const QUIET_CHECK_MS = 15_000;
+
+/** What each conversation last showed, so reopening it is instant while it refreshes. */
+const shown = new Map<string, { items: ConversationItem[]; start: number }>();
 
 /**
  * The bot's one conversation: the newest page on open, then live events layered on top. Events
@@ -37,6 +48,7 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
   const cursor = useRef<number | null>(null);
   const reload = useRef<() => Promise<void>>(async () => undefined);
   const buffered = useRef<AgentEvent[]>([]);
+  const lastEvent = useRef(Date.now());
   const finishedCallback = useRef(onTurnFinished);
   finishedCallback.current = onTurnFinished;
 
@@ -44,12 +56,15 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
     let cancelled = false;
     cursor.current = null;
     buffered.current = [];
-    setItems([]);
-    setStart(0);
+    // The last copy, until the fresh one lands: no blank page when switching back.
+    const cached = shown.get(bot);
+    setItems(cached?.items ?? []);
+    setStart(cached?.start ?? 0);
     setLoaded(false);
     setError(null);
 
     const apply = (event: AgentEvent) => {
+      lastEvent.current = Date.now();
       setItems((current) => reduce(current, event));
       if (event.type === "finished" || event.type === "error") {
         setOutstanding((count) => Math.max(0, count - 1));
@@ -65,9 +80,11 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
         .subscribe(bot, PAGE_SIZE)
         .then((snapshot) => {
           if (cancelled) return;
+          lastEvent.current = Date.now();
           setItems(fromSnapshot(snapshot.items, snapshot.running));
           setStart(snapshot.start);
           setOutstanding(snapshot.running ? 1 : 0);
+          if (!snapshot.running) markIdle(bot);
           cursor.current = snapshot.sequence;
           setLoaded(true);
           for (const event of buffered.current) {
@@ -107,10 +124,30 @@ export function useConversation(bot: string, onTurnFinished?: () => void) {
     };
   }, [bot]);
 
+  // Remember what is on screen for the next visit.
+  useEffect(() => {
+    if (loaded) shown.set(bot, { items, start });
+  }, [bot, items, start, loaded]);
+
+  // A reply that has gone quiet: check with the server instead of guessing.
+  useEffect(() => {
+    if (!running) return;
+    const timer = window.setInterval(() => {
+      if (Date.now() - lastEvent.current >= QUIET_CHECK_MS) {
+        lastEvent.current = Date.now();
+        cursor.current = null;
+        void reload.current();
+      }
+    }, 5_000);
+    return () => window.clearInterval(timer);
+  }, [running]);
+
   const send = useCallback(
     async (text: string, images: string[] = [], parts: RenderPart[] = []) => {
       setItems((current) => appendUser(current, text, parts));
       setOutstanding((count) => count + 1);
+      lastEvent.current = Date.now();
+      markReplying(bot);
       try {
         // The bubble matched what was typed; the wire still needs something to answer.
         await api.send(bot, text.trim() || (images.length ? "请处理这些附件" : ""), images);

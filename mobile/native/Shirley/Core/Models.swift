@@ -9,11 +9,13 @@ struct Bot: Decodable, Identifiable, Hashable {
     let tools: [String]
     let skills: [String]
     let persona: String?
+    /// Answering in its conversation right now (absent from older servers).
+    let running: Bool
 
     var id: String { name }
 
     enum CodingKeys: String, CodingKey {
-        case name, tools, skills, persona
+        case name, tools, skills, persona, running
         case displayName = "display_name"
     }
 
@@ -24,6 +26,7 @@ struct Bot: Decodable, Identifiable, Hashable {
         tools = try c.decodeIfPresent([String].self, forKey: .tools) ?? []
         skills = try c.decodeIfPresent([String].self, forKey: .skills) ?? []
         persona = try c.decodeIfPresent(String.self, forKey: .persona)
+        running = try c.decodeIfPresent(Bool.self, forKey: .running) ?? false
     }
 }
 

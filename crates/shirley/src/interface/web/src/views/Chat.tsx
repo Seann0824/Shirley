@@ -107,9 +107,12 @@ function ToolActivity({ bot, calls, settled }: { bot: string; calls: ToolCallWir
 /** Within this many pixels of the top, the page before the oldest message is fetched. */
 const OLDER_THRESHOLD = 240;
 
-/** Silence longer than this is worth saying out loud; longer still, the turn may be stuck. */
-const QUIET_SECONDS = 20;
-const STUCK_SECONDS = 120;
+/**
+ * Silence longer than this is mentioned, plainly: a model thinking hard or a slow tool is normal.
+ * Whether the turn is really still running is not guessed here -- after 15 quiet seconds the
+ * conversation asks the server (`QUIET_CHECK_MS`), and a turn that is over disappears.
+ */
+const QUIET_SECONDS = 60;
 
 function clock(seconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
@@ -153,11 +156,8 @@ function RunStatus({ bot, name }: { bot: string; name: string }) {
   if (!online) {
     level = "warn";
     text = "与服务器的连接断开了，正在重连…";
-  } else if (quiet >= STUCK_SECONDS) {
-    level = "warn";
-    text = `已 ${clock(quiet)} 没有任何动静，可能卡住了，可以点停止再试`;
   } else if (quiet >= QUIET_SECONDS) {
-    text = `${text} · ${quiet} 秒没有新进展，仍在运行`;
+    text = `${text} · 已 ${clock(quiet)} 没有新输出`;
   }
   return (
     <div className="message-row bot-message run-row">
@@ -501,6 +501,9 @@ export function Chat({
           <div className="message-thread">
             {conversation.loadingOlder && <div className="system-line older-loading">加载更早的消息…</div>}
             {conversation.error && <p className="error-note">{conversation.error}</p>}
+            {!conversation.loaded && items.length === 0 && !conversation.error && (
+              <div className="system-line">正在加载…</div>
+            )}
             {conversation.loaded && items.length === 0 && (
               <div className="message-row bot-message">
                 <div className={`message-avatar ${botTone(bot.name)}`}>

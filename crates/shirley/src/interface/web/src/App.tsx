@@ -88,6 +88,12 @@ export default function App() {
     return () => window.removeEventListener("popstate", onPop);
   }, []);
 
+  // Back on the list: ask the server where every bot stands, in case an event went missing.
+  const refreshBots = bots.refresh;
+  useEffect(() => {
+    if (tab === "home") void refreshBots();
+  }, [tab, refreshBots]);
+
   const openBot = (name: string) => {
     setSeed(undefined);
     // Opening the new bot replaces the "new bot" screen, so back does not return to the form.

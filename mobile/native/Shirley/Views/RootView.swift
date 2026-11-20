@@ -46,6 +46,10 @@ struct RootView: View {
                 model.active = false
             }
         }
+        // Back on the list: ask the server where every bot stands, in case an event went missing.
+        .onChange(of: model.path.isEmpty) { _, home in
+            if home { Task { await model.bots.refresh() } }
+        }
         .preferredColorScheme(.light)
     }
 

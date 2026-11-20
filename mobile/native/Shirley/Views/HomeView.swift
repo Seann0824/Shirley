@@ -58,7 +58,8 @@ struct HomeView: View {
     }
 
     private var botList: some View {
-        let busy = Set(model.tasks.tasks.filter { $0.status.working }.map(\.bot))
+        // Working: answering in its conversation, or on a task it took on.
+        let busy = Replying.shared.bots.union(model.tasks.tasks.filter { $0.status.working }.map(\.bot))
         // Work lives in each bot's conversation; the list only says which bot has something to look at.
         let review = Set(model.tasks.tasks.filter { $0.status == .inReview || $0.status == .blocked }.map(\.bot))
         let bots = model.bots.visible

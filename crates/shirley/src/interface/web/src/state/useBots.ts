@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 
-import { api } from "../api/bridge";
+import { api, onAgentEvent } from "../api/bridge";
 import type { Bot } from "../api/types";
+import { noteEvent, replyingFromList } from "./replying";
 
 /** Per-device bot list preferences (pin / mute). Not server state on purpose. */
 interface BotPrefs {
@@ -37,7 +38,9 @@ export function useBots() {
 
   const refresh = useCallback(async () => {
     try {
-      setBots(await api.listBots());
+      const list = await api.listBots();
+      setBots(list);
+      replyingFromList(list);
       setError(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -47,6 +50,16 @@ export function useBots() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  // Replies start and end while the list is on screen; after a gap in the stream, ask again.
+  useEffect(
+    () =>
+      onAgentEvent((event) => {
+        if (event.type === "resync") void refresh();
+        else noteEvent(event);
+      }),
+    [refresh],
+  );
 
   useEffect(() => {
     localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));

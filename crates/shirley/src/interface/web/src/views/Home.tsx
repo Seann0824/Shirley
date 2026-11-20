@@ -6,6 +6,7 @@ import { SwipeBotRow } from "../components/BotRow";
 import { ComposerDock, type Attachment } from "../components/Composer";
 import { Icon, type IconName } from "../components/Icon";
 import type { useBots } from "../state/useBots";
+import { useReplying } from "../state/replying";
 import { useWide } from "../state/useWide";
 
 type Tab = "home" | "chat" | "new" | "skills" | "connections";
@@ -146,9 +147,12 @@ export function Home({
   const [asking, setAsking] = useState(false);
   const [deleting, setDeleting] = useState<Bot | null>(null);
 
-  const busyBots = new Set(
-    tasks.filter((task) => task.status === "in_progress" || task.status === "to_do").map((task) => task.bot),
-  );
+  // Working: answering in its conversation, or on a task it took on.
+  const replying = useReplying();
+  const busyBots = new Set([
+    ...replying,
+    ...tasks.filter((task) => task.status === "in_progress" || task.status === "to_do").map((task) => task.bot),
+  ]);
   // Work lives in each bot's conversation; the list only says which bot has something to look at.
   const reviewBots = new Set(
     tasks.filter((task) => task.status === "in_review" || task.status === "blocked").map((task) => task.bot),

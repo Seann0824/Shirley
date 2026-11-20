@@ -331,8 +331,8 @@ impl AgentEventWire {
                 bot: None,
                 session: None,
                 call_id,
+                arguments: for_screen(&name, arguments),
                 name,
-                arguments,
             },
             AgentEvent::ToolFinished {
                 call_id,
@@ -346,10 +346,10 @@ impl AgentEventWire {
                 bot: None,
                 session: None,
                 call_id,
+                output: for_screen(&name, output),
                 name,
                 ok,
                 parts: parts_from_tool_value(structured.as_ref()),
-                output,
                 error_kind: error_kind.map(error_kind_str),
                 elapsed_ms,
             },
@@ -494,10 +494,10 @@ impl From<CoreItemWire> for ItemWire {
                              ok,
                              parts,
                          }| ToolCallWireDto {
+                            arguments: for_screen(&name, arguments),
+                            output: output.map(|text| for_screen(&name, text)),
                             id,
                             name,
-                            arguments,
-                            output,
                             ok,
                             parts,
                         },
@@ -505,6 +505,26 @@ impl From<CoreItemWire> for ItemWire {
                     .collect(),
             },
         }
+    }
+}
+
+/// The tools whose arguments and output the UI reads (a task card needs its id and title).
+const SCREEN_READ_TOOLS: [&str; 2] = ["dispatch_task", "task_note"];
+
+/// Longest tool argument / output text sent to a client for any other tool.
+const SCREEN_TEXT_CHARS: usize = 240;
+
+/// Tool text as the UI needs it. The UI shows no tool's raw text -- only render parts and task
+/// cards -- yet a file read, a search or a `bash` run can return hundreds of KB, and every
+/// conversation snapshot carries its newest tool calls: sent whole, opening a conversation meant
+/// downloading megabytes. The model still gets everything; only the copy for the screen is cut.
+fn for_screen(name: &str, text: String) -> String {
+    if SCREEN_READ_TOOLS.contains(&name) {
+        return text;
+    }
+    match text.char_indices().nth(SCREEN_TEXT_CHARS) {
+        Some((cut, _)) => format!("{}…", &text[..cut]),
+        None => text,
     }
 }
 
@@ -570,6 +590,18 @@ impl HistoryPageWire {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn tool_text_for_the_screen_is_cut_except_where_the_ui_reads_it() {
+        let long = "字".repeat(1000);
+        let cut = for_screen("read", long.clone());
+        assert_eq!(cut.chars().count(), SCREEN_TEXT_CHARS + 1);
+        assert!(cut.ends_with('…'));
+        assert_eq!(for_screen("read", "short".into()), "short");
+        assert_eq!(for_screen("dispatch_task", long.clone()), long);
+        assert_eq!(for_screen("task_note", long.clone()), long);
+    }
+
     use super::*;
     use crate::status::StateKeeper;
 

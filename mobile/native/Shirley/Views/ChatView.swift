@@ -179,6 +179,9 @@ struct ChatView: View {
         let base = conversation.start
         if conversation.loadingOlder { rows.append(ThreadRow(id: "older", kind: .system("加载更早的消息…"))) }
         if let error = conversation.error { rows.append(ThreadRow(id: "error", kind: .error(error))) }
+        if !conversation.loaded && items.isEmpty && conversation.error == nil {
+            rows.append(ThreadRow(id: "loading", kind: .system("正在加载…")))
+        }
         if conversation.loaded && items.isEmpty { rows.append(ThreadRow(id: "greeting", kind: .greeting)) }
         for (index, item) in items.enumerated() {
             let key = "\(base + index)"
@@ -604,9 +607,10 @@ private struct RunStatusRow: View {
     @State private var note: String?
     @State private var online = true
 
-    /// Silence longer than this is worth saying out loud; longer still, the turn may be stuck.
-    private static let quietSeconds = 20
-    private static let stuckSeconds = 120
+    /// Silence longer than this is mentioned, plainly: a model thinking hard or a slow tool is
+    /// normal. Whether the turn still runs is not guessed -- the conversation asks the server
+    /// after 15 quiet seconds, and a turn that is over disappears.
+    private static let quietSeconds = 60
 
     var body: some View {
         TimelineView(.periodic(from: .now, by: 1)) { context in
@@ -632,8 +636,7 @@ private struct RunStatusRow: View {
     private func status(quiet: Int) -> (text: String, warn: Bool) {
         let base = note ?? (tool.map { "正在使用 \($0)" } ?? "\(name) 正在思考")
         if !online { return ("与服务器的连接断开了，正在重连…", true) }
-        if quiet >= Self.stuckSeconds { return ("已 \(Self.clock(quiet)) 没有任何动静，可能卡住了，可以点停止再试", true) }
-        if quiet >= Self.quietSeconds { return ("\(base) · \(quiet) 秒没有新进展，仍在运行", false) }
+        if quiet >= Self.quietSeconds { return ("\(base) · 已 \(Self.clock(quiet)) 没有新输出", false) }
         return (base, false)
     }
 

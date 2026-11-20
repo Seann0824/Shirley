@@ -222,6 +222,12 @@ impl BotRuntimeManager {
         self.cancels.lock().await.keys().any(|key| key.starts_with(&prefix))
     }
 
+    /// Whether the bot is answering in its conversation right now (a turn of its main session
+    /// runs). Work it handed off as tasks is not counted: the task pool reports that.
+    pub async fn is_replying(&self, bot: &str) -> bool {
+        self.cancels.lock().await.contains_key(&route_key(bot, MAIN_SESSION))
+    }
+
     // -----------------------------------------------------------------------
     // (bot management removed — bot configuration handled by BotSpec)
     // -----------------------------------------------------------------------
