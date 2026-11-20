@@ -35,9 +35,13 @@ final class Session {
     private static let serverKey = "shirley.server"
 
     private init() {
-        server = UserDefaults.standard.string(forKey: Self.serverKey).flatMap(URL.init(string:))
-        token = Keychain.read()
-        needed = server == nil || token == nil
+        // Locals first: reading the properties back here would be "self before all stored
+        // properties are initialized", which the @Observable macro makes a hard error.
+        let address = UserDefaults.standard.string(forKey: Self.serverKey).flatMap(URL.init(string:))
+        let secret = Keychain.read()
+        server = address
+        token = secret
+        needed = address == nil || secret == nil
     }
 
     /// The gate may be dismissed only when the app already has somewhere to talk to.

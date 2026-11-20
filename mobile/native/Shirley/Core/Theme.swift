@@ -121,9 +121,11 @@ extension View {
         }
     }
 
-    /// `border: 0.5px solid color`.
+    /// `border: 0.5px solid color`. `stroke` rather than `strokeBorder`: the shapes here are not
+    /// all `InsettableShape` (`Corners` is not), and half a point of the 0.5pt line falling outside
+    /// the edge is invisible.
     func hairline(_ color: Color, in shape: some Shape) -> some View {
-        overlay { shape.strokeBorder(color, lineWidth: 0.5) }
+        overlay { shape.stroke(color, lineWidth: 0.5) }
     }
 }
 
