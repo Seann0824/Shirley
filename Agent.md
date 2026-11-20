@@ -91,6 +91,8 @@ Layout: one full-viewport column on phones; from 900px, the bot list on the left
 
 `build.rs` runs `npm install` (first time) and `npm run build` when UI sources change, so `cargo run` serves a current page. `SHIRLEY_SKIP_WEB_BUILD=1` skips it. `dist/` is not checked in.
 
+**Native iOS app (`mobile/native/`)** -- SwiftUI, a one-to-one port of the web UI (same screens, sizes, colours and interactions) talking to the same server endpoints. It keeps its own copy of the wire contract (`Core/Models.swift`) and of the conversation reducer (`State/Conversation.swift`, a port of `state/conversation.ts`): a change to either on the web side needs the same change there. Voice input runs on the phone (iOS speech recognition), not through `/api/transcribe`. `mobile/ios/` is the older Capacitor shell that loads the web page; see `mobile/README.md`.
+
 **Prompts live in markdown.** Every prompt body is in `crates/shirley/prompts/*.md` or `crates/shirley-agent-sdk/prompts/*.md`; Rust only `include_str!`s and fills `{{placeholders}}` (`infra/prompt_template.rs`, single pass, unknown placeholders kept verbatim). To change wording, edit the markdown.
 
 ---

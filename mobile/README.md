@@ -1,5 +1,9 @@
 # Shirley mobile
 
+> The native SwiftUI app is in [`native/`](native/README.md): the same UI rebuilt natively, with
+> voice input on the phone. This folder's Capacitor shell (below) stays until the native app has
+> fully replaced it.
+
 The iOS app (Android later, in this same folder): a native shell, made with
 [Capacitor](https://capacitorjs.com), that loads your running Shirley server's page. `/api`,
 the event stream, the token prompt and voice input work as in the browser; nothing about the

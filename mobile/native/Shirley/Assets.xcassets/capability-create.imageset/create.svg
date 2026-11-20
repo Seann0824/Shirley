@@ -1,0 +1,10 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 180">
+  <defs>
+    <linearGradient id="bg" x1="20" y1="15" x2="219" y2="171" gradientUnits="userSpaceOnUse"><stop stop-color="#FCECF5"/><stop offset="1" stop-color="#F4DCEC"/></linearGradient>
+    <linearGradient id="art" x1="62" y1="40" x2="176" y2="140" gradientUnits="userSpaceOnUse"><stop stop-color="#9D85DC"/><stop offset=".55" stop-color="#DD7EAC"/><stop offset="1" stop-color="#F2B380"/></linearGradient>
+  </defs>
+  <rect width="240" height="180" rx="36" fill="url(#bg)"/>
+  <ellipse cx="119" cy="151" rx="67" ry="10" fill="#A75D86" opacity=".12"/>
+  <g transform="rotate(-5 117 93)"><rect x="52" y="31" width="132" height="119" rx="23" fill="#FFF" opacity=".82"/><rect x="61" y="40" width="114" height="101" rx="17" fill="url(#art)"/><circle cx="143" cy="68" r="26" fill="#FFD9C8" opacity=".58"/><path d="m62 126 34-38 23 21 17-17 39 34v15H61l1-15Z" fill="#6F5AB3" opacity=".54"/><circle cx="87" cy="66" r="9" fill="#FFF2D8" opacity=".9"/></g>
+  <path d="M183 43c2 16 10 24 25 25-15 2-23 10-25 25-2-15-10-23-25-25 15-1 23-9 25-25ZM49 106c1 9 6 14 15 15-9 1-14 6-15 15-1-9-6-14-15-15 9-1 14-6 15-15Z" fill="#FFF"/>
+</svg>
