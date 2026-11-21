@@ -130,14 +130,48 @@ final class ImageStore {
         local[key] ?? cache.object(forKey: key as NSString)
     }
 
+    /// How a picture is named in the cache and the size table.
+    static func key(bot: String, source: AssetSource) -> String {
+        switch source {
+        case .artifact(let id): "\(bot)/\(id)"
+        case .url(let url): url
+        }
+    }
+
+    func cached(bot: String, source: AssetSource) -> UIImage? {
+        cached(Self.key(bot: bot, source: source))
+    }
+
+    // MARK: Sizes
+
+    /// Every picture's size once seen, kept across launches, so a picture not loaded yet still
+    /// takes its real space and the thread does not jump when it arrives.
+    private static let sizesKey = "imageSizes"
+    private static let sizesLimit = 1000
+    private lazy var sizes: [String: [Double]] =
+        UserDefaults.standard.dictionary(forKey: Self.sizesKey) as? [String: [Double]] ?? [:]
+
+    func size(bot: String, source: AssetSource) -> CGSize? {
+        let key = Self.key(bot: bot, source: source)
+        if let image = cached(key) { return image.size }
+        guard let pair = sizes[key], pair.count == 2, pair[0] > 0, pair[1] > 0 else { return nil }
+        return CGSize(width: pair[0], height: pair[1])
+    }
+
+    private func remember(_ image: UIImage, key: String) {
+        guard !key.hasPrefix("local:"), sizes[key] == nil, image.size.width > 0, image.size.height > 0 else { return }
+        if sizes.count >= Self.sizesLimit { sizes.removeAll() }
+        sizes[key] = [Double(image.size.width), Double(image.size.height)]
+        UserDefaults.standard.set(sizes, forKey: Self.sizesKey)
+    }
+
     /// An image from the library (`bot` + artifact id) or a plain URL.
     func load(bot: String, source: AssetSource) async -> UIImage? {
-        let key: String
-        switch source {
-        case .artifact(let id): key = "\(bot)/\(id)"
-        case .url(let url): key = url
+        let key = Self.key(bot: bot, source: source)
+        if let image = cached(key) {
+            remember(image, key: key)
+            return image
         }
-        if let image = cached(key) { return image }
         let url: URL?
         switch source {
         case .artifact(let id): url = try? await API.assetURL(bot, id)
@@ -147,32 +181,58 @@ final class ImageStore {
             return nil
         }
         cache.setObject(image, forKey: key as NSString)
+        remember(image, key: key)
         return image
     }
 }
 
-/// An image from the conversation, loaded once and kept.
+/// An image from the conversation, loaded once and kept. Until it arrives it holds the space
+/// it will take (its remembered size, else 4:3), so nothing around it moves when it does.
 struct RemoteImage<Placeholder: View>: View {
     let bot: String
     let source: AssetSource
     var mode: ContentMode = .fit
-    @ViewBuilder var placeholder: () -> Placeholder
+    let placeholder: () -> Placeholder
     @State private var image: UIImage?
+    @State private var failed = false
+
+    private static var fallbackRatio: CGFloat { 4.0 / 3.0 }
+
+    init(bot: String, source: AssetSource, mode: ContentMode = .fit, @ViewBuilder placeholder: @escaping () -> Placeholder) {
+        self.bot = bot
+        self.source = source
+        self.mode = mode
+        self.placeholder = placeholder
+        // Already in memory: show it in the first frame, at its real size.
+        _image = State(initialValue: ImageStore.shared.cached(bot: bot, source: source))
+    }
 
     var body: some View {
         Group {
             if let image {
                 Image(uiImage: image).resizable().aspectRatio(contentMode: mode)
-            } else {
+            } else if failed {
                 placeholder()
+            } else {
+                Rectangle()
+                    .fill(Palette.fill)
+                    .aspectRatio(ratio, contentMode: .fit)
+                    .overlay { placeholder() }
             }
         }
         .task(id: source) {
-            if case .url(let key) = source, let hit = ImageStore.shared.cached(key) {
+            if let hit = ImageStore.shared.cached(bot: bot, source: source) {
                 image = hit
                 return
             }
+            failed = false
             image = await ImageStore.shared.load(bot: bot, source: source)
+            failed = image == nil
         }
+    }
+
+    private var ratio: CGFloat {
+        guard let size = ImageStore.shared.size(bot: bot, source: source) else { return Self.fallbackRatio }
+        return size.width / size.height
     }
 }

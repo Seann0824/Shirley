@@ -42,6 +42,8 @@ struct RootView: View {
                     await model.tasks.refresh()
                     await model.bots.refresh()
                 }
+            } else if now == .background {
+                model.becameInactive()
             } else {
                 model.active = false
             }

@@ -35,6 +35,9 @@ struct ComposerDock: View {
     @State private var pressed = false
     @GestureState private var holding = false
     @FocusState private var focused: Bool
+    /// Focus the field once it appears (it does not exist yet while the voice controls show).
+    /// Only a switch to typing sets it, so coming back to the screen does not reopen the keyboard.
+    @State private var focusOnAppear = false
 
     /// Past this many points upward, a release edits instead of sending.
     private static let slideToEdit: CGFloat = 60
@@ -86,8 +89,12 @@ struct ComposerDock: View {
         .onChange(of: draft) { _, next in
             guard let next else { return }
             value = next.text
-            textMode = true
-            focused = true
+            openKeyboard()
+        }
+        .onChange(of: focused) { was, now in
+            // The keyboard was put away (its own button, a swipe, another screen): with nothing
+            // typed, the phone goes back to hold-to-talk instead of leaving an idle field.
+            if was && !now && !prefersText && empty { textMode = nil }
         }
         .onChange(of: holding) { _, now in
             if now { press() } else { release() }
@@ -114,7 +121,12 @@ struct ComposerDock: View {
                 .focused($focused)
                 .submitLabel(.send)
                 .onSubmit { send(value) }
-                .onAppear { if textMode == true { focused = true } }
+                .onAppear {
+                    if focusOnAppear {
+                        focusOnAppear = false
+                        focused = true
+                    }
+                }
 
             if canStop && empty {
                 roundButton(.stop, size: 16, background: Palette.label, foreground: .white, label: "停止") { onStop?() }
@@ -155,10 +167,7 @@ struct ComposerDock: View {
                 withTransaction(quiet) { showSheet = true }
             }
             voiceButton
-            sideButton(.keyboard, size: 20, label: "文字输入") {
-                textMode = true
-                focused = true
-            }
+            sideButton(.keyboard, size: 20, label: "文字输入") { openKeyboard() }
         }
     }
 
@@ -297,12 +306,21 @@ struct ComposerDock: View {
         let combined = typed.isEmpty ? text : "\(typed) \(text)"
         if edit {
             value = combined
-            textMode = true
-            focused = true
+            openKeyboard()
         } else {
             send(combined)
         }
         return true
+    }
+
+    /// Switch to typing with the keyboard up; if the field is not on screen yet, focus it when it appears.
+    private func openKeyboard() {
+        if typing {
+            focused = true
+        } else {
+            focusOnAppear = true
+            textMode = true
+        }
     }
 
     private func send(_ text: String) {

@@ -148,4 +148,9 @@ final class AppModel {
         Notifier.clearBadge()
         EventHub.shared.wake()
     }
+
+    func becameInactive() {
+        active = false
+        EventHub.shared.sleep()
+    }
 }

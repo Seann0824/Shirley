@@ -10,12 +10,15 @@ final class EventHub {
     private var connectionListeners: [UUID: (Bool) -> Void] = [:]
     private(set) var online = true
     private var loop: Task<Void, Never>?
+    /// A stream has been open before: the next one follows a gap, so listeners resync.
+    private var opened = false
+    private var backgroundedAt: Date?
     private let decoder = JSONDecoder()
 
-    /// Keep-alives arrive every 15 s; a minute of silence means the connection is gone.
+    /// Keep-alives arrive every 15 s; two missed in a row mean the connection is gone.
     private let session: URLSession = {
         let config = URLSessionConfiguration.default
-        config.timeoutIntervalForRequest = 60
+        config.timeoutIntervalForRequest = 35
         config.timeoutIntervalForResource = 7 * 24 * 3600
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: config)
@@ -57,10 +60,18 @@ final class EventHub {
         connect()
     }
 
-    /// Back in the foreground: a stream the system cut while suspended reconnects now, not
-    /// after its backoff.
+    /// Going to the background: the system will suspend the app and usually cut the stream
+    /// without telling it.
+    func sleep() {
+        backgroundedAt = Date()
+    }
+
+    /// Back in the foreground: a stream that may have died while suspended is replaced now,
+    /// not after a timeout, and every listener resyncs for what it missed meanwhile.
     func wake() {
-        if !online { restart() }
+        let away = backgroundedAt.map { Date().timeIntervalSince($0) } ?? 0
+        backgroundedAt = nil
+        if !online || away > 3 { restart() }
     }
 
     private func setOnline(_ value: Bool) {
@@ -87,7 +98,6 @@ final class EventHub {
     }
 
     private func run() async {
-        var opened = false
         var delay: Double = 1
         while !Task.isCancelled {
             guard let url = Session.shared.url("/api/events"), let token = Session.shared.token else {

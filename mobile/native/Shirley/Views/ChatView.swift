@@ -80,6 +80,10 @@ struct ChatView: View {
     /// Distance from the bottom, saved just before older items go on top, so the message the
     /// user was reading stays where it was.
     @State private var anchor: CGFloat?
+    /// Opening: the cached copy shows first, then the fresh one replaces it, and the push
+    /// transition moves things meanwhile. Until that settles (or the user takes the scroll),
+    /// every change goes to the bottom and none of it counts as the user scrolling up.
+    @State private var settling = true
     @State private var width: CGFloat = 360
     @State private var recallOpen = false
     @State private var draft: Draft?
@@ -119,6 +123,9 @@ struct ChatView: View {
                 } action: { old, new in
                     scrolled(old, new)
                 }
+                .onScrollPhaseChange { _, phase in
+                    if phase == .interacting { settling = false }
+                }
                 .onGeometryChange(for: CGFloat.self) { $0.size.width } action: { width = min($0, 760) - 34 }
                 .safeAreaInset(edge: .bottom, spacing: 0) {
                     dock(proxy).frame(maxWidth: model.wide ? 760 : .infinity)
@@ -131,7 +138,17 @@ struct ChatView: View {
             conversation.onTurnFinished = { [bots = model.bots] in Task { await bots.refresh() } }
             await conversation.run()
         }
-        .onChange(of: conversation.loaded) { _, _ in sendSeed() }
+        .onChange(of: conversation.loaded) { _, loaded in
+            sendSeed()
+            guard loaded, settling else { return }
+            // Let the fresh items lay out (pictures, markdown) before scrolling is the user's again.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) {
+                guard settling else { return }
+                settling = false
+                pinned = true
+                position.scrollTo(edge: .bottom)
+            }
+        }
         .onChange(of: model.seed) { _, _ in sendSeed() }
         .onChange(of: conversation.loadingOlder) { _, loading in
             // A page that failed to arrive leaves nothing to hold on to.
@@ -167,6 +184,13 @@ struct ChatView: View {
     }
 
     // MARK: Thread
+
+    /// The tool the running turn is in right now, read from the conversation itself, so it
+    /// survives reopening the chat or a reload from the server.
+    private var liveTool: String? {
+        guard let last = conversation.items.last, last.kind == .tools, !last.settled else { return nil }
+        return last.calls.last { $0.output == nil && $0.ok == nil }?.name
+    }
 
     private var lastUser: Int {
         conversation.items.lastIndex { $0.kind == .message && $0.role == "user" } ?? -1
@@ -352,7 +376,7 @@ struct ChatView: View {
         case .error(let message):
             NoteView(text: message)
         case .run:
-            RunStatusRow(bot: bot.name, name: bot.displayName)
+            RunStatusRow(bot: bot.name, name: bot.displayName, tool: liveTool)
         }
     }
 
@@ -367,6 +391,12 @@ struct ChatView: View {
     // MARK: Scrolling
 
     private func scrolled(_ old: ScrollState, _ new: ScrollState) {
+        if settling {
+            if new.fromBottom > 1 { position.scrollTo(edge: .bottom) }
+            // A first page shorter than the screen still fetches more.
+            if new.content <= new.container { loadOlder(new) }
+            return
+        }
         if new.content != old.content || new.container != old.container {
             if let anchor {
                 position.scrollTo(y: max(0, new.maxOffset - anchor))
@@ -398,6 +428,7 @@ struct ChatView: View {
     }
 
     private func send(_ text: String, _ attachments: [Attachment]) {
+        settling = false
         pinned = true
         position.scrollTo(edge: .bottom)
         Task {
@@ -601,9 +632,9 @@ private struct DispatchedTask: View {
 private struct RunStatusRow: View {
     let bot: String
     let name: String
+    let tool: String?
     @State private var started = Date()
     @State private var lastEvent = Date()
-    @State private var tool: String?
     @State private var note: String?
     @State private var online = true
 
@@ -649,8 +680,6 @@ private struct RunStatusRow: View {
             if let from = event.bot, from != bot { return }
             lastEvent = Date()
             switch event.type {
-            case "tool_started": tool = event.name
-            case "tool_finished": tool = nil
             case "retrying": note = "出错了，正在重试（第 \(event.attempt ?? 0) 次）"
             case "compaction_started": note = "正在整理上下文"
             case "compaction_finished", "content_delta": note = nil
